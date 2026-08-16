@@ -16,7 +16,7 @@ English: [README.md](README.md)
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
 - 输入框下方会话统计行：轮次/步数、模型与工具耗时、TTFT、tok/s、缓存命中率、
   输入/输出 token（与 web 端口径一致）；
-- 历史会话启动选择器：`dsh --profile tui` / `--resume` 先选会话再进入；
+- 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
 - 审批、`ask_user_question`、子代理进度、`/mode` 模式切换、`/model` 模型切换、
@@ -66,11 +66,12 @@ dsh plugin --profile tui add dsh-ssh-tui
 ## 启动与命令行参数
 
 ```bash
-dsh --profile tui                          # 启动即打开历史会话选择器
-dsh --profile tui --resume                 # 同上（选择器）
+dsh --profile tui                          # 直接进入主界面（新建会话）
+dsh --profile tui --resume                 # 打开历史会话选择器
+dsh --profile tui resume                   # 同上（选择器）
 dsh --profile tui --resume <session-id>    # 直接恢复指定会话
 dsh --profile tui resume <session-id>      # 等价写法
-dsh --profile tui --new                    # 跳过选择器，新建会话
+dsh --profile tui --new                    # 显式新建会话（默认即新建，供脚本使用）
 dsh --profile tui --model deepseek-v4-flash
 dsh --profile tui --provider <id>
 dsh --profile tui --no-color

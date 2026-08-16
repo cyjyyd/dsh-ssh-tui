@@ -203,12 +203,13 @@ dsh --profile tui --no-color
 dsh --profile tui --resume <session-id>
 ```
 
-By default `dsh --profile tui` opens the history-session picker BEFORE the
-main interface: pick a session to resume it directly, press `0`/`Enter` for a
-fresh session, or `Esc` to cancel. `dsh --profile tui --resume <session-id>`
-(or `dsh --profile tui resume <session-id>`) skips the picker and resumes
-directly; `dsh --profile tui --new` skips the picker and starts fresh. The
-in-app `/resume` command remains available for switching while running.
+`dsh --profile tui` starts a fresh session directly in the main interface.
+`dsh --profile tui --resume` (or `dsh --profile tui resume`) opens the
+history-session picker before the main interface; `dsh --profile tui --resume
+<session-id>` (or `dsh --profile tui resume <session-id>`) skips the picker
+and resumes directly. `dsh --profile tui --new` explicitly starts fresh
+without the picker. The in-app `/resume` command remains available for
+switching while running.
 
 ## Development
 

@@ -94,7 +94,7 @@ export function apply(ctx: Context): void {
       return
     }
     const resumeId = flagId !== '' ? flagId : positionalId
-    const picker = resumeId === '' && options.new !== true
+    const picker = resumeId === '' && (mode === 'resume' || flagValue !== undefined)
     const resume = resumeId !== ''
     const identity: LauncherAgentIdentity = resume
       ? { id: SessionId(resumeId), resume: true }
