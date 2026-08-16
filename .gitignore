@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output (rebuilt by scripts/install.sh / npm run build)
+lib/
+
+# logs, temp, and local state
+*.log
+*.tgz
+.DS_Store
+coverage/
+
+# never upload credentials or session data
+.env
+.env.*
+*.pem
+*.key
+*credential*
+session*.jsonl*
+.dsh/
+sessions/
+
+# editor/IDE
+.vscode/
+.idea/

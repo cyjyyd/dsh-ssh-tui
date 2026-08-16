@@ -1,0 +1,62 @@
+# dsh-ssh-tui — SSH-friendly interactive terminal mode over dsh-base.
+#
+# A patch replaces the targeted row's whole `config`, so each overridden row
+# restates every key it owns. Later layers (profile cordis.patch.yml,
+# $DSH_HOME/cordis.patch.yml, --patch overlays) can re-patch any of these rows.
+
+# The persona section keeps identity and behavior; tool plugins own tool
+# guidance. The loop resolves {{model}} from the agent configuration.
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working
+      directory is {{cwd}}. Verify your work by running the code or tests.
+      Keep answers brief and factual.
+
+# The shared module-reload HMR row stays off; the launcher's watch-only
+# fallback keeps user patch layers live until the TUI exits.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+# The `main` agent is created by the TUI plugin itself after the loader
+# settles, so it can read the saved default provider/model from
+# `agent-default-model` without a boot-time race. The base `agent-loop` row
+# stays mounted (empty) because it owns the agent factory.
+
+# Full thinking at max effort on every request. Key and endpoint stay
+# unconfigured here: both resolve per request from the `llm-deepseek:`
+# settings section, the credential store, and DEEPSEEK_BASE_URL.
+- id: llm-deepseek
+  config:
+    thinking: enabled
+    reasoningEffort: max
+
+- insert:
+    # The agent-mode roster (standard / PTC / minimal / cordis). The launcher
+    # injects the shipped preset root into this row when it is present.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
+    - id: ssh-tui-startup
+      name: 'dsh-ssh-tui/startup'
+
+    # The TUI renders exactly the agent the agent-loop row bound, so it reads
+    # the same startup-owned identity rather than restating one.
+    - id: ssh-tui
+      name: 'dsh-ssh-tui'
+      inject: [sshTuiStartup]
+      config:
+        sessionId: !!js ctx.sshTuiStartup.sessionId
+        resume: !!js ctx.sshTuiStartup.resume
+        resumePicker: !!js ctx.sshTuiStartup.resumePicker
+        provider: !!js ctx.sshTuiStartup.provider
+        model: !!js ctx.sshTuiStartup.model
+        showReasoning: true
+        maxToolOutputLines: 6
+        color: !!js ctx.sshTuiStartup.noColor !== true
