@@ -92,6 +92,11 @@ type Row =
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
 
+/** A reasoning/tool row or the live streaming-reasoning block. */
+type CollapsibleBlock =
+  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }>
+  | { kind: 'streaming-reasoning'; expanded: boolean }
+
 type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path'
 
 /** One file's change, matching the web diff-card contract (`card: 'diff'`). */
@@ -824,7 +829,7 @@ export class SshTui {
   private onboarding: OnboardingState | undefined
   private commandSuggestions: { name: string; description: string; local: boolean }[] = []
   private suggestionIndex = 0
-  private focusedRow: Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> | null = null
+  private focusedRow: CollapsibleBlock | null = null
   private pendingMessages = new Map<string, string>()
   private lastActivity = Date.now()
   private stalledWarningShown = false
@@ -848,7 +853,8 @@ export class SshTui {
   private readonly usageByStep = new Map<string, SessionStats['usage']>()
   private lastStatsTurn: number | null = null
   private scrollOffset = 0
-  private readonly clickableRows = new Map<number, Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }>>()
+  private readonly clickableRows = new Map<number, CollapsibleBlock>()
+  private streamingReasoning: { kind: 'streaming-reasoning'; expanded: boolean } | undefined
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
   private thinkingStartedAt: number | undefined
@@ -1083,7 +1089,9 @@ export class SshTui {
     this.rows.push(row)
     if (this.rows.length > 500) {
       const removed = this.rows.length - 500
-      if (this.focusedRow !== null && this.rows.indexOf(this.focusedRow) < removed) {
+      if (this.focusedRow !== null
+        && this.focusedRow.kind !== 'streaming-reasoning'
+        && this.rows.indexOf(this.focusedRow) < removed) {
         this.focusedRow = null
       }
       this.rows.splice(0, removed)
@@ -1091,9 +1099,16 @@ export class SshTui {
   }
 
   /** The transcript rows that support per-row expand/collapse. */
-  private collapsibleRows(): Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }>[] {
-    return this.rows.filter((row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> =>
-      row.kind === 'reasoning' || row.kind === 'tool')
+  private collapsibleRows(): CollapsibleBlock[] {
+    const rows: CollapsibleBlock[] = this.rows.filter(
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> =>
+        row.kind === 'reasoning' || row.kind === 'tool')
+    if (this.streamingReasoning !== undefined
+      && this.streaming !== undefined
+      && this.streaming.reasoning !== '') {
+      rows.push(this.streamingReasoning)
+    }
+    return rows
   }
 
   /** Move the expand/collapse focus among reasoning and tool rows. */
@@ -1128,10 +1143,10 @@ export class SshTui {
     const height = Math.max(6, process.stdout.rows || 24)
 
     const display: string[] = []
-    const displayRefs: (Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> | undefined)[] = []
+    const displayRefs: (CollapsibleBlock | undefined)[] = []
     const addDisplay = (
       line: string,
-      ref?: Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }>,
+      ref?: CollapsibleBlock,
     ): void => {
       display.push(line)
       displayRefs.push(ref)
@@ -1220,15 +1235,23 @@ export class SshTui {
 
     if (this.streaming !== undefined) {
       if (this.showReasoning && this.streaming.reasoning !== '') {
+        const block = this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
+        const focused = this.focusedRow === block
+        const marker = block.expanded ? '▾' : '▸'
         const spinner = SPINNER[Math.floor(Date.now() / 120) % SPINNER.length]
         const chars = this.streaming.reasoning.length
         const elapsed = this.thinkingStartedAt === undefined
           ? 0
           : Math.floor((Date.now() - this.thinkingStartedAt) / 1000)
-        addDisplay(this.styleLine(
-          'reasoning',
-          `▸ 思考中 ${spinner} · ${chars} 字${elapsed > 0 ? ` · ${elapsed}s` : ''}`,
-        ))
+        const header = `${marker} 思考中 ${spinner} · ${chars} 字${elapsed > 0 ? ` · ${elapsed}s` : ''}`
+        const line = `${focused ? '▶ ' : '  '}${header}`
+        const styled = this.styleLine('reasoning', line)
+        addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, block)
+        if (block.expanded) {
+          for (const wrapped of wrap(this.streaming.reasoning, width)) {
+            addDisplay(this.styleLine('reasoning', wrapped))
+          }
+        }
       }
       if (this.streaming.text !== '') {
         for (const line of wrap(this.streaming.text, width)) {
@@ -1359,7 +1382,7 @@ export class SshTui {
       if (ref !== undefined) this.clickableRows.set(headerLines.length + index + 1, ref)
     }
 
-    this.write('\x1b[H')
+    this.write('\x1b[?25l\x1b[H')
     for (const line of headerLines) {
       this.write(`${line}\x1b[0m\x1b[K\n`)
     }
@@ -1588,6 +1611,7 @@ export class SshTui {
           this.streaming ??= { text: '', reasoning: '' }
           if (this.streaming.reasoning === '' && chunk.text !== '') {
             this.thinkingStartedAt = Date.now()
+            this.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
           }
           this.streaming.reasoning += chunk.text
           this.markDirty()
@@ -1620,9 +1644,13 @@ export class SshTui {
         if (event.data.usage !== undefined) {
           this.recordUsage(event.data.turn, event.data.step, event.data.usage)
         }
+        const reasoningExpanded = this.streamingReasoning?.expanded ?? false
         this.streaming = undefined
+        this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
-        if (reasoning !== '') this.pushRow({ kind: 'reasoning', text: reasoning, expanded: false })
+        if (reasoning !== '') {
+          this.pushRow({ kind: 'reasoning', text: reasoning, expanded: reasoningExpanded })
+        }
         if (text !== '') this.pushRow({ kind: 'assistant', text })
         this.markDirty()
         break

@@ -139,7 +139,8 @@ from the input area.
 Model reasoning blocks are collapsed by default: while thinking a compact
 `▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and
 after the turn each block collapses to a `▸ 已思考 · N 行` summary without
-its content. Reasoning and tool cards are
+its content. The thinking block can be expanded live while streaming to watch
+the raw reasoning as it arrives. Reasoning and tool cards are
 each expandable/collapsible independently — `Ctrl+N` / `Ctrl+P` move the
 selection highlight between them, `Ctrl+R` toggles the selected block (or the
 most recent one when nothing is selected), and `Esc` drops the selection. With
