@@ -24,11 +24,12 @@ export function formatSessionTime(timestamp: number): string {
 /**
  * List the most recent resumable top-level sessions, newest first.
  *
- * Subagent-owned sessions and the current session are excluded; the label is
- * the user's first input, falling back to the session title and then the id.
+ * Subagent-owned sessions, the current session, and sessions with no user
+ * input (empty/uuid-only rows) are excluded; the label is the user's first
+ * input, falling back to the session title and then the id.
  * @param persistence - the session persistence service.
  * @param currentId - the live session to exclude (empty at launch).
- * @returns up to nine candidates in display order.
+ * @returns up to nine candidates in display order, all carrying user input.
  */
 export async function listResumableSessions(
   persistence: SessionPersistence,
@@ -42,8 +43,8 @@ export async function listResumableSessions(
       && meta.origin !== 'subagent'
       && (meta.delegationDepth ?? 0) === 0)
     .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, 9)
-  return Promise.all(candidates.map(async (meta) => {
+    .slice(0, 30)
+  const inspected = await Promise.all(candidates.map(async (meta) => {
     try {
       const inspection = await persistence.inspect(meta.id)
       const firstUserMessage = inspection.events.find(
@@ -67,9 +68,25 @@ export async function listResumableSessions(
         ? undefined
         : (titleEvent as unknown as { data: { title: string } }).data.title
       const updatedAt = inspection.events.at(-1)?.time ?? meta.createdAt
-      return { id: meta.id, label: firstUserText ?? title ?? meta.id, updatedAt, cwd: meta.cwd ?? '' }
+      return {
+        id: meta.id,
+        label: firstUserText ?? title ?? meta.id,
+        updatedAt,
+        cwd: meta.cwd ?? '',
+        hasUserInput: firstUserMessage !== undefined,
+      }
     } catch {
-      return { id: meta.id, label: meta.id, updatedAt: meta.createdAt, cwd: meta.cwd ?? '' }
+      return {
+        id: meta.id,
+        label: meta.id,
+        updatedAt: meta.createdAt,
+        cwd: meta.cwd ?? '',
+        hasUserInput: false,
+      }
     }
   }))
+  return inspected
+    .filter(item => item.hasUserInput)
+    .slice(0, 9)
+    .map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
 }

@@ -114,6 +114,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Esc` / `Ctrl+C` | cancel the running turn |
 | `Ctrl+D` | exit |
 | `Ctrl+L` | redraw |
+| `Ctrl+T` | fold/unfold the input box (display-only; submission keeps the full text) |
 | `↑` / `↓` | input history |
 | `y` / `n` / `Esc` | answer an approval prompt |
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
@@ -129,6 +130,15 @@ provider exposes them). The change applies to the next request without
 changing the provider, updates the header/status line, and is remembered in
 `agent-default-model` for future launches.
 
+`/usage` (alias `/quota`) works when the current provider is an OpenCode
+source and keeps the two billing models distinct:
+
+- **OpenCode Go** queries the official quota endpoint and shows rolling
+  5-hour / weekly / monthly usage percentages, limit state, and reset times;
+- **OpenCode Zen** is metered per API bill and has no fixed quota, so the TUI
+  points to `https://opencode.ai/zen` for balance/billing and shows the
+  session token usage it has recorded instead of inventing a quota.
+
 The startup screen shows the official DeepSeek whale logo (rendered from the
 harness favicon) in the DeepSeek brand color, with the wordmark below it. The
 logo scales to the terminal width — a 52-column variant on wide terminals,
@@ -140,10 +150,14 @@ Model reasoning blocks are collapsed by default: while thinking a compact
 `▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and
 after the turn each block collapses to a `▸ 已思考 · N 行` summary without
 its content. The thinking block can be expanded live while streaming to watch
-the raw reasoning as it arrives. Reasoning and tool cards are
+the raw reasoning as it arrives. Assistant replies render in bold white with
+terminal markdown support: heading levels (H1 enlarged/underlined, H2
+underlined, H3 colored), bold, italic, inline code, fenced code blocks,
+lists, quotes, and links all get ANSI styling while remaining
+width-wrapped for the terminal. Reasoning and tool cards are
 each expandable/collapsible independently — `Ctrl+N` / `Ctrl+P` move the
-selection highlight between them, `Ctrl+R` toggles the selected block (or the
-most recent one when nothing is selected), and `Esc` drops the selection. With
+selection highlight between them, `Ctrl+R` expands/collapses all blocks at once
+(individual blocks use `↑`/`↓` + `Enter`), and `Esc` drops the selection. With
 the input box empty, `↑`/`↓` move the selection and `Enter` toggles the
 selected block directly. Clicking a reasoning or tool header in the transcript
 also toggles it.
@@ -163,13 +177,15 @@ dot leads each card — yellow while running, green on success, red on failure
 (a shell command with a non-zero exit or signal also turns red, with a
 `[退出码 N]` / `[信号 X]` suffix). Shell tools show the command as
 `$ command`, file mutations (`edit` / `write` / `str_replace_editor`) render
-the applied change git-style: a path header, red `-` lines for removed lines,
-green `+` lines for added lines, and a `└ +N -M · K file(s)` footer. Other
-tools show a short argument summary. Cards start collapsed to a single line
-(the command, truncated with `…` when long); expand to reveal output, diffs,
-or the result body. Expanded generic calls convert their JSON arguments and
-JSON results into readable indented content — key/value fields, bullet lists,
-and multiline blocks for code/content — instead of raw JSON text.
+the applied change git-style: a path header, `-` lines on a light-red
+background, `+` lines on a light-green background, and a `└ +N -M · K file(s)`
+footer. File-mutation diffs are shown in full (never collapsed to a `… more`
+line) and their cards start expanded. Other tools show a short argument
+summary and start collapsed to a single line (the command, truncated with
+`…` when long); expand to reveal output or the result body. Expanded generic
+calls convert their JSON arguments and JSON results into readable indented
+content — key/value fields, bullet lists, and multiline blocks for
+code/content — instead of raw JSON text.
 
 A web-aligned session stats line sits below the input box: turn/step counts,
 model and tool wall time, first-token latency, tokens/second, cache-hit

@@ -5,7 +5,7 @@
  * subagents, sandbox approvals) is the same one the web surface uses.
  */
 
-import { installModelSelection, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { errorChain } from '@deepseek-ai/dsh-llm'
@@ -52,6 +52,9 @@ export function apply(ctx: Context, config: Config): void {
     let switching = false
     let handle: AgentHandle | undefined
     let controller: TuiController | undefined
+    // An explicit in-process change (/setup or /model) wins over launch-time
+    // CLI overrides for every session created or resumed later in this process.
+    let liveSelection: ModelSelection | undefined
 
     const start = async (sessionId: SessionId, resume: boolean): Promise<void> => {
       await ctx.get('loader')?.await()
@@ -59,9 +62,13 @@ export function apply(ctx: Context, config: Config): void {
       const agents = ctx.get('agents')
       if (agents === undefined) throw new Error('dsh-ssh-tui: agents service is unavailable')
       const defaultModel = ctx.get('agentDefaultModel')
-      const selection = defaultModel?.currentSelection()
-      const provider = config.provider ?? selection?.provider ?? 'deepseek-official'
-      const model = config.model ?? selection?.model ?? 'deepseek-v4-flash'
+      const selection = liveSelection ?? defaultModel?.currentSelection()
+      const provider = liveSelection !== undefined
+        ? liveSelection.provider
+        : config.provider ?? selection?.provider ?? 'deepseek-official'
+      const model = liveSelection !== undefined
+        ? liveSelection.model
+        : config.model ?? selection?.model ?? 'deepseek-v4-flash'
       const selectionRef: ModelSelectionRef = {
         current: selection ?? { provider, model },
         assembled: undefined,
@@ -104,6 +111,9 @@ export function apply(ctx: Context, config: Config): void {
         presetId,
         presetName,
         onSwitchSession: switchTo,
+        onSelectionChanged: (next) => {
+          liveSelection = next
+        },
       })
     }
 

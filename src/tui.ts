@@ -63,6 +63,8 @@ export interface TuiConfig {
   presetName?: string
   /** Switch the running TUI to another session (used by /resume). */
   onSwitchSession?: (sessionId: string) => Promise<void> | void
+  /** Notify the launcher of an explicit in-process selection change. */
+  onSelectionChanged?: (selection: ModelSelection) => void
   /** Open the history-session picker immediately after mounting (--resume). */
   resumePicker?: boolean
 }
@@ -226,6 +228,7 @@ const WAIT_INDICATOR_MS = 8000
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
+const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
 
 function dshHomeDir(): string {
@@ -361,6 +364,8 @@ const LOCAL_COMMANDS = [
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
   { name: 'status', description: 'show session, provider and model status' },
+  { name: 'usage', description: 'show OpenCode Zen billing / Go quota usage' },
+  { name: 'quota', description: 'alias of /usage for OpenCode Go quota' },
   { name: 'subagents', description: 'list active subagents' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
   { name: 'setup', description: 're-open provider / API key setup' },
@@ -419,6 +424,267 @@ function truncate(text: string, maxLines: number): string {
   const tail = lines.slice(-1)
   return [...head, `… ${lines.length - head.length - 1} more line(s) …`, ...tail].join('\n')
 }
+type InlineMarkdownKind = 'text' | 'bold' | 'italic' | 'code' | 'link' | 'muted'
+
+interface MarkdownSegment {
+  kind: InlineMarkdownKind
+  text: string
+}
+
+type MarkdownBlockKind = 'assistant' | 'heading1' | 'heading2' | 'heading3' | 'code' | 'quote' | 'rule'
+
+interface MarkdownBlockLine {
+  base: MarkdownBlockKind
+  segments: MarkdownSegment[]
+}
+
+const INLINE_MARKDOWN_PATTERN =
+  /(\*\*[^*\n]+\*\*)|(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(\*[^*\n]+\*)|(_[^_\n]+_)/gu
+
+/** Parse one line's bold / italic / inline-code / link spans. */
+function parseInlineMarkdown(line: string): MarkdownSegment[] {
+  const segments: MarkdownSegment[] = []
+  let last = 0
+  for (const match of line.matchAll(INLINE_MARKDOWN_PATTERN)) {
+    const index = match.index
+    if (index > last) segments.push({ kind: 'text', text: line.slice(last, index) })
+    const token = match[0]
+    if (match[1] !== undefined) {
+      segments.push({ kind: 'bold', text: token.slice(2, -2) })
+    } else if (match[2] !== undefined) {
+      segments.push({ kind: 'code', text: token.slice(1, -1) })
+    } else if (match[3] !== undefined) {
+      const labelEnd = token.indexOf('](')
+      const label = token.slice(1, labelEnd)
+      const url = token.slice(labelEnd + 2, -1)
+      segments.push({ kind: 'link', text: label })
+      if (url !== '') segments.push({ kind: 'muted', text: ` (${url})` })
+    } else if (match[4] !== undefined) {
+      segments.push({ kind: 'italic', text: token.slice(1, -1) })
+    } else if (match[5] !== undefined) {
+      segments.push({ kind: 'italic', text: token.slice(1, -1) })
+    }
+    last = index + token.length
+  }
+  if (last < line.length) segments.push({ kind: 'text', text: line.slice(last) })
+  if (segments.length === 0) segments.push({ kind: 'text', text: line })
+  return segments
+}
+
+function markdownSegmentWidth(segments: MarkdownSegment[]): number {
+  return segments.reduce((total, segment) => total + displayWidth(segment.text), 0)
+}
+
+/** Wrap styled inline segments into visual rows, carrying a prefix only on row one. */
+function wrapMarkdownSegments(
+  segments: MarkdownSegment[],
+  width: number,
+  prefixSegments: MarkdownSegment[] = [],
+): MarkdownSegment[][] {
+  const limit = Math.max(1, width)
+  const lines: MarkdownSegment[][] = []
+  let current: MarkdownSegment[] = [...prefixSegments]
+  let used = markdownSegmentWidth(current)
+
+  for (const segment of segments) {
+    let rest = segment.text
+    while (rest !== '') {
+      const available = limit - used
+      if (available <= 0) {
+        lines.push(current)
+        current = []
+        used = 0
+        continue
+      }
+      const slice = forwardSliceByWidth(rest, available)
+      let chunk = slice.text
+      if (chunk === '') {
+        // A wide character does not fit the remaining cell; take one code
+        // point so the loop always makes progress. The terminal wraps it.
+        chunk = Array.from(rest)[0] ?? rest.slice(0, 1)
+      }
+      current.push({ kind: segment.kind, text: chunk })
+      used += displayWidth(chunk)
+      rest = rest.slice(chunk.length)
+      if (rest !== '') {
+        lines.push(current)
+        current = []
+        used = 0
+      }
+    }
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current)
+  return lines.map(line => line.length === 0 ? [{ kind: 'text', text: '' }] : line)
+}
+
+function markdownSegmentCode(kind: InlineMarkdownKind): string {
+  switch (kind) {
+    case 'bold': return '1;97'
+    case 'italic': return '3;37'
+    case 'code': return '36'
+    case 'link': return '4;36'
+    case 'muted': return '2;37'
+    default: return ''
+  }
+}
+
+function markdownBaseCode(kind: MarkdownBlockKind): string {
+  switch (kind) {
+    case 'heading1': return '1;4;97'
+    case 'heading2': return '1;4;36'
+    case 'heading3': return '1;36'
+    case 'code': return '36'
+    case 'quote': return '3;37'
+    case 'rule': return '90'
+    default: return '1;37'
+  }
+}
+
+/** Render one pre-wrapped markdown line as ANSI (or plain text without color). */
+function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean): string {
+  if (!color) return block.segments.map(segment => segment.text).join('')
+  const base = markdownBaseCode(block.base)
+  let out = `\x1b[${base}m`
+  for (const segment of block.segments) {
+    const code = markdownSegmentCode(segment.kind)
+    if (code === '') {
+      out += segment.text
+    } else {
+      out += `\x1b[${code}m${segment.text}\x1b[${base}m`
+    }
+  }
+  return `${out}\x1b[0m`
+}
+
+/** Enlarge H1 text visually: fullwidth ASCII and spaced CJK glyphs. */
+function expandHeadingText(text: string): string {
+  let out = ''
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0
+    if (cp >= 0x21 && cp <= 0x7e) {
+      out += String.fromCodePoint(0xff01 + cp - 0x21)
+    } else if (char.trim() === '') {
+      out += ' '
+    } else {
+      out += `${char} `
+    }
+  }
+  return out
+}
+
+function headingSegments(text: string, level: number): MarkdownSegment[] {
+  const segments = parseInlineMarkdown(text)
+  if (level !== 1) return segments
+  return segments.map(segment =>
+    segment.kind === 'code' || segment.kind === 'link' || segment.kind === 'muted'
+      ? segment
+      : { kind: segment.kind, text: expandHeadingText(segment.text) })
+}
+
+/**
+ * Render workspace markdown into width-bounded terminal rows. Assistant
+ * replies get a bold-white base; code blocks, headings, quotes, lists, rules,
+ * links and inline spans keep their own ANSI treatment.
+ */
+export function renderMarkdownLines(text: string, width: number, color: boolean): string[] {
+  const lines: string[] = []
+  let inFence = false
+
+  for (const raw of text.split('\n')) {
+    const fence = /^```([^\n]*)$/u.exec(raw.trim())
+    if (fence !== null) {
+      inFence = !inFence
+      lines.push(renderMarkdownBlockLine({
+        base: 'code',
+        segments: [{ kind: 'text', text: `\`\`\`${fence[1] ?? ''}` }],
+      }, color))
+      continue
+    }
+    if (inFence) {
+      if (raw === '') {
+        lines.push('')
+        continue
+      }
+      for (const line of wrap(raw, width)) {
+        lines.push(renderMarkdownBlockLine({
+          base: 'code',
+          segments: [{ kind: 'text', text: line }],
+        }, color))
+      }
+      continue
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/u.exec(raw)
+    if (heading !== null) {
+      // The hashes are markdown syntax, not content: replace them with
+      // heading style. Levels differ visually: H1 is enlarged and
+      // underlined, H2 underlined, H3 colored, H4+ bold white.
+      const level = Math.min(6, (heading[1] ?? '#').length)
+      const base: MarkdownBlockKind = level === 1
+        ? 'heading1'
+        : level === 2
+          ? 'heading2'
+          : level === 3
+            ? 'heading3'
+            : 'assistant'
+      if (level === 1 && lines.at(-1) !== '') lines.push('')
+      for (const segments of wrapMarkdownSegments(headingSegments(heading[2] ?? '', level), width)) {
+        lines.push(renderMarkdownBlockLine({ base, segments }, color))
+      }
+      if (level === 1) lines.push('')
+      continue
+    }
+
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/u.test(raw) && raw.trim() !== '') {
+      lines.push(renderMarkdownBlockLine({
+        base: 'rule',
+        segments: [{ kind: 'text', text: '─'.repeat(Math.max(1, width)) }],
+      }, color))
+      continue
+    }
+
+    const quote = /^(\s*)>\s?(.*)$/u.exec(raw)
+    if (quote !== null) {
+      const indent = quote[1] ?? ''
+      const prefix = `${indent}│ `
+      for (const segments of wrapMarkdownSegments(
+        parseInlineMarkdown(quote[2] ?? ''),
+        width,
+        [{ kind: 'text', text: prefix }],
+      )) {
+        lines.push(renderMarkdownBlockLine({ base: 'quote', segments }, color))
+      }
+      continue
+    }
+
+    const list = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/u.exec(raw)
+    if (list !== null) {
+      const indent = list[1] ?? ''
+      const marker = list[2] ?? '-'
+      const prefix = `${indent}${marker} `
+      for (const segments of wrapMarkdownSegments(
+        parseInlineMarkdown(list[3] ?? ''),
+        width,
+        [{ kind: 'text', text: prefix }],
+      )) {
+        lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
+      }
+      continue
+    }
+
+    if (raw === '') {
+      lines.push('')
+      continue
+    }
+
+    for (const segments of wrapMarkdownSegments(parseInlineMarkdown(raw), width)) {
+      lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
+    }
+  }
+  return lines
+}
+
+
 
 /** Cut one line to fit a width, appending an ellipsis when truncated. */
 function truncateToWidth(text: string, width: number): string {
@@ -433,6 +699,225 @@ function truncateToWidth(text: string, width: number): string {
   }
   if (cut === 0) cut = 1
   return `${text.slice(0, cut)}…`
+}
+/** One renderable view of the input line: text plus the cursor's visual offset. */
+interface InputView {
+  text: string
+  cursorOffset: number
+  folded: boolean
+}
+
+/** Slice up to `maxWidth` display columns from the beginning of `text`. */
+function forwardSliceByWidth(text: string, maxWidth: number): { text: string; width: number } {
+  let cut = 0
+  let used = 0
+  for (const char of text) {
+    const charWidth = displayWidth(char)
+    if (used + charWidth > maxWidth) break
+    used += charWidth
+    cut += char.length
+  }
+  return { text: text.slice(0, cut), width: used }
+}
+
+/** Slice up to `maxWidth` display columns ending at `end` in `text`. */
+function backwardSliceByWidth(text: string, end: number, maxWidth: number): { start: number; width: number } {
+  if (end <= 0 || maxWidth <= 0) return { start: end, width: 0 }
+  const chars = Array.from(text.slice(0, end))
+  let used = 0
+  let firstIncluded = chars.length
+  for (let index = chars.length - 1; index >= 0; index--) {
+    const charWidth = displayWidth(chars[index] ?? '')
+    if (used + charWidth > maxWidth) break
+    used += charWidth
+    firstIncluded = index
+  }
+  return {
+    start: chars.slice(0, firstIncluded).join('').length,
+    width: used,
+  }
+}
+
+/**
+ * Fold a long single-line input into one terminal row around the cursor.
+ * Only the *display* is clipped; the caller keeps the original `input` intact
+ * for editing and submission.
+ */
+export function foldInputView(input: string, cursor: number, maxWidth: number): InputView {
+  const width = Math.max(1, maxWidth)
+  const totalWidth = displayWidth(input)
+  const cursorOffset = displayWidth(input.slice(0, cursor))
+  if (totalWidth <= width) {
+    return { text: input, cursorOffset, folded: false }
+  }
+  const before = cursorOffset
+  const after = totalWidth - cursorOffset
+  const leftFolded = before > 0
+  const rightFolded = after > 0
+  const markers = (leftFolded ? 1 : 0) + (rightFolded ? 1 : 0)
+  const available = Math.max(1, width - markers)
+  let beforeBudget = Math.min(before, Math.ceil(available / 2))
+  let afterBudget = Math.min(after, available - beforeBudget)
+  // If the tail is shorter than its budget, spend the spare columns on the
+  // side before the cursor so the cursor stays visible near its true offset.
+  beforeBudget = Math.min(before, beforeBudget + (available - beforeBudget - afterBudget))
+  const beforeSlice = backwardSliceByWidth(input, cursor, beforeBudget)
+  const afterSlice = forwardSliceByWidth(input.slice(cursor), afterBudget)
+  const beforeText = input.slice(beforeSlice.start, cursor)
+  return {
+    text: `${leftFolded ? '…' : ''}${beforeText}${afterSlice.text}${rightFolded ? '…' : ''}`,
+    cursorOffset: (leftFolded ? 1 : 0) + displayWidth(beforeText),
+    folded: true,
+  }
+}
+
+/** A recognized OpenCode provider route, used by /usage and /quota. */
+export type OpenCodeFlavor = 'zen' | 'go'
+
+export interface OpenCodeSource {
+  provider: string
+  flavor: OpenCodeFlavor
+  label: string
+  apiKeyEnv: string
+  baseURL?: string
+}
+
+interface LlmPiAiProviderProfile {
+  displayName?: unknown
+  apiKeyEnv?: unknown
+  baseURL?: unknown
+}
+
+interface LlmPiAiSection {
+  providers?: Record<string, LlmPiAiProviderProfile>
+}
+
+const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
+
+/**
+ * Classify the currently selected provider as an OpenCode route. Built-in
+ * `opencode`/`opencode-go` ids are recognized directly, and custom llm-pi-ai
+ * routes are recognized by their `opencode.ai` base URL.
+ */
+export function openCodeSourceFor(provider: string, llmPiAiSection: unknown): OpenCodeSource | null {
+  const section = llmPiAiSection as LlmPiAiSection | null | undefined
+  const profile = section?.providers?.[provider]
+  const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
+  const lowerBase = baseURL?.toLowerCase() ?? ''
+  const isGo = provider === 'opencode-go' || lowerBase.includes('opencode.ai/zen/go')
+  const isZen = provider === 'opencode' || (lowerBase.includes('opencode.ai/zen') && !isGo)
+  if (!isGo && !isZen) return null
+
+  const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
+    ? profile.apiKeyEnv
+    : provider === 'opencode' || provider === 'opencode-go'
+      ? 'OPENCODE_API_KEY'
+      : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
+  const label = typeof profile?.displayName === 'string' && profile.displayName.trim() !== ''
+    ? profile.displayName
+    : isGo ? 'OpenCode Go' : 'OpenCode Zen'
+
+  return {
+    provider,
+    flavor: isGo ? 'go' : 'zen',
+    label,
+    apiKeyEnv,
+    ...(baseURL === undefined ? {} : { baseURL }),
+  }
+}
+
+interface OpenCodeGoUsageWindow {
+  status?: string
+  percent?: number
+  resetsAt?: string
+}
+
+interface OpenCodeGoUsagePayload {
+  usage?: {
+    rolling?: OpenCodeGoUsageWindow
+    weekly?: OpenCodeGoUsageWindow
+    monthly?: OpenCodeGoUsageWindow
+  }
+}
+
+function openCodeGoUsageWindow(value: unknown): OpenCodeGoUsageWindow | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  return {
+    ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
+    ...(typeof raw.percent === 'number' && Number.isFinite(raw.percent) ? { percent: raw.percent } : {}),
+    ...(typeof raw.resetsAt === 'string' ? { resetsAt: raw.resetsAt } : {}),
+  }
+}
+
+/** A days/hours/minutes/seconds relative duration for quota reset times. */
+function formatRelativeDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+  if (seconds < 86400) {
+    return `${Math.floor(seconds / 3600)}h${Math.floor(seconds % 3600 / 60)}m`
+  }
+  return `${Math.floor(seconds / 86400)}d${Math.floor(seconds % 86400 / 3600)}h`
+}
+
+/** One compact `████░░ 40.0% · 正常 · 约 2m 后重置` line for a Go limit. */
+function formatOpenCodeGoWindow(label: string, value: unknown): string {
+  const window = openCodeGoUsageWindow(value)
+  const percent = window?.percent === undefined
+    ? null
+    : Math.max(0, Math.min(100, window.percent))
+  const state = window?.status === 'rate-limited'
+    ? '已限流'
+    : window?.status === 'ok'
+      ? '正常'
+      : window?.status ?? '未知状态'
+  const parts: string[] = [label]
+  if (percent !== null) {
+    const barWidth = 16
+    const filled = Math.round(percent / 100 * barWidth)
+    parts.push(`${'█'.repeat(filled)}${'░'.repeat(barWidth - filled)} ${percent.toFixed(1)}%`)
+  }
+  parts.push(state)
+  if (window?.resetsAt !== undefined) {
+    const reset = new Date(window.resetsAt)
+    if (!Number.isNaN(reset.getTime())) {
+      const until = reset.getTime() - Date.now()
+      parts.push(until > 0
+        ? `约 ${formatRelativeDuration(until)} 后重置（${reset.toLocaleString()}）`
+        : `已于 ${reset.toLocaleString()} 重置`)
+    }
+  }
+  return `  ${parts.join(' · ')}`
+}
+
+/** Render the OpenCode Go quota payload as a transcript block. */
+export function formatOpenCodeGoUsage(payload: unknown, source: OpenCodeSource): string {
+  const raw = payload as OpenCodeGoUsagePayload | null | undefined
+  const usage = raw?.usage
+  if (usage === null || usage === undefined) {
+    throw new Error('额度接口返回格式无法识别')
+  }
+  return [
+    `OpenCode Go 额度（${source.provider}）`,
+    formatOpenCodeGoWindow('滚动 5 小时', usage.rolling),
+    formatOpenCodeGoWindow('本周', usage.weekly),
+    formatOpenCodeGoWindow('本月', usage.monthly),
+  ].join('\n')
+}
+
+/** Extract a safe human-readable message from an OpenCode error payload. */
+function openCodeApiErrorMessage(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return ''
+  const raw = payload as Record<string, unknown>
+  const error = raw.error
+  if (typeof error === 'string' && error.trim() !== '') return error.trim()
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as Record<string, unknown>).message
+    if (typeof message === 'string' && message.trim() !== '') return message.trim()
+  }
+  if (typeof raw.message === 'string' && raw.message.trim() !== '') return raw.message.trim()
+  return ''
 }
 
 /** Whether `text` could still grow into a recognized escape sequence. */
@@ -720,7 +1205,10 @@ function parseJsonBody(text: string): unknown | null {
  */
 export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDisplayLine[] {
   if (row.diff !== undefined && row.diff.length > 0) {
-    return renderToolDiff(row.diff, maxLines)
+    // File-edit diffs are never truncated: omitting hunks would hide the
+    // exact code change the model applied. `maxLines` only governs shell and
+    // generic JSON output bodies.
+    return renderToolDiff(row.diff, Number.MAX_SAFE_INTEGER)
   }
   if (row.command !== undefined) {
     const out: DiffDisplayLine[] = []
@@ -802,6 +1290,7 @@ export class SshTui {
   private streaming: { text: string; reasoning: string } | undefined
   private input = ''
   private cursor = 0
+  private inputFolded = false
   private history: string[] = []
   private historyIndex = -1
   private status = 'idle'
@@ -819,6 +1308,7 @@ export class SshTui {
   private readonly providerName: string
   private readonly selectionRef: ModelSelectionRef | undefined
   private readonly onSwitchSession: ((sessionId: string) => Promise<void> | void) | undefined
+  private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
   private readonly resumePicker: boolean
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
@@ -862,6 +1352,7 @@ export class SshTui {
   private completedAt = 0
   private lastTitleUpdateAt = 0
   private lastPaintRows: string[] = []
+  private lastChromeKey = ''
 
   constructor(
     private readonly ctx: Context,
@@ -878,13 +1369,14 @@ export class SshTui {
     this.providerName = config.provider ?? 'deepseek-official'
     this.selectionRef = config.selectionRef
     this.onSwitchSession = config.onSwitchSession
+    this.onSelectionChanged = config.onSelectionChanged
     this.resumePicker = config.resumePicker === true
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
-    this.pushRow({ kind: 'system', text: 'Type /help for commands · /setup provider & key · ↑/↓ select · Enter expand/collapse · Esc cancels' })
+    this.pushRow({ kind: 'system', text: 'Type /help for commands · /setup provider & key · ↑/↓ select · Enter expand/collapse · Ctrl+T fold input · Esc cancels' })
   }
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
@@ -1056,7 +1548,11 @@ export class SshTui {
     process.stdin.setRawMode(false)
     process.stdin.pause()
     this.write('\x1b]0;\x07')
-    this.write(`\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+    // Clear every screen (regular + scrollback) before restoring the terminal.
+    // In no-alternate-screen mode this removes the last painted frame that
+    // would otherwise stay behind the shell prompt after exit.
+    this.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
+    this.write(`\x1b[?1000l\x1b[?1006l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
@@ -1088,8 +1584,8 @@ export class SshTui {
   /** Append one transcript row, bounding memory on long sessions. */
   private pushRow(row: Row): void {
     this.rows.push(row)
-    if (this.rows.length > 500) {
-      const removed = this.rows.length - 500
+    if (this.rows.length > MAX_TRANSCRIPT_ROWS) {
+      const removed = this.rows.length - MAX_TRANSCRIPT_ROWS
       if (this.focusedRow !== null
         && this.focusedRow.kind !== 'streaming-reasoning'
         && this.rows.indexOf(this.focusedRow) < removed) {
@@ -1140,6 +1636,16 @@ export class SshTui {
     this.markDirty()
   }
 
+  /** Expand all collapsible blocks, or collapse them again when all are open. */
+  private toggleAllCollapsible(): void {
+    const rows = this.collapsibleRows()
+    if (rows.length === 0) return
+    const allExpanded = rows.every(row => row.expanded)
+    for (const row of rows) row.expanded = !allExpanded
+    this.focusedRow = allExpanded ? null : rows[rows.length - 1] ?? null
+    this.markDirty()
+  }
+
   private paint = (): void => {
     if (this.exiting) return
     const width = Math.max(10, process.stdout.columns || 80)
@@ -1155,6 +1661,12 @@ export class SshTui {
       displayRefs.push(ref)
     }
     const pushRow = (kind: DisplayKind, text: string): void => {
+      if (kind === 'assistant') {
+        for (const line of renderMarkdownLines(text, width, this.color)) {
+          addDisplay(line)
+        }
+        return
+      }
       for (const line of wrap(text, width)) {
         addDisplay(this.styleLine(kind, line))
       }
@@ -1257,8 +1769,8 @@ export class SshTui {
         }
       }
       if (this.streaming.text !== '') {
-        for (const line of wrap(this.streaming.text, width)) {
-          addDisplay(this.styleLine('assistant', line))
+        for (const line of renderMarkdownLines(this.streaming.text, width, this.color)) {
+          addDisplay(line)
         }
       }
     }
@@ -1368,9 +1880,29 @@ export class SshTui {
     const prompt = this.color ? `\x1b[36m${promptPlain.trimEnd()}\x1b[0m ` : promptPlain
     const promptWidth = displayWidth(promptPlain)
     const masked = this.dialog?.kind === 'onboarding' && this.onboarding?.step === 'key'
-    const visibleInput = masked ? '•'.repeat(this.input.length) : this.input
-    const inputPlainWidth = displayWidth(`${promptPlain}${visibleInput}`)
-    const inputRows = Math.max(1, Math.ceil(inputPlainWidth / Math.max(1, width)))
+    const inputView: InputView = masked
+      ? { text: '•'.repeat(this.input.length), cursorOffset: this.cursor, folded: false }
+      : this.inputFolded
+        ? foldInputView(this.input, this.cursor, Math.max(1, width - promptWidth))
+        : { text: this.input, cursorOffset: displayWidth(this.input.slice(0, this.cursor)), folded: false }
+    const grid = Math.max(1, width)
+    const cursorPlainOffset = promptWidth + inputView.cursorOffset
+    const inputTextWidth = Math.max(1, width - promptWidth)
+    const inputTextLines = wrap(inputView.text, inputTextWidth)
+    const inputDisplayLines = inputTextLines.map((line, index) =>
+      index === 0 ? `${prompt}${line}` : line)
+    // When the cursor sits exactly at the end of a full visual row, the
+    // terminal has already advanced to the next row. Reserve that empty row so
+    // the cursor never lands on top of the last character typed.
+    if (
+      !inputView.folded
+      && cursorPlainOffset > 0
+      && cursorPlainOffset % grid === 0
+      && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
+    ) {
+      inputDisplayLines.push('')
+    }
+    const inputRows = Math.max(1, inputDisplayLines.length)
 
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + 1 // +1 input divider
     const available = Math.max(1, height - reserved - dialogLines.length)
@@ -1390,11 +1922,12 @@ export class SshTui {
       if (ref !== undefined) this.clickableRows.set(headerLines.length + index + 1, ref)
     }
 
-    const inputLine = `${prompt}${visibleInput}`
     const statsText = this.statsText()
     const statsLine = this.styleLine('system', fitLine(statsText === '' ? '— 尚无会话统计' : statsText))
 
-    let statusText = `${this.status}  ${this.agent.id}  [${this.presetName}]  ${this.currentSelectionLabel()}`
+    let statusText = `${this.status}  [${this.presetName}]  ${this.currentSelectionLabel()}`
+    if (inputView.folded) statusText += ' · 输入已折叠 · Ctrl+T 展开'
+    else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
     const idleMs = Date.now() - this.lastActivity
     if (this.agent.status === 'running' && this.activeSubagents.size > 0) {
@@ -1412,10 +1945,30 @@ export class SshTui {
       ...dialogLines,
       inputDivider,
       ...suggestionLines,
-      `${inputLine}\x1b[0m`,
+      ...inputDisplayLines,
       `${statsLine}\x1b[0m`,
       `${statusLine}\x1b[0m`,
     ]
+
+    // Bottom chrome is force-repainted whenever its state changes while the
+    // agent is working; this clears any stale cell left behind by a previous
+    // frame even when the row strings happen to be identical.
+    const chromeStart = Math.max(0, paintRows.length - inputRows - 3)
+    const chromeKey = [
+      this.status,
+      this.agent.status,
+      this.scrollOffset,
+      statsText,
+      statusText,
+      inputView.text,
+      inputView.folded,
+      inputRows,
+      paintRows.length,
+      this.pendingMessages.size,
+      this.commandSuggestions.length,
+      this.suggestionIndex,
+    ].join('\x1f')
+    const chromeChanged = chromeKey !== this.lastChromeKey
 
     // Incremental repaint: rewrite only rows whose content changed, so slow
     // SSH links don't rebuild (and flicker) the whole screen on every tick.
@@ -1423,17 +1976,33 @@ export class SshTui {
     const maxRows = Math.max(paintRows.length, this.lastPaintRows.length)
     for (let i = 0; i < maxRows; i++) {
       const current = paintRows[i]
-      if (current === this.lastPaintRows[i]) continue
-      this.write(`\x1b[${i + 1};1H${current ?? ''}\x1b[K`)
+      if (current === this.lastPaintRows[i] && !(chromeChanged && i >= chromeStart)) continue
+      this.write(`\x1b[${i + 1};1H\x1b[0m${current ?? ''}\x1b[K`)
     }
     if (paintRows.length < this.lastPaintRows.length) {
       this.write(`\x1b[${paintRows.length + 1};1H\x1b[J`)
     }
+    this.write('\x1b[0m')
     this.lastPaintRows = paintRows
+    this.lastChromeKey = chromeKey
 
-    const column = (promptWidth + displayWidth(visibleInput.slice(0, this.cursor))) % Math.max(1, width) + 1
+    const cursorRowOffset = Math.min(
+      Math.floor(cursorPlainOffset / grid),
+      Math.max(0, inputRows - 1),
+    )
+    let column = cursorPlainOffset % grid + 1
+    // A folded view is capped to one visual row; if the cursor still lands on
+    // an exact boundary, keep it on the final occupied cell rather than
+    // pointing at the row below.
+    if (
+      cursorPlainOffset > 0
+      && cursorPlainOffset % grid === 0
+      && Math.floor(cursorPlainOffset / grid) >= inputRows
+    ) {
+      column = grid
+    }
     const inputTopRow = visible.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
-    const row = Math.min(height, inputTopRow + inputRows - 1)
+    const row = Math.min(height, inputTopRow + cursorRowOffset)
     this.write(`\x1b[${row};${Math.max(1, column)}H\x1b[?25h`)
   }
 
@@ -1567,12 +2136,12 @@ export class SshTui {
     if (!this.color) return text
     const code =
       kind === 'user' ? '36' :
-      kind === 'assistant' ? '32' :
+      kind === 'assistant' ? '1;37' :
       kind === 'reasoning' ? '2;3' :
       kind === 'brand' ? '1;38;2;77;107;253' :
       kind === 'tool' || kind === 'tool-result' ? '33' :
-      kind === 'diff-add' ? '32' :
-      kind === 'diff-del' ? '31' :
+      kind === 'diff-add' ? '38;5;22;48;5;194' :
+      kind === 'diff-del' ? '38;5;124;48;5;224' :
       kind === 'diff-path' ? '1;36' :
       kind === 'error' ? '31' :
       '90'
@@ -1690,7 +2259,7 @@ export class SshTui {
           ...present.command === undefined ? {} : { command: present.command },
           ...present.cwd === undefined ? {} : { cwd: present.cwd },
           ...present.diff === undefined ? {} : { diff: present.diff },
-          expanded: false,
+          expanded: DIFF_TOOL_NAMES.has(event.data.name),
         }
         this.pushRow(row)
         this.streaming = undefined
@@ -1710,7 +2279,10 @@ export class SshTui {
         const output = collectText(event.data.message.content)
         if (row !== undefined) {
           const metaDiffs = diffMetaDiffs(event.data.meta)
-          if (metaDiffs !== null) row.diff = metaDiffs
+          if (metaDiffs !== null) {
+            row.diff = metaDiffs
+            if (DIFF_TOOL_NAMES.has(row.name)) row.expanded = true
+          }
           const isShell = SHELL_TOOL_NAMES.has(row.name)
           if (isShell) {
             const parsed = parseExitStatus(output)
@@ -2053,6 +2625,7 @@ export class SshTui {
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
     if (this.selectionRef !== undefined) this.selectionRef.current = next
+    this.onSelectionChanged?.(next)
     await this.ctx.get('agentDefaultModel')?.saveSelection(next)
     this.pushRow({ kind: 'system', text: `模型已切换：${selected.id}（思考强度 ${effort ?? '默认'}）；下一步请求生效。` })
     this.markDirty()
@@ -2143,6 +2716,109 @@ export class SshTui {
     this.pushRow({ kind: 'system', text: `正在切换到会话 ${picked.id}…` })
     this.markDirty()
     await this.onSwitchSession?.(picked.id)
+  }
+
+  /** Current provider route selected for the running agent. */
+  private currentProvider(): string {
+    // `agent.options` is authoritative for the launched agent; the selection
+    // ref can still hold the persisted default when a CLI override is active.
+    return this.agent.options.provider ?? this.selectionRef?.current?.provider ?? this.providerName
+  }
+
+  /** Resolve one credential reference without exposing its value. */
+  private async resolveCredential(envRef: string): Promise<string | undefined> {
+    const env = process.env[envRef]
+    if (env !== undefined && env.trim() !== '') return env.trim()
+    const credentials = this.ctx.get('credentials')
+    if (credentials === undefined) return undefined
+    const resolved = await credentials.resolve(credentialRef(envRef))
+    return resolved?.value.trim() === '' ? undefined : resolved?.value.trim()
+  }
+
+  /** Query the OpenCode Go quota endpoint. */
+  private async fetchOpenCodeGoUsage(apiKey: string): Promise<unknown> {
+    let response: Response
+    try {
+      response = await fetch(OPENCODE_GO_USAGE_URL, {
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch (error) {
+      throw new Error(`无法访问 OpenCode 额度接口：${errorChain(error)}`)
+    }
+    let payload: unknown
+    try {
+      payload = await response.json() as unknown
+    } catch {
+      payload = undefined
+    }
+    if (!response.ok) {
+      const message = openCodeApiErrorMessage(payload)
+      if (response.status === 401) {
+        throw new Error(`OpenCode Go API Key 无效或未授权（401）${message === '' ? '' : `：${message}`}`)
+      }
+      if (response.status === 403) {
+        throw new Error(`当前 Key 未订阅 OpenCode Go，或额度服务不可用（403）${message === '' ? '' : `：${message}`}`)
+      }
+      throw new Error(`OpenCode Go 额度接口返回 HTTP ${response.status}${message === '' ? '' : `：${message}`}`)
+    }
+    return payload
+  }
+
+  /** Explain Zen metered billing instead of pretending it has a quota. */
+  private zenUsageText(source: OpenCodeSource): string {
+    const usage = this.stats.usage
+    const billedInput = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+    const tokenLine = billedInput > 0 || usage.outputTokens > 0
+      ? `本会话已记录 token：输入 ${formatTokens(billedInput)} · 输出 ${formatTokens(usage.outputTokens)}（会话统计，非账单金额）`
+      : '本会话尚无 token 用量记录。'
+    return [
+      `OpenCode Zen 按量计费（${source.provider}）`,
+      'Zen 没有固定额度：请求按 API 账单计费，余额与账单请前往 https://opencode.ai/zen 查看。',
+      tokenLine,
+    ].join('\n')
+  }
+
+  /** /usage and /quota: show Zen billing info or live Go quota usage. */
+  private async runUsageCommand(): Promise<void> {
+    const provider = this.currentProvider()
+    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const source = openCodeSourceFor(provider, llmPiAi)
+    if (source === null) {
+      this.pushRow({
+        kind: 'error',
+        text: `当前提供商 ${provider} 不是 OpenCode 源；/usage 仅对 OpenCode Zen/Go 可用。`,
+      })
+      this.markDirty()
+      return
+    }
+    if (source.flavor === 'zen') {
+      this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
+      this.markDirty()
+      return
+    }
+    const apiKey = await this.resolveCredential(source.apiKeyEnv)
+    if (apiKey === undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: `未找到 OpenCode Go 凭据 ${source.apiKeyEnv}；请先运行 /setup 配置，或导出该环境变量。`,
+      })
+      this.markDirty()
+      return
+    }
+    const previousStatus = this.status
+    this.status = `querying ${source.provider} usage…`
+    this.markDirty()
+    try {
+      const payload = await this.fetchOpenCodeGoUsage(apiKey)
+      this.pushRow({ kind: 'system', text: formatOpenCodeGoUsage(payload, source) })
+    } finally {
+      this.status = previousStatus
+      this.markDirty()
+    }
   }
 
   // ── keyboard ────────────────────────────────────────────────────────────
@@ -2278,11 +2954,12 @@ export class SshTui {
       case '\x0c': this.dirty = true; this.render(); return
       case '\x01': this.cursor = 0; this.markDirty(); return
       case '\x05': this.cursor = this.input.length; this.markDirty(); return
-      case '\x15': this.input = ''; this.cursor = 0; this.markDirty(); return
+      case '\x15': this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
       case '\x0b': this.input = this.input.slice(0, this.cursor); this.markDirty(); return
       case '\x0e': this.moveCollapsibleFocus(1); return
       case '\x10': this.moveCollapsibleFocus(-1); return
-      case '\x12': this.toggleCollapsible(); return
+      case '\x12': this.toggleAllCollapsible(); return
+      case '\x14': this.inputFolded = !this.inputFolded; this.markDirty(); return
     }
     if (this.dialog !== undefined) {
       this.handleDialogChar(char)
@@ -2500,6 +3177,10 @@ export class SshTui {
         await this.saveCredential(credentials, envRef, state.key)
         const model = state.models[0] ?? 'deepseek-v4-pro'
         await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: 'deepseek-official', model })
+        if (this.selectionRef !== undefined) {
+          this.selectionRef.current = { provider: 'deepseek-official', model }
+        }
+        this.onSelectionChanged?.({ provider: 'deepseek-official', model })
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
           this.pushRow({ kind: 'system', text: `Base URL 已保存 → ${displayDshPath('settings.yaml')}` })
@@ -2532,6 +3213,10 @@ export class SshTui {
         if (saved) {
           const model = state.models[0]
           await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: state.providerId, model })
+          if (this.selectionRef !== undefined) {
+            this.selectionRef.current = { provider: state.providerId, model }
+          }
+          this.onSelectionChanged?.({ provider: state.providerId, model })
           this.pushRow({
             kind: 'system',
             text: `配置完成，已记住默认提供商/模型：${state.providerId} / ${model}。以后直接运行 dsh --profile tui 即可（--provider/--model 可临时覆盖）。`,
@@ -2717,6 +3402,7 @@ export class SshTui {
     this.historyIndex = this.history.length
     this.input = ''
     this.cursor = 0
+    this.inputFolded = false
     const message = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
@@ -2784,6 +3470,13 @@ export class SshTui {
         this.pushRow({
           kind: 'system',
           text: `session: ${this.agent.id}\nmodel: ${this.agent.options.model ?? 'default'}\nprovider: ${this.agent.options.provider ?? 'default'}\nstatus: ${this.agent.status}`,
+        })
+        break
+      case 'usage':
+      case 'quota':
+        void this.runUsageCommand().catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })
+          this.markDirty()
         })
         break
       case 'subagents': {
@@ -2858,6 +3551,7 @@ export class SshTui {
     }
     this.input = ''
     this.cursor = 0
+    this.inputFolded = false
     this.markDirty()
   }
 
