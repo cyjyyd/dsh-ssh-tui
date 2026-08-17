@@ -1103,9 +1103,8 @@ export class SshTui {
     const rows: CollapsibleBlock[] = this.rows.filter(
       (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> =>
         row.kind === 'reasoning' || row.kind === 'tool')
-    if (this.streamingReasoning !== undefined
-      && this.streaming !== undefined
-      && this.streaming.reasoning !== '') {
+    if (this.streaming !== undefined && this.streaming.reasoning !== '') {
+      this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
     }
     return rows
@@ -1130,7 +1129,10 @@ export class SshTui {
   private toggleCollapsible(): void {
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
-    const target = this.focusedRow ?? rows[rows.length - 1]
+    const focused = this.focusedRow !== null && rows.includes(this.focusedRow)
+      ? this.focusedRow
+      : undefined
+    const target = focused ?? rows[rows.length - 1]
     if (target === undefined) return
     target.expanded = !target.expanded
     this.focusedRow = target
@@ -1503,6 +1505,13 @@ export class SshTui {
   private updateTerminalTitle(): void {
     if (this.exiting) return
     const now = Date.now()
+    // Completion wins over a still-running agent status: the turn/end event
+    // lands before agent/status flips to idle, and the title must not stay
+    // on the running spinner until the next repaint trigger.
+    if (this.completedAt !== 0 && now - this.completedAt < 5000) {
+      this.write('\x1b]0;dsh ✓ 已完成\x07')
+      return
+    }
     if (this.agent.status === 'running') {
       if (now - this.lastTitleUpdateAt < 800) return
       this.lastTitleUpdateAt = now
@@ -1511,10 +1520,6 @@ export class SshTui {
       if (this.openToolCalls.size > 0) detail = `运行中 · 工具 ${this.openToolCalls.size}`
       else if (this.activeSubagents.size > 0) detail = `运行中 · 子代理 ${this.activeSubagents.size}`
       this.write(`\x1b]0;dsh ${spinner} ${detail}\x07`)
-      return
-    }
-    if (this.completedAt !== 0 && now - this.completedAt < 5000) {
-      this.write('\x1b]0;dsh ✓ 已完成\x07')
       return
     }
     this.write('\x1b]0;dsh 待命\x07')
@@ -1585,6 +1590,7 @@ export class SshTui {
             this.pushRow({ kind: 'system', text: `(context) ${text}` })
           }
           this.streaming = undefined
+          this.streamingReasoning = undefined
           this.markDirty()
         }
         break
@@ -2676,7 +2682,7 @@ export class SshTui {
       return
     }
     this.scrollOffset = 0
-    if (this.input.trim() === '' && this.focusedRow !== null) {
+    if (this.input.trim() === '' && this.collapsibleRows().length > 0) {
       this.toggleCollapsible()
       return
     }
