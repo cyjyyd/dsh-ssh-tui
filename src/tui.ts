@@ -861,6 +861,7 @@ export class SshTui {
   private completionSignaled = false
   private completedAt = 0
   private lastTitleUpdateAt = 0
+  private lastPaintRows: string[] = []
 
   constructor(
     private readonly ctx: Context,
@@ -1263,10 +1264,15 @@ export class SshTui {
     }
 
     const dialogLines: string[] = []
+    const addDialog = (text: string): void => {
+      for (const wrapped of wrap(text, Math.max(1, width))) {
+        dialogLines.push(this.styleLine('system', wrapped))
+      }
+    }
     if (this.dialog !== undefined) {
       if (this.dialog.kind === 'confirm') {
-        dialogLines.push(this.styleLine('system', this.dialog.prompt))
-        dialogLines.push(this.styleLine('system', `  ${this.dialog.hint}`))
+        addDialog(this.dialog.prompt)
+        addDialog(`  ${this.dialog.hint}`)
       } else if (this.dialog.kind === 'onboarding') {
         const ob = this.onboarding
         if (ob !== undefined) {
@@ -1274,64 +1280,64 @@ export class SshTui {
           const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
           switch (ob.step) {
             case 'provider':
-              dialogLines.push(this.styleLine('system', '首次配置向导 — 选择提供商（与官方 Models 页一致）'))
-              dialogLines.push(this.styleLine('system', '  1  DeepSeek 官方（api.deepseek.com）'))
-              dialogLines.push(this.styleLine('system', '  2  OpenCode Go（opencode.ai/zen/go，Responses 协议）'))
-              dialogLines.push(this.styleLine('system', '  3  自定义 OpenAI 兼容网关（Completions）'))
-              dialogLines.push(this.styleLine('system', '  4  自定义 OpenAI Responses 网关'))
-              dialogLines.push(this.styleLine('system', '  5  Anthropic Messages 兼容网关'))
-              dialogLines.push(this.styleLine('system', '  按 1-5 选择，Esc 取消'))
+              addDialog('首次配置向导 — 选择提供商（与官方 Models 页一致）')
+              addDialog('  1  DeepSeek 官方（api.deepseek.com）')
+              addDialog('  2  OpenCode Go（opencode.ai/zen/go，Responses 协议）')
+              addDialog('  3  自定义 OpenAI 兼容网关（Completions）')
+              addDialog('  4  自定义 OpenAI Responses 网关')
+              addDialog('  5  Anthropic Messages 兼容网关')
+              addDialog('  按 1-5 选择，Esc 取消')
               break
             case 'id':
-              dialogLines.push(this.styleLine('system', `提供商：${providerLabel}`))
-              dialogLines.push(this.styleLine('system', 'Provider ID（小写字母/数字/连字符，永久标识）：'))
-              dialogLines.push(this.styleLine('system', `  默认：${template.defaultId}`))
-              dialogLines.push(this.styleLine('system', '  Enter 确认，Esc 取消'))
+              addDialog(`提供商：${providerLabel}`)
+              addDialog('Provider ID（小写字母/数字/连字符，永久标识）：')
+              addDialog(`  默认：${template.defaultId}`)
+              addDialog('  Enter 确认，Esc 取消')
               break
             case 'key':
-              dialogLines.push(this.styleLine('system', `提供商：${providerLabel}`))
-              dialogLines.push(this.styleLine('system', '请输入 API Key（输入时以 • 显示）：'))
-              dialogLines.push(this.styleLine('system', '  Enter 确认，Esc 取消'))
+              addDialog(`提供商：${providerLabel}`)
+              addDialog('请输入 API Key（输入时以 • 显示）：')
+              addDialog('  Enter 确认，Esc 取消')
               break
             case 'base-url':
-              dialogLines.push(this.styleLine('system', `提供商：${providerLabel}`))
-              dialogLines.push(this.styleLine('system', `请输入 Base URL（留空使用 ${template.defaultBaseUrl || '官方/模板默认'}）：`))
-              dialogLines.push(this.styleLine('system', '  Enter 确认，Esc 取消'))
+              addDialog(`提供商：${providerLabel}`)
+              addDialog(`请输入 Base URL（留空使用 ${template.defaultBaseUrl || '官方/模板默认'}）：`)
+              addDialog('  Enter 确认，Esc 取消')
               break
             case 'models':
-              dialogLines.push(this.styleLine('system', `提供商：${providerLabel}`))
-              dialogLines.push(this.styleLine('system', '模型 ID（多个用逗号或空格分隔）：'))
-              dialogLines.push(this.styleLine('system', `  默认：${template.defaultModels.join(', ')}`))
-              dialogLines.push(this.styleLine('system', '  Enter 确认，Esc 取消'))
+              addDialog(`提供商：${providerLabel}`)
+              addDialog('模型 ID（多个用逗号或空格分隔）：')
+              addDialog(`  默认：${template.defaultModels.join(', ')}`)
+              addDialog('  Enter 确认，Esc 取消')
               break
             case 'confirm':
-              dialogLines.push(this.styleLine('system', '确认保存以下配置？'))
-              dialogLines.push(this.styleLine('system', `  提供商:  ${providerLabel}`))
-              dialogLines.push(this.styleLine('system', `  Provider ID: ${ob.providerId}`))
-              dialogLines.push(this.styleLine('system', `  Base URL: ${ob.baseUrl === '' ? (template.defaultBaseUrl || '(默认)') : ob.baseUrl}`))
-              dialogLines.push(this.styleLine('system', `  API 协议: ${template.api ?? 'deepseek-official'}`))
-              dialogLines.push(this.styleLine('system', `  模型: ${ob.models.join(', ')}`))
-              dialogLines.push(this.styleLine('system', `  API Key:  ${ob.key.slice(0, 6)}…${ob.key.slice(-4)}（长度 ${ob.key.length}）`))
-              dialogLines.push(this.styleLine('system', '  y = 保存, n = 重填, Esc = 取消'))
+              addDialog('确认保存以下配置？')
+              addDialog(`  提供商:  ${providerLabel}`)
+              addDialog(`  Provider ID: ${ob.providerId}`)
+              addDialog(`  Base URL: ${ob.baseUrl === '' ? (template.defaultBaseUrl || '(默认)') : ob.baseUrl}`)
+              addDialog(`  API 协议: ${template.api ?? 'deepseek-official'}`)
+              addDialog(`  模型: ${ob.models.join(', ')}`)
+              addDialog(`  API Key:  ${ob.key.slice(0, 6)}…${ob.key.slice(-4)}（长度 ${ob.key.length}）`)
+              addDialog('  y = 保存, n = 重填, Esc = 取消')
               break
           }
         }
       } else {
         const d = this.dialog
-        dialogLines.push(this.styleLine('system', `Question ${d.index + 1}/${d.total}: ${d.question.question}`))
+        addDialog(`Question ${d.index + 1}/${d.total}: ${d.question.question}`)
         if (d.question.detail !== undefined && d.question.detail !== '') {
-          dialogLines.push(this.styleLine('system', truncate(d.question.detail, 6)))
+          addDialog(truncate(d.question.detail, 6))
         }
         const options = d.question.options ?? []
         for (const [index, option] of options.entries()) {
           const marker = d.selected.has(index) ? '●' : '○'
           const extra = option.description === undefined ? '' : ` — ${option.description}`
-          dialogLines.push(this.styleLine('system', `  ${index + 1} ${marker} ${option.label}${extra}`))
+          addDialog(`  ${index + 1} ${marker} ${option.label}${extra}`)
         }
         if (options.length === 0) {
-          dialogLines.push(this.styleLine('system', '  (free text: type below and press Enter)'))
+          addDialog('  (free text: type below and press Enter)')
         }
-        dialogLines.push(this.styleLine('system', `  ${d.question.multiSelect === true ? 'digits toggle, Enter submit' : 'digit to select, Enter submit'}, Esc to cancel`))
+        addDialog(`  ${d.question.multiSelect === true ? 'digits toggle, Enter submit' : 'digit to select, Enter submit'}, Esc to cancel`)
       }
     }
 
@@ -1384,25 +1390,9 @@ export class SshTui {
       if (ref !== undefined) this.clickableRows.set(headerLines.length + index + 1, ref)
     }
 
-    this.write('\x1b[?25l\x1b[H')
-    for (const line of headerLines) {
-      this.write(`${line}\x1b[0m\x1b[K\n`)
-    }
-    for (const line of visible) {
-      this.write(`${line}\x1b[0m\x1b[K\n`)
-    }
-    for (const line of dialogLines) {
-      this.write(`${line}\x1b[0m\x1b[K\n`)
-    }
-    this.write(`${inputDivider}\x1b[0m\x1b[K\n`)
-    for (const line of suggestionLines) {
-      this.write(`${line}\x1b[0m\x1b[K\n`)
-    }
-
     const inputLine = `${prompt}${visibleInput}`
-    this.write(`${inputLine}\x1b[0m\x1b[K\n`)
     const statsText = this.statsText()
-    this.write(`${this.styleLine('system', fitLine(statsText === '' ? '— 尚无会话统计' : statsText))}\x1b[0m\x1b[K\n`)
+    const statsLine = this.styleLine('system', fitLine(statsText === '' ? '— 尚无会话统计' : statsText))
 
     let statusText = `${this.status}  ${this.agent.id}  [${this.presetName}]  ${this.currentSelectionLabel()}`
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
@@ -1414,9 +1404,32 @@ export class SshTui {
     } else if (this.agent.status === 'running' && idleMs > WAIT_INDICATOR_MS) {
       statusText += ` · 等待响应 ${Math.floor(idleMs / 1000)}s`
     }
-    // No trailing newline: writing one on the bottom row scrolls the screen
-    // up, shifting every row and breaking the absolute cursor placement below.
-    this.write(`${this.styleLine('system', fitLine(statusText))}\x1b[0m\x1b[K\x1b[J`)
+    const statusLine = this.styleLine('system', fitLine(statusText))
+
+    const paintRows: string[] = [
+      ...headerLines,
+      ...visible,
+      ...dialogLines,
+      inputDivider,
+      ...suggestionLines,
+      `${inputLine}\x1b[0m`,
+      `${statsLine}\x1b[0m`,
+      `${statusLine}\x1b[0m`,
+    ]
+
+    // Incremental repaint: rewrite only rows whose content changed, so slow
+    // SSH links don't rebuild (and flicker) the whole screen on every tick.
+    this.write('\x1b[?25l')
+    const maxRows = Math.max(paintRows.length, this.lastPaintRows.length)
+    for (let i = 0; i < maxRows; i++) {
+      const current = paintRows[i]
+      if (current === this.lastPaintRows[i]) continue
+      this.write(`\x1b[${i + 1};1H${current ?? ''}\x1b[K`)
+    }
+    if (paintRows.length < this.lastPaintRows.length) {
+      this.write(`\x1b[${paintRows.length + 1};1H\x1b[J`)
+    }
+    this.lastPaintRows = paintRows
 
     const column = (promptWidth + displayWidth(visibleInput.slice(0, this.cursor))) % Math.max(1, width) + 1
     const inputTopRow = visible.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
