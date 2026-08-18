@@ -1296,6 +1296,7 @@ export class SshTui {
   private input = ''
   private cursor = 0
   private inputFolded = false
+  private inPaste = false
   private history: string[] = []
   private historyIndex = -1
   private status = 'idle'
@@ -1408,7 +1409,7 @@ export class SshTui {
       this.userQuestionDisposer = questions.registerProvider({ ask: this.handleUserQuestions })
     }
 
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?25l`)
+    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.render()
     this.updateTerminalTitle()
     if (this.resumePicker) {
@@ -1557,7 +1558,7 @@ export class SshTui {
     // In no-alternate-screen mode this removes the last painted frame that
     // would otherwise stay behind the shell prompt after exit.
     this.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-    this.write(`\x1b[?1000l\x1b[?1006l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+    this.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
@@ -3001,6 +3002,14 @@ export class SshTui {
       this.escapeTimer = undefined
     }
 
+    // Bracketed paste: terminals wrap pasted content in \x1b[200~ ... \x1b[201~.
+    // While inside a paste, CR/LF are literal input characters rather than
+    // submit, so copying a multi-line error message arrives as one message.
+    if (this.inPaste || combined.includes('\x1b[200~') || combined.includes('\x1b[201~')) {
+      this.processPasteChunk(combined)
+      return
+    }
+
     const escape = /^\x1b\[([A-D])$/u
     const match = combined.match(escape)
     if (match !== null) {
@@ -3094,7 +3103,60 @@ export class SshTui {
     this.handlePlainText(combined)
   }
 
+  /** Handle one data chunk that may contain bracketed-paste markers. */
+  private processPasteChunk(combined: string): void {
+    let index = 0
+    while (index < combined.length) {
+      if (combined.startsWith('\x1b[200~', index)) {
+        this.inPaste = true
+        index += 6
+        continue
+      }
+      if (combined.startsWith('\x1b[201~', index)) {
+        this.inPaste = false
+        index += 6
+        continue
+      }
+      let end = index
+      while (end < combined.length
+        && !combined.startsWith('\x1b[200~', end)
+        && !combined.startsWith('\x1b[201~', end)) {
+        end += 1
+      }
+      if (end > index) {
+        const part = combined.slice(index, end)
+        if (this.inPaste) this.handlePasteText(part)
+        else this.handlePlainText(part)
+        index = end
+      } else {
+        index += 1
+      }
+    }
+  }
+
+  /** Insert pasted text into the input buffer; CR/LF are literal newlines. */
+  private handlePasteText(text: string): void {
+    const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+    if (normalized === '') return
+    this.input = `${this.input.slice(0, this.cursor)}${normalized}${this.input.slice(this.cursor)}`
+    this.cursor += normalized.length
+    this.markDirty()
+  }
+
   private handlePlainText(text: string): void {
+    // Fallback for terminals without bracketed paste: a burst of multiple line
+    // breaks in one chunk is a paste, not repeated Enter presses.
+    let newlines = 0
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]
+      if (char === '\r' && text[index + 1] !== '\n') newlines += 1
+      else if (char === '\n' && text[index - 1] !== '\r') newlines += 1
+    }
+    if (newlines > 1) {
+      this.handlePasteText(text)
+      return
+    }
+
     let previous = ''
     for (const char of text) {
       // Windows terminals may deliver Enter as CRLF; consume only the first half.
