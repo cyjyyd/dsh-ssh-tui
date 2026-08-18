@@ -772,6 +772,39 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
   }
 }
 
+/**
+ * Map a character index in the input text to its visual (row, col) after the
+ * same width wrapping `wrap()` applies to the rendered input. `row` is the
+ * 0-based input display line, `col` the 0-based column within that line
+ * (before any prompt prefix). This keeps the cursor on the correct line/column
+ * when the input contains literal newlines from multi-line pastes.
+ */
+function cursorVisualPosition(text: string, cursor: number, width: number): { row: number; col: number } {
+  let row = 0
+  let col = 0
+  let used = 0
+  let offset = 0
+  for (const char of text) {
+    if (offset >= cursor) break
+    if (char === '\n') {
+      row += 1
+      col = 0
+      used = 0
+    } else {
+      const charWidth = displayWidth(char)
+      if (used + charWidth > width) {
+        row += 1
+        col = 0
+        used = 0
+      }
+      used += charWidth
+      col += charWidth
+    }
+    offset += char.length
+  }
+  return { row, col }
+}
+
 /** A recognized OpenCode provider route, used by /usage and /quota. */
 export type OpenCodeFlavor = 'zen' | 'go'
 
@@ -1898,22 +1931,51 @@ export class SshTui {
       : this.inputFolded
         ? foldInputView(this.input, this.cursor, Math.max(1, width - promptWidth))
         : { text: this.input, cursorOffset: displayWidth(this.input.slice(0, this.cursor)), folded: false }
-    const grid = Math.max(1, width)
-    const cursorPlainOffset = promptWidth + inputView.cursorOffset
     const inputTextWidth = Math.max(1, width - promptWidth)
     const inputTextLines = wrap(inputView.text, inputTextWidth)
     const inputDisplayLines = inputTextLines.map((line, index) =>
       index === 0 ? `${prompt}${line}` : line)
-    // When the cursor sits exactly at the end of a full visual row, the
-    // terminal has already advanced to the next row. Reserve that empty row so
-    // the cursor never lands on top of the last character typed.
-    if (
-      !inputView.folded
-      && cursorPlainOffset > 0
-      && cursorPlainOffset % grid === 0
-      && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
-    ) {
-      inputDisplayLines.push('')
+
+    // Cursor visual position. Folded/masked views are single-line and use
+    // the existing flat offset model; normal multi-line input maps the cursor
+    // index through the same wrap() layout so it stays on the right line.
+    let cursorRowOffset: number
+    let column: number
+    if (inputView.folded || masked) {
+      const grid = Math.max(1, width)
+      const cursorPlainOffset = promptWidth + inputView.cursorOffset
+      if (
+        !inputView.folded
+        && cursorPlainOffset > 0
+        && cursorPlainOffset % grid === 0
+        && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
+      ) {
+        inputDisplayLines.push('')
+      }
+      cursorRowOffset = Math.min(
+        Math.floor(cursorPlainOffset / grid),
+        Math.max(0, inputDisplayLines.length - 1),
+      )
+      column = cursorPlainOffset % grid + 1
+      if (
+        cursorPlainOffset > 0
+        && cursorPlainOffset % grid === 0
+        && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
+      ) {
+        column = grid
+      }
+    } else {
+      const pos = cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)
+      // A cursor exactly at the end of a full-width row sits at the start of
+      // the next row; if that row does not exist yet, reserve an empty row.
+      if (pos.col === inputTextWidth) {
+        if (pos.row + 1 >= inputDisplayLines.length) inputDisplayLines.push('')
+        cursorRowOffset = Math.min(pos.row + 1, Math.max(0, inputDisplayLines.length - 1))
+        column = (cursorRowOffset === 0 ? promptWidth : 0) + 1
+      } else {
+        cursorRowOffset = Math.min(pos.row, Math.max(0, inputDisplayLines.length - 1))
+        column = (pos.row === 0 ? promptWidth : 0) + pos.col + 1
+      }
     }
     const inputRows = Math.max(1, inputDisplayLines.length)
 
@@ -1999,21 +2061,6 @@ export class SshTui {
     this.lastPaintRows = paintRows
     this.lastChromeKey = chromeKey
 
-    const cursorRowOffset = Math.min(
-      Math.floor(cursorPlainOffset / grid),
-      Math.max(0, inputRows - 1),
-    )
-    let column = cursorPlainOffset % grid + 1
-    // A folded view is capped to one visual row; if the cursor still lands on
-    // an exact boundary, keep it on the final occupied cell rather than
-    // pointing at the row below.
-    if (
-      cursorPlainOffset > 0
-      && cursorPlainOffset % grid === 0
-      && Math.floor(cursorPlainOffset / grid) >= inputRows
-    ) {
-      column = grid
-    }
     const inputTopRow = visible.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
     const row = Math.min(height, inputTopRow + cursorRowOffset)
     this.write(`\x1b[${row};${Math.max(1, column)}H\x1b[?25h`)
