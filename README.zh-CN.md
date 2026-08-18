@@ -1,4 +1,4 @@
-# dsh-tui（dsh-ssh-tui）
+# dsh-ssh-tui
 
 DeepSeek Harness（`dsh`）的 SSH 友好交互终端插件：纯 ANSI 聊天式转录、流式输出、
 工具卡片、git 风格 diff、历史会话选择、滚动回看与鼠标点击展开，并带终端标题栏
@@ -37,8 +37,8 @@ English: [README.md](README.md)
 ### 方式一：一键脚本（推荐）
 
 ```bash
-git clone https://github.com/cyjyyd/dsh-tui.git
-cd dsh-tui
+git clone https://github.com/cyjyyd/dsh-ssh-tui.git
+cd dsh-ssh-tui
 bash scripts/install.sh            # 默认安装到 tui profile
 ```
 
@@ -54,7 +54,7 @@ bash scripts/install.sh work
 ### 方式二：手动安装
 
 ```bash
-cd dsh-tui
+cd dsh-ssh-tui
 npm install --no-audit --no-fund
 npm run build
 dsh plugin --profile tui add "link:$(pwd)"

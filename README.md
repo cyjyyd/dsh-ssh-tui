@@ -18,8 +18,8 @@ framework — designed for slow/remote SSH links.
 ## Install
 
 ```sh
-git clone https://github.com/cyjyyd/dsh-tui.git
-cd dsh-tui
+git clone https://github.com/cyjyyd/dsh-ssh-tui.git
+cd dsh-ssh-tui
 bash scripts/install.sh          # installs into the `tui` profile
 ```
 

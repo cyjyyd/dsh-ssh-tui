@@ -13,11 +13,11 @@
   "author": "cyjyyd",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cyjyyd/dsh-tui.git"
+    "url": "git+https://github.com/cyjyyd/dsh-ssh-tui.git"
   },
-  "homepage": "https://github.com/cyjyyd/dsh-tui#readme",
+  "homepage": "https://github.com/cyjyyd/dsh-ssh-tui#readme",
   "bugs": {
-    "url": "https://github.com/cyjyyd/dsh-tui/issues"
+    "url": "https://github.com/cyjyyd/dsh-ssh-tui/issues"
   },
   "publishConfig": {
     "access": "public"
