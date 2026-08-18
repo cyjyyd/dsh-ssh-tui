@@ -1,262 +1,206 @@
 # dsh-ssh-tui
 
-An SSH-friendly interactive terminal (TUI) plugin for [DeepSeek
-Harness](https://github.com/deepseek-ai/deepseek-harness). It renders the agent
-session as a plain-ANSI chat transcript, streams model output, shows tool calls,
-answers approvals and `ask_user_question` prompts from the keyboard, and lets
-you resume persisted sessions. No browser, no mouse, no heavy terminal
-framework — designed for slow/remote SSH links.
+DeepSeek Harness（`dsh`）的 SSH 友好交互终端插件：纯 ANSI 聊天式转录、流式输出、
+工具卡片、git 风格 diff、历史会话选择、滚动回看与鼠标点击展开，并带终端标题栏
+进度与完成提示音。
 
-中文部署指南：[README.zh-CN.md](README.zh-CN.md)
+English: [README.en.md](README.en.md)
 
-## Requirements
+## 功能一览
 
-- Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh`
-- pnpm (used by `dsh plugin` to manage profile dependencies)
+- 纯终端渲染，无需浏览器/鼠标/重量级终端框架，适合慢速或远程 SSH；
+- 模型思考流默认折叠，显示 `▸ 思考中 ⠹ · N 字 · Ns` 动画；结束后折叠为
+  `▸ 已思考 · N 行`，可单独展开；思考过程中也能实时展开/收起查看原文；
+- 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
+  粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以粗体白色显示；
+- 工具调用卡片化：彩色状态点（运行黄 / 成功绿 / 失败红）、shell 命令友好展示、
+  编辑工具 git 风格 diff（`-` 浅红底 / `+` 浅绿底 / 文件统计，编辑卡片默认展开且
+  diff 内容不截断）、JSON 参数与结果自动转可读内容；
+- 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
+- 输入框下方会话统计行：轮次/步数、模型与工具耗时、TTFT、tok/s、缓存命中率、
+  输入/输出 token（与 web 端口径一致）；
+- 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
+- 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
+  一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
+- 审批、`ask_user_question`、子代理进度、`/mode` 模式切换、`/model` 模型切换、
+  `/resume` 会话切换等完整支持。
 
-## Install
+## 环境要求
 
-```sh
+- Node.js ≥ 22.19
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`
+- pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
+- 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
+
+## 部署指南
+
+### 方式一：一键脚本（推荐）
+
+```bash
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
 cd dsh-ssh-tui
-bash scripts/install.sh          # installs into the `tui` profile
+bash scripts/install.sh            # 默认安装到 tui profile
 ```
 
-Or manually:
+安装到其它 profile（例如自定义 `work` profile）：
 
-```sh
+```bash
+bash scripts/install.sh work
+```
+
+脚本会依次：安装依赖 → 构建 `lib/` → 通过 `dsh plugin --profile <name> add link:<repo>`
+把插件链接进 profile，并自动把 `dsh-ssh-tui` 加入该 profile 的 `dsh.profile.bundles`。
+
+### 方式二：手动安装
+
+```bash
+cd dsh-ssh-tui
 npm install --no-audit --no-fund
 npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
-Or install the published npm package directly (requires `@deepseek-ai/dsh` and
-`pnpm`, no local clone needed):
+### 方式三：npm 安装（发布后）
 
-```sh
+前置要求：已全局安装 `@deepseek-ai/dsh`（`npm i -g @deepseek-ai/dsh`）且有 pnpm。
+
+```bash
 dsh plugin --profile tui add dsh-ssh-tui
-# or from a repo checkout: bash scripts/install-npm.sh
+# 或在仓库内快捷执行：bash scripts/install-npm.sh
+# 指定其它 profile：bash scripts/install-npm.sh work
 ```
 
-Set `DEEPSEEK_API_KEY` (or a `$DSH_HOME/settings.yaml` / `.env` with the
-credentials), then start:
+`dsh plugin add` 会从 npm 拉取包、写入 profile 依赖，并自动把 `dsh-ssh-tui`
+加入该 profile 的 `dsh.profile.bundles`。
 
-```sh
-dsh --profile tui
-```
+## 启动与命令行参数
 
-Verify and uninstall:
-
-```sh
-bash scripts/verify.sh
-bash scripts/uninstall.sh
-```
-
-## First-launch setup
-
-On first launch (when no API key is configured) the TUI opens a setup wizard:
-
-1. choose a provider template, matching the official Models page:
-   - DeepSeek official;
-   - OpenCode Go (`opencode.ai/zen/go/v1`, Responses protocol);
-   - custom OpenAI-compatible gateway (Completions);
-   - custom OpenAI Responses gateway;
-   - Anthropic Messages-compatible gateway;
-2. for custom providers, enter a lowercase Provider ID (permanent), base URL,
-   API key (masked while typing), and one or more model IDs — each step has a
-   sensible template default. On the models step, press `Ctrl+F` to fetch the
-   current model list straight from the provider endpoint;
-3. confirm and save.
-
-The wizard writes the key to `~/.dsh/.credentials.yaml` when no environment
-variable shadows it; if the machine injects `DEEPSEEK_API_KEY` from
-`/etc/profile.d` or similar, it writes `~/.dsh/env.sh` (sourced by
-`~/.profile` / `~/.bashrc` / `~/.zshenv` / `~/.zshrc` automatically,
-idempotently) so your
-value wins on the next launch. On Windows it runs `setx` and writes
-`%USERPROFILE%\.dsh\env.cmd` as a fallback. Custom gateway base URLs are saved
-to `$DSH_HOME/settings.yaml` as an `llm-pi-ai.providers.<id>` route (the same
-shape the official custom-provider form writes). After saving a custom
-provider, exit and launch with:
-
-The wizard also remembers the selected provider/model in
-`agent-default-model` (the same settings memory the official Models page
-uses), so after setup you can just run:
-
-```sh
-dsh --profile tui
-```
-
-`--provider <id> --model <id>` remains available as a temporary override.
-
-You can reopen the wizard at any time with:
-
-```sh
-/setup
-```
-
-## Cross-platform support
-
-The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
-
-- Linux/macOS: same command as above; the wizard persists credentials in
-  `~/.dsh/.credentials.yaml`, or `~/.dsh/env.sh` when a system-injected
-  environment variable must be overridden.
-- Windows (PowerShell or Windows Terminal): install with the same npm/dsh
-  commands — `dsh` is on PATH via npm's global bin. The wizard stores the key
-  through the dsh credential store, or runs `setx` (plus `env.cmd`) when an
-  environment variable shadows the store. Agent shell tools automatically use
-  PowerShell on Windows (the harness disables bash there).
-- Legacy Windows consoles without VT support: set `DSH_TUI_NO_ALT_SCREEN=1`
-  (and `--no-color` if needed) to skip the alternate-screen escape sequences.
-- Keyboard input accepts both `\x7f` and `\x08` backspace, and both `\r` /
-  `\r\n` line endings.
-
-## Usage
-
-| Key | Action |
-| --- | --- |
-| `Enter` | send the message; while the agent is running, steers it |
-| `Tab` | complete the highlighted slash command |
-| `↑` / `↓` | navigate slash-command suggestions (or input history) |
-| `Esc` / `Ctrl+C` | cancel the running turn |
-| `Ctrl+D` | exit |
-| `Ctrl+L` | redraw |
-| `Ctrl+T` | fold/unfold the input box (display-only; submission keeps the full text) |
-| `↑` / `↓` | input history |
-| `y` / `n` / `Esc` | answer an approval prompt |
-| `1..9` + `Enter` | answer an `ask_user_question` dialog |
-
-Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands with every command the harness registers (`/goal`, `/plan`,
-`/compact`, `/permission`, `/feedback`, ...). `Tab` completes, `Enter` runs.
-`/help` lists everything.
-
-`/model` opens a two-step selector: pick a model from the current provider's
-catalog, then pick its reasoning effort (`off` / `high` / `max` when the
-provider exposes them). The change applies to the next request without
-changing the provider, updates the header/status line, and is remembered in
-`agent-default-model` for future launches.
-
-For OpenCode and other third-party providers, `/model` queries the provider's
-endpoint (`GET {baseURL}/models`) for a live model list, falling back to the
-configured catalog when the endpoint cannot be reached. Picking a model that
-is not stored in the provider profile automatically adds it to
-`llm-pi-ai.providers.<id>.models` so the harness can serve it.
-
-`/usage` (alias `/quota`) works when the current provider is an OpenCode
-source and keeps the two billing models distinct:
-
-- **OpenCode Go** queries the official quota endpoint and shows rolling
-  5-hour / weekly / monthly usage percentages, limit state, and reset times;
-- **OpenCode Zen** is metered per API bill and has no fixed quota, so the TUI
-  points to `https://opencode.ai/zen` for balance/billing and shows the
-  session token usage it has recorded instead of inventing a quota.
-
-The startup screen shows the official DeepSeek whale logo (rendered from the
-harness favicon) in the DeepSeek brand color, with the wordmark below it. The
-logo scales to the terminal width — a 52-column variant on wide terminals,
-down to a compact variant on narrow ones — so it never looks squeezed. A
-horizontal rule separates the workspace (transcript, reasoning, tool cards)
-from the input area.
-
-Model reasoning blocks are collapsed by default: while thinking a compact
-`▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and
-after the turn each block collapses to a `▸ 已思考 · N 行` summary without
-its content. The thinking block can be expanded live while streaming to watch
-the raw reasoning as it arrives. Assistant replies render in bold white with
-terminal markdown support: heading levels (H1 enlarged/underlined, H2
-underlined, H3 colored), bold, italic, inline code, fenced code blocks,
-lists, quotes, and links all get ANSI styling while remaining
-width-wrapped for the terminal. Reasoning and tool cards are
-each expandable/collapsible independently — `Ctrl+N` / `Ctrl+P` move the
-selection highlight between them, `Ctrl+R` expands/collapses all blocks at once
-(individual blocks use `↑`/`↓` + `Enter`), and `Esc` drops the selection. With
-the input box empty, `↑`/`↓` move the selection and `Enter` toggles the
-selected block directly. Clicking a reasoning or tool header in the transcript
-also toggles it.
-
-The transcript is scrollable: `PgUp`/`PgDn` or the mouse wheel move back
-through earlier reasoning blocks and tool calls, a `↑ 已回看 N 行` indicator
-shows the scroll position, and `Esc` (or sending a message) returns to the
-live bottom.
-
-The terminal window title mirrors the session state while unfocused: an
-animated spinner plus `运行中 · 工具 N` while working, `✓ 已完成` for a few
-seconds after completion, and `待命` when idle. A terminal bell rings on
-completion (`DSH_TUI_NO_BELL=1` disables it).
-
-Tool calls render as compact cards instead of raw argument JSON. A colored
-dot leads each card — yellow while running, green on success, red on failure
-(a shell command with a non-zero exit or signal also turns red, with a
-`[退出码 N]` / `[信号 X]` suffix). Shell tools show the command as
-`$ command`, file mutations (`edit` / `write` / `str_replace_editor`) render
-the applied change git-style: a path header, `-` lines on a light-red
-background, `+` lines on a light-green background, and a `└ +N -M · K file(s)`
-footer. File-mutation diffs are shown in full (never collapsed to a `… more`
-line) and their cards start expanded. Other tools show a short argument
-summary and start collapsed to a single line (the command, truncated with
-`…` when long); expand to reveal output or the result body. Expanded generic
-calls convert their JSON arguments and JSON results into readable indented
-content — key/value fields, bullet lists, and multiline blocks for
-code/content — instead of raw JSON text.
-
-A web-aligned session stats line sits below the input box: turn/step counts,
-model and tool wall time, first-token latency, tokens/second, cache-hit
-percentage, and billed input/output tokens (`输入 12.3K · 输出 1.2K`), updated
-as the session progresses.
-
-While a turn is waiting on the provider, the status line shows
-`等待响应 Ns`; if nothing arrives for 60s a warning appears and `Esc` /
-`Ctrl+C` cancels the turn. Follow-ups sent while a turn is running are
-acknowledged immediately (`⚡ … 排队 N`) and take effect at the next step
-boundary, so the UI never looks frozen. Long-running work is not
-misclassified: while tools are executing the status shows `工具执行中 N`,
-and while subagents are running it shows `子代理执行中 N` (no
-`等待响应`/stall warning). Subagent start/end, child assistant output, child
-tool calls/results, approvals, and `ask_user_question` prompts are all
-rendered with a `[子代理 …]` label; `/subagents` lists active runs.
-
-`/mode` opens the agent-mode picker backed by dsh's official preset roster:
-标准模式 (standard), PTC 模式 (code), 极简模式 (minimal), 创造模式 (cordis),
-plus any locally authored presets. On a session that has not produced work
-the switch applies immediately; otherwise it is remembered as the default for
-the next launch. The active mode is shown in the header/status line.
-
-`/resume` switches the running TUI to a past session. With no argument it
-opens a picker of recent sessions (excluding subagents), labeled by the user's
-first message with a time/cwd description; `/resume <session-id>` switches
-directly. Switching is refused while a turn is running.
-
-```sh
+```bash
+dsh --profile tui                          # 直接进入主界面（新建会话）
+dsh --profile tui --resume                 # 打开历史会话选择器
+dsh --profile tui resume                   # 同上（选择器）
+dsh --profile tui --resume <session-id>    # 直接恢复指定会话
+dsh --profile tui resume <session-id>      # 等价写法
+dsh --profile tui --new                    # 显式新建会话（默认即新建，供脚本使用）
 dsh --profile tui --model deepseek-v4-flash
+dsh --profile tui --provider <id>
 dsh --profile tui --no-color
-dsh --profile tui --resume <session-id>
 ```
 
-`dsh --profile tui` starts a fresh session directly in the main interface.
-`dsh --profile tui --resume` (or `dsh --profile tui resume`) opens the
-history-session picker before the main interface; `dsh --profile tui --resume
-<session-id>` (or `dsh --profile tui resume <session-id>`) skips the picker
-and resumes directly. `dsh --profile tui --new` explicitly starts fresh
-without the picker. The in-app `/resume` command remains available for
-switching while running.
+选择器操作：`1-9` 选择历史会话；`0` / `Enter` 新建；`Esc` 取消退出。
 
-## Development
+## 交互与快捷键
 
-```sh
+| 键 | 作用 |
+| --- | --- |
+| `Enter` | 发送；运行中则 steer 当前轮次；输入为空且有选中块时展开/收起 |
+| `↑` / `↓` | 输入为空时在思考/工具块间移动选择；有输入时切换历史 |
+| `Ctrl+N` / `Ctrl+P` | 在思考/工具块间移动选择 |
+| `Ctrl+R` | 全部展开/全部收起（逐项展开请用 `↑`/`↓` 选中后按 `Enter`） |
+| `Ctrl+T` | 折叠/展开输入框（折叠只影响显示，提交时仍为完整文本） |
+| 鼠标左键 | 点击思考/工具标题行直接展开/收起 |
+| `PgUp` / `PgDn`、滚轮 | 转录区滚动回看 |
+| `Esc` | 取消选择 / 回到底部 / 取消当前轮次 |
+| `Ctrl+C` | 中断当前轮次；空闲时退出 |
+| `Ctrl+D` | 退出 |
+| `Ctrl+L` | 重绘 |
+
+斜杠命令：`/help`、`/model`、`/mode`、`/resume`、`/status`、`/subagents`、
+`/usage`（`/quota` 同义）、`/setup`、`/clear`，以及 harness 自带命令
+（`/goal`、`/plan`、`/compact` 等）。
+
+`/usage` 在当前提供商为 OpenCode 源时可用，并区分两种计费方式：
+
+- **OpenCode Go**：调用官方额度接口，显示滚动 5 小时 / 本周 / 本月用量
+  百分比、限流状态与重置时间；
+- **OpenCode Zen**：按 API 账单计费、没有固定额度，TUI 不假装查询余额，
+  只提示到 `https://opencode.ai/zen` 查看，并附本会话已记录的 token 用量。
+
+## 配置
+
+### 模型默认值（`$DSH_HOME/settings.yaml`）
+
+```yaml
+agent-default-model:
+  provider: opencode-go
+  model: deepseek-v4-pro
+  reasoningEffort: max
+agent-presets:
+  default: standard
+```
+
+`/model` 与 `/mode` 的修改会写回这里，web 端与 TUI 共用同一份设置。
+
+对 OpenCode 和其他第三方提供商，`/model` 会先调用提供商的端点
+（`GET {baseURL}/models`）获取实时模型列表；端点不可达时回退到已配置的
+模型列表。若选中的模型尚未写入提供商配置，会自动追加到
+`llm-pi-ai.providers.<id>.models`，保证 Harness 可以正常调用。
+
+首次配置向导的自定义/OpenCode 提供商步骤中，输入模型 ID 前可按
+`Ctrl+F` 直接从端点拉取模型列表，免去手动输入。
+
+### profile 用户层
+
+每个 profile 的 `cordis.patch.yml` 是用户覆盖层，可覆盖插件 patch 的任何行；
+`--patch <file>` 可临时叠加。
+
+## 验证
+
+```bash
+bash scripts/verify.sh              # 检查 profile 组合与 CLI 语法
+```
+
+或手动：
+
+```bash
+dsh --profile tui --dump-config | grep -A12 'id: ssh-tui'
+dsh --profile tui --help
+```
+
+## 卸载
+
+```bash
+bash scripts/uninstall.sh           # 默认 tui profile
+bash scripts/uninstall.sh work      # 指定 profile
+```
+
+卸载只移除 profile 中的插件依赖与 bundle 层，不会删除会话数据。
+
+## 隐私与上传安全
+
+- 所有会话、凭据、设置都保存在 `$DSH_HOME`（默认 `~/.dsh`），**不落在本仓库**；
+- `.gitignore` 已排除 `node_modules/`、`lib/`、`.env*`、`*.key`、`session*.jsonl*`、
+  `sessions/`、日志与临时文件；
+- 上传前请自查：`find . -type f | grep -Ei 'credential|\.env|\.key|session'`；
+- 插件本身不收集、不上传任何数据；会话日志仅按需读写于本机 `$DSH_HOME`。
+
+## 开发与目录结构
+
+```text
+src/index.ts        插件入口：启动选择器、会话创建/恢复/切换
+src/startup.ts      命令行参数解析（--resume / --new / --model ...）
+src/picker.ts       启动历史会话选择器
+src/session-list.ts 历史会话扫描与标签（共享给 /resume）
+src/tui.ts          终端渲染、交互、统计、标题/铃声
+cordis.patch.yml    dsh bundle patch（挂载 TUI 与 agent-presets）
+scripts/            安装 / 卸载 / 验证脚本
+```
+
+```bash
 npm install
+npm run typecheck
 npm run build
 ```
 
-## Privacy
+## 常见问题
 
-All sessions, credentials, and settings live under `$DSH_HOME` (default
-`~/.dsh`) — never inside this repository. `.gitignore` excludes
-`node_modules/`, build output, `.env*`, keys, session logs, and local state, so
-cloning or uploading the repo never carries user sessions or secrets.
+- **`dsh-ssh-tui: both stdin and stdout must be TTYs`**：必须从真实终端/SSH 会话启动。
+- **pnpm 拒绝 git 依赖的构建脚本**：git 安装的插件需要把 pnpm 打印的 key 加入
+  profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`。
+- **标题栏或铃声不生效**：确认终端支持 OSC 0 与 BEL；铃声可用
+  `DSH_TUI_NO_BELL=1` 关闭。
+- **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
 
 ## License
 
-MIT
+MIT，见 [LICENSE](LICENSE)。
