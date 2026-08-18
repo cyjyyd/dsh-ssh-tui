@@ -73,6 +73,19 @@ dsh plugin --profile tui add dsh-ssh-tui
 `dsh plugin add` 会从 npm 拉取包、写入 profile 依赖，并自动把 `dsh-ssh-tui`
 加入该 profile 的 `dsh.profile.bundles`。
 
+### 智能路由模式（dsh-routing-suite）
+
+需要“智能路由模式”时，安装 `dsh-routing-suite` 并注册其 preset：
+
+```bash
+bash scripts/install-routing-suite.sh          # 默认 tui profile
+bash scripts/install-routing-suite.sh work     # 其它 profile
+```
+
+脚本会执行 `dsh plugin --profile <name> add dsh-routing-suite`，并把包内的
+`preset/routing-suite` 复制到 `$DSH_HOME/.agent-presets/routing-suite`，
+这样 TUI 的 `/mode` 菜单才能选择“智能路由模式”。
+
 ## 启动与命令行参数
 
 ```bash

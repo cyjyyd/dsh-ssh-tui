@@ -39,6 +39,12 @@ dsh plugin --profile tui add dsh-ssh-tui
 # or from a repo checkout: bash scripts/install-npm.sh
 ```
 
+For the optional **智能路由模式 (routing-suite)** mode, also run:
+
+```sh
+bash scripts/install-routing-suite.sh
+```
+
 Set `DEEPSEEK_API_KEY` (or a `$DSH_HOME/settings.yaml` / `.env` with the
 credentials), then start:
 
@@ -220,9 +226,11 @@ rendered with a `[子代理 …]` label; `/subagents` lists active runs.
 
 `/mode` opens the agent-mode picker backed by dsh's official preset roster:
 标准模式 (standard), PTC 模式 (code), 极简模式 (minimal), 创造模式 (cordis),
-plus any locally authored presets. On a session that has not produced work
-the switch applies immediately; otherwise it is remembered as the default for
-the next launch. The active mode is shown in the header/status line.
+智能路由模式 (routing-suite, from `dsh-routing-suite`),
+plus any locally authored presets (e.g. `whoami-standard`). On a session that
+has not produced work the switch applies immediately; otherwise it is remembered
+as the default for the next launch. The active mode is shown in the
+header/status line.
 
 `/resume` switches the running TUI to a past session. With no argument it
 opens a picker of recent sessions (excluding subagents), labeled by the user's

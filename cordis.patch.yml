@@ -36,8 +36,9 @@
     reasoningEffort: max
 
 - insert:
-    # The agent-mode roster (standard / PTC / minimal / cordis). The launcher
-    # injects the shipped preset root into this row when it is present.
+    # The agent-mode roster (standard / PTC / minimal / cordis / routing-suite).
+    # The launcher injects the shipped preset root into this row when it is
+    # present.
     - id: agent-presets
       name: '@deepseek-ai/dsh-agent-presets'
       config:

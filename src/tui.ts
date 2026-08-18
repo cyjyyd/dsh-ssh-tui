@@ -360,7 +360,7 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
 const LOCAL_COMMANDS = [
   { name: 'help', description: 'show all available commands' },
   { name: 'model', description: 'select model and reasoning effort (same provider)' },
-  { name: 'mode', description: 'switch agent mode / preset (standard, PTC, minimal, ...)' },
+  { name: 'mode', description: 'switch agent mode / preset (standard, minimal, code, cordis, routing-suite, ...)' },
   { name: 'quit', description: 'exit the TUI' },
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
@@ -2848,7 +2848,7 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** /mode: pick an agent preset (standard / PTC / minimal / ...). */
+  /** /mode: pick an agent preset (standard / minimal / code / cordis / routing-suite / ...). */
   private async runModeCommand(): Promise<void> {
     const agentPresets = this.ctx.get('agentPresets')
     if (agentPresets === undefined) {
