@@ -30,6 +30,39 @@ mkdir -p "$DSH_HOME/.agent-presets"
 rm -rf "$DEST"
 cp -R "$PKG_DIR/preset/routing-suite" "$DEST"
 
+# dsh-routing-suite injects the host `webServer` service to expose its
+# read-only status API. dsh-base does not provide that service in a terminal
+# profile, so mount the in-box loopback webserver on an OS-assigned port.
+PATCH_FILE="$DSH_HOME/profiles/$PROFILE/cordis.patch.yml"
+if ! grep -q -- "name: '@deepseek-ai/dsh-host-webserver'" "$PATCH_FILE" 2>/dev/null; then
+  echo "==> adding loopback webServer service for dsh-routing-suite"
+  PATCH_FILE="$PATCH_FILE" node <<'NODE'
+const fs = require('node:fs')
+
+const file = process.env.PATCH_FILE
+let text = fs.readFileSync(file, 'utf8')
+const block = `# dsh-routing-suite injects the host webServer service to expose its
+# read-only status API. dsh-base does not provide that service in a terminal
+# profile, so mount the in-box loopback webserver on an OS-assigned port.
+- insert:
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: '127.0.0.1'
+        port: 0
+`
+
+if (/name:\s*'@deepseek-ai\/dsh-host-webserver'/.test(text)) process.exit(0)
+if (/^\s*\[\s*\]\s*$/m.test(text)) {
+  text = text.replace(/^\s*\[\s*\]\s*$/m, block.trimEnd() + '\n')
+} else {
+  if (!text.endsWith('\n')) text += '\n'
+  text += '\n' + block
+}
+fs.writeFileSync(file, text)
+NODE
+fi
+
 echo "==> done"
 echo "start with: dsh --profile $PROFILE"
 echo "then use /mode and select 智能路由模式 (routing-suite)"

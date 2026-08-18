@@ -45,6 +45,10 @@ For the optional **智能路由模式 (routing-suite)** mode, also run:
 bash scripts/install-routing-suite.sh
 ```
 
+The script adds `dsh-routing-suite`, registers its preset for the `/mode`
+menu, and mounts the in-box loopback `webServer` service (`127.0.0.1` on an
+OS-assigned port) that the plugin requires for its read-only status API.
+
 Set `DEEPSEEK_API_KEY` (or a `$DSH_HOME/settings.yaml` / `.env` with the
 credentials), then start:
 
