@@ -124,6 +124,14 @@ agent-presets:
 
 `/model` 与 `/mode` 的修改会写回这里，web 端与 TUI 共用同一份设置。
 
+对 OpenCode 和其他第三方提供商，`/model` 会先调用提供商的端点
+（`GET {baseURL}/models`）获取实时模型列表；端点不可达时回退到已配置的
+模型列表。若选中的模型尚未写入提供商配置，会自动追加到
+`llm-pi-ai.providers.<id>.models`，保证 Harness 可以正常调用。
+
+首次配置向导的自定义/OpenCode 提供商步骤中，输入模型 ID 前可按
+`Ctrl+F` 直接从端点拉取模型列表，免去手动输入。
+
 ### profile 用户层
 
 每个 profile 的 `cordis.patch.yml` 是用户覆盖层，可覆盖插件 patch 的任何行；

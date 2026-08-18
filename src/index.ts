@@ -14,6 +14,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { showSessionPicker } from './picker.js'
 import { mountTui, type TuiController } from './tui.js'
+import { defaultReasoningEffort } from './reasoning.js'
 
 export const name = 'ssh-tui'
 
@@ -69,15 +70,30 @@ export function apply(ctx: Context, config: Config): void {
       const model = liveSelection !== undefined
         ? liveSelection.model
         : config.model ?? selection?.model ?? 'deepseek-v4-flash'
+
+      // OpenCode / third-party (llm-pi-ai) routes carry no adapter-level
+      // reasoning default, so default a supported effort ourselves when none is
+      // selected. Without it the model streams thinking as plain text and the
+      // foldable `思考中` block never has data to render.
+      let reasoningEffort = selection?.reasoningEffort
+      if (reasoningEffort === undefined && provider !== 'deepseek-official') {
+        const llm = ctx.get('llm')
+        if (llm !== undefined) {
+          reasoningEffort = await defaultReasoningEffort(llm, provider, model)
+        }
+      }
+
       const selectionRef: ModelSelectionRef = {
-        current: selection ?? { provider, model },
+        current: selection !== undefined
+          ? { ...selection, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
+          : { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
         assembled: undefined,
       }
       const agentPresets = ctx.get('agentPresets')
       const agentOptions = {
         provider,
         model,
-          ...(selection?.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
       }
       const setup = async (agentCtx: Context): Promise<void> => {
         installModelSelection(agentCtx, selectionRef)

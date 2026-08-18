@@ -29,6 +29,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
+import { defaultReasoningEffort } from './reasoning.js'
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -786,6 +787,9 @@ interface LlmPiAiProviderProfile {
   displayName?: unknown
   apiKeyEnv?: unknown
   baseURL?: unknown
+  api?: unknown
+  models?: unknown
+  reasoning?: unknown
 }
 
 interface LlmPiAiSection {
@@ -793,6 +797,7 @@ interface LlmPiAiSection {
 }
 
 const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
+const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1'
 
 /**
  * Classify the currently selected provider as an OpenCode route. Built-in
@@ -1769,8 +1774,14 @@ export class SshTui {
         }
       }
       if (this.streaming.text !== '') {
-        for (const line of renderMarkdownLines(this.streaming.text, width, this.color)) {
-          addDisplay(line)
+        // Streaming text is the model's live token stream: while reasoning is
+        // being produced (before a final assistant message has assembled) it
+        // can contain the raw thinking/chain-of-thought. Rendering it as
+        // markdown here would style that thinking instead of keeping it in the
+        // collapsible reasoning block, so keep the in-progress stream plain.
+        // The completed assistant message is what gets markdown-rendered.
+        for (const line of wrap(this.streaming.text, width)) {
+          addDisplay(this.styleLine('assistant', line))
         }
       }
     }
@@ -1820,6 +1831,7 @@ export class SshTui {
               addDialog(`提供商：${providerLabel}`)
               addDialog('模型 ID（多个用逗号或空格分隔）：')
               addDialog(`  默认：${template.defaultModels.join(', ')}`)
+              if (template.api !== undefined) addDialog('  Ctrl+F = 从端点获取模型列表')
               addDialog('  Enter 确认，Esc 取消')
               break
             case 'confirm':
@@ -2569,6 +2581,135 @@ export class SshTui {
     })
   }
 
+  /** The stored llm-pi-ai profile for one provider route, when settings provide one. */
+  private piAiProviderProfile(provider: string): LlmPiAiProviderProfile | undefined {
+    if (provider === 'deepseek-official') return undefined
+    const section = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai')) as LlmPiAiSection | null | undefined
+    return section?.providers?.[provider]
+  }
+
+  /** Default listing endpoint for a built-in OpenCode route with no stored base URL. */
+  private openCodeListingBaseURL(provider: string): string | undefined {
+    if (provider === 'opencode-go') return PROVIDER_TEMPLATES['opencode-go'].defaultBaseUrl
+    if (provider === 'opencode') return OPENCODE_ZEN_BASE_URL
+    return undefined
+  }
+
+  /**
+   * Fetch the live model list for an OpenCode or third-party provider from its
+   * OpenAI-compatible listing endpoint. The provider route is deliberately not
+   * passed to discovery: pi-ai would answer a catalog route from its installed
+   * registry, while the TUI wants the endpoint's current list.
+   */
+  private async discoverEndpointModels(provider: string): Promise<{ id: string; label: string }[]> {
+    const profile = this.piAiProviderProfile(provider)
+    const baseURL = typeof profile?.baseURL === 'string' && profile.baseURL.trim() !== ''
+      ? profile.baseURL.trim()
+      : this.openCodeListingBaseURL(provider)
+    if (baseURL === undefined) return []
+    const api = typeof profile?.api === 'string' && profile.api.trim() !== '' ? profile.api.trim() : undefined
+    const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
+      ? profile.apiKeyEnv.trim()
+      : undefined
+    const apiKey = apiKeyEnv === undefined ? undefined : await this.resolveCredential(apiKeyEnv)
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return []
+    const discovered = await llm.discoverModels(settingsNamespace('llm-pi-ai'), {
+      baseURL,
+      ...(api === undefined ? {} : { api }),
+      ...(apiKey === undefined ? {} : { apiKey }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    return discovered.map(model => ({ id: model.id, label: model.name || model.id }))
+  }
+
+  /** Add one endpoint-listed model to the stored provider profile when needed. */
+  private async ensureProviderModelConfigured(provider: string, modelId: string): Promise<boolean> {
+    const settings = this.ctx.get('settings')
+    const profile = this.piAiProviderProfile(provider)
+    if (settings === undefined || profile === undefined) return true
+    // A profile may legitimately have no models yet (e.g. onboarding saved an
+    // empty list); the picked endpoint model must still be persisted so the
+    // harness can serve it.
+    const models = Array.isArray(profile.models) ? profile.models : []
+    const ids = new Set<string>()
+    for (const raw of models) {
+      const id = typeof raw === 'string'
+        ? raw
+        : typeof raw === 'object' && raw !== null && typeof (raw as { id?: unknown }).id === 'string'
+          ? (raw as { id: string }).id
+          : undefined
+      if (typeof id === 'string' && id.length > 0) ids.add(id)
+    }
+    if (ids.has(modelId)) return true
+    try {
+      await settings.mutate(settingsNamespace('llm-pi-ai'), [
+        { op: 'set', path: ['providers', provider, 'models'], value: [...models, { id: modelId }] },
+      ])
+      this.pushRow({ kind: 'system', text: `模型 ${modelId} 已加入提供商 ${provider} 的配置。` })
+      this.markDirty()
+      return true
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: `无法把模型 ${modelId} 写入提供商配置：${errorChain(error)}` })
+      this.markDirty()
+      return false
+    }
+  }
+
+  /** How many endpoint-listed models fit on one picker page alongside navigation. */
+  private readonly MODEL_PAGE_SIZE = 7
+  private readonly MODEL_PAGE_PREV = '« 上一页'
+  private readonly MODEL_PAGE_NEXT = '» 下一页'
+
+  /**
+   * One pick across a possibly long model list, paging through the digit
+   * dialog so an endpoint with dozens of models stays selectable.
+   */
+  private async pickModelOption(
+    modelOptions: readonly { id: string; label: string }[],
+    provider: string,
+    sourceLabel: string,
+    currentModel: string | undefined,
+  ): Promise<{ id: string; label: string } | undefined> {
+    const seen = new Set<string>()
+    const unique = modelOptions.filter(option => {
+      if (seen.has(option.id)) return false
+      seen.add(option.id)
+      return true
+    })
+    if (unique.length === 0) return undefined
+    let offset = 0
+    for (;;) {
+      const page = unique.slice(offset, offset + this.MODEL_PAGE_SIZE)
+      const hasPrev = offset > 0
+      const hasNext = offset + this.MODEL_PAGE_SIZE < unique.length
+      const pageCount = Math.max(1, Math.ceil(unique.length / this.MODEL_PAGE_SIZE))
+      const currentPage = Math.floor(offset / this.MODEL_PAGE_SIZE) + 1
+      const options = page.map(option => ({
+        label: option.label,
+        description: option.id === currentModel ? '当前' : undefined,
+      }))
+      if (hasPrev) options.push({ label: this.MODEL_PAGE_PREV, description: undefined })
+      if (hasNext) options.push({ label: this.MODEL_PAGE_NEXT, description: undefined })
+      const answer = await this.askQuestion({
+        id: 'model-pick',
+        question: `选择模型（提供商 ${provider} · ${sourceLabel}${hasPrev || hasNext ? `，第 ${currentPage}/${pageCount} 页` : ''}）`,
+        options,
+      })
+      const picked = options.find(option => option.label === answer.selected[0])
+      if (picked === undefined) return undefined
+      if (picked.label === this.MODEL_PAGE_NEXT) {
+        offset += this.MODEL_PAGE_SIZE
+        continue
+      }
+      if (picked.label === this.MODEL_PAGE_PREV) {
+        offset = Math.max(0, offset - this.MODEL_PAGE_SIZE)
+        continue
+      }
+      return page.find(option => option.label === picked.label)
+    }
+  }
+
   /** /model: pick a model and reasoning effort for the current provider. */
   private async runModelCommand(): Promise<void> {
     const llm = this.ctx.get('llm')
@@ -2576,27 +2717,55 @@ export class SshTui {
     const provider = current?.provider ?? this.agent.options.provider ?? this.providerName
 
     let modelOptions: { id: string; label: string }[] = []
-    try {
-      const listed = (await llm?.listModels(provider)) ?? []
-      modelOptions = listed.map(model => ({ id: model.id, label: model.name || model.id }))
-    } catch {
-      modelOptions = []
+    let modelSource = '已配置列表'
+    // OpenCode and other third-party routes are interrogated live so the picker
+    // shows what the endpoint actually serves, not just the stored catalog.
+    if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
+      const previousStatus = this.status
+      try {
+        this.status = `正在从端点获取 ${provider} 的模型列表…`
+        this.markDirty()
+        modelOptions = await this.discoverEndpointModels(provider)
+        if (modelOptions.length > 0) {
+          modelSource = '端点实时列表'
+          // Keep models the endpoint does not list (e.g. ones already stored
+          // for the route) selectable, so the live list never hides the
+          // current model.
+          try {
+            const listed = (await llm?.listModels(provider)) ?? []
+            const endpointIds = new Set(modelOptions.map(model => model.id))
+            for (const model of listed) {
+              if (!endpointIds.has(model.id)) {
+                modelOptions.push({ id: model.id, label: model.name || model.id })
+              }
+            }
+          } catch {
+            // The endpoint list stands alone when the catalog cannot be read.
+          }
+        }
+      } catch {
+        modelOptions = []
+      } finally {
+        this.status = previousStatus
+        this.markDirty()
+      }
+    }
+    if (modelOptions.length === 0) {
+      try {
+        const listed = (await llm?.listModels(provider)) ?? []
+        modelOptions = listed.map(model => ({ id: model.id, label: model.name || model.id }))
+      } catch {
+        modelOptions = []
+      }
     }
     if (modelOptions.length === 0) {
       const fallback = current?.model ?? this.agent.options.model ?? 'deepseek-v4-flash'
       modelOptions = [{ id: fallback, label: fallback }]
     }
 
-    const modelAnswer = await this.askQuestion({
-      id: 'model-pick',
-      question: `选择模型（提供商 ${provider}）`,
-      options: modelOptions.map(option => ({
-        label: option.label,
-        description: option.id === current?.model ? '当前' : undefined,
-      })),
-    })
-    const selected = modelOptions.find(option => option.label === modelAnswer.selected[0])
+    const selected = await this.pickModelOption(modelOptions, provider, modelSource, current?.model)
     if (selected === undefined) return
+    if (!(await this.ensureProviderModelConfigured(provider, selected.id))) return
 
     let effortOptions: { id: string; label: string }[] = []
     try {
@@ -3077,6 +3246,10 @@ export class SshTui {
       case 'base-url':
       case 'key':
       case 'models': {
+        if (state.step === 'models' && text === '\x06') {
+          void this.fetchOnboardingModels()
+          return
+        }
         if (text === '\r' || text === '\n') {
           const value = this.input.trim()
           if (state.step === 'id') {
@@ -3163,6 +3336,57 @@ export class SshTui {
     this.markDirty()
   }
 
+  /** Fetch the endpoint's model list into the onboarding wizard's models step. */
+  private async fetchOnboardingModels(): Promise<void> {
+    const state = this.onboarding
+    if (state === undefined || state.step !== 'models') return
+    const template = PROVIDER_TEMPLATES[state.providerType]
+    const providerType = state.providerType
+    const baseUrl = state.baseUrl
+    const key = state.key
+    const baseURL = baseUrl === '' ? template.defaultBaseUrl : baseUrl
+    if (baseURL === '') {
+      this.pushRow({ kind: 'error', text: '请先填写 Base URL 再获取模型列表。' })
+      this.markDirty()
+      return
+    }
+    const previousStatus = this.status
+    this.status = '正在从端点获取模型列表…'
+    this.markDirty()
+    try {
+      const llm = this.ctx.get('llm')
+      if (llm === undefined) throw new Error('llm 服务不可用')
+      const discovered = await llm.discoverModels(settingsNamespace('llm-pi-ai'), {
+        baseURL,
+        ...(template.api === undefined ? {} : { api: template.api }),
+        ...(key === '' ? {} : { apiKey: key }),
+        signal: AbortSignal.timeout(15_000),
+      })
+      // Apply only if the wizard is still on the same draft the fetch started
+      // from, so a stale reply cannot overwrite a newer edit or a reset.
+      const stillCurrent = this.onboarding === state
+        && state.step === 'models'
+        && state.providerType === providerType
+        && state.baseUrl === baseUrl
+        && state.key === key
+      if (!stillCurrent) return
+      const ids = [...new Set(discovered.map(model => model.id).filter(id => id.length > 0))]
+      if (ids.length === 0) {
+        this.pushRow({ kind: 'error', text: '端点没有返回可用模型，请手动输入模型 ID。' })
+      } else {
+        state.models = ids
+        this.input = ''
+        this.cursor = 0
+        this.pushRow({ kind: 'system', text: `已从端点获取 ${ids.length} 个模型（Enter 确认，也可继续修改）。` })
+      }
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: `获取模型列表失败：${errorChain(error)}` })
+    } finally {
+      this.status = previousStatus
+      this.markDirty()
+    }
+  }
+
   private async saveOnboarding(): Promise<void> {
     const state = this.onboarding
     if (state === undefined) return
@@ -3193,12 +3417,23 @@ export class SshTui {
         }
       } else {
         const envRef = envRefForId(state.providerId)
+        const model = state.models[0]
+        // OpenCode / third-party (llm-pi-ai) routes have no adapter-level
+        // reasoning default. Re-running setup must not silently drop the
+        // effort that makes thinking arrive as `reasoning` blocks; default it
+        // to a supported level (if any) and persist it in both the profile
+        // and the default-model selection.
+        const llm = this.ctx.get('llm')
+        const defaultEffort = model !== undefined && llm !== undefined
+          ? await defaultReasoningEffort(llm, state.providerId, model)
+          : undefined
         const profile = {
           displayName: template.label,
           apiKeyEnv: envRef,
           api: template.api,
           baseURL: state.baseUrl === '' ? template.defaultBaseUrl : state.baseUrl,
           models: state.models.map(id => ({ id })),
+          ...(defaultEffort === undefined ? {} : { reasoning: defaultEffort }),
         }
         if (settings === undefined) {
           this.pushRow({ kind: 'error', text: '设置服务不可用，自定义提供商未保存。' })
@@ -3211,12 +3446,16 @@ export class SshTui {
         }
         await this.saveCredential(credentials, envRef, state.key)
         if (saved) {
-          const model = state.models[0]
-          await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: state.providerId, model })
-          if (this.selectionRef !== undefined) {
-            this.selectionRef.current = { provider: state.providerId, model }
+          const selection: ModelSelection = {
+            provider: state.providerId,
+            model,
+            ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
           }
-          this.onSelectionChanged?.({ provider: state.providerId, model })
+          await this.ctx.get('agentDefaultModel')?.saveSelection(selection)
+          if (this.selectionRef !== undefined) {
+            this.selectionRef.current = selection
+          }
+          this.onSelectionChanged?.(selection)
           this.pushRow({
             kind: 'system',
             text: `配置完成，已记住默认提供商/模型：${state.providerId} / ${model}。以后直接运行 dsh --profile tui 即可（--provider/--model 可临时覆盖）。`,

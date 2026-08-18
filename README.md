@@ -57,7 +57,8 @@ On first launch (when no API key is configured) the TUI opens a setup wizard:
    - Anthropic Messages-compatible gateway;
 2. for custom providers, enter a lowercase Provider ID (permanent), base URL,
    API key (masked while typing), and one or more model IDs — each step has a
-   sensible template default;
+   sensible template default. On the models step, press `Ctrl+F` to fetch the
+   current model list straight from the provider endpoint;
 3. confirm and save.
 
 The wizard writes the key to `~/.dsh/.credentials.yaml` when no environment
@@ -129,6 +130,12 @@ catalog, then pick its reasoning effort (`off` / `high` / `max` when the
 provider exposes them). The change applies to the next request without
 changing the provider, updates the header/status line, and is remembered in
 `agent-default-model` for future launches.
+
+For OpenCode and other third-party providers, `/model` queries the provider's
+endpoint (`GET {baseURL}/models`) for a live model list, falling back to the
+configured catalog when the endpoint cannot be reached. Picking a model that
+is not stored in the provider profile automatically adds it to
+`llm-pi-ai.providers.<id>.models` so the harness can serve it.
 
 `/usage` (alias `/quota`) works when the current provider is an OpenCode
 source and keeps the two billing models distinct:
