@@ -62,9 +62,16 @@ dsh plugin --profile tui add "link:$(pwd)"
 
 ### 方式三：npm 安装（发布后）
 
+前置要求：已全局安装 `@deepseek-ai/dsh`（`npm i -g @deepseek-ai/dsh`）且有 pnpm。
+
 ```bash
 dsh plugin --profile tui add dsh-ssh-tui
+# 或在仓库内快捷执行：bash scripts/install-npm.sh
+# 指定其它 profile：bash scripts/install-npm.sh work
 ```
+
+`dsh plugin add` 会从 npm 拉取包、写入 profile 依赖，并自动把 `dsh-ssh-tui`
+加入该 profile 的 `dsh.profile.bundles`。
 
 ## 启动与命令行参数
 

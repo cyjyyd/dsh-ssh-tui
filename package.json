@@ -56,7 +56,9 @@
     "clean": "rm -rf lib",
     "prepare": "npm run build",
     "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck",
     "install:dsh": "bash scripts/install.sh",
+    "install:npm": "bash scripts/install-npm.sh",
     "uninstall:dsh": "bash scripts/uninstall.sh",
     "verify:dsh": "bash scripts/verify.sh"
   },

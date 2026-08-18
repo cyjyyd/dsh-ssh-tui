@@ -31,6 +31,14 @@ npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
+Or install the published npm package directly (requires `@deepseek-ai/dsh` and
+`pnpm`, no local clone needed):
+
+```sh
+dsh plugin --profile tui add dsh-ssh-tui
+# or from a repo checkout: bash scripts/install-npm.sh
+```
+
 Set `DEEPSEEK_API_KEY` (or a `$DSH_HOME/settings.yaml` / `.env` with the
 credentials), then start:
 
