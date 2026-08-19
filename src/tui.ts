@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { createUserMessage, errorChain, ReasoningEffortId, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
@@ -30,6 +30,13 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
 import { defaultReasoningEffort } from './reasoning.js'
+import {
+  DEFAULT_SUBAGENT_MODEL,
+  SUBAGENT_SETTINGS_NAMESPACE,
+  subagentSettingsValue,
+  type SubagentSelection,
+  type SubagentSelectionRef,
+} from './subagent-model.js'
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -60,6 +67,8 @@ export interface TuiConfig {
   model?: string
   /** Live model-selection ref installed on the agent; mutated by /model. */
   selectionRef?: ModelSelectionRef
+  /** Settings-backed model/effort selection applied to subagent requests. */
+  subagentSelection?: SubagentSelectionRef
   /** Active agent-preset id (standard/code/minimal/cordis/...). */
   presetId?: string
   /** Display name of the active preset. */
@@ -233,6 +242,7 @@ const WAIT_INDICATOR_MS = 8000
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
+const SUBAGENT_DEFAULT_EFFORT_LABEL = '跟随提供商默认'
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
 const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
@@ -368,6 +378,8 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
 const LOCAL_COMMANDS = [
   { name: 'help', description: 'show all available commands' },
   { name: 'model', description: 'select model and reasoning effort (same provider)' },
+  { name: 'submodel', description: `select subagent model (default ${DEFAULT_SUBAGENT_MODEL}, same provider as parent)` },
+  { name: 'subeffort', description: 'select subagent reasoning effort (default follows provider)' },
   { name: 'mode', description: 'switch agent mode / preset (standard, minimal, code, cordis, routing-suite, ...)' },
   { name: 'quit', description: 'exit the TUI' },
   { name: 'exit', description: 'exit the TUI' },
@@ -1412,6 +1424,7 @@ export class SshTui {
   private readonly resume: boolean
   private readonly providerName: string
   private readonly selectionRef: ModelSelectionRef | undefined
+  private readonly subagentSelection: SubagentSelectionRef
   private readonly onSwitchSession: ((sessionId: string) => Promise<void> | void) | undefined
   private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
   private readonly resumePicker: boolean
@@ -1476,6 +1489,7 @@ export class SshTui {
     this.resume = config.resume === true
     this.providerName = config.provider ?? 'deepseek-official'
     this.selectionRef = config.selectionRef
+    this.subagentSelection = config.subagentSelection ?? { current: { model: DEFAULT_SUBAGENT_MODEL } }
     this.onSwitchSession = config.onSwitchSession
     this.onSelectionChanged = config.onSelectionChanged
     this.resumePicker = config.resumePicker === true
@@ -1502,6 +1516,7 @@ export class SshTui {
       this.ctx.on('agent/disposed', this.handleDisposed),
       this.ctx.on('agent/inbox/claimed', this.handleInboxClaimed),
       this.ctx.on('agent/inbox/discarded', this.handleInboxDiscarded),
+      this.ctx.on('agent/request', this.handleAgentRequest),
       this.ctx.on('subagent/start', this.handleSubagentStart),
       this.ctx.on('subagent/end', this.handleSubagentEnd),
       this.ctx.on('approval/request', this.handleApproval),
@@ -2102,6 +2117,12 @@ export class SshTui {
     const statsLine = this.styleLine('system', fitLine(statsText === '' ? '— 尚无会话统计' : statsText))
 
     let statusText = `${this.status}  [${this.presetName}]  ${this.currentSelectionLabel()}`
+    const sub = this.subagentSelection.current
+    const subProvider = sub.provider ?? this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
+    const subEffort = sub.reasoningEffort === undefined ? '' : `(${sub.reasoningEffort})`
+    statusText += sub.provider === undefined
+      ? ` · sub:${sub.model}${subEffort}`
+      : ` · sub:${subProvider}/${sub.model}${subEffort}`
     if (inputView.folded) statusText += ' · 输入已折叠 · Ctrl+T 展开'
     else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
@@ -2311,6 +2332,27 @@ export class SshTui {
   }
 
   // ── event handling ──────────────────────────────────────────────────────
+
+  /**
+   * Apply the TUI's subagent model selection to every child-agent request.
+   * The parent request is left untouched (its own `/model` waterfall already
+   * owns the route); direct children created by tool-subagent inherit the
+   * parent provider unless `/submodel` stored an explicit subagent provider.
+   */
+  private readonly handleAgentRequest = async (
+    { agent }: { agent: Agent },
+    next: () => Promise<LlmCallConfig>,
+  ): Promise<LlmCallConfig> => {
+    const resolved = await next()
+    if (agent === this.agent) return resolved
+    const selection = this.subagentSelection.current
+    return {
+      ...resolved,
+      ...(selection.provider === undefined ? {} : { provider: selection.provider }),
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+    }
+  }
 
   private readonly handleSessionEvent = (session: { id: SessionId }, event: SessionEvent): void => {
     if (session.id !== this.agent.id) {
@@ -3023,6 +3065,151 @@ export class SshTui {
     this.onSelectionChanged?.(next)
     await this.ctx.get('agentDefaultModel')?.saveSelection(next)
     this.pushRow({ kind: 'system', text: `模型已切换：${selected.id}（思考强度 ${effort ?? '默认'}）；下一步请求生效。` })
+    this.markDirty()
+  }
+
+  /** Provider route the next subagent request should use. */
+  private effectiveSubagentProvider(): string {
+    return this.subagentSelection.current.provider
+      ?? this.selectionRef?.current?.provider
+      ?? this.agent.options.provider
+      ?? this.providerName
+  }
+
+  /** Persist one subagent selection and publish it to the live request waterfall. */
+  private async saveSubagentSelection(next: SubagentSelection): Promise<boolean> {
+    this.subagentSelection.current = next
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) {
+      this.pushRow({ kind: 'error', text: '设置服务不可用，子代理选择仅当前会话生效。' })
+      this.markDirty()
+      return false
+    }
+    await settings.replace(SUBAGENT_SETTINGS_NAMESPACE, subagentSettingsValue(next))
+    return true
+  }
+
+  /** Resolve the picker model list for one provider (endpoint first, then catalog). */
+  private async subagentModelOptions(provider: string): Promise<{
+    options: { id: string; label: string }[]
+    source: string
+  }> {
+    const llm = this.ctx.get('llm')
+    let options: { id: string; label: string }[] = []
+    let source = '已配置列表'
+    if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
+      const previousStatus = this.status
+      try {
+        this.status = `正在从端点获取子代理模型列表（${provider}）…`
+        this.markDirty()
+        options = await this.discoverEndpointModels(provider)
+        if (options.length > 0) {
+          source = '端点实时列表'
+          try {
+            const listed = (await llm?.listModels(provider)) ?? []
+            const endpointIds = new Set(options.map(model => model.id))
+            for (const model of listed) {
+              if (!endpointIds.has(model.id)) options.push({ id: model.id, label: model.name || model.id })
+            }
+          } catch {
+            // The endpoint list stands alone when the catalog cannot be read.
+          }
+        }
+      } catch {
+        options = []
+      } finally {
+        this.status = previousStatus
+        this.markDirty()
+      }
+    }
+    if (options.length === 0) {
+      try {
+        const listed = (await llm?.listModels(provider)) ?? []
+        options = listed.map(model => ({ id: model.id, label: model.name || model.id }))
+      } catch {
+        options = []
+      }
+    }
+    return { options, source }
+  }
+
+  /** /submodel: pick (or set) the model subagent children use. */
+  private async runSubmodelCommand(arg: string): Promise<void> {
+    const provider = this.effectiveSubagentProvider()
+    const current = this.subagentSelection.current
+    const direct = arg.trim()
+    let selectedId = direct
+
+    if (selectedId === '') {
+      const { options, source } = await this.subagentModelOptions(provider)
+      if (options.length === 0) {
+        options.push({ id: current.model, label: current.model })
+      }
+      const selected = await this.pickModelOption(options, provider, source, current.model)
+      if (selected === undefined) return
+      selectedId = selected.id
+    }
+    if (!(await this.ensureProviderModelConfigured(provider, selectedId))) return
+
+    const persisted = await this.saveSubagentSelection({ ...current, model: selectedId })
+    this.pushRow({
+      kind: 'system',
+      text: `${current.provider === undefined
+        ? `子代理模型已切换：${selectedId}（提供方跟随父会话 ${provider}）。`
+        : `子代理模型已切换：${selectedId}（提供方 ${provider}）。`}${persisted ? '' : '（仅当前会话）'}`,
+    })
+    this.markDirty()
+  }
+
+  /** /subeffort: pick the reasoning effort subagent children use. */
+  private async runSubeffortCommand(): Promise<void> {
+    const provider = this.effectiveSubagentProvider()
+    const current = this.subagentSelection.current
+    const llm = this.ctx.get('llm')
+
+    let effortOptions: { id: string; label: string }[] = []
+    try {
+      const info = await llm?.resolveModelInfo(provider, current.model)
+      effortOptions = (info?.reasoning?.efforts ?? []).map(effort => ({ id: String(effort.id), label: effort.name }))
+    } catch {
+      effortOptions = []
+    }
+    if (effortOptions.length === 0) {
+      effortOptions = ['off', 'high', 'max'].map(id => ({ id, label: id }))
+    }
+
+    const choices: { id: string | undefined; label: string }[] = [
+      { id: undefined, label: SUBAGENT_DEFAULT_EFFORT_LABEL },
+      ...effortOptions.map(option => ({ id: option.id, label: option.label })),
+    ]
+    const answer = await this.askQuestion({
+      id: 'subagent-effort-pick',
+      question: `选择子代理思考强度（${provider}/${current.model}）`,
+      options: choices.map(option => ({
+        label: option.label,
+        description: option.id === undefined
+          ? '清空自定义强度，跟随提供商/模型默认'
+          : option.id === String(current.reasoningEffort)
+            ? '当前'
+            : undefined,
+      })),
+    })
+    const picked = choices.find(option => option.label === answer.selected[0])
+    if (picked === undefined) return
+
+    const next: SubagentSelection = {
+      ...current,
+      ...(picked.id === undefined
+        ? { reasoningEffort: undefined }
+        : { reasoningEffort: ReasoningEffortId(picked.id) }),
+    }
+    const persisted = await this.saveSubagentSelection(next)
+    this.pushRow({
+      kind: 'system',
+      text: `${picked.id === undefined
+        ? '子代理思考强度已恢复为提供商默认。'
+        : `子代理思考强度已切换：${picked.id}。`}${persisted ? '' : '（仅当前会话）'}`,
+    })
     this.markDirty()
   }
 
@@ -4023,6 +4210,26 @@ export class SshTui {
             this.pushRow({ kind: 'system', text: '模型选择已取消。' })
           } else {
             this.pushRow({ kind: 'error', text: `/model failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
+      case 'submodel':
+        void this.runSubmodelCommand(arg).catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: '子代理模型选择已取消。' })
+          } else {
+            this.pushRow({ kind: 'error', text: `/submodel failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
+      case 'subeffort':
+        void this.runSubeffortCommand().catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: '子代理思考强度选择已取消。' })
+          } else {
+            this.pushRow({ kind: 'error', text: `/subeffort failed: ${errorChain(error)}` })
           }
           this.markDirty()
         })

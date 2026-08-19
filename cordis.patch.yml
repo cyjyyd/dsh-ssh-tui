@@ -35,6 +35,25 @@
     thinking: enabled
     reasoningEffort: max
 
+# Subagents follow the parent session's provider and default to the
+# lightweight model. The TUI's /submodel and /subeffort commands can override
+# both model and reasoning effort at runtime through the request waterfall.
+- id: tool-subagent
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
+    agentOptions:
+      model: deepseek-v4-flash
+
+- id: tool-subagent-fork
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: one-shot
+    agentOptions:
+      model: deepseek-v4-flash
+
 - insert:
     # The agent-mode roster (standard / PTC / minimal / cordis / routing-suite).
     # The launcher injects the shipped preset root into this row when it is

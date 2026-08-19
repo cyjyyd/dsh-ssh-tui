@@ -155,6 +155,12 @@ configured catalog when the endpoint cannot be reached. Picking a model that
 is not stored in the provider profile automatically adds it to
 `llm-pi-ai.providers.<id>.models` so the harness can serve it.
 
+Subagents follow the parent session's provider by default and run on the
+lightweight `deepseek-v4-flash` model. `/submodel [model-id]` picks (or
+directly sets) the subagent model, and `/subeffort` picks the subagent
+reasoning effort or restores the provider default. Both commands are
+remembered under `ssh-tui-subagent` in `$DSH_HOME/settings.yaml`.
+
 `/usage` (alias `/quota`) works when the current provider is an OpenCode
 source and keeps the two billing models distinct:
 

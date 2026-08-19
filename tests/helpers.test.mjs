@@ -9,6 +9,7 @@ import {
   parseExitStatus,
   renderMarkdownLines,
   renderToolDiff,
+  SshTui,
   toolBodyLines,
   truncateToWidth,
 } from '../lib/tui.js'
@@ -70,4 +71,27 @@ test('formatOpenCodeGoUsage rejects unrecognized payloads', () => {
 test('parseExitStatus keeps exit-code and signal parsing', () => {
   assert.deepEqual(parseExitStatus('out\n[exit code: 7]'), { body: 'out', exitCode: 7 })
   assert.deepEqual(parseExitStatus('out\n[killed by signal: SIGTERM]'), { body: 'out', signal: 'SIGTERM' })
+})
+
+test('subagent request waterfall applies model/effort but leaves the parent alone', async () => {
+  const ctx = { get: () => undefined }
+  const agent = { id: 'main-session' }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    subagentSelection: {
+      current: { model: 'deepseek-v4-flash', reasoningEffort: 'max' },
+    },
+  })
+  const next = async () => ({ provider: 'opencode-go', model: 'deepseek-v4-pro' })
+
+  const child = await tui.handleAgentRequest({ agent: { id: 'child-session' } }, next)
+  assert.equal(child.provider, 'opencode-go')
+  assert.equal(child.model, 'deepseek-v4-flash')
+  assert.equal(child.reasoningEffort, 'max')
+
+  const parent = await tui.handleAgentRequest({ agent }, next)
+  assert.equal(parent.provider, 'opencode-go')
+  assert.equal(parent.model, 'deepseek-v4-pro')
+  assert.equal(parent.reasoningEffort, undefined)
 })

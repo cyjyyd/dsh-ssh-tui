@@ -120,9 +120,14 @@ dsh --profile tui --no-color
 | `Ctrl+D` | 退出 |
 | `Ctrl+L` | 重绘 |
 
-斜杠命令：`/help`、`/model`、`/mode`、`/resume`、`/status`、`/subagents`、
-`/usage`（`/quota` 同义）、`/setup`、`/clear`，以及 harness 自带命令
-（`/goal`、`/plan`、`/compact` 等）。
+斜杠命令：`/help`、`/model`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+`/status`、`/subagents`、`/usage`（`/quota` 同义）、`/setup`、`/clear`，
+以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。
+
+子代理默认跟随父会话的提供方，模型默认为轻量的 `deepseek-v4-flash`：
+
+- `/submodel [model-id]`：打开子代理模型选择器；带参数时直接指定模型；
+- `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”。
 
 `/usage` 在当前提供商为 OpenCode 源时可用，并区分两种计费方式：
 
@@ -142,9 +147,14 @@ agent-default-model:
   reasoningEffort: max
 agent-presets:
   default: standard
+ssh-tui-subagent:
+  model: deepseek-v4-flash
+  # provider 可省略：省略时子代理跟随父会话提供方
+  # reasoningEffort 可省略：省略时跟随提供商/模型默认
 ```
 
-`/model` 与 `/mode` 的修改会写回这里，web 端与 TUI 共用同一份设置。
+`/model`、`/mode`、`/submodel` 与 `/subeffort` 的修改会写回这里，
+web 端与 TUI 共用同一份设置。
 
 对 OpenCode 和其他第三方提供商，`/model` 会先调用提供商的端点
 （`GET {baseURL}/models`）获取实时模型列表；端点不可达时回退到已配置的

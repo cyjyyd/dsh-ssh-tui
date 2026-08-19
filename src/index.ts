@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto'
 import { showSessionPicker } from './picker.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
+import { createSubagentSelection } from './subagent-model.js'
 
 export const name = 'ssh-tui'
 
@@ -48,6 +49,7 @@ export function apply(ctx: Context, config: Config): void {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error('dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session')
   }
+  const subagentSelection = createSubagentSelection(ctx)
   ctx.effect(() => {
     let disposed = false
     let switching = false
@@ -155,6 +157,7 @@ export function apply(ctx: Context, config: Config): void {
         provider,
         model,
         selectionRef,
+        subagentSelection,
         presetId,
         presetName,
         goodbye: goodbyeFor(String(sessionId)),
