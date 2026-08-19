@@ -8,6 +8,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
+import { truncateToWidth } from './tui.js'
 
 /** What the launch picker decided. */
 export type SessionPickerResult =
@@ -45,20 +46,20 @@ export async function showSessionPicker(ctx: Context, color: boolean): Promise<S
   const render = (): void => {
     const width = Math.max(20, process.stdout.columns || 80)
     const lines: string[] = [
-      style('DeepSeek Harness — 选择要恢复的历史会话', '1'),
+      style(truncateToWidth('DeepSeek Harness — 选择要恢复的历史会话', width), '1'),
       '─'.repeat(width),
     ]
     sessions.forEach((session, index) => {
-      lines.push(`${index + 1}  ${session.label}`)
-      lines.push(`   ${style(formatSessionTime(session.updatedAt), '90')} · ${style(session.cwd, '90')}`)
+      lines.push(style(truncateToWidth(`${index + 1}  ${session.label}`, width), '1'))
+      const meta = `${session.unreadable === true ? '⚠ 无法读取 · ' : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
+      lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), '90')}`)
     })
     lines.push('')
     lines.push(`${style('0', '36')} / ${style('Enter', '36')}  新建会话`)
     lines.push(`${style('Esc', '36')}  取消`)
     process.stdout.write('\x1b[2J\x1b[H')
     for (const line of lines) {
-      const wrapped = line.length > width ? `${line.slice(0, width - 1)}…` : line
-      process.stdout.write(`${wrapped}\x1b[0m\x1b[K\n`)
+      process.stdout.write(`${line}\x1b[0m\x1b[K\n`)
     }
   }
 
@@ -68,7 +69,11 @@ export async function showSessionPicker(ctx: Context, color: boolean): Promise<S
       if (done) return
       done = true
       process.stdin.removeListener('data', onData)
-      process.stdin.setRawMode(false)
+      try {
+        process.stdin.setRawMode(false)
+      } catch {
+        // The stream may already be closed during shutdown; restoring is best-effort.
+      }
       process.stdin.pause()
       process.stdout.write(`\x1b[0m\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}\n`)
       resolve(result)

@@ -34,6 +34,11 @@ cp -R "$PKG_DIR/preset/routing-suite" "$DEST"
 # read-only status API. dsh-base does not provide that service in a terminal
 # profile, so mount the in-box loopback webserver on an OS-assigned port.
 PATCH_FILE="$DSH_HOME/profiles/$PROFILE/cordis.patch.yml"
+if [ ! -f "$PATCH_FILE" ]; then
+  echo "==> creating profile patch file at $PATCH_FILE"
+  mkdir -p "$(dirname "$PATCH_FILE")"
+  printf '[]\n' > "$PATCH_FILE"
+fi
 if ! grep -q -- "name: '@deepseek-ai/dsh-host-webserver'" "$PATCH_FILE" 2>/dev/null; then
   echo "==> adding loopback webServer service for dsh-routing-suite"
   PATCH_FILE="$PATCH_FILE" node <<'NODE'

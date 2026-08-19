@@ -57,25 +57,53 @@ export function apply(ctx: Context, config: Config): void {
     // CLI overrides for every session created or resumed later in this process.
     let liveSelection: ModelSelection | undefined
 
+    /** Build the goodbye hint for the session that actually runs. */
+    const goodbyeFor = (sessionId: string): string => {
+      const existing = ctx.get('tuiGoodbyeMessage') as string | undefined
+      const marker = '--resume='
+      const markerIndex = existing?.lastIndexOf(marker) ?? -1
+      if (existing !== undefined && markerIndex !== -1) {
+        const tail = existing.slice(markerIndex + marker.length)
+        if (tail !== '' && !/\s/u.test(tail)) {
+          return `${existing.slice(0, markerIndex + marker.length)}${sessionId}`
+        }
+      }
+      return `To resume this session: dsh --profile tui --resume=${sessionId}`
+    }
+
     const start = async (sessionId: SessionId, resume: boolean): Promise<void> => {
       await ctx.get('loader')?.await()
       if (disposed) return
       const agents = ctx.get('agents')
       if (agents === undefined) throw new Error('dsh-ssh-tui: agents service is unavailable')
       const defaultModel = ctx.get('agentDefaultModel')
-      const selection = liveSelection ?? defaultModel?.currentSelection()
-      const provider = liveSelection !== undefined
-        ? liveSelection.provider
-        : config.provider ?? selection?.provider ?? 'deepseek-official'
-      const model = liveSelection !== undefined
-        ? liveSelection.model
-        : config.model ?? selection?.model ?? 'deepseek-v4-flash'
+      const savedSelection = defaultModel?.currentSelection()
 
+      // An explicit in-process change (/setup or /model) wins over launch-time
+      // CLI overrides for every session created or resumed later in this process.
+      const provider = liveSelection?.provider
+        ?? config.provider
+        ?? savedSelection?.provider
+        ?? 'deepseek-official'
+      const model = liveSelection?.model
+        ?? config.model
+        ?? savedSelection?.model
+        ?? 'deepseek-v4-flash'
+
+      // Reasoning effort is only meaningful for the exact provider/model it
+      // belongs to. CLI overrides that change either route must not inherit the
+      // saved effort of a different model.
+      let reasoningEffort = liveSelection?.reasoningEffort
+      if (reasoningEffort === undefined && liveSelection === undefined) {
+        const sameSavedRoute = savedSelection !== undefined
+          && (config.provider === undefined || config.provider === savedSelection.provider)
+          && (config.model === undefined || config.model === savedSelection.model)
+        if (sameSavedRoute) reasoningEffort = savedSelection.reasoningEffort
+      }
       // OpenCode / third-party (llm-pi-ai) routes carry no adapter-level
       // reasoning default, so default a supported effort ourselves when none is
       // selected. Without it the model streams thinking as plain text and the
       // foldable `思考中` block never has data to render.
-      let reasoningEffort = selection?.reasoningEffort
       if (reasoningEffort === undefined && provider !== 'deepseek-official') {
         const llm = ctx.get('llm')
         if (llm !== undefined) {
@@ -83,17 +111,20 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
 
+      const effectiveSelection: ModelSelection = {
+        provider,
+        model,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      }
       const selectionRef: ModelSelectionRef = {
-        current: selection !== undefined
-          ? { ...selection, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
-          : { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) },
+        current: effectiveSelection,
         assembled: undefined,
       }
       const agentPresets = ctx.get('agentPresets')
       const agentOptions = {
         provider,
         model,
-          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
       }
       const setup = async (agentCtx: Context): Promise<void> => {
         installModelSelection(agentCtx, selectionRef)
@@ -126,6 +157,7 @@ export function apply(ctx: Context, config: Config): void {
         selectionRef,
         presetId,
         presetName,
+        goodbye: goodbyeFor(String(sessionId)),
         onSwitchSession: switchTo,
         onSelectionChanged: (next) => {
           liveSelection = next
@@ -157,6 +189,7 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
+    let bootingSessionId = config.sessionId
     const boot = async (): Promise<void> => {
       if (config.resumePicker === true) {
         await ctx.get('loader')?.await()
@@ -169,9 +202,17 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         if (picked.kind === 'resume') {
+          bootingSessionId = picked.id
           await start(SessionId(picked.id), true)
         } else {
-          await start(SessionId(`main-session-${randomUUID()}`), false)
+          // Reuse the startup-minted session identity so the goodbye hint and
+          // the launcher-configured `main` identity all describe the session
+          // that actually runs.
+          const sessionId = config.sessionId === ''
+            ? `main-session-${randomUUID()}`
+            : config.sessionId
+          bootingSessionId = sessionId
+          await start(SessionId(sessionId), false)
         }
         return
       }
@@ -179,7 +220,7 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     void boot().catch((error: unknown) => {
-      process.stderr.write(`dsh-ssh-tui: session "${config.sessionId}" failed to start: ${errorChain(error)}\n`)
+      process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start: ${errorChain(error)}\n`)
       const exit = ctx.get('appExit')
       if (exit !== undefined) exit(1)
       else process.exit(1)

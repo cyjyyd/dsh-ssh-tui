@@ -12,6 +12,8 @@ export interface ResumableSession {
   label: string
   updatedAt: number
   cwd: string
+  /** Whether the full event log could not be inspected (corrupt/unsupported). */
+  unreadable?: boolean
 }
 
 /** `MM-DD HH:mm` local-time label for session lists. */
@@ -24,13 +26,21 @@ export function formatSessionTime(timestamp: number): string {
 /**
  * List the most recent resumable top-level sessions, newest first.
  *
- * Subagent-owned sessions, the current session, and sessions with no user
- * input (empty/uuid-only rows) are excluded; the label is the user's first
- * input, falling back to the session title and then the id.
+ * Subagent-owned sessions and the current session are excluded. Sessions
+ * whose event log cannot be inspected are kept (marked `unreadable`) instead
+ * of silently disappearing from history; readable sessions with user input
+ * sort first. The label is the user's first input, falling back to the
+ * session title and then the id.
  * @param persistence - the session persistence service.
  * @param currentId - the live session to exclude (empty at launch).
- * @returns up to nine candidates in display order, all carrying user input.
+ * @returns up to nine candidates in display order.
  */
+/** Upper bound on one inspection batch, so the picker never fans out unbounded. */
+const INSPECT_BATCH_SIZE = 30
+
+/** Internal inspection result before display filtering. */
+type InspectedSession = ResumableSession & { hasUserInput: boolean }
+
 export async function listResumableSessions(
   persistence: SessionPersistence,
   currentId: string,
@@ -43,8 +53,8 @@ export async function listResumableSessions(
       && meta.origin !== 'subagent'
       && (meta.delegationDepth ?? 0) === 0)
     .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, 30)
-  const inspected = await Promise.all(candidates.map(async (meta) => {
+
+  const inspectCandidate = async (meta: (typeof candidates)[number]): Promise<InspectedSession> => {
     try {
       const inspection = await persistence.inspect(meta.id)
       const firstUserMessage = inspection.events.find(
@@ -53,15 +63,18 @@ export async function listResumableSessions(
           && event.data.source.kind === 'user')
       const firstUserText = firstUserMessage === undefined
         ? undefined
-        : firstUserMessage.data.content
-          .map((block) => {
-            const candidate = block as { type: string; text?: unknown }
-            return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
-          })
-          .join(' ')
-          .replace(/\s+/gu, ' ')
-          .trim()
+        : Array.from(
+            firstUserMessage.data.content
+              .map((block) => {
+                const candidate = block as { type: string; text?: unknown }
+                return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
+              })
+              .join(' ')
+              .replace(/\s+/gu, ' ')
+              .trim(),
+          )
           .slice(0, 80)
+          .join('')
       const titleEvent = [...inspection.events].reverse()
         .find(event => (event as { type: string }).type === 'session/title')
       const title = titleEvent === undefined
@@ -70,23 +83,49 @@ export async function listResumableSessions(
       const updatedAt = inspection.events.at(-1)?.time ?? meta.createdAt
       return {
         id: meta.id,
-        label: firstUserText ?? title ?? meta.id,
+        label: firstUserText !== undefined && firstUserText !== ''
+          ? firstUserText
+          : title !== undefined && title !== ''
+            ? title
+            : meta.id,
         updatedAt,
         cwd: meta.cwd ?? '',
         hasUserInput: firstUserMessage !== undefined,
       }
     } catch {
+      // A corrupt/unsupported log must not make the session vanish from the
+      // picker: keep it visible under its id and let a resume attempt report
+      // the real error.
       return {
         id: meta.id,
         label: meta.id,
         updatedAt: meta.createdAt,
         cwd: meta.cwd ?? '',
         hasUserInput: false,
+        unreadable: true,
       }
     }
-  }))
-  return inspected
-    .filter(item => item.hasUserInput)
+  }
+
+  // Headers only carry creation time, so inspect by creation recency until
+  // nine sessions with real user input are found. Recent empty boot rows (a
+  // launch that exited before the first message) must not push older real
+  // conversations out of the fixed window.
+  const inspected: InspectedSession[] = []
+  for (let offset = 0; offset < candidates.length; offset += INSPECT_BATCH_SIZE) {
+    const batch = candidates.slice(offset, offset + INSPECT_BATCH_SIZE)
+    inspected.push(...await Promise.all(batch.map(inspectCandidate)))
+    if (inspected.filter(item => item.hasUserInput).length >= 9) break
+  }
+
+  const resumable = inspected.filter(item => item.hasUserInput || item.unreadable === true)
+  // Readable sessions with user input first, unreadable sessions after them;
+  // within each group the inspected activity time puts the most recently
+  // touched session first.
+  resumable.sort((a, b) =>
+    (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
+    || b.updatedAt - a.updatedAt)
+  return resumable
     .slice(0, 9)
     .map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
 }

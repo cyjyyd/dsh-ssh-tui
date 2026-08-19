@@ -89,8 +89,8 @@ export function apply(ctx: Context): void {
       program.error('dsh --profile tui: a session id requires resume mode or --resume')
       return
     }
-    if (options.new === true && (flagValue !== undefined || positionalId !== '')) {
-      program.error('dsh --profile tui: --new cannot be combined with a resume session id')
+    if (options.new === true && (flagValue !== undefined || positionalId !== '' || mode !== undefined)) {
+      program.error('dsh --profile tui: --new cannot be combined with a resume session id or mode')
       return
     }
     const resumeId = flagId !== '' ? flagId : positionalId

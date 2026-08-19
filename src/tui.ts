@@ -50,6 +50,8 @@ export interface TuiConfig {
   color?: boolean
   /** Banner subtitle line shown while no session title exists. */
   welcome?: string
+  /** Override for the launcher-provided goodbye/resume hint. */
+  goodbye?: string
   /** Whether this launch resumes an existing persisted session. */
   resume?: boolean
   /** Provider route selected at launch (defaults to deepseek-official). */
@@ -210,6 +212,8 @@ interface OnboardingState {
   baseUrl: string
   key: string
   models: string[]
+  /** True while the wizard's async save is in flight; input is ignored. */
+  saving: boolean
   resolve(saved: boolean): void
 }
 
@@ -228,6 +232,7 @@ const RENDER_INTERVAL_MS = 120
 const WAIT_INDICATOR_MS = 8000
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
 const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
@@ -246,7 +251,10 @@ function displayDshPath(file: string): string {
     }
     return `${home}\\${file}`.replaceAll('/', '\\')
   }
-  return `~/.dsh/${file}`
+  const userHome = homedir()
+  if (home === userHome) return `~/.dsh/${file}`
+  if (home.startsWith(`${userHome}/`)) return `~/${home.slice(userHome.length + 1)}/${file}`
+  return join(home, file)
 }
 
 const DSH_ENV_FILE = join(dshHomeDir(), IS_WINDOWS ? 'env.cmd' : 'env.sh')
@@ -376,6 +384,12 @@ const LOCAL_COMMANDS = [
 function displayWidth(text: string): number {
   let width = 0
   for (const char of text) {
+    if (char === '\t') {
+      // Tabs are expanded to spaces before rendering; keep the width
+      // calculation consistent with `sanitizeTerminalText()`.
+      width += 4
+      continue
+    }
     const cp = char.codePointAt(0) ?? 0
     const wide =
       (cp >= 0x1100 && cp <= 0x115f) ||
@@ -392,14 +406,27 @@ function displayWidth(text: string): number {
   return width
 }
 
+/** Strip terminal control sequences and expand tabs for display output. */
+function sanitizeTerminalText(text: string): string {
+  return text
+    .replace(/[\x1b\u009b]/gu, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+    .replaceAll('\t', '    ')
+}
+
+/** UTF-16 length of the first code point, so fallback cuts never split a surrogate pair. */
+function firstCodePointLength(text: string): number {
+  return Array.from(text)[0]?.length ?? 1
+}
+
 function wrap(text: string, width: number): string[] {
   const lines: string[] = []
-  for (const rawLine of text.split('\n')) {
-    if (rawLine === '') {
+  for (const sourceLine of text.split('\n')) {
+    if (sourceLine === '') {
       lines.push('')
       continue
     }
-    let rest = rawLine
+    let rest = sanitizeTerminalText(sourceLine)
     while (displayWidth(rest) > width) {
       let cut = 0
       let used = 0
@@ -409,7 +436,7 @@ function wrap(text: string, width: number): string[] {
         used += charWidth
         cut += char.length
       }
-      if (cut === 0) cut = 1
+      if (cut === 0) cut = firstCodePointLength(rest)
       lines.push(rest.slice(0, cut))
       rest = rest.slice(cut)
     }
@@ -420,8 +447,10 @@ function wrap(text: string, width: number): string[] {
 
 function truncate(text: string, maxLines: number): string {
   const lines = text.split('\n')
+  if (maxLines <= 0) return ''
   if (lines.length <= maxLines) return text
-  const head = lines.slice(0, Math.max(1, maxLines - 1))
+  if (maxLines === 1) return `… ${lines.length - 1} more line(s) …`
+  const head = lines.slice(0, Math.max(0, maxLines - 2))
   const tail = lines.slice(-1)
   return [...head, `… ${lines.length - head.length - 1} more line(s) …`, ...tail].join('\n')
 }
@@ -543,10 +572,11 @@ function markdownBaseCode(kind: MarkdownBlockKind): string {
 
 /** Render one pre-wrapped markdown line as ANSI (or plain text without color). */
 function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean): string {
-  if (!color) return block.segments.map(segment => segment.text).join('')
+  const segments = block.segments.map(segment => ({ ...segment, text: sanitizeTerminalText(segment.text) }))
+  if (!color) return segments.map(segment => segment.text).join('')
   const base = markdownBaseCode(block.base)
   let out = `\x1b[${base}m`
-  for (const segment of block.segments) {
+  for (const segment of segments) {
     const code = markdownSegmentCode(segment.kind)
     if (code === '') {
       out += segment.text
@@ -591,7 +621,8 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
   const lines: string[] = []
   let inFence = false
 
-  for (const raw of text.split('\n')) {
+  for (const sourceLine of text.split('\n')) {
+    const raw = sanitizeTerminalText(sourceLine)
     const fence = /^```([^\n]*)$/u.exec(raw.trim())
     if (fence !== null) {
       inFence = !inFence
@@ -688,18 +719,22 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
 
 
 /** Cut one line to fit a width, appending an ellipsis when truncated. */
-function truncateToWidth(text: string, width: number): string {
-  if (displayWidth(text) <= width) return text
+export function truncateToWidth(text: string, width: number): string {
+  const safe = sanitizeTerminalText(text)
+  if (width <= 0) return ''
+  if (displayWidth(safe) <= width) return safe
+  if (width === 1) return '…'
+  const limit = width - 1
   let cut = 0
   let used = 0
-  for (const char of text) {
+  for (const char of safe) {
     const charWidth = displayWidth(char)
-    if (used + charWidth > width - 1) break
+    if (used + charWidth > limit) break
     used += charWidth
     cut += char.length
   }
-  if (cut === 0) cut = 1
-  return `${text.slice(0, cut)}…`
+  if (cut === 0) cut = firstCodePointLength(safe)
+  return `${safe.slice(0, cut)}…`
 }
 /** One renderable view of the input line: text plus the cursor's visual offset. */
 interface InputView {
@@ -848,9 +883,11 @@ export function openCodeSourceFor(provider: string, llmPiAiSection: unknown): Op
 
   const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
     ? profile.apiKeyEnv
-    : provider === 'opencode' || provider === 'opencode-go'
+    : provider === 'opencode'
       ? 'OPENCODE_API_KEY'
-      : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
+      : provider === 'opencode-go'
+        ? 'OPENCODE_GO_API_KEY'
+        : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
   const label = typeof profile?.displayName === 'string' && profile.displayName.trim() !== ''
     ? profile.displayName
     : isGo ? 'OpenCode Go' : 'OpenCode Zen'
@@ -963,6 +1000,7 @@ function isEscapePrefix(text: string): boolean {
   if (text === '\x1b') return true
   if (!text.startsWith('\x1b')) return false
   if (text === '\x1b[') return true
+  if (text === '\x1bO' || /^\x1bO[A-Z]?$/u.test(text)) return true
   if (/^\x1b\[[A-D]$/u.test(text)) return true
   if (/^\x1b\[[HF]$/u.test(text)) return true
   if (/^\x1b\[\d~?$/u.test(text)) return true
@@ -990,10 +1028,22 @@ function scalarText(value: unknown): string | null {
   return null
 }
 
+/** Take the first `max` code points of a string without splitting surrogates. */
+function sliceCodePoints(text: string, max: number): string {
+  if (max <= 0) return ''
+  return Array.from(text).slice(0, max).join('')
+}
+
+/** Take the last `max` code points of a string without splitting surrogates. */
+function lastCodePoints(text: string, max: number): string {
+  if (max <= 0) return ''
+  return Array.from(text).slice(-max).join('')
+}
+
 /** Prefer the fields a human scans for; fall back to the first scalar pairs. */
 function friendlyArgsSummary(name: string, args: string): string {
   const parsed = parseJsonArgs(args)
-  if (parsed === null) return args.slice(0, 120)
+  if (parsed === null) return sliceCodePoints(args, 120)
   const preferred = [
     'path', 'file_path', 'file', 'query', 'pattern', 'url', 'command',
     'description', 'content', 'file_text', 'old_string', 'new_string',
@@ -1016,7 +1066,7 @@ function friendlyArgsSummary(name: string, args: string): string {
     }
   }
   const summary = parts.join('  ')
-  return summary === '' ? name : summary.slice(0, 160)
+  return summary === '' ? name : sliceCodePoints(summary, 160)
 }
 
 const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
@@ -1070,7 +1120,7 @@ export function presentToolCall(name: string, args: string): {
 } {
   const parsed = parseJsonArgs(args)
   if (SHELL_TOOL_NAMES.has(name)) {
-    const command = typeof parsed?.command === 'string' ? parsed.command : args.slice(0, 80)
+    const command = typeof parsed?.command === 'string' ? parsed.command : sliceCodePoints(args, 80)
     return {
       title: name,
       summary: `$ ${command}`,
@@ -1119,6 +1169,16 @@ interface DiffDisplayLine {
   text: string
 }
 
+/** Cap one flat diff/body row list to `maxLines` while preserving the final line. */
+function capDisplayLines(lines: readonly DiffDisplayLine[], maxLines: number): DiffDisplayLine[] {
+  const budget = Math.max(1, Math.floor(maxLines))
+  if (lines.length <= budget) return [...lines]
+  const omitted = lines.length - budget + 1
+  const marker: DiffDisplayLine = { kind: 'tool-result', text: `… ${omitted} more line(s) …` }
+  if (budget === 1) return [marker]
+  return [...lines.slice(0, budget - 2), marker, ...lines.slice(-1)]
+}
+
 /** Flatten hunks into git-style `-`/`+` lines plus the web-compatible footer. */
 export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDisplayLine[] {
   const rows: DiffDisplayLine[] = []
@@ -1147,14 +1207,7 @@ export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDis
     kind: 'tool-result',
     text: `└ +${added} -${removed} · ${paths.size} file${paths.size === 1 ? '' : 's'}`,
   })
-  if (rows.length <= maxLines) return rows
-  const head = rows.slice(0, Math.max(1, maxLines - 1))
-  const tail = rows.slice(-1)
-  return [
-    ...head,
-    { kind: 'tool-result', text: `… ${rows.length - head.length - 1} more line(s) …` },
-    ...tail,
-  ]
+  return capDisplayLines(rows, maxLines)
 }
 
 /** Keys whose multiline strings render as indented content blocks. */
@@ -1164,6 +1217,8 @@ const LONG_TEXT_KEYS = new Set([
 ])
 
 const JSON_STRING_CAP = 400
+const JSON_MAX_DEPTH = 16
+const JSON_MAX_ENTRIES = 60
 
 /** Convert any parsed JSON value into readable indented display lines. */
 export function friendlyJsonLines(value: unknown, depth = 0): string[] {
@@ -1176,10 +1231,14 @@ export function friendlyJsonLines(value: unknown, depth = 0): string[] {
   if (typeof value === 'number' || typeof value === 'boolean') {
     return [`${pad}${String(value)}`]
   }
+  if (depth >= JSON_MAX_DEPTH) {
+    return [`${pad}…`]
+  }
   if (Array.isArray(value)) {
     if (value.length === 0) return [`${pad}[]`]
+    const shown = value.slice(0, JSON_MAX_ENTRIES)
     const lines: string[] = []
-    for (const item of value) {
+    for (const item of shown) {
       if (item !== null && typeof item === 'object') {
         lines.push(`${pad}-`)
         lines.push(...friendlyJsonLines(item, depth + 1))
@@ -1187,13 +1246,15 @@ export function friendlyJsonLines(value: unknown, depth = 0): string[] {
         lines.push(`${pad}- ${friendlyJsonLines(item, 0)[0] ?? ''}`)
       }
     }
+    if (value.length > shown.length) lines.push(`${pad}… ${value.length - shown.length} more item(s)`)
     return lines
   }
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
     if (entries.length === 0) return [`${pad}{}`]
+    const shown = entries.slice(0, JSON_MAX_ENTRIES)
     const lines: string[] = []
-    for (const [key, item] of entries) {
+    for (const [key, item] of shown) {
       if (typeof item === 'string' && item.includes('\n') && LONG_TEXT_KEYS.has(key)) {
         const contentLines = item.split('\n')
         lines.push(`${pad}${key}:`)
@@ -1211,6 +1272,7 @@ export function friendlyJsonLines(value: unknown, depth = 0): string[] {
         lines.push(`${pad}${key}: ${scalar}`)
       }
     }
+    if (entries.length > shown.length) lines.push(`${pad}… ${entries.length - shown.length} more field(s)`)
     return lines
   }
   return [`${pad}${String(value)}`]
@@ -1281,7 +1343,7 @@ export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDispla
       }
     }
   }
-  return out
+  return capDisplayLines(out, maxLines)
 }
 
 /** Recover the shell tools' exit marker, mirroring @deepseek-ai/dsh-shell/render. */
@@ -1322,6 +1384,8 @@ export function formatTokensPerSecond(tokensPerSecond: number): string {
   return `${Math.round(tokensPerSecond)} tok/s`
 }
 
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
 /** Owns one interactive terminal channel and its agent event wiring. */
 export class SshTui {
   private readonly rows: Row[] = []
@@ -1334,6 +1398,8 @@ export class SshTui {
   private historyIndex = -1
   private status = 'idle'
   private dialog: Dialog | undefined
+  private readonly dialogQueue: Dialog[] = []
+  private onboardingCompletion: Promise<boolean> | undefined
   private dirty = true
   private disposed = false
   private exiting = false
@@ -1363,6 +1429,7 @@ export class SshTui {
   private lastActivity = Date.now()
   private stalledWarningShown = false
   private lastPaintAt = 0
+  private commandAbort: AbortController | undefined
   private activeSubagents = new Map<string, { id: string; provider: string; startedAt: number }>()
   private subagentSessions = new Set<string>()
   private openToolCalls = new Map<string, string>()
@@ -1388,6 +1455,7 @@ export class SshTui {
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
   private thinkingStartedAt: number | undefined
   private completionSignaled = false
+  private replaying = false
   private completedAt = 0
   private lastTitleUpdateAt = 0
   private lastPaintRows: string[] = []
@@ -1402,7 +1470,8 @@ export class SshTui {
     this.color = config.color !== false && !noColorEnv && process.env.TERM !== 'dumb'
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
     this.showReasoning = config.showReasoning !== false
-    this.goodbye = this.ctx.get('tuiGoodbyeMessage') as string | undefined
+    this.goodbye = config.goodbye
+      ?? this.ctx.get('tuiGoodbyeMessage') as string | undefined
       ?? `To resume this session: dsh --profile tui --resume=${this.agent.id}`
     this.resume = config.resume === true
     this.providerName = config.provider ?? 'deepseek-official'
@@ -1472,15 +1541,26 @@ export class SshTui {
     }, RENDER_INTERVAL_MS)
     this.renderTimer.unref?.()
 
-    void this.maybeRunOnboarding()
+    void this.maybeRunOnboarding().catch((error: unknown) => {
+      if (this.disposed) return
+      this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
+      this.markDirty()
+    })
   }
 
   /** Replay the durable session log so a resumed session renders its history. */
   replayHistory(): void {
-    for (const event of this.agent.session.events) {
-      this.handleSessionEvent(this.agent.session, event)
+    this.replaying = true
+    try {
+      for (const event of this.agent.session.events) {
+        this.handleSessionEvent(this.agent.session, event)
+      }
+    } finally {
+      this.replaying = false
     }
     this.streaming = undefined
+    this.streamingReasoning = undefined
+    this.thinkingStartedAt = undefined
     this.status = this.agent.status === 'running' ? 'running' : 'idle'
     this.dirty = true
   }
@@ -1494,6 +1574,7 @@ export class SshTui {
     let stored = false
     if (credentials !== undefined) {
       stored = (await credentials.describe(credentialRef(envRef))).configured
+      if (this.disposed) return
     }
     if (!stored) {
       // Belt-and-braces: the file provider may not have its in-memory snapshot
@@ -1502,6 +1583,7 @@ export class SshTui {
         const credentialFile = join(dshHomeDir(), '.credentials.yaml')
         if (existsSync(credentialFile)) {
           const content = await readFile(credentialFile, 'utf8')
+          if (this.disposed) return
           stored = new RegExp(`^${envRef}\\s*:\\s*\\S`, 'm').test(content)
         }
       } catch {
@@ -1531,7 +1613,8 @@ export class SshTui {
 
   /** Run the provider/API-key onboarding wizard. Resolves true when saved. */
   private runOnboarding(): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
+    if (this.onboardingCompletion !== undefined) return this.onboardingCompletion
+    this.onboardingCompletion = new Promise<boolean>((resolve) => {
       this.onboarding = {
         step: 'provider',
         providerType: 'official',
@@ -1539,23 +1622,29 @@ export class SshTui {
         baseUrl: '',
         key: '',
         models: [],
-        resolve,
+        saving: false,
+        resolve: (saved) => {
+          this.onboardingCompletion = undefined
+          resolve(saved)
+        },
       }
       this.input = ''
       this.cursor = 0
       this.dialog = { kind: 'onboarding' }
       this.markDirty()
     })
+    return this.onboardingCompletion
   }
 
   private cancelOnboarding(): void {
     const state = this.onboarding
-    if (state === undefined) return
+    if (state === undefined || state.saving) return
     this.onboarding = undefined
-    this.dialog = undefined
+    if (this.dialog?.kind === 'onboarding') this.dialog = undefined
     this.input = ''
     this.cursor = 0
     state.resolve(false)
+    this.showNextDialog()
     this.markDirty()
   }
 
@@ -1565,6 +1654,8 @@ export class SshTui {
     this.disposed = true
     this.exiting = true
     const dialog = this.dialog
+    const queued = this.dialogQueue.splice(0)
+    this.dialog = undefined
     if (dialog !== undefined) {
       if (dialog.kind === 'confirm') {
         dialog.resolve('cancel')
@@ -1573,9 +1664,20 @@ export class SshTui {
       } else {
         this.cancelOnboarding()
       }
-      this.dialog = undefined
+    }
+    for (const pending of queued) {
+      if (pending.kind === 'confirm') {
+        pending.resolve('cancel')
+      } else if (pending.kind === 'questions') {
+        pending.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
+      }
     }
     if (this.renderTimer !== undefined) clearInterval(this.renderTimer)
+    this.renderTimer = undefined
+    if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
+    this.escapeTimer = undefined
+    this.commandAbort?.abort()
+    this.commandAbort = undefined
     for (const dispose of this.disposers.splice(0)) {
       dispose()
     }
@@ -1599,7 +1701,7 @@ export class SshTui {
     if (this.exiting) return
     this.exiting = true
     await this.dispose()
-    process.stdout.write(`\n${this.goodbye}\n`)
+    process.stdout.write(`\n${sanitizeTerminalText(this.goodbye)}\n`)
     try {
       await this.ctx.get('sessions')?.flush(this.agent.session)
     } catch (error) {
@@ -1742,9 +1844,15 @@ export class SshTui {
       if (row.kind === 'tool') {
         const running = row.status === undefined || row.status === 'running'
         const ok = row.status === 'ok'
-        const dot = this.color
-          ? running ? '\x1b[33m●\x1b[0m' : ok ? '\x1b[32m●\x1b[0m' : '\x1b[31m●\x1b[0m'
-          : '●'
+        // The status dot carries its own ANSI color. `styleLine` sanitizes its
+        // input, so embedding the escape sequence there would leave literal
+        // "[33m" text on screen; color the dot between two sanitized halves.
+        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
+        const styleToolHeader = (line: string): string => {
+          const dotIndex = line.indexOf('●')
+          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', line)
+          return `${this.styleLine('tool', line.slice(0, dotIndex))}\x1b[${dotColor}m●${this.styleLine('tool', line.slice(dotIndex + 1))}`
+        }
         const state = running ? 'running…' : ok ? 'ok' : 'error'
         const summary = row.summary === '' ? '' : `  ${row.summary}`
         const exit = !running && row.command !== undefined
@@ -1762,20 +1870,12 @@ export class SshTui {
             `${focused ? '▶ ' : '  '}${plainHeader}`,
             Math.max(1, width - 2),
           )
-          const dotIndex = collapsed.indexOf('●')
-          const withDot = dotIndex === -1
-            ? collapsed
-            : `${collapsed.slice(0, dotIndex)}${dot}${collapsed.slice(dotIndex + 1)}`
-          const styled = this.styleLine('tool', withDot)
+          const styled = styleToolHeader(collapsed)
           addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
           continue
         }
-        for (const [index, wrapped] of wrap(plainHeader, width).entries()) {
-          const dotIndex = index === 0 ? wrapped.indexOf('●') : -1
-          const withDot = dotIndex === -1
-            ? wrapped
-            : `${wrapped.slice(0, dotIndex)}${dot}${wrapped.slice(dotIndex + 1)}`
-          addDisplay(this.styleLine('tool', withDot), row)
+        for (const wrapped of wrap(plainHeader, width)) {
+          addDisplay(styleToolHeader(wrapped), row)
         }
         for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
           for (const wrapped of wrap(line.text, Math.max(1, width - 2))) {
@@ -1875,7 +1975,7 @@ export class SshTui {
               addDialog(`  Base URL: ${ob.baseUrl === '' ? (template.defaultBaseUrl || '(默认)') : ob.baseUrl}`)
               addDialog(`  API 协议: ${template.api ?? 'deepseek-official'}`)
               addDialog(`  模型: ${ob.models.join(', ')}`)
-              addDialog(`  API Key:  ${ob.key.slice(0, 6)}…${ob.key.slice(-4)}（长度 ${ob.key.length}）`)
+              addDialog(`  API Key:  ${sliceCodePoints(ob.key, 6)}…${lastCodePoints(ob.key, 4)}（长度 ${ob.key.length}）`)
               addDialog('  y = 保存, n = 重填, Esc = 取消')
               break
           }
@@ -1889,13 +1989,14 @@ export class SshTui {
         const options = d.question.options ?? []
         for (const [index, option] of options.entries()) {
           const marker = d.selected.has(index) ? '●' : '○'
+          const key = QUESTION_OPTION_KEYS[index] ?? '?'
           const extra = option.description === undefined ? '' : ` — ${option.description}`
-          addDialog(`  ${index + 1} ${marker} ${option.label}${extra}`)
+          addDialog(`  ${key} ${marker} ${option.label}${extra}`)
         }
         if (options.length === 0) {
           addDialog('  (free text: type below and press Enter)')
         }
-        addDialog(`  ${d.question.multiSelect === true ? 'digits toggle, Enter submit' : 'digit to select, Enter submit'}, Esc to cancel`)
+        addDialog(`  ${d.question.multiSelect === true ? 'digits/letters toggle, Enter submit' : 'digit/letter to select, Enter submit'}, Esc to cancel`)
       }
     }
 
@@ -1917,7 +2018,7 @@ export class SshTui {
     for (const [index, command] of this.commandSuggestions.entries()) {
       const marker = index === this.suggestionIndex ? '›' : ' '
       const line = `  ${marker} /${command.name.padEnd(14)} ${command.description}${command.local ? '' : '  (dsh)'}`
-      suggestionLines.push(index === this.suggestionIndex
+      suggestionLines.push(index === this.suggestionIndex && this.color
         ? `\x1b[7m${fitLine(line)}\x1b[27m`
         : this.styleLine('system', fitLine(line)))
     }
@@ -2193,7 +2294,8 @@ export class SshTui {
   }
 
   private styleLine(kind: DisplayKind, text: string): string {
-    if (!this.color) return text
+    const safe = sanitizeTerminalText(text)
+    if (!this.color) return safe
     const code =
       kind === 'user' ? '36' :
       kind === 'assistant' ? '1;37' :
@@ -2205,7 +2307,7 @@ export class SshTui {
       kind === 'diff-path' ? '1;36' :
       kind === 'error' ? '31' :
       '90'
-    return `\x1b[${code}m${text}`
+    return `\x1b[${code}m${safe}`
   }
 
   // ── event handling ──────────────────────────────────────────────────────
@@ -2390,6 +2492,9 @@ export class SshTui {
         }
         this.stats.steps += 1
         this.openStepStats = undefined
+        // Usage accounting is complete for this step; the map only exists to
+        // deduplicate repeated usage reports during the step.
+        this.usageByStep.delete(`${event.data.turn}:${event.data.step}`)
         this.markDirty()
         break
       }
@@ -2404,7 +2509,12 @@ export class SshTui {
         this.pendingToolTimes.clear()
         this.stalledWarningShown = false
         this.pendingMessages.clear()
-        if (reason.kind === 'completed' && !this.completionSignaled) {
+        // Aborted/errored turns may close without an assembled
+        // assistant/message; never leave a half-streamed thinking block behind.
+        this.streaming = undefined
+        this.streamingReasoning = undefined
+        this.thinkingStartedAt = undefined
+        if (reason.kind === 'completed' && !this.replaying && !this.completionSignaled) {
           this.completionSignaled = true
           this.completedAt = Date.now()
           this.updateTerminalTitle()
@@ -2485,7 +2595,7 @@ export class SshTui {
         break
       }
       case 'tool/call':
-        this.pushRow({ kind: 'system', text: `${label} ▶ ${event.data.name} ${event.data.arguments.slice(0, 160)}` })
+        this.pushRow({ kind: 'system', text: `${label} ▶ ${event.data.name} ${sliceCodePoints(event.data.arguments, 160)}` })
         break
       case 'tool/result': {
         const output = truncate(collectText(event.data.message.content), 4)
@@ -2536,17 +2646,23 @@ export class SshTui {
 
   private readonly handleApproval = async (
     request: ApprovalRequest,
-    next: () => Promise<ApprovalOutcome>,
+    _next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> => {
     const agentLabel = request.agent.id === this.agent.id
       ? '当前会话'
       : `子代理 ${request.agent.id}`
     return new Promise<ApprovalOutcome>((resolve) => {
+      if (request.signal?.aborted === true) {
+        resolve('cancelled')
+        return
+      }
+      let dialog: ConfirmDialog | undefined
       const onAbort = (): void => {
-        this.closeConfirm('cancel')
+        request.signal?.removeEventListener('abort', onAbort)
+        if (dialog !== undefined) this.abortConfirm(dialog)
       }
       request.signal?.addEventListener('abort', onAbort, { once: true })
-      this.openConfirm(
+      dialog = this.openConfirm(
         `允许工具 "${request.toolName}"？（${agentLabel}）${request.reason === undefined ? '' : `\n${request.reason}`}`,
         'y = 允许一次, n = 拒绝, Esc = 取消',
         (answer) => {
@@ -2564,27 +2680,76 @@ export class SshTui {
       : `子代理 ${request.agent.id}`
     for (const [index, question] of request.questions.entries()) {
       const answer = await new Promise<DialogAnswer>((resolve, reject) => {
-        const onAbort = (): void => {
-          this.dialog = undefined
-          reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+        const fail = (error: unknown): void => {
+          request.signal?.removeEventListener('abort', onAbort)
+          reject(error)
         }
+        const onAbort = (): void => {
+          request.signal?.removeEventListener('abort', onAbort)
+          if (dialog !== undefined) {
+            dialog.reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+          } else {
+            reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+          }
+        }
+        let dialog: QuestionDialog | undefined
         request.signal?.addEventListener('abort', onAbort, { once: true })
+        if (request.signal?.aborted === true) {
+          onAbort()
+          return
+        }
         const labeled: AskUserQuestionItem = agentLabel === undefined
           ? question
           : { ...question, question: `[${agentLabel}] ${question.question}` }
-        this.openQuestion(labeled, index, request.questions.length, (selection) => {
+        dialog = this.openQuestion(labeled, index, request.questions.length, (selection) => {
           request.signal?.removeEventListener('abort', onAbort)
           resolve(selection)
-        }, reject)
+        }, fail)
       })
       answers.push({ id: question.id, selected: answer.selected, custom: answer.custom })
     }
     return { answers }
   }
 
-  private openConfirm(prompt: string, hint: string, resolve: (value: 'y' | 'n' | 'cancel') => void): void {
-    this.dialog = { kind: 'confirm', prompt, hint, resolve }
+  /** Queue one dialog behind an already-open one instead of overwriting it. */
+  private openDialog(dialog: Dialog): void {
+    if (this.dialog === undefined) {
+      this.dialog = dialog
+    } else {
+      this.dialogQueue.push(dialog)
+    }
     this.markDirty()
+  }
+
+  private showNextDialog(): void {
+    if (this.dialog !== undefined) return
+    const next = this.dialogQueue.shift()
+    if (next !== undefined) {
+      this.dialog = next
+      this.markDirty()
+    }
+  }
+
+  private removeQueuedDialog(dialog: Dialog): void {
+    const index = this.dialogQueue.indexOf(dialog)
+    if (index !== -1) this.dialogQueue.splice(index, 1)
+  }
+
+  private settleQuestion(dialog: QuestionDialog, finish: () => void): void {
+    if (this.dialog === dialog) {
+      this.dialog = undefined
+    } else {
+      this.removeQueuedDialog(dialog)
+    }
+    finish()
+    this.showNextDialog()
+    this.markDirty()
+  }
+
+  private openConfirm(prompt: string, hint: string, resolve: (value: 'y' | 'n' | 'cancel') => void): ConfirmDialog {
+    const dialog: ConfirmDialog = { kind: 'confirm', prompt, hint, resolve }
+    this.openDialog(dialog)
+    return dialog
   }
 
   private closeConfirm(value: 'y' | 'n' | 'cancel'): void {
@@ -2592,7 +2757,21 @@ export class SshTui {
     if (dialog === undefined || dialog.kind !== 'confirm') return
     this.dialog = undefined
     dialog.resolve(value)
+    this.showNextDialog()
     this.markDirty()
+  }
+
+  /** Resolve one queued or active confirm from its abort signal. */
+  private abortConfirm(dialog: ConfirmDialog): void {
+    if (this.dialog === dialog) {
+      this.dialog = undefined
+      dialog.resolve('cancel')
+      this.showNextDialog()
+      this.markDirty()
+      return
+    }
+    this.removeQueuedDialog(dialog)
+    dialog.resolve('cancel')
   }
 
   private openQuestion(
@@ -2601,25 +2780,22 @@ export class SshTui {
     total: number,
     resolve: (answer: DialogAnswer) => void,
     reject: (error: unknown) => void,
-  ): void {
-    this.dialog = {
+  ): QuestionDialog {
+    const dialog: QuestionDialog = {
       kind: 'questions',
       question,
       index,
       total,
       selected: new Set(),
       resolve: (selection) => {
-        this.dialog = undefined
-        resolve(selection)
-        this.markDirty()
+        this.settleQuestion(dialog, () => resolve(selection))
       },
       reject: (error) => {
-        this.dialog = undefined
-        reject(error)
-        this.markDirty()
+        this.settleQuestion(dialog, () => reject(error))
       },
     }
-    this.markDirty()
+    this.openDialog(dialog)
+    return dialog
   }
 
   /** Open one question dialog and await its answer (cancellation rejects). */
@@ -2650,7 +2826,9 @@ export class SshTui {
    * registry, while the TUI wants the endpoint's current list.
    */
   private async discoverEndpointModels(provider: string): Promise<{ id: string; label: string }[]> {
+    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
     const profile = this.piAiProviderProfile(provider)
+    const source = openCodeSourceFor(provider, llmPiAi)
     const baseURL = typeof profile?.baseURL === 'string' && profile.baseURL.trim() !== ''
       ? profile.baseURL.trim()
       : this.openCodeListingBaseURL(provider)
@@ -2658,7 +2836,7 @@ export class SshTui {
     const api = typeof profile?.api === 'string' && profile.api.trim() !== '' ? profile.api.trim() : undefined
     const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
       ? profile.apiKeyEnv.trim()
-      : undefined
+      : source?.apiKeyEnv
     const apiKey = apiKeyEnv === undefined ? undefined : await this.resolveCredential(apiKeyEnv)
     const llm = this.ctx.get('llm')
     if (llm === undefined) return []
@@ -2903,9 +3081,14 @@ export class SshTui {
         this.markDirty()
         return
       }
+      if (this.onSwitchSession === undefined) {
+        this.pushRow({ kind: 'error', text: '会话切换回调不可用，无法 /resume。' })
+        this.markDirty()
+        return
+      }
       this.pushRow({ kind: 'system', text: `正在切换到会话 ${target}…` })
       this.markDirty()
-      await this.onSwitchSession?.(target)
+      await this.onSwitchSession(target)
       return
     }
     const persistence = this.ctx.get('sessionPersistence')
@@ -2925,14 +3108,19 @@ export class SshTui {
       question: '选择要恢复的历史会话',
       options: inspected.map(item => ({
         label: item.label,
-        description: `${formatSessionTime(item.updatedAt)} · ${item.cwd}`,
+        description: `${item.unreadable === true ? '⚠ 无法读取 · ' : ''}${formatSessionTime(item.updatedAt)} · ${item.cwd}`,
       })),
     })
     const picked = inspected.find(item => item.label === answer.selected[0])
     if (picked === undefined) return
+    if (this.onSwitchSession === undefined) {
+      this.pushRow({ kind: 'error', text: '会话切换回调不可用，无法 /resume。' })
+      this.markDirty()
+      return
+    }
     this.pushRow({ kind: 'system', text: `正在切换到会话 ${picked.id}…` })
     this.markDirty()
-    await this.onSwitchSession?.(picked.id)
+    await this.onSwitchSession(picked.id)
   }
 
   /** Current provider route selected for the running agent. */
@@ -3120,6 +3308,12 @@ export class SshTui {
     if (combined === '\x1b[H' || combined === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
     if (combined === '\x1b[F' || combined === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
     if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
+    const ss3 = /^\x1bO[A-Z]/u.exec(combined)
+    if (ss3 !== null) {
+      const rest = combined.slice(ss3[0].length)
+      if (rest !== '') this.handlePlainText(rest)
+      return
+    }
     if (isEscapePrefix(combined)) {
       this.escapeBuffer = combined
       this.escapeTimer = setTimeout(() => {
@@ -3128,7 +3322,11 @@ export class SshTui {
         this.escapeBuffer = ''
         if (pending === '\x1b') {
           this.handleChar('\x1b')
-        } else if (pending.startsWith('\x1b[')) {
+        } else if (pending === '\x1bO') {
+          // ESC O without an SS3 final byte is an Alt+O keystroke, not a
+          // function key.
+          this.handlePlainText('O')
+        } else if (pending.startsWith('\x1b[') || pending.startsWith('\x1bO')) {
           // An escape sequence that never completed: consume it silently
           // instead of treating its ESC byte as a cancel.
         } else if (pending !== '') {
@@ -3137,14 +3335,15 @@ export class SshTui {
       }, 60)
       return
     }
-    if (combined.startsWith('\x1b[')) {
-      // Unknown escape sequence — consume without side effects.
+    if (combined.startsWith('\x1b[') || combined.startsWith('\x1bO')) {
+      // Unknown escape sequence (including SS3 function keys) — consume
+      // without side effects.
       return
     }
-    if (combined.startsWith('\x1b')) {
-      this.handleChar('\x1b')
-      const rest = combined.slice(1)
-      if (rest !== '') this.handlePlainText(rest)
+    if (combined.startsWith('\x1b') && combined.length > 1) {
+      // Alt+<key> sequences: ignore the ESC half instead of triggering cancel,
+      // and type the printable remainder.
+      this.handlePlainText(combined.slice(1))
       return
     }
     this.handlePlainText(combined)
@@ -3280,20 +3479,17 @@ export class SshTui {
       else if (text === '\x03' || text === '\x1b') this.closeConfirm('cancel')
       return
     }
-    const digit = /^[0-9]$/u.exec(text)?.[0]
-    if (digit !== undefined) {
-      const index = Number(digit) - 1
-      if (index >= 0 && index < (dialog.question.options?.length ?? 0)) {
-        if (dialog.question.multiSelect === true) {
-          if (dialog.selected.has(index)) dialog.selected.delete(index)
-          else dialog.selected.add(index)
-        } else {
-          dialog.selected.clear()
-          dialog.selected.add(index)
-        }
-        this.markDirty()
+    const key = text.toLowerCase()
+    const index = QUESTION_OPTION_KEYS.indexOf(key)
+    if (index >= 0 && index < (dialog.question.options?.length ?? 0)) {
+      if (dialog.question.multiSelect === true) {
+        if (dialog.selected.has(index)) dialog.selected.delete(index)
+        else dialog.selected.add(index)
+      } else {
+        dialog.selected.clear()
+        dialog.selected.add(index)
       }
-      return
+      this.markDirty()
     }
     if (text === '\r' || text === '\n') {
       const options = dialog.question.options ?? []
@@ -3406,8 +3602,9 @@ export class SshTui {
         return
       }
       case 'confirm':
+        if (state.saving) return
         if (text === 'y' || text === 'Y') {
-          this.dialog = undefined
+          state.saving = true
           this.input = ''
           this.cursor = 0
           void this.saveOnboarding()
@@ -3553,7 +3750,9 @@ export class SshTui {
           ])
           this.pushRow({ kind: 'system', text: `提供商 ${state.providerId} 已保存 → ${displayDshPath('settings.yaml')}` })
         }
-        await this.saveCredential(credentials, envRef, state.key)
+        // Only store the key when its provider profile actually made it to
+        // settings; otherwise the saved key points at an unusable route.
+        if (saved) await this.saveCredential(credentials, envRef, state.key)
         if (saved) {
           const selection: ModelSelection = {
             provider: state.providerId,
@@ -3576,7 +3775,9 @@ export class SshTui {
       this.pushRow({ kind: 'error', text: `保存配置失败: ${errorChain(error)}` })
     } finally {
       this.onboarding = undefined
+      if (this.dialog?.kind === 'onboarding') this.dialog = undefined
       state.resolve(saved)
+      this.showNextDialog()
       this.markDirty()
     }
   }
@@ -3610,22 +3811,46 @@ export class SshTui {
     const home = dshHomeDir()
     const file = join(home, IS_WINDOWS ? 'env.cmd' : 'env.sh')
     await mkdir(home, { recursive: true, mode: 0o700 })
+    const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+
     if (IS_WINDOWS) {
-      const lines = ['@echo off', 'rem Generated by dsh-ssh-tui onboarding.']
-      for (const [name, value] of Object.entries(entries)) {
-        lines.push(`set "${name}=${value.replaceAll('"', '')}"`)
+      let previous = ''
+      try {
+        previous = await readFile(file, 'utf8')
+      } catch {
+        // File absent: start fresh below.
       }
+      const preserved = previous.split(/\r?\n/u).filter(Boolean).filter(line => {
+        if (/^@echo off$/iu.test(line.trim())) return false
+        if (/^rem Generated by dsh-ssh-tui onboarding\.$/iu.test(line.trim())) return false
+        for (const name of Object.keys(entries)) {
+          if (new RegExp(`^set\\s+"?${escapeRegex(name)}"?=`, 'iu').test(line.trim())) return false
+        }
+        return true
+      })
+      const additions = Object.entries(entries).map(([name, value]) => `set "${name}=${value.replaceAll('"', '')}"`)
+      const lines = ['@echo off', 'rem Generated by dsh-ssh-tui onboarding.', ...preserved, ...additions]
       await writeFile(file, `${lines.join('\r\n')}\r\n`, { mode: 0o600 })
       // Persist for future processes; best-effort, env.cmd remains as a manual fallback.
       await Promise.all(Object.entries(entries).map(([name, value]) => this.setWindowsEnv(name, value))).catch(() => {})
       return
     }
     const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
-    const lines = ['# Generated by dsh-ssh-tui onboarding.']
-    for (const [name, value] of Object.entries(entries)) {
-      lines.push(`export ${name}=${quote(value)}`)
+    let previous = ''
+    try {
+      previous = await readFile(file, 'utf8')
+    } catch {
+      // File absent: start fresh below.
     }
-    await writeFile(file, `${lines.join('\n')}\n`, { mode: 0o600 })
+    const preserved = previous.split('\n').filter(Boolean).filter(line => {
+      if (line.trim() === '# Generated by dsh-ssh-tui onboarding.') return false
+      for (const name of Object.keys(entries)) {
+        if (new RegExp(`^export\\s+${escapeRegex(name)}=`).test(line)) return false
+      }
+      return true
+    })
+    const additions = Object.entries(entries).map(([name, value]) => `export ${name}=${quote(value)}`)
+    await writeFile(file, `${['# Generated by dsh-ssh-tui onboarding.', ...preserved, ...additions].join('\n')}\n`, { mode: 0o600 })
     await this.ensurePosixEnvHook()
   }
 
@@ -3640,7 +3865,9 @@ export class SshTui {
 
   /** Idempotently source $DSH_HOME/env.sh from the user's POSIX shell rc files. */
   private async ensurePosixEnvHook(): Promise<void> {
-    const sourceLine = `[ -f "$HOME/.dsh/env.sh" ] && . "$HOME/.dsh/env.sh"`
+    const envFile = join(dshHomeDir(), 'env.sh')
+    const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
+    const sourceLine = `[ -f ${quote(envFile)} ] && . ${quote(envFile)}`
     const marker = '# dsh-ssh-tui launch environment'
     const shell = process.env.SHELL ?? ''
     const targets: string[] = []
@@ -3658,7 +3885,7 @@ export class SshTui {
       }
       if (content.includes(marker)) continue
       const line = relative.endsWith('config.fish')
-        ? 'test -f "$HOME/.dsh/env.sh"; and source "$HOME/.dsh/env.sh"'
+        ? `test -f ${quote(envFile)}; and source ${quote(envFile)}`
         : sourceLine
       const addition = `${content === '' ? '' : '\n'}${marker}\n${line}\n`
       await mkdir(dirname(file), { recursive: true, mode: 0o700 })
@@ -3813,6 +4040,9 @@ export class SshTui {
       case 'clear':
         this.rows.length = 0
         this.streaming = undefined
+        this.streamingReasoning = undefined
+        this.thinkingStartedAt = undefined
+        this.focusedRow = null
         break
       case 'status':
         this.pushRow({
@@ -3865,8 +4095,14 @@ export class SshTui {
           }],
           agent: this.agent,
         }).then(
-          (answer) => this.pushRow({ kind: 'system', text: `dialog answer: ${JSON.stringify(answer)}` }),
-          (error) => this.pushRow({ kind: 'error', text: `dialog error: ${errorChain(error)}` }),
+          (answer) => {
+            this.pushRow({ kind: 'system', text: `dialog answer: ${JSON.stringify(answer)}` })
+            this.markDirty()
+          },
+          (error) => {
+            this.pushRow({ kind: 'error', text: `dialog error: ${errorChain(error)}` })
+            this.markDirty()
+          },
         )
         break
       }
@@ -3877,7 +4113,9 @@ export class SshTui {
             this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
             break
           }
+          this.commandAbort?.abort()
           const controller = new AbortController()
+          this.commandAbort = controller
           void commands.execute(this.agent, text, controller.signal).then((execution) => {
             if (execution === undefined) {
               this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
@@ -3893,6 +4131,9 @@ export class SshTui {
             }
           }).catch((error: unknown) => {
             this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })
+          }).finally(() => {
+            if (this.commandAbort === controller) this.commandAbort = undefined
+            this.markDirty()
           })
         }
         break
@@ -3903,21 +4144,72 @@ export class SshTui {
     this.markDirty()
   }
 
+  /** Grapheme cluster immediately before `cursor`; cursor-internal positions delete it whole. */
+  private graphemeBefore(cursor: number): { start: number; end: number } {
+    if (cursor <= 0) return { start: 0, end: 0 }
+    let previousStart = 0
+    let previousEnd = 0
+    for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+      const start = segment.index
+      const end = start + segment.segment.length
+      if (cursor === start) return { start: previousStart, end: previousEnd }
+      if (cursor > start && cursor < end) return { start, end }
+      previousStart = start
+      previousEnd = end
+    }
+    return { start: previousStart, end: previousEnd }
+  }
+
+  /** Grapheme cluster containing or following `cursor`. */
+  private graphemeAfter(cursor: number): { start: number; end: number } | undefined {
+    for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+      const start = segment.index
+      const end = start + segment.segment.length
+      if (cursor === start || (cursor > start && cursor < end)) return { start, end }
+    }
+    return undefined
+  }
+
   private backspace(): void {
     if (this.cursor === 0) return
-    this.input = `${this.input.slice(0, this.cursor - 1)}${this.input.slice(this.cursor)}`
-    this.cursor -= 1
+    const range = this.graphemeBefore(this.cursor)
+    this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
+    this.cursor = range.start
     this.markDirty()
   }
 
   private deleteAtCursor(): void {
-    if (this.cursor >= this.input.length) return
-    this.input = `${this.input.slice(0, this.cursor)}${this.input.slice(this.cursor + 1)}`
+    const range = this.graphemeAfter(this.cursor)
+    if (range === undefined) return
+    this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
+    this.cursor = range.start
     this.markDirty()
   }
 
   private moveCursor(delta: number): void {
-    this.cursor = Math.max(0, Math.min(this.input.length, this.cursor + delta))
+    if (delta < 0) {
+      let target = 0
+      for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+        if (segment.index >= this.cursor) break
+        target = segment.index
+      }
+      this.cursor = target
+    } else {
+      let target = this.input.length
+      for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+        const start = segment.index
+        const end = start + segment.segment.length
+        if (start > this.cursor) {
+          target = start
+          break
+        }
+        if (end > this.cursor) {
+          target = end
+          break
+        }
+      }
+      this.cursor = target
+    }
     this.markDirty()
   }
 

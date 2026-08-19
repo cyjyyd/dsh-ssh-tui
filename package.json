@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
@@ -53,6 +53,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "clean": "rm -rf lib",
     "prepare": "npm run build",
     "prepack": "npm run build",
