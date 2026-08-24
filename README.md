@@ -122,12 +122,18 @@ dsh --profile tui --no-color
 
 斜杠命令：`/help`、`/model`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/quota` 同义）、`/setup`、`/clear`，
-以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。
+以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。harness 命令若声明
+支持图片附件，会在命令列表和补全提示中标注“可附图”。
 
 子代理默认跟随父会话的提供方，模型默认为轻量的 `deepseek-v4-flash`：
 
 - `/submodel [model-id]`：打开子代理模型选择器；带参数时直接指定模型；
-- `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”。
+- `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”；
+- `/subagents`：列出活动子代理；`/subagents kill <session-id> [更多 id...]`
+  可释放指定的 continuable 子代理（harness 0.1.1 新增的定向回收能力）。
+
+中断的流式输出会保留已生成的部分，并显示 `⚠ 已中断` 标记；团队协作类会话事件
+（`team/*`）也会以系统消息形式显示在转录区。
 
 `/usage` 在当前提供商为 OpenCode 源时可用，并区分两种计费方式：
 

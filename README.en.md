@@ -160,6 +160,14 @@ lightweight `deepseek-v4-flash` model. `/submodel [model-id]` picks (or
 directly sets) the subagent model, and `/subeffort` picks the subagent
 reasoning effort or restores the provider default. Both commands are
 remembered under `ssh-tui-subagent` in `$DSH_HOME/settings.yaml`.
+`/subagents` lists active subagents, and `/subagents kill <session-id> [more ids...]`
+releases selected continuable children using the harness 0.1.1
+`drainContinuableChildren` capability.
+
+Interrupted streaming output keeps the already-generated prefix and is marked
+`⚠ interrupted`; team collaboration session events (`team/*`) are surfaced as
+system messages. Harness slash commands that accept image attachments are
+labelled `(images ok)` in the command list and completion hints.
 
 `/usage` (alias `/quota`) works when the current provider is an OpenCode
 source and keeps the two billing models distinct:

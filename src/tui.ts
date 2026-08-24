@@ -387,7 +387,7 @@ const LOCAL_COMMANDS = [
   { name: 'status', description: 'show session, provider and model status' },
   { name: 'usage', description: 'show OpenCode Zen billing / Go quota usage' },
   { name: 'quota', description: 'alias of /usage for OpenCode Go quota' },
-  { name: 'subagents', description: 'list active subagents' },
+  { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
   { name: 'setup', description: 're-open provider / API key setup' },
   { name: 'dialog-test', description: 'verify the question dialog' },
@@ -2203,7 +2203,7 @@ export class SshTui {
     const prefix = input.slice(1).toLowerCase()
     const dsh = (this.ctx.get('commands')?.list(this.agent) ?? []).map(command => ({
       name: command.name,
-      description: command.description,
+      description: command.input?.images === true ? `${command.description}（可附图）` : command.description,
       local: false,
     }))
     const all = [
@@ -2446,13 +2446,19 @@ export class SshTui {
           this.recordUsage(event.data.turn, event.data.step, event.data.usage)
         }
         const reasoningExpanded = this.streamingReasoning?.expanded ?? false
+        const interrupted = event.data.interrupted === true
         this.streaming = undefined
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
+        const interruptedMark = interrupted ? ' ⚠ 已中断' : ''
         if (reasoning !== '') {
-          this.pushRow({ kind: 'reasoning', text: reasoning, expanded: reasoningExpanded })
+          this.pushRow({ kind: 'reasoning', text: `${reasoning}${interruptedMark}`, expanded: reasoningExpanded })
         }
-        if (text !== '') this.pushRow({ kind: 'assistant', text })
+        if (text !== '') {
+          this.pushRow({ kind: 'assistant', text: `${text}${interruptedMark}` })
+        } else if (interrupted && reasoning === '') {
+          this.pushRow({ kind: 'system', text: '本轮输出已中断，没有可见内容。' })
+        }
         this.markDirty()
         break
       }
@@ -2583,6 +2589,10 @@ export class SshTui {
         break
       }
       default:
+        if (event.type.startsWith('team/')) {
+          this.pushRow({ kind: 'system', text: `[团队] ${event.type}` })
+          this.markDirty()
+        }
         break
     }
   }
@@ -2661,6 +2671,9 @@ export class SshTui {
         this.pushRow({ kind: 'system', text: `${label} 等待审批：${event.data.toolName}` })
         break
       default:
+        if (event.type.startsWith('team/')) {
+          this.pushRow({ kind: 'system', text: `${label} [团队] ${event.type}` })
+        }
         break
     }
     this.lastActivity = Date.now()
@@ -4209,7 +4222,7 @@ export class SshTui {
           .filter(item => item.name !== 'help' && item.name !== 'exit')
           .map(item => `/${item.name.padEnd(12)} ${item.description}`)
         const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
-          .map(item => `/${item.name.padEnd(12)} ${item.description}  (dsh)`)
+          .map(item => `/${item.name.padEnd(12)} ${item.description}${item.input?.images === true ? '（可附图）' : ''}  (dsh)`)
         this.pushRow({
           kind: 'system',
           text: [
@@ -4286,6 +4299,32 @@ export class SshTui {
         })
         break
       case 'subagents': {
+        const trimmed = arg.trim()
+        if (trimmed !== '' && trimmed !== 'list') {
+          const [action, ...ids] = trimmed.split(/\s+/u)
+          if (action === 'kill' || action === 'stop') {
+            if (ids.length === 0) {
+              this.pushRow({ kind: 'error', text: '/subagents kill <session-id> — 缺少子代理会话 ID' })
+              break
+            }
+            const subagents = this.ctx.get('subagents')
+            if (subagents === undefined) {
+              this.pushRow({ kind: 'error', text: 'subagents service is unavailable' })
+              break
+            }
+            const targets = ids.map(id => SessionId(id))
+            void subagents.drainContinuableChildren(this.agent, targets).then(() => {
+              this.pushRow({ kind: 'system', text: `已请求释放子代理：${ids.join(', ')}` })
+              this.markDirty()
+            }).catch((error: unknown) => {
+              this.pushRow({ kind: 'error', text: `/subagents kill failed: ${errorChain(error)}` })
+              this.markDirty()
+            })
+            break
+          }
+          this.pushRow({ kind: 'error', text: `/subagents 未知操作 "${action}"（支持 list / kill <id>）` })
+          break
+        }
         if (this.activeSubagents.size === 0) {
           this.pushRow({ kind: 'system', text: '当前没有活动的子代理。' })
         } else {
@@ -4344,7 +4383,7 @@ export class SshTui {
           this.commandAbort?.abort()
           const controller = new AbortController()
           this.commandAbort = controller
-          void commands.execute(this.agent, text, controller.signal).then((execution) => {
+          void commands.execute(this.agent, text, [], controller.signal).then((execution) => {
             if (execution === undefined) {
               this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
               return
