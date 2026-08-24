@@ -876,6 +876,14 @@ interface LlmPiAiSection {
   providers?: Record<string, LlmPiAiProviderProfile>
 }
 
+/** Build per-model reasoningEfforts from a provider-level reasoning default. */
+function reasoningEffortsForDefault(reasoning: unknown): Record<string, string | null> | undefined {
+  if (typeof reasoning !== 'string') return undefined
+  const level = reasoning.trim()
+  if (level === '' || level === 'off') return undefined
+  return { off: null, [level]: level }
+}
+
 const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
 const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1'
 
@@ -2932,9 +2940,12 @@ export class SshTui {
       if (typeof id === 'string' && id.length > 0) ids.add(id)
     }
     if (ids.has(modelId)) return true
+    const modelEntry: Record<string, unknown> = { id: modelId }
+    const reasoningEfforts = reasoningEffortsForDefault(profile.reasoning)
+    if (reasoningEfforts !== undefined) modelEntry.reasoningEfforts = reasoningEfforts
     try {
       await settings.mutate(settingsNamespace('llm-pi-ai'), [
-        { op: 'set', path: ['providers', provider, 'models'], value: [...models, { id: modelId }] },
+        { op: 'set', path: ['providers', provider, 'models'], value: [...models, modelEntry] },
       ])
       this.pushRow({ kind: 'system', text: `模型 ${modelId} 已加入提供商 ${provider} 的配置。` })
       this.markDirty()
@@ -3954,12 +3965,18 @@ export class SshTui {
         const defaultEffort = model !== undefined && llm !== undefined
           ? await defaultReasoningEffort(llm, state.providerId, model)
           : undefined
+        const reasoningEfforts = defaultEffort === undefined
+          ? undefined
+          : { off: null, [defaultEffort]: defaultEffort }
         const profile = {
           displayName: template.label,
           apiKeyEnv: envRef,
           api: template.api,
           baseURL: state.baseUrl === '' ? template.defaultBaseUrl : state.baseUrl,
-          models: state.models.map(id => ({ id })),
+          models: state.models.map(id => ({
+            id,
+            ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
+          })),
           ...(defaultEffort === undefined ? {} : { reasoning: defaultEffort }),
         }
         if (settings === undefined) {
