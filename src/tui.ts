@@ -1052,6 +1052,13 @@ function lastCodePoints(text: string, max: number): string {
   return Array.from(text).slice(-max).join('')
 }
 
+/** Format a model list compactly: show the first few entries and an ellipsis. */
+function formatModelList(models: readonly string[], max = 5): string {
+  const shown = models.slice(0, max)
+  const text = shown.join(', ')
+  return models.length > max ? `${text}…（共 ${models.length} 个）` : text
+}
+
 /** Prefer the fields a human scans for; fall back to the first scalar pairs. */
 function friendlyArgsSummary(name: string, args: string): string {
   const parsed = parseJsonArgs(args)
@@ -1979,7 +1986,9 @@ export class SshTui {
             case 'models':
               addDialog(`提供商：${providerLabel}`)
               addDialog('模型 ID（多个用逗号或空格分隔）：')
-              addDialog(`  默认：${template.defaultModels.join(', ')}`)
+              addDialog(ob.models.length > 0
+                ? `  已获取（${ob.models.length}）：${formatModelList(ob.models, 6)}`
+                : `  默认：${template.defaultModels.join(', ')}`)
               if (template.api !== undefined) addDialog('  Ctrl+F = 从端点获取模型列表')
               addDialog('  Enter 确认，Esc 取消')
               break
@@ -1989,7 +1998,7 @@ export class SshTui {
               addDialog(`  Provider ID: ${ob.providerId}`)
               addDialog(`  Base URL: ${ob.baseUrl === '' ? (template.defaultBaseUrl || '(默认)') : ob.baseUrl}`)
               addDialog(`  API 协议: ${template.api ?? 'deepseek-official'}`)
-              addDialog(`  模型: ${ob.models.join(', ')}`)
+              addDialog(`  模型: ${formatModelList(ob.models, 8)}`)
               addDialog(`  API Key:  ${sliceCodePoints(ob.key, 6)}…${lastCodePoints(ob.key, 4)}（长度 ${ob.key.length}）`)
               addDialog('  y = 保存, n = 重填, Esc = 取消')
               break
@@ -3043,18 +3052,22 @@ export class SshTui {
       effortOptions = []
     }
     if (effortOptions.length === 0) {
-      effortOptions = ['off', 'high', 'max'].map(id => ({ id, label: id }))
+      // No selectable reasoning effort for this model: do not invent
+      // `off/high/max`, which the adapter may reject for the exact model.
     }
 
-    const effortAnswer = await this.askQuestion({
-      id: 'effort-pick',
-      question: `选择思考强度（${selected.id}）`,
-      options: effortOptions.map(option => ({
-        label: option.label,
-        description: option.id === String(current?.reasoningEffort) ? '当前' : undefined,
-      })),
-    })
-    const effort = effortOptions.find(option => option.label === effortAnswer.selected[0])?.id
+    let effort: string | undefined
+    if (effortOptions.length > 0) {
+      const effortAnswer = await this.askQuestion({
+        id: 'effort-pick',
+        question: `选择思考强度（${selected.id}）`,
+        options: effortOptions.map(option => ({
+          label: option.label,
+          description: option.id === String(current?.reasoningEffort) ? '当前' : undefined,
+        })),
+      })
+      effort = effortOptions.find(option => option.label === effortAnswer.selected[0])?.id
+    }
 
     const next: ModelSelection = {
       provider,
@@ -3064,7 +3077,10 @@ export class SshTui {
     if (this.selectionRef !== undefined) this.selectionRef.current = next
     this.onSelectionChanged?.(next)
     await this.ctx.get('agentDefaultModel')?.saveSelection(next)
-    this.pushRow({ kind: 'system', text: `模型已切换：${selected.id}（思考强度 ${effort ?? '默认'}）；下一步请求生效。` })
+    this.pushRow({
+      kind: 'system',
+      text: `模型已切换：${selected.id}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
+    })
     this.markDirty()
   }
 
@@ -3174,8 +3190,13 @@ export class SshTui {
     } catch {
       effortOptions = []
     }
-    if (effortOptions.length === 0) {
-      effortOptions = ['off', 'high', 'max'].map(id => ({ id, label: id }))
+    if (effortOptions.length === 0 && current.reasoningEffort === undefined) {
+      this.pushRow({
+        kind: 'system',
+        text: `模型 ${provider}/${current.model} 未声明可选 reasoning effort，已保持提供商默认；请勿手动设置 high/max。`,
+      })
+      this.markDirty()
+      return
     }
 
     const choices: { id: string | undefined; label: string }[] = [
@@ -3870,7 +3891,7 @@ export class SshTui {
         state.models = ids
         this.input = ''
         this.cursor = 0
-        this.pushRow({ kind: 'system', text: `已从端点获取 ${ids.length} 个模型（Enter 确认，也可继续修改）。` })
+        this.pushRow({ kind: 'system', text: `已从端点获取 ${ids.length} 个模型：${formatModelList(ids, 6)}（Enter 确认，也可继续修改）。` })
       }
     } catch (error) {
       this.pushRow({ kind: 'error', text: `获取模型列表失败：${errorChain(error)}` })
