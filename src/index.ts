@@ -37,6 +37,8 @@ export interface Config {
   provider?: string
   /** CLI-supplied model override; otherwise the saved default is used. */
   model?: string
+  /** Minimum milliseconds between paints; see DSH_TUI_PAINT_MS. */
+  paintIntervalMs?: number
 }
 
 /**

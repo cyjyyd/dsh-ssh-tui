@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   askSummary,
   clipAnsiToWidth,
+  composePaintOutput,
   describeProviderRoute,
   displayWidth,
   padAnsiToWidth,
@@ -13,10 +14,15 @@ import {
   isEscapePrefix,
   openCodeSourceFor,
   parseExitStatus,
+  parseFindQuery,
   parsePlanTodos,
+  planDockNote,
+  planIsLive,
   planTitleFromMarkdown,
+  matchTranscriptRows,
   presentToolCall,
   providerUsesLocalOAuth,
+  resolvePaintIntervalMs,
   renderMarkdownLines,
   renderToolDiff,
   repeatToWidth,
@@ -69,6 +75,89 @@ test('padAnsiToWidth keeps diff background across the whole row', () => {
   assert.equal(visibleWidth(padded), 12)
   assert.ok(padded.endsWith(' '.repeat(5)))
   assert.equal(padded.includes('\x1b[0m'), false)
+  const closed = padAnsiToWidth('\x1b[33mshort\x1b[0m', 10)
+  assert.equal(visibleWidth(closed), 10)
+  assert.ok(closed.endsWith('\x1b[0m'))
+  assert.ok(closed.includes('short     '))
+})
+
+test('composePaintOutput pads a short card line so the next row cannot inherit glyphs', () => {
+  const frame = composePaintOutput({
+    width: 12,
+    height: 2,
+    paintRows: ['\x1b[2;3m思考残留\x1b[0m', '\x1b[33m● tool\x1b[0m'],
+    previousRows: [],
+    sizeChanged: true,
+    chromeChanged: false,
+    chromeStart: 0,
+    cursorRow: 2,
+    cursorColumn: 1,
+  })
+  const rows = [...frame.matchAll(/\x1b\[\d+;1H\x1b\[0m\x1b\[2K(.*?)\x1b\[0m/g)].map(match => match[1])
+  assert.equal(rows.length, 2)
+  assert.equal(visibleWidth(rows[0] ?? ''), 12)
+  assert.equal(visibleWidth(rows[1] ?? ''), 12)
+  assert.equal(frame.includes('\x1b[K'), false)
+  assert.ok(frame.includes('\x1b[1;1H\x1b[0m\x1b[2K'))
+  assert.ok(frame.includes('\x1b[2;1H\x1b[0m\x1b[2K'))
+})
+
+test('composePaintOutput never writes past the terminal height', () => {
+  const frame = composePaintOutput({
+    width: 8,
+    height: 2,
+    paintRows: ['one', 'two', 'three'],
+    previousRows: [],
+    sizeChanged: false,
+    chromeChanged: false,
+    chromeStart: 0,
+    cursorRow: 9,
+    cursorColumn: 1,
+  })
+  assert.equal(frame.includes('\x1b[3;1H'), false)
+  assert.equal(frame.includes('\x1b[9;1H'), false)
+  assert.ok(frame.includes('\x1b[2;1H'))
+})
+
+test('resolvePaintIntervalMs clamps jump-host cadence', () => {
+  assert.equal(resolvePaintIntervalMs(undefined, {}), 120)
+  assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '250' }), 250)
+  assert.equal(resolvePaintIntervalMs(40, { DSH_TUI_PAINT_MS: '9999' }), 40)
+  assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '10' }), 40)
+  assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '5000' }), 1000)
+})
+
+test('composePaintOutput is one write of dirty rows only', () => {
+  const first = composePaintOutput({
+    width: 8,
+    height: 2,
+    paintRows: ['hello', 'world'],
+    previousRows: [],
+    sizeChanged: true,
+    chromeChanged: false,
+    chromeStart: 0,
+    cursorRow: 2,
+    cursorColumn: 2,
+  })
+  assert.equal(first.includes('\x1b[H\x1b[J'), true)
+  assert.ok((first.match(/\x1b\[\d+;1H/g) ?? []).length >= 2)
+  assert.ok(first.includes('hello'))
+  assert.ok(first.includes('world'))
+  const second = composePaintOutput({
+    width: 8,
+    height: 2,
+    paintRows: ['hello', 'there'],
+    previousRows: ['hello', 'world'],
+    sizeChanged: false,
+    chromeChanged: false,
+    chromeStart: 0,
+    cursorRow: 2,
+    cursorColumn: 2,
+  })
+  assert.equal(second.includes('\x1b[H\x1b[J'), false)
+  assert.equal((second.match(/\x1b\[\d+;1H/g) ?? []).length, 1)
+  assert.ok(second.includes('there'))
+  assert.equal(second.includes('hello'), false)
 })
 
 test('prompt plus ASCII input cursor stays on integer columns', () => {
@@ -262,6 +351,106 @@ test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => 
   assert.equal(frame.length, 24)
   assert.ok(frame.some(line => line.includes('hello')))
   assert.ok(frame.some(line => line.includes('DeepSeek Harness')))
+})
+
+test('planDockNote follows task status instead of always saying plan mode is off', () => {
+  assert.equal(planDockNote({
+    active: false,
+    pending: false,
+    todos: [{ content: 'edit diff', status: 'in_progress' }],
+  }), '正在按计划执行。')
+  assert.equal(planDockNote({
+    active: false,
+    pending: false,
+    todos: [{ content: 'edit diff', status: 'completed' }],
+  }), '计划任务已全部完成。')
+  assert.equal(planDockNote({
+    active: true,
+    pending: false,
+    todos: [{ content: 'outline', status: 'in_progress' }],
+  }), '只规划、不改代码；确认后再执行。')
+  assert.equal(planDockNote({
+    active: false,
+    pending: false,
+    todos: [],
+  }), '计划模式已关闭，可用 /plan 重新进入。')
+})
+
+test('planIsLive treats completed archived plans as dock-ineligible', () => {
+  assert.equal(planIsLive({
+    active: true, pending: false, todos: [{ content: 'a', status: 'pending' }],
+  }), true)
+  assert.equal(planIsLive({
+    active: false, pending: false, todos: [{ content: 'a', status: 'completed' }],
+  }), false)
+  assert.equal(planIsLive({
+    active: false, pending: false, todos: [{ content: 'a', status: 'in_progress' }],
+  }), true)
+})
+
+test('re-entering plan mode on an incomplete list does not archive it', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: true } })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [{ content: 'still going', status: 'in_progress' }] },
+  })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: true } })
+  const plans = tui.rows.filter(row => row.kind === 'plan')
+  assert.equal(plans.length, 1)
+  assert.equal(plans[0].archived, false)
+  assert.equal(plans[0].active, true)
+  assert.equal(plans[0].todos[0]?.content, 'still going')
+})
+
+test('a second plan/mode on archives the previous live plan into the transcript', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: true } })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [{ content: 'first plan', status: 'completed' }] },
+  })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: false } })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: true } })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [{ content: 'second plan', status: 'in_progress' }] },
+  })
+  const plans = tui.rows.filter(row => row.kind === 'plan')
+  assert.equal(plans.length, 2)
+  assert.equal(plans[0].archived, true)
+  assert.equal(plans[0].todos[0]?.content, 'first plan')
+  assert.equal(plans[1].archived, false)
+  assert.equal(plans[1].todos[0]?.content, 'second plan')
+  const frame = tui.captureFrame(80, 24)
+  assert.ok(frame.some(line => line.includes('first plan') || line.includes('已归档') || line.includes('计划')))
+  assert.ok(frame.some(line => line.includes('second plan') || line.includes('进行中')))
+})
+
+test('parseFindQuery and matchTranscriptRows filter thinking vs reply', () => {
+  assert.deepEqual(parseFindQuery('思考 padAnsi'), { category: 'thinking', query: 'padAnsi' })
+  assert.deepEqual(parseFindQuery('thinking overflow'), { category: 'thinking', query: 'overflow' })
+  assert.deepEqual(parseFindQuery('just text'), { query: 'just text' })
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'assistant/message',
+    data: { message: { content: [
+      { type: 'reasoning', text: 'look at padAnsiToWidth first' },
+      { type: 'text', text: 'done with the overflow fix' },
+    ] } },
+  })
+  const thinking = matchTranscriptRows(tui.rows, '思考 padAnsi')
+  assert.equal(thinking.length, 1)
+  assert.equal(thinking[0]?.kind, 'reasoning')
+  const replies = matchTranscriptRows(tui.rows, '回复 overflow')
+  assert.equal(replies.length, 1)
+  assert.equal(replies[0]?.kind, 'assistant')
 })
 
 test('plan mode and ask-user questions get their own collapsed cards', () => {

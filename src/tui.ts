@@ -5,9 +5,9 @@
  * `ask_user_question` prompts from the keyboard, and drives one configured
  * agent with followup/steer.
  *
- * The renderer uses plain ANSI and a throttled full repaint, which keeps it
- * predictable over slow SSH links and avoids terminal-library dependency
- * drift inside the plugin.
+ * The renderer uses plain ANSI and coalesces each frame into one stdout
+ * write of dirty rows only — jump-host / proxied SSH should see one packet
+ * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS (default 120).
  */
 
 import { spawn } from 'node:child_process'
@@ -81,6 +81,12 @@ export interface TuiConfig {
   onSelectionChanged?: (selection: ModelSelection) => void
   /** Open the history-session picker immediately after mounting (--resume). */
   resumePicker?: boolean
+  /**
+   * Minimum milliseconds between paints while a turn is streaming.
+   * Jump-host / proxied SSH can raise this so token ticks do not flood the
+   * link. Defaults from `DSH_TUI_PAINT_MS` (120).
+   */
+  paintIntervalMs?: number
 }
 
 type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
@@ -141,6 +147,8 @@ type Row =
       todos: PlanTodoItem[]
       planMarkdown?: string
       expanded: boolean
+      /** When true the plan stays in the scrolling transcript, not the dock. */
+      archived?: boolean
     }
   | {
       kind: 'question'
@@ -296,6 +304,58 @@ export interface TuiController {
 
 const RENDER_INTERVAL_MS = 120
 const WAIT_INDICATOR_MS = 8000
+const MIN_PAINT_INTERVAL_MS = 40
+const MAX_PAINT_INTERVAL_MS = 1000
+
+/**
+ * Paint cadence for jump-host / proxied SSH. Token ticks coalesce into one
+ * frame; the default stays snappy, slower links raise `DSH_TUI_PAINT_MS`.
+ */
+export function resolvePaintIntervalMs(
+  configured?: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = configured ?? Number.parseInt(env.DSH_TUI_PAINT_MS ?? '', 10)
+  if (!Number.isFinite(raw) || raw <= 0) return RENDER_INTERVAL_MS
+  return Math.min(MAX_PAINT_INTERVAL_MS, Math.max(MIN_PAINT_INTERVAL_MS, Math.floor(raw)))
+}
+
+/** One incremental paint as a single stdout write (one SSH packet when corked). */
+export function composePaintOutput(options: {
+  width: number
+  height: number
+  paintRows: readonly string[]
+  previousRows: readonly string[]
+  sizeChanged: boolean
+  chromeChanged: boolean
+  chromeStart: number
+  cursorRow: number
+  cursorColumn: number
+}): string {
+  const { width, height, paintRows, previousRows, sizeChanged, chromeChanged, chromeStart } = options
+  let out = '\x1b[?25l'
+  const prev = sizeChanged ? [] : previousRows
+  if (sizeChanged) out += '\x1b[H\x1b[J'
+  // Never address row height+1: that scrolls the SSH viewport and leaves
+  // thinking/tool/assistant glyphs sitting on the next card.
+  const rowCount = Math.min(height, paintRows.length)
+  for (let i = 0; i < rowCount; i++) {
+    const current = paintRows[i] ?? ''
+    if (current === prev[i] && !(chromeChanged && i >= chromeStart)) continue
+    const clipped = padAnsiToWidth(current, width)
+    // EL2 *before* the glyphs, from column 1. A full-width write followed
+    // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
+    // next card instead of the row we just drew.
+    out += `\x1b[${i + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
+  }
+  if (rowCount < height) {
+    out += `\x1b[${rowCount + 1};1H\x1b[J`
+  }
+  out += '\x1b[0m'
+  const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
+  out += `\x1b[${cursorRow};${Math.max(1, options.cursorColumn)}H\x1b[?25h`
+  return out
+}
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -467,6 +527,7 @@ const LOCAL_COMMANDS = [
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
   { name: 'setup', description: 'configure an API-key provider (DeepSeek / OpenCode); SuperGrok uses local OAuth' },
+  { name: 'find', description: 'search thinking / plan / subagent / reply cards' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
 
@@ -533,12 +594,65 @@ export function padAnsiToWidth(text: string, width: number): string {
   if (width <= 0) return ''
   const clipped = clipAnsiToWidth(text, width)
   const used = visibleWidth(clipped)
-  return used >= width ? clipped : `${clipped}${' '.repeat(width - used)}`
+  if (used >= width) return clipped
+  const pad = ' '.repeat(width - used)
+  // Insert spaces before a trailing SGR reset so backgrounds (diff rows)
+  // and the cell budget both fill the whole terminal row.
+  if (clipped.endsWith('\x1b[0m')) return `${clipped.slice(0, -4)}${pad}\x1b[0m`
+  return `${clipped}${pad}`
 }
 
-/** Visible width of an ANSI-styled line, ignoring SGR sequences. */
+/** Visible width of an ANSI-styled line, ignoring CSI / OSC sequences. */
 export function visibleWidth(text: string): number {
-  return displayWidth(text.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, ''))
+  let used = 0
+  let index = 0
+  while (index < text.length) {
+    if (text.charCodeAt(index) === 0x1b) {
+      index = skipAnsiSequence(text, index)
+      continue
+    }
+    const cp = text.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    used += displayWidth(char)
+    index += char.length
+  }
+  return used
+}
+
+/** Advance past one ESC sequence starting at `index`. */
+function skipAnsiSequence(text: string, index: number): number {
+  let seqEnd = index + 1
+  if (seqEnd >= text.length) return text.length
+  const intro = text.charCodeAt(seqEnd)
+  if (intro === 0x5b) {
+    seqEnd += 1
+    while (seqEnd < text.length) {
+      const code = text.charCodeAt(seqEnd)
+      seqEnd += 1
+      if (code >= 0x40 && code <= 0x7e) break
+    }
+    return seqEnd
+  }
+  if (intro === 0x5d) {
+    seqEnd += 1
+    while (seqEnd < text.length) {
+      const code = text.charCodeAt(seqEnd)
+      seqEnd += 1
+      if (code === 0x07) break
+      if (code === 0x1b && text.charCodeAt(seqEnd) === 0x5c) {
+        seqEnd += 1
+        break
+      }
+    }
+    return seqEnd
+  }
+  while (seqEnd < text.length) {
+    const code = text.charCodeAt(seqEnd)
+    seqEnd += 1
+    if (code >= 0x40 && code <= 0x7e) break
+  }
+  return seqEnd
 }
 
 /** Repeat a glyph until it occupies exactly `width` cells. */
@@ -904,24 +1018,7 @@ export function clipAnsiToWidth(text: string, width: number): string {
   let index = 0
   while (index < text.length) {
     if (text.charCodeAt(index) === 0x1b) {
-      // CSI / OSC / other ESC sequences: consume through the final byte.
-      // Do not use [@-~] — that class includes digits (`5`) and would
-      // truncate 256-color SGR such as `38;5;22;48;5;194m`.
-      let seqEnd = index + 1
-      if (text.charCodeAt(seqEnd) === 0x5b) {
-        seqEnd += 1
-        while (seqEnd < text.length) {
-          const code = text.charCodeAt(seqEnd)
-          seqEnd += 1
-          if (code >= 0x40 && code <= 0x7e) break
-        }
-      } else {
-        while (seqEnd < text.length) {
-          const code = text.charCodeAt(seqEnd)
-          seqEnd += 1
-          if (code >= 0x40 && code <= 0x7e) break
-        }
-      }
+      const seqEnd = skipAnsiSequence(text, index)
       out += text.slice(index, seqEnd)
       index = seqEnd
       continue
@@ -1295,6 +1392,128 @@ const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
   pending: '○',
   in_progress: '◐',
   completed: '●',
+}
+
+/** True while a plan still belongs in the dock (latest incomplete work). */
+export function planIsLive(plan: {
+  active: boolean
+  pending: boolean
+  todos: readonly PlanTodoItem[]
+  planMarkdown?: string
+  archived?: boolean
+}): boolean {
+  if (plan.archived === true) return false
+  if (plan.active || plan.pending) return true
+  if (plan.todos.some(item => item.status !== 'completed')) return true
+  return false
+}
+
+export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal'
+
+/** Category for jump / search. Assistant replies are not collapsible cards. */
+export function cardCategoryOf(row: { kind: string }): CardCategory | undefined {
+  if (row.kind === 'reasoning' || row.kind === 'streaming-reasoning') return 'thinking'
+  if (row.kind === 'plan') return 'plan'
+  if (row.kind === 'subagent') return 'subagent'
+  if (row.kind === 'assistant') return 'reply'
+  if (row.kind === 'tool') return 'tool'
+  if (row.kind === 'question') return 'question'
+  if (row.kind === 'goal') return 'goal'
+  return undefined
+}
+
+const CARD_CATEGORY_LABEL: Record<CardCategory, string> = {
+  thinking: '思考',
+  plan: '计划',
+  subagent: '子代理',
+  reply: '回复',
+  tool: '工具',
+  question: '提问',
+  goal: '目标',
+}
+
+const SEARCHABLE_CATEGORIES: readonly CardCategory[] = ['thinking', 'plan', 'subagent', 'reply']
+
+function parseCardCategoryToken(token: string): CardCategory | undefined {
+  const id = token.trim().toLowerCase()
+  if (id === 'thinking' || id === 'think' || id === '推理' || id === '思考') return 'thinking'
+  if (id === 'plan' || id === '计划') return 'plan'
+  if (id === 'subagent' || id === 'sub' || id === '子代理') return 'subagent'
+  if (id === 'reply' || id === 'assistant' || id === '回复') return 'reply'
+  if (id === 'tool' || id === '工具') return 'tool'
+  if (id === 'question' || id === '提问') return 'question'
+  if (id === 'goal' || id === '目标') return 'goal'
+  return undefined
+}
+
+/** Split `/find thinking padAnsi` into an optional category and a query. */
+export function parseFindQuery(raw: string): { category?: CardCategory; query: string } {
+  const text = raw.trim()
+  if (text === '') return { query: '' }
+  const match = /^(\S+)(?:\s+(.*))?$/u.exec(text)
+  if (match === null) return { query: text }
+  const category = parseCardCategoryToken(match[1] ?? '')
+  if (category === undefined) return { query: text }
+  return { category, query: (match[2] ?? '').trim() }
+}
+
+function rowSearchHaystack(row: Row): string {
+  switch (row.kind) {
+    case 'reasoning':
+    case 'assistant':
+    case 'user':
+    case 'system':
+    case 'error':
+    case 'brand':
+      return row.text
+    case 'tool':
+      return `${row.title} ${row.summary} ${row.output} ${row.args}`
+    case 'subagent':
+      return `${row.label} ${row.lastActivity} ${row.logs.map(entry => entry.text).join('\n')}`
+    case 'plan':
+      return `${row.planMarkdown ?? ''} ${row.todos.map(item => item.content).join('\n')}`
+    case 'question':
+      return `${row.title} ${row.summary} ${row.detail ?? ''} ${row.header ?? ''}`
+    case 'goal':
+      return `${row.objective} ${row.blockedReason ?? ''}`
+    default:
+      return ''
+  }
+}
+
+/** Transcript rows matching a `/find` query, newest last. */
+export function matchTranscriptRows(
+  rows: readonly Row[],
+  raw: string,
+): Row[] {
+  const { category, query } = parseFindQuery(raw)
+  const needle = query.toLowerCase()
+  return rows.filter(row => {
+    const kind = cardCategoryOf(row)
+    if (kind === undefined) return false
+    if (category !== undefined && kind !== category) return false
+    if (needle === '') return SEARCHABLE_CATEGORIES.includes(kind) || category !== undefined
+    return rowSearchHaystack(row).toLowerCase().includes(needle)
+  })
+}
+
+/** One-line note under an expanded plan strip. */
+export function planDockNote(plan: {
+  active: boolean
+  pending: boolean
+  todos: readonly PlanTodoItem[]
+  planMarkdown?: string
+}): string {
+  const running = plan.todos.some(item => item.status === 'in_progress')
+  const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
+  if (plan.pending) return '模式切换将在下一步生效。'
+  if (plan.active) return '只规划、不改代码；确认后再执行。'
+  if (running) return '正在按计划执行。'
+  if (allDone) return '计划任务已全部完成。'
+  if (plan.todos.length > 0 || (plan.planMarkdown !== undefined && plan.planMarkdown !== '')) {
+    return '计划还在，尚未全部完成。'
+  }
+  return '计划模式已关闭，可用 /plan 重新进入。'
 }
 
 /** Compact per-status counts matching the web plan strip. */
@@ -1923,6 +2142,10 @@ export class SshTui {
   private lastChromeKey = ''
   private lastPaintWidth = 0
   private lastPaintHeight = 0
+  private readonly paintIntervalMs: number
+  private searchHits: Row[] = []
+  private searchIndex = -1
+  private searchQuery = ''
 
   constructor(
     private readonly ctx: Context,
@@ -1946,9 +2169,10 @@ export class SshTui {
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+    this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs)
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
-    this.pushRow({ kind: 'system', text: '输入 /help 查看命令 · /model 切换模型 · ↑/↓ 选择卡片 · Enter 展开/折叠 · Ctrl+R 全部展开/收起 · Ctrl+T 折叠输入 · Esc 取消' })
+    this.pushRow({ kind: 'system', text: '输入 /help 查看快捷键 · /find 搜索思考/计划/子代理/回复 · 空输入时 ↑/↓ 选卡片' })
   }
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
@@ -1991,7 +2215,7 @@ export class SshTui {
           (row.kind === 'question' && row.status === 'waiting')
           || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
           || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked')))
-      if (animating && now - this.lastPaintAt >= 200) {
+      if (animating && now - this.lastPaintAt >= Math.max(this.paintIntervalMs, 200)) {
         this.dirty = true
       }
       // While a turn is waiting on the provider with no new events, repaint at
@@ -2007,7 +2231,7 @@ export class SshTui {
         this.lastPaintAt = now
         this.render()
       }
-    }, RENDER_INTERVAL_MS)
+    }, this.paintIntervalMs)
     this.renderTimer.unref?.()
 
     void this.maybeRunOnboarding().catch((error: unknown) => {
@@ -2263,14 +2487,42 @@ export class SshTui {
   }
 
   private findLivePlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
-    return this.rows.findLast((row): row is Extract<Row, { kind: 'plan' }> => row.kind === 'plan')
+    return this.rows.findLast((row): row is Extract<Row, { kind: 'plan' }> =>
+      row.kind === 'plan' && planIsLive(row))
+  }
+
+  /** Older / finished plans stay in the scrolling transcript. */
+  private archiveStalePlans(keep?: Extract<Row, { kind: 'plan' }>): void {
+    for (const row of this.rows) {
+      if (row.kind !== 'plan' || row === keep) continue
+      if (row.archived === true) continue
+      row.archived = true
+      row.active = false
+      row.pending = false
+      row.expanded = false
+    }
   }
 
   private upsertPlanRow(patch: Partial<Extract<Row, { kind: 'plan' }>>): Extract<Row, { kind: 'plan' }> {
     const existing = this.findLivePlanRow()
-    if (existing !== undefined) {
+    // A new docked plan only starts when the current one is no longer live
+    // (completed / archived). Re-entering plan mode on the same incomplete
+    // list must keep updating that row, not archive it.
+    if (existing !== undefined && planIsLive(existing)) {
       Object.assign(existing, patch)
+      existing.archived = false
+      if (!planIsLive(existing)) {
+        existing.archived = true
+        existing.expanded = false
+      }
+      this.archiveStalePlans(planIsLive(existing) ? existing : undefined)
       return existing
+    }
+    if (existing !== undefined) {
+      existing.archived = true
+      existing.active = false
+      existing.pending = false
+      existing.expanded = false
     }
     const row: Extract<Row, { kind: 'plan' }> = {
       kind: 'plan',
@@ -2279,16 +2531,16 @@ export class SshTui {
       todos: patch.todos ?? [],
       ...(patch.planMarkdown === undefined ? {} : { planMarkdown: patch.planMarkdown }),
       expanded: false,
+      archived: false,
     }
     this.pushRow(row)
+    this.archiveStalePlans(row)
     return row
   }
 
   /** Whether the live plan strip should occupy the workspace footer. */
   private shouldDockPlan(): boolean {
-    const plan = this.findLivePlanRow()
-    if (plan === undefined) return false
-    return plan.active || plan.pending || plan.todos.length > 0 || (plan.planMarkdown !== undefined && plan.planMarkdown !== '')
+    return this.findLivePlanRow() !== undefined
   }
 
   /** Compact web-style plan strip pinned above the input, not in the transcript. */
@@ -2297,8 +2549,9 @@ export class SshTui {
     if (plan === undefined) return []
     const inner = Math.max(1, width - 2)
     const running = plan.todos.some(item => item.status === 'in_progress')
+    const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
     const spinner = (plan.active || plan.pending || running) ? ` ${this.spinnerFrame()}` : ''
-    const mode = plan.pending ? '切换中' : plan.active ? '计划模式' : '计划'
+    const mode = plan.pending ? '切换中' : plan.active ? '计划模式' : running ? '计划' : allDone ? '计划完成' : '计划'
     const counts = todoProgressLabel(plan.todos)
     const title = planTitleFromMarkdown(plan.planMarkdown ?? '')
     const summary = title ?? (counts === '' ? '还没有任务' : counts)
@@ -2308,11 +2561,7 @@ export class SshTui {
     const lines = [this.styleLine('plan-dock', padToWidth(header, width))]
     if (yieldBottom || !plan.expanded) return lines
 
-    const note = plan.pending
-      ? '模式切换将在下一步生效。'
-      : plan.active
-        ? '只规划、不改代码；确认后再执行。'
-        : '计划模式已关闭，可用 /plan 重新进入。'
+    const note = planDockNote(plan)
     lines.push(this.styleLine('plan-dock', padToWidth(`   ${note}`, width)))
     if (plan.planMarkdown !== undefined && plan.planMarkdown !== '') {
       const markdown = renderMarkdownLines(plan.planMarkdown, inner, this.color)
@@ -2404,6 +2653,83 @@ export class SshTui {
     this.markDirty()
   }
 
+  private focusCard(row: Row | CollapsibleBlock | undefined): void {
+    if (row === undefined) return
+    if (row.kind === 'assistant') {
+      this.focusedRow = null
+    } else if ('expanded' in row) {
+      this.focusedRow = row as CollapsibleBlock
+    }
+    this.scrollOffset = 0
+    this.markDirty()
+  }
+
+  /** Jump to the newest card in a category (thinking / plan / subagent / reply). */
+  private jumpToCategory(category: CardCategory): void {
+    if (category === 'plan') {
+      const live = this.findLivePlanRow()
+      if (live !== undefined) {
+        this.focusCard(live)
+        this.pushRow({ kind: 'system', text: `已跳到${CARD_CATEGORY_LABEL[category]}（底栏计划条）。` })
+        return
+      }
+    }
+    const target = this.rows.findLast(row => cardCategoryOf(row) === category)
+    if (target === undefined) {
+      this.pushRow({ kind: 'system', text: `当前没有${CARD_CATEGORY_LABEL[category]}卡片。` })
+      this.markDirty()
+      return
+    }
+    if ('expanded' in target) target.expanded = true
+    this.focusCard(target)
+    this.pushRow({ kind: 'system', text: `已跳到最新${CARD_CATEGORY_LABEL[category]}。` })
+  }
+
+  private applySearchHits(query: string, hits: Row[]): void {
+    this.searchQuery = query
+    this.searchHits = hits
+    if (hits.length === 0) {
+      this.searchIndex = -1
+      this.pushRow({ kind: 'system', text: query === '' ? '没有可搜索的卡片。' : `没有匹配「${query}」的卡片。` })
+      this.markDirty()
+      return
+    }
+    this.searchIndex = hits.length - 1
+    const hit = hits[this.searchIndex]
+    if (hit !== undefined && 'expanded' in hit) hit.expanded = true
+    this.focusCard(hit)
+    const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
+    this.pushRow({
+      kind: 'system',
+      text: `找到 ${hits.length} 条${query === '' ? '' : `「${query}」`} · 第 ${hits.length}/${hits.length} 条（${where}）。Ctrl+G / Alt+N 下一条，Alt+P 上一条。`,
+    })
+  }
+
+  private runFindCommand(arg: string): void {
+    const parsed = parseFindQuery(arg)
+    const label = parsed.category === undefined ? '' : `${CARD_CATEGORY_LABEL[parsed.category]} `
+    const hits = matchTranscriptRows(this.rows, arg)
+    this.applySearchHits(`${label}${parsed.query}`.trim(), hits)
+  }
+
+  private stepSearch(delta: number): void {
+    if (this.searchHits.length === 0) {
+      this.pushRow({ kind: 'system', text: '还没有搜索结果。用 /find 思考 padAnsi，或 Ctrl+/ 打开搜索。' })
+      this.markDirty()
+      return
+    }
+    const count = this.searchHits.length
+    this.searchIndex = (this.searchIndex + delta + count) % count
+    const hit = this.searchHits[this.searchIndex]
+    if (hit !== undefined && 'expanded' in hit) hit.expanded = true
+    this.focusCard(hit)
+    const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
+    this.pushRow({
+      kind: 'system',
+      text: `搜索「${this.searchQuery}」· 第 ${this.searchIndex + 1}/${count} 条（${where}）。`,
+    })
+  }
+
   private paint = (): void => {
     if (this.exiting) return
     const width = Math.max(10, process.stdout.columns || 80)
@@ -2447,7 +2773,7 @@ export class SshTui {
         const focused = this.focusedRow === row
         const marker = row.expanded ? '▾' : '▸'
         const lines = row.text.split('\n').length
-        const header = `${marker} 已思考 · ${lines} 行${row.expanded ? '' : ' · Ctrl+R 展开'}`
+        const header = `${marker} 已思考 · ${lines} 行${row.expanded ? '' : ' · Enter 展开'}`
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
@@ -2466,9 +2792,11 @@ export class SshTui {
         // "[33m" text on screen; color the dot between two sanitized halves.
         const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
         const styleToolHeader = (line: string): string => {
-          const dotIndex = line.indexOf('●')
-          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', line)
-          return `${this.styleLine('tool', line.slice(0, dotIndex))}\x1b[${dotColor}m●${this.styleLine('tool', line.slice(dotIndex + 1))}`
+          const safe = sanitizeTerminalText(line)
+          if (!this.color) return safe
+          const dotIndex = safe.indexOf('●')
+          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', safe)
+          return `\x1b[33m${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[33m${safe.slice(dotIndex + 1)}\x1b[0m`
         }
         const spinner = running ? ` ${this.spinnerFrame()}` : ''
         const state = running ? 'running…' : ok ? 'ok' : 'error'
@@ -2510,9 +2838,11 @@ export class SshTui {
         const ok = row.status === 'ok'
         const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
         const styleHeader = (line: string): string => {
-          const dotIndex = line.indexOf('●')
-          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', line)
-          return `${this.styleLine('tool', line.slice(0, dotIndex))}\x1b[${dotColor}m●${this.styleLine('tool', line.slice(dotIndex + 1))}`
+          const safe = sanitizeTerminalText(line)
+          if (!this.color) return safe
+          const dotIndex = safe.indexOf('●')
+          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', safe)
+          return `\x1b[33m${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[33m${safe.slice(dotIndex + 1)}\x1b[0m`
         }
         const spinner = running ? ` ${this.spinnerFrame()}` : ''
         const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : ' · Enter 展开'}`
@@ -2540,8 +2870,26 @@ export class SshTui {
         continue
       }
       if (row.kind === 'plan') {
-        // The live plan occupies the workspace footer (web TodoDock). Keep it
-        // out of the scrolling transcript so it never collides with the input.
+        if (planIsLive(row) && this.findLivePlanRow() === row) continue
+        const counts = todoProgressLabel(row.todos)
+        const title = planTitleFromMarkdown(row.planMarkdown ?? '')
+        const summary = title ?? (counts === '' ? '已归档' : counts)
+        const header = `计划 · ${summary}${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, 'plan-dock', header, width)
+        if (row.expanded) {
+          addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`))
+          if (row.planMarkdown !== undefined && row.planMarkdown !== '') {
+            for (const line of renderMarkdownLines(row.planMarkdown, Math.max(1, width - 2), this.color).slice(0, 8)) {
+              addDisplay(`  ${line}`)
+            }
+          }
+          for (const item of row.todos) {
+            const mark = TODO_STATUS_MARK[item.status]
+            for (const wrapped of wrap(`${mark} ${item.content}`, Math.max(1, width - 2))) {
+              addDisplay(this.styleLine(todoItemKind(item.status), `  ${wrapped}`))
+            }
+          }
+        }
         continue
       }
       if (row.kind === 'question') {
@@ -2841,6 +3189,9 @@ export class SshTui {
     statusText += sub.provider === undefined
       ? ` · sub:${sub.model}${subEffort}`
       : ` · sub:${subProvider}/${sub.model}${subEffort}`
+    if (this.searchHits.length > 0 && this.searchIndex >= 0) {
+      statusText += ` · 搜索 ${this.searchIndex + 1}/${this.searchHits.length}`
+    }
     if (inputView.folded) statusText += ' · 输入已折叠 · Ctrl+T 展开'
     else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
@@ -2907,34 +3258,26 @@ export class SshTui {
     const chromeChanged = chromeKey !== this.lastChromeKey
     const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight
 
-    // Incremental repaint: rewrite only rows whose content changed, so slow
-    // SSH links don't rebuild (and flicker) the whole screen on every tick.
-    // Always erase to the end of the line *and* clip to the measured cell
-    // width: leftover wide glyphs otherwise wrap into the input box.
-    this.write('\x1b[?25l')
-    if (sizeChanged) {
-      this.write('\x1b[H\x1b[J')
-      this.lastPaintRows = []
-    }
-    const maxRows = Math.max(paintRows.length, this.lastPaintRows.length, height)
-    for (let i = 0; i < maxRows; i++) {
-      const current = paintRows[i]
-      if (current === this.lastPaintRows[i] && !(chromeChanged && i >= chromeStart) && i < height) continue
-      const clipped = current === undefined ? '' : padAnsiToWidth(current, width)
-      this.write(`\x1b[${i + 1};1H\x1b[0m${clipped}\x1b[K`)
-    }
-    if (paintRows.length < Math.max(this.lastPaintRows.length, height)) {
-      this.write(`\x1b[${paintRows.length + 1};1H\x1b[J`)
-    }
-    this.write('\x1b[0m')
-    this.lastPaintRows = paintRows
+    // One stdout write per frame: dirty rows only, so jump-host SSH sees a
+    // single packet instead of one write per line. Clip/pad so leftover
+    // wide glyphs cannot wrap into the input box.
+    const inputTopRow = visible.length + planDockLines.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
+    const row = Math.min(height, inputTopRow + cursorRowOffset)
+    this.write(composePaintOutput({
+      width,
+      height,
+      paintRows,
+      previousRows: this.lastPaintRows,
+      sizeChanged,
+      chromeChanged,
+      chromeStart,
+      cursorRow: row,
+      cursorColumn: column,
+    }))
+    this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     this.lastChromeKey = chromeKey
     this.lastPaintWidth = width
     this.lastPaintHeight = height
-
-    const inputTopRow = visible.length + planDockLines.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
-    const row = Math.min(height, inputTopRow + cursorRowOffset)
-    this.write(`\x1b[${row};${Math.max(1, column)}H\x1b[?25h`)
   }
 
   private buildSuggestions(): { name: string; description: string; local: boolean }[] {
@@ -3097,7 +3440,7 @@ export class SshTui {
       kind === 'plan-dock' ? '38;5;180' :
       kind === 'error' ? '31' :
       '90'
-    return `\x1b[${code}m${safe}`
+    return `\x1b[${code}m${safe}\x1b[0m`
   }
 
   // ── event handling ──────────────────────────────────────────────────────
@@ -4677,9 +5020,21 @@ export class SshTui {
       return
     }
     if (combined.startsWith('\x1b') && combined.length > 1) {
-      // Alt+<key> sequences: ignore the ESC half instead of triggering cancel,
-      // and type the printable remainder.
-      this.handlePlainText(combined.slice(1))
+      const alt = combined.slice(1)
+      if (alt === '1') { this.jumpToCategory('thinking'); return }
+      if (alt === '2') { this.jumpToCategory('plan'); return }
+      if (alt === '3') { this.jumpToCategory('subagent'); return }
+      if (alt === '4') { this.jumpToCategory('reply'); return }
+      if (alt === 'n' || alt === 'N') { this.stepSearch(1); return }
+      if (alt === 'p' || alt === 'P') { this.stepSearch(-1); return }
+      if (alt === 'f' || alt === 'F' || alt === '/') {
+        this.input = '/find '
+        this.cursor = this.input.length
+        this.markDirty()
+        return
+      }
+      // Other Alt+<key>: ignore ESC so it does not cancel, type the remainder.
+      this.handlePlainText(alt)
       return
     }
     this.handlePlainText(combined)
@@ -4783,6 +5138,16 @@ export class SshTui {
     }
     if (this.dialog !== undefined) {
       this.handleDialogChar(char)
+      return
+    }
+    if (char === '\x07') {
+      this.stepSearch(1)
+      return
+    }
+    if (char === '\x1f') {
+      this.input = '/find '
+      this.cursor = this.input.length
+      this.markDirty()
       return
     }
     if (char === '\t') {
@@ -5359,9 +5724,10 @@ export class SshTui {
             ...local,
             ...dsh,
             '',
-            '运行中按 Enter 可插入指示；Esc / Ctrl+C 取消当前轮次。',
-            '↑/↓ 或 Ctrl+N/P 选择思考、工具、子代理、计划或提问卡片；Enter 展开/折叠；Ctrl+R 全部展开或收起。',
-            '计划模式、提问用户和当前目标会显示独立卡片；多个子代理默认各自折叠，互不混排。',
+            '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲 Ctrl+C 退出。',
+            '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开；Ctrl+R 全部展开/收起；Ctrl+T 折叠输入。',
+            'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
+            '/find [思考|计划|子代理|回复] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',
             '/model 默认列出当前提供商的模型；当前是 SuperGrok 时直接选 grok-4.6 / grok-4.5 和思考强度（含 xhigh）。要换提供商再选「更换提供商」。',
             '/setup 只用于配置 API Key 提供商。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。',
             '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，还是其它已注册提供商。',
@@ -5413,12 +5779,18 @@ export class SshTui {
           this.markDirty()
         })
         break
+      case 'find':
+        this.runFindCommand(arg)
+        break
       case 'clear':
         this.rows.length = 0
         this.streaming = undefined
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
         this.focusedRow = null
+        this.searchHits = []
+        this.searchIndex = -1
+        this.searchQuery = ''
         this.pushRow({ kind: 'system', text: '转录已清空。子代理、计划与提问卡片会在新事件到达时重新出现。' })
         break
       case 'status':
@@ -5485,7 +5857,7 @@ export class SshTui {
             const activity = card?.lastActivity ? ` · ${card.lastActivity}` : ''
             return `▶ ${label}  ${sub.id}（${sub.provider}）运行 ${Math.floor((Date.now() - sub.startedAt) / 1000)}s  [${runId.slice(0, 8)}]${activity}`
           })
-          this.pushRow({ kind: 'system', text: `${lines.join('\n')}\n↑/↓ 选择对应卡片，Enter 展开/折叠，Ctrl+R 全部展开或收起。` })
+          this.pushRow({ kind: 'system', text: `${lines.join('\n')}\n空输入时 ↑/↓ 选卡片，Enter 展开；Alt+3 跳到最新子代理。` })
         }
         break
       }

@@ -145,23 +145,25 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 
 | Key | Action |
 | --- | --- |
-| `Enter` | send the message; while the agent is running, steers it |
+| `Enter` | send; while running, steer; with empty input, toggle the selected card |
 | `Tab` | complete the highlighted slash command |
-| `↑` / `↓` | with empty input, move among thinking/tool/subagent/plan/question cards; otherwise history |
-| `Ctrl+N` / `Ctrl+P` | move among collapsible cards |
+| `↑` / `↓` | empty input: move among cards; otherwise history. Same as `Ctrl+N` / `Ctrl+P` |
 | `Ctrl+R` | expand or collapse all cards |
-| `Esc` / `Ctrl+C` | cancel the running turn |
+| `Ctrl+T` | fold the input box (display-only) |
+| `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
+| `/find [kind] query` | search cards (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
+| `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
+| `Esc` | drop selection → scroll to bottom → cancel the running turn |
+| `Ctrl+C` | cancel the running turn; exit when idle |
 | `Ctrl+D` | exit |
 | `Ctrl+L` | redraw |
-| `Ctrl+T` | fold/unfold the input box (display-only; submission keeps the full text) |
-| `↑` / `↓` | input history |
 | `y` / `n` / `Esc` | answer an approval prompt |
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands with every command the harness registers (`/goal`, `/plan`,
-`/compact`, `/permission`, `/feedback`, ...). `Tab` completes, `Enter` runs.
-`/help` lists everything.
+commands (`/find`, `/model`, `/help`, ...) with every command the harness
+registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
+`Tab` completes, `Enter` runs. `/help` lists everything.
 
 `/model` lists models for the **current** provider first. On SuperGrok that
 is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). Switching
@@ -185,19 +187,19 @@ releases selected continuable children using the harness 0.1.1
 `drainContinuableChildren` capability.
 
 Each subagent is its own collapsible card. One or many children start collapsed,
-so the parent transcript stays readable; `Enter`, click, `Ctrl+N`/`Ctrl+P`, and
-`Ctrl+R` expand or collapse them independently. Running cards show a spinner,
+so the parent transcript stays readable; `Enter`, click, empty-input `↑`/`↓`,
+and `Ctrl+R` expand or collapse them independently. Running cards show a spinner,
 and the status/title line shows `⠋ 子代理 N` instead of mixing child output
 into the parent stream.
 
-Plan mode is pinned to the bottom of the workspace, just above the input.
-The strip stays collapsed as `计划模式 · 1 completed · 2 in progress` and
-expands into the task list (spinning ring for in-progress, filled dot for
-done). Opening the `/` command menu or an approval/question dialog yields
-that bottom space. `exit_plan_mode` renders the plan as markdown instead of
-raw JSON; the review dialog does the same. `ask_user_question` still opens a
-dialog and leaves a collapsed `提问用户` card. `/goal` renders a collapsed
-`目标` card and a matching footer hint.
+The plan strip pins only the **latest incomplete plan**. When the model
+opens a new plan in the same turn, the previous one archives into the
+scrolling transcript and the dock shows the new one. A finished plan says
+「计划任务已全部完成」, not 「计划模式已关闭」. The `/` menu and
+approval/question dialogs yield that bottom space. `exit_plan_mode` is
+markdown. `ask_user_question` still opens a dialog and leaves a collapsed
+`提问用户` card. `/goal` is a collapsed `目标` card. `/find thinking foo`
+or `Alt+1..4` jumps to the matching category.
 
 Interrupted streaming output keeps the already-generated prefix and is marked
 `⚠ interrupted`; team collaboration session events (`team/*`) are surfaced as
@@ -229,12 +231,11 @@ terminal markdown support: heading levels (H1 enlarged/underlined, H2
 underlined, H3 colored), bold, italic, inline code, fenced code blocks,
 lists, quotes, and links all get ANSI styling while remaining
 width-wrapped for the terminal. Reasoning, tool, subagent, plan, and question cards are
-each expandable/collapsible independently — `Ctrl+N` / `Ctrl+P` move the
-selection highlight between them, `Ctrl+R` expands/collapses all blocks at once
-(individual blocks use `↑`/`↓` + `Enter`), and `Esc` drops the selection. With
-the input box empty, `↑`/`↓` move the selection and `Enter` toggles the
-selected block directly. Clicking a card header in the transcript
-also toggles it. Subagent cards start collapsed even when several run at once.
+each expandable/collapsible independently. Empty input: `↑`/`↓` (same as
+`Ctrl+N`/`Ctrl+P`) move the highlight, `Enter` toggles, `Ctrl+R` toggles all,
+`Esc` drops the selection. Click a card header to toggle it. Subagent cards
+start collapsed even when several run at once. `Alt+1..4` jumps to the latest
+thinking / plan / subagent / reply.
 
 The transcript is scrollable: `PgUp`/`PgDn` or the mouse wheel move back
 through earlier reasoning blocks and tool calls, a `↑ 已回看 N 行` indicator
@@ -304,6 +305,16 @@ history-session picker before the main interface; `dsh --profile tui --resume
 and resumes directly. `dsh --profile tui --new` explicitly starts fresh
 without the picker. The in-app `/resume` command remains available for
 switching while running.
+
+## Jump-host / proxied SSH
+
+Each paint is one `stdout.write` of dirty rows only, so a jump host or
+corporate proxy does not see one SSH packet per line. Default cadence is
+about 120 ms. On high-RTT paths raise it:
+
+```sh
+export DSH_TUI_PAINT_MS=250   # 40–1000; higher = fewer packets, choppier stream
+```
 
 ## Development
 

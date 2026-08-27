@@ -26,3 +26,6 @@ sessions/
 docs/screenshots/*-labeled.png
 docs/screenshots/*.ansi.txt
 docs/screenshots/*.pango
+
+# local publish credentials (never copy into the tree)
+.config/
