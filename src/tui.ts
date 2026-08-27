@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { StringDecoder } from 'node:string_decoder'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -31,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
 import { defaultReasoningEffort } from './reasoning.js'
+import { checkForPluginUpdate } from './update-check.js'
 import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
@@ -402,6 +404,15 @@ export function composePaintOutput(options: {
   out += `\x1b[${cursorRow};${Math.max(1, options.cursorColumn)}H\x1b[?25h`
   return out
 }
+const PLUGIN_VERSION = ((): string => {
+  try {
+    const require = createRequire(import.meta.url)
+    const parsed = require('../package.json') as { version?: unknown }
+    return typeof parsed.version === 'string' ? parsed.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -567,7 +578,7 @@ const LOCAL_COMMANDS = [
   { name: 'quit', description: 'exit the TUI' },
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
-  { name: 'status', description: 'show session, provider and model status' },
+  { name: 'status', description: 'show session, provider, model, paint, and plugin version' },
   { name: 'usage', description: 'show remaining quota for the current provider (OpenCode Go / SuperGrok)' },
   { name: 'quota', description: 'alias of /usage' },
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
@@ -2524,6 +2535,16 @@ export class SshTui {
     void this.refreshQuota({ reason: 'start', announce: true }).catch(() => {
       // Start-up quota is best-effort; /usage still reports errors.
     })
+    void this.notifyPluginUpdate().catch(() => {
+      // Update check is best-effort and never blocks the TUI.
+    })
+  }
+
+  private async notifyPluginUpdate(): Promise<void> {
+    const notice = await checkForPluginUpdate(PLUGIN_VERSION)
+    if (this.disposed || notice === undefined) return
+    this.pushRow({ kind: 'system', text: notice })
+    this.markDirty()
   }
 
   private startRenderTimer(): void {
@@ -6471,6 +6492,7 @@ export class SshTui {
           const effort = this.selectionRef?.current?.reasoningEffort
           const lines = [
             `session: ${this.agent.id}`,
+            `plugin: dsh-ssh-tui ${PLUGIN_VERSION}`,
             `route: ${provider}/${model}${effort === undefined ? '' : ` (${effort})`}`,
             `provider: ${route.kind}`,
             `status: ${this.agent.status}`,

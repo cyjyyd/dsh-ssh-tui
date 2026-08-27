@@ -9,6 +9,17 @@ If you mostly work over SSH — a jump host, a test box, a keyboard-only
 session — start here. A local desktop terminal with themes and layout
 you already like can stay as it is.
 
+Install with the official CLI (no clone):
+
+```sh
+dsh plugin --profile tui add dsh-ssh-tui
+dsh --profile tui
+```
+
+Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
+Swap `tui` for another profile name. The same command updates. Remove with
+`dsh plugin --profile tui remove dsh-ssh-tui`.
+
 ## Official headless vs this TUI
 
 There is no shipped TUI. The default terminal entry on a remote box is
@@ -49,11 +60,14 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 
 ## Install
 
-On a remote box with `dsh` and pnpm already installed (no clone):
+The recommended install is the command at the top of this README:
+`dsh plugin --profile tui add dsh-ssh-tui`. The CLI pulls npm, writes the
+profile dependency, and appends this package to `dsh.profile.bundles`
+because the manifest declares `dsh.bundle`.
+
+Optional: reuse a SuperGrok / grok-bridge token already on the machine:
 
 ```sh
-dsh plugin --profile tui add dsh-ssh-tui
-# optional: reuse a SuperGrok / grok-bridge token already on the machine
 dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
 dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
 ```
@@ -66,6 +80,31 @@ dsh --profile tui
 ```
 
 From a checkout: `bash scripts/smoke-headless.sh` (prints an outcome summary, never a token).
+
+### Survive an SSH drop (tmux)
+
+A slow-link-friendly painter is not the same as surviving a disconnect.
+Closing the laptop or an idle jump host kills the TTY process. Put the TUI
+in tmux so SSH is only the display:
+
+```sh
+tmux new -s dsh -- dsh --profile tui
+# after reconnecting
+tmux attach -t dsh
+```
+
+A second TUI on the same `sessionId` is refused (it would steal stdin and
+approvals) and prints `tmux attach`. Locks live under `$DSH_HOME/tui-locks/`;
+a leftover file from a crash is stolen if the pid is dead.
+`DSH_TUI_NO_SESSION_LOCK=1` skips this.
+
+On start the TUI checks npm for a newer `dsh-ssh-tui` and **notifies only**:
+
+```text
+发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
+```
+
+Set `DSH_TUI_NO_UPDATE_CHECK=1` to skip. `/status` also shows the plugin version.
 
 From git:
 
@@ -346,6 +385,9 @@ corporate proxy does not see one SSH packet per line. Local ttys use 80 ms.
 Over SSH the TUI probes CSI 6n once and picks 80 / 160 / 250 / 400 ms from
 the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). `/status` and the
 footer show the active tier.
+
+SSH disconnect still kills a TUI that is not inside tmux. Do not start a
+second copy of the same session from another window.
 
 ## Development
 

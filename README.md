@@ -10,6 +10,15 @@ English: [README.en.md](README.en.md)
 
 SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
 
+安装（官方 CLI，无需 clone）：
+
+```bash
+dsh plugin --profile tui add dsh-ssh-tui
+dsh --profile tui
+```
+
+当前 `dsh` 必须带 `--profile`（`dsh plugin add …` 会报缺选项）。装进别的 profile 把 `tui` 换成那个名字即可。更新同一条命令。卸载：`dsh plugin --profile tui remove dsh-ssh-tui`。
+
 ## 官方 headless 和这个 TUI
 
 官方没有预置 TUI。远程机器上的默认终端入口是 `dsh --profile headless`：跑完一个任务，把**最后一条助手回复**打到 stdout 就退出。思考、工具调用、子代理、计划都在会话日志里，终端上看不到。
@@ -61,11 +70,11 @@ SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.c
 
 ## 部署指南
 
-远程机器最短路径（已有 `dsh` 和 pnpm，无需 clone）：
+推荐安装就是文首那条 `dsh plugin --profile tui add dsh-ssh-tui`。CLI 会从 npm 拉包、写入 profile 依赖，并把本插件加入 `dsh.profile.bundles`（因为包内声明了 `dsh.bundle`）。
+
+可选：本机已有 SuperGrok / grok-bridge token 时再装配套 OAuth：
 
 ```bash
-dsh plugin --profile tui add dsh-ssh-tui
-# 可选：本机已有 SuperGrok / grok-bridge token 时
 dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
 dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
 ```
@@ -76,6 +85,29 @@ dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
 dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
 dsh --profile tui          # 必须在真实终端 / SSH 会话里
 ```
+
+### SSH 断线后续跑（tmux）
+
+弱网友好不等于断线后还能跑。合盖、跳板 idle、换网会杀掉当前 TTY 上的进程。
+把 TUI 放进 tmux，断 SSH 只丢显示器，不丢 Agent：
+
+```bash
+tmux new -s dsh -- dsh --profile tui
+# 断线后重新 SSH 进来
+tmux attach -t dsh
+```
+
+同一 `sessionId` 不能开第二份 TUI（会抢 stdin 和审批）。第二份启动会退出并提示
+`tmux attach`。锁在 `$DSH_HOME/tui-locks/`；进程异常退出后残留锁会在下次启动时
+核对 pid，已死则自动接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
+
+启动时会查一次 npm 上的 `dsh-ssh-tui` 最新版，有更新只提示、不自动升级：
+
+```text
+发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
+```
+
+`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本。
 
 仓库内也可：`bash scripts/smoke-headless.sh`（记录出口摘要，不打印 token）。
 
@@ -105,14 +137,13 @@ npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
-### 方式三：指定其它 profile 的 npm 安装
+### 方式三：指定其它 profile
 
 ```bash
+dsh plugin --profile work add dsh-ssh-tui
+# 或仓库脚本
 bash scripts/install-npm.sh work
 ```
-
-`dsh plugin add` 会从 npm 拉取包、写入 profile 依赖，并自动把 `dsh-ssh-tui`
-加入该 profile 的 `dsh.profile.bundles`。
 
 ### 智能路由模式（dsh-routing-suite）
 
@@ -278,10 +309,12 @@ bash scripts/uninstall.sh work      # 指定 profile
 ## 开发与目录结构
 
 ```text
-src/index.ts        插件入口：启动选择器、会话创建/恢复/切换
+src/index.ts        插件入口：启动选择器、会话创建/恢复/切换、session lock
 src/startup.ts      命令行参数解析（--resume / --new / --model ...）
 src/picker.ts       启动历史会话选择器
 src/session-list.ts 历史会话扫描与标签（共享给 /resume）
+src/session-lock.ts 同会话防双开
+src/update-check.ts npm 最新版提示（不自动升级）
 src/tui.ts          终端渲染、交互、统计、标题/铃声
 cordis.patch.yml    dsh bundle patch（挂载 TUI 与 agent-presets）
 scripts/            安装 / 卸载 / 验证脚本
@@ -302,6 +335,8 @@ npm run build
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
 - **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。`/status` 和底栏显示当前档。
+- **SSH 断了任务也没了**：用 tmux 开 TUI（见上文）。不要在另一个 SSH 窗口再开同一会话。
+- **提示会话已在 pid 运行**：那份 TUI 还活着。`tmux attach -t dsh`；确认进程已死再删 `$DSH_HOME/tui-locks/` 对应文件。
 
 ## License
 

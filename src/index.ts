@@ -16,6 +16,7 @@ import { showSessionPicker } from './picker.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
+import { acquireSessionLock, releaseSessionLock, sessionLockDisabled } from './session-lock.js'
 
 export const name = 'ssh-tui'
 
@@ -57,6 +58,21 @@ export function apply(ctx: Context, config: Config): void {
     let switching = false
     let handle: AgentHandle | undefined
     let controller: TuiController | undefined
+    let sessionLockPathHeld: string | undefined
+
+    const dropSessionLock = async (): Promise<void> => {
+      const path = sessionLockPathHeld
+      sessionLockPathHeld = undefined
+      if (path !== undefined) await releaseSessionLock(path)
+    }
+
+    const takeSessionLock = async (sessionId: string): Promise<void> => {
+      if (sessionLockDisabled()) return
+      const { path } = await acquireSessionLock(sessionId, {
+        tty: process.env.SSH_TTY ?? process.env.TTY,
+      })
+      sessionLockPathHeld = path
+    }
     // An explicit in-process change (/setup or /model) wins over launch-time
     // CLI overrides for every session created or resumed later in this process.
     let liveSelection: ModelSelection | undefined
@@ -134,11 +150,18 @@ export function apply(ctx: Context, config: Config): void {
         installModelSelection(agentCtx, selectionRef)
         await agentPresets?.mount(agentCtx)
       }
-      handle = resume
-        ? await agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
-        : await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+      await takeSessionLock(String(sessionId))
+      try {
+        handle = resume
+          ? await agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+          : await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+      } catch (error: unknown) {
+        await dropSessionLock()
+        throw error
+      }
       if (disposed) {
         await handle.dispose()
+        await dropSessionLock()
         return
       }
       const presetId = agentPresets?.composedPreset(handle.agent.ctx) ?? agentPresets?.defaultId
@@ -183,6 +206,7 @@ export function apply(ctx: Context, config: Config): void {
           await handle.dispose()
           handle = undefined
         }
+        await dropSessionLock()
         await start(SessionId(target), true)
       } catch (error: unknown) {
         process.stderr.write(`dsh-ssh-tui: failed to switch to session "${target}": ${errorChain(error)}\n`)
@@ -226,7 +250,10 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     void boot().catch((error: unknown) => {
-      process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start: ${errorChain(error)}\n`)
+      const detail = error instanceof Error && error.name === 'SessionLockHeldError'
+        ? error.message
+        : errorChain(error)
+      process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start:\n${detail}\n`)
       const exit = ctx.get('appExit')
       if (exit !== undefined) exit(1)
       else process.exit(1)
@@ -237,6 +264,7 @@ export function apply(ctx: Context, config: Config): void {
       pickerAbort.abort()
       await controller?.dispose()
       await handle?.dispose()
+      await dropSessionLock()
     }
   }, 'ssh-tui')
 }
