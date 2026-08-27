@@ -429,9 +429,29 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
   },
 ]
 
+/** Human-facing kind for a live LLM route. */
+export function describeProviderRoute(provider: string): { kind: string; short: string } {
+  const id = provider.trim()
+  if (id === 'deepseek-official' || id === 'deepseek') {
+    return { kind: 'DeepSeek 官方', short: 'DeepSeek 官方' }
+  }
+  if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) {
+    return { kind: 'SuperGrok / X Premium 订阅', short: 'SuperGrok' }
+  }
+  if (id === 'opencode-go') return { kind: 'OpenCode Go', short: 'OpenCode Go' }
+  if (id === 'opencode') return { kind: 'OpenCode Zen', short: 'OpenCode Zen' }
+  return { kind: '已注册提供商', short: id }
+}
+
+/** Routes that authenticate without a harness API-key credential. */
+export function providerUsesLocalOAuth(provider: string): boolean {
+  const id = provider.trim()
+  return id === 'xai' || id === 'grok' || id.startsWith('xai-')
+}
+
 const LOCAL_COMMANDS = [
   { name: 'help', description: 'show all available commands' },
-  { name: 'model', description: 'select model and reasoning effort (same provider)' },
+  { name: 'model', description: 'select provider, model and reasoning effort' },
   { name: 'submodel', description: `select subagent model (default ${DEFAULT_SUBAGENT_MODEL}, same provider as parent)` },
   { name: 'subeffort', description: 'select subagent reasoning effort (default follows provider)' },
   { name: 'mode', description: 'switch agent mode / preset (standard, minimal, code, cordis, routing-suite, ...)' },
@@ -1755,7 +1775,15 @@ export class SshTui {
   /** Show the first-launch provider/API-key onboarding when nothing is configured. */
   private async maybeRunOnboarding(): Promise<void> {
     const credentials = this.ctx.get('credentials')
-    const provider = this.providerName
+    const provider = this.currentProviderId()
+    if (providerUsesLocalOAuth(provider)) {
+      this.pushRow({
+        kind: 'system',
+        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），使用本机 OAuth token，无需 API Key。如需改回 Key 提供商，输入 /setup。`,
+      })
+      this.markDirty()
+      return
+    }
     const envRef = provider === 'deepseek-official' ? 'DEEPSEEK_API_KEY' : envRefForId(provider)
     const envKey = process.env[envRef]
     let stored = false
@@ -2581,12 +2609,17 @@ export class SshTui {
     return this.commandSuggestions.length > 0 && this.dialog === undefined
   }
 
+  private currentProviderId(): string {
+    return this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
+  }
+
   private currentSelectionLabel(): string {
     const current = this.selectionRef?.current
-    const provider = current?.provider ?? this.agent.options.provider ?? this.providerName
+    const provider = this.currentProviderId()
     const model = current?.model ?? this.agent.options.model ?? 'unknown'
     const effort = current?.reasoningEffort
-    return `${provider}/${model}${effort === undefined ? '' : ` (${effort})`}`
+    const kind = describeProviderRoute(provider).short
+    return `${provider}/${model}${effort === undefined ? '' : ` (${effort})`} · ${kind}`
   }
 
   /** Replace one step's usage sample so a repeated report never double counts. */
@@ -3567,11 +3600,49 @@ export class SshTui {
     }
   }
 
-  /** /model: pick a model and reasoning effort for the current provider. */
+  /** Live adapter routes the TUI can switch to, plus the current selection. */
+  private listSelectableProviders(): { id: string; label: string }[] {
+    const llm = this.ctx.get('llm')
+    const current = this.currentProviderId()
+    const seen = new Set<string>()
+    const out: { id: string; label: string }[] = []
+    const add = (id: string, name?: string): void => {
+      if (id === '' || seen.has(id)) return
+      seen.add(id)
+      const kind = describeProviderRoute(id)
+      const display = name !== undefined && name !== '' && name !== id ? name : kind.short
+      out.push({ id, label: `${display} · ${id}` })
+    }
+    for (const info of llm?.listProviders() ?? []) add(info.id, info.name)
+    add(current)
+    add('deepseek-official', 'DeepSeek 官方')
+    add('xai', 'SuperGrok')
+    add('opencode-go', 'OpenCode Go')
+    add('opencode', 'OpenCode Zen')
+    return out
+  }
+
+  /** /model: pick a provider, then a model and reasoning effort on that route. */
   private async runModelCommand(): Promise<void> {
     const llm = this.ctx.get('llm')
     const current = this.selectionRef?.current
-    const provider = current?.provider ?? this.agent.options.provider ?? this.providerName
+    const providers = this.listSelectableProviders()
+    let provider = this.currentProviderId()
+    if (providers.length > 1) {
+      const answer = await this.askQuestion({
+        id: 'provider-pick',
+        question: '选择提供商',
+        options: providers.map(option => ({
+          label: option.label,
+          description: option.id === provider
+            ? `${describeProviderRoute(option.id).kind} · 当前`
+            : describeProviderRoute(option.id).kind,
+        })),
+      })
+      const picked = providers.find(option => option.label === answer.selected[0])
+      if (picked === undefined) return
+      provider = picked.id
+    }
 
     let modelOptions: { id: string; label: string }[] = []
     let modelSource = '已配置列表'
@@ -3657,9 +3728,10 @@ export class SshTui {
     if (this.selectionRef !== undefined) this.selectionRef.current = next
     this.onSelectionChanged?.(next)
     await this.ctx.get('agentDefaultModel')?.saveSelection(next)
+    const kind = describeProviderRoute(provider)
     this.pushRow({
       kind: 'system',
-      text: `模型已切换：${selected.id}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
+      text: `已切换到 ${kind.kind}：${provider}/${selected.id}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
     })
     this.markDirty()
   }
@@ -4805,6 +4877,8 @@ export class SshTui {
             '运行中按 Enter 可插入指示；Esc / Ctrl+C 取消当前轮次。',
             '↑/↓ 或 Ctrl+N/P 选择思考、工具、子代理、计划或提问卡片；Enter 展开/折叠；Ctrl+R 全部展开或收起。',
             '计划模式、提问用户和当前目标会显示独立卡片；多个子代理默认各自折叠，互不混排。',
+            '/model 先选提供商（DeepSeek 官方 / SuperGrok 订阅 / OpenCode …），再选模型和思考强度。',
+            '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，还是其它已注册提供商。',
           ].join('\n'),
         })
         break
@@ -4865,10 +4939,14 @@ export class SshTui {
         {
           const plan = this.findLivePlanRow()
           const waiting = this.rows.filter(row => row.kind === 'question' && row.status === 'waiting').length
+          const provider = this.currentProviderId()
+          const route = describeProviderRoute(provider)
+          const model = this.selectionRef?.current?.model ?? this.agent.options.model ?? 'default'
+          const effort = this.selectionRef?.current?.reasoningEffort
           const lines = [
             `session: ${this.agent.id}`,
-            `model: ${this.agent.options.model ?? 'default'}`,
-            `provider: ${this.agent.options.provider ?? 'default'}`,
+            `route: ${provider}/${model}${effort === undefined ? '' : ` (${effort})`}`,
+            `provider: ${route.kind}`,
             `status: ${this.agent.status}`,
             `preset: ${this.presetName}`,
             `subagents: ${this.activeSubagents.size}`,

@@ -8,6 +8,8 @@ English: [README.en.md](README.en.md)
 
 定位与路线：[COMPETITIVENESS.md](COMPETITIVENESS.md)。本插件面向慢速 SSH / 远程终端，不和 Ink 系 TUI 比皮肤。
 
+SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
+
 ## 功能一览
 
 - 纯终端渲染，无需浏览器/鼠标/重量级终端框架，适合慢速或远程 SSH；
@@ -128,6 +130,10 @@ dsh --profile tui --no-color
 `/status`、`/subagents`、`/usage`（`/quota` 同义）、`/setup`、`/clear`，
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。harness 命令若声明
 支持图片附件，会在命令列表和补全提示中标注“可附图”。
+
+`/model` 先选提供商，再选模型和思考强度。提供商会标明类型：DeepSeek 官方、
+SuperGrok / X Premium 订阅、OpenCode Go、OpenCode Zen。`/status` 和底栏同样
+显示这条路由，避免把 Grok 订阅误当成还要填 API Key。
 
 子代理默认跟随父会话的提供方，模型默认为轻量的 `deepseek-v4-flash`：
 

@@ -145,11 +145,10 @@ commands with every command the harness registers (`/goal`, `/plan`,
 `/compact`, `/permission`, `/feedback`, ...). `Tab` completes, `Enter` runs.
 `/help` lists everything.
 
-`/model` opens a two-step selector: pick a model from the current provider's
-catalog, then pick its reasoning effort (`off` / `high` / `max` when the
-provider exposes them). The change applies to the next request without
-changing the provider, updates the header/status line, and is remembered in
-`agent-default-model` for future launches.
+`/model` first picks a provider, then a model and reasoning effort. Provider
+rows are labelled by kind: DeepSeek official, SuperGrok / X Premium, OpenCode
+Go, OpenCode Zen. `/status` and the footer show the same route, so a Grok
+subscription is not mistaken for a missing API key.
 
 For OpenCode and other third-party providers, `/model` queries the provider's
 endpoint (`GET {baseURL}/models`) for a live model list, falling back to the

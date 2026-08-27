@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   askSummary,
+  describeProviderRoute,
+  providerUsesLocalOAuth,
   foldInputView,
   formatOpenCodeGoUsage,
   friendlyJsonLines,
@@ -211,4 +213,14 @@ test('goal cards stay collapsed and report the current phase', () => {
   assert.equal(goal?.phase, 'active')
   assert.equal(goal?.expanded, false)
   assert.equal(goal?.objective, 'finish the TUI cards')
+})
+
+test('describeProviderRoute labels DeepSeek, SuperGrok, and OpenCode routes', () => {
+  assert.equal(describeProviderRoute('deepseek-official').short, 'DeepSeek 官方')
+  assert.equal(describeProviderRoute('xai').kind, 'SuperGrok / X Premium 订阅')
+  assert.equal(describeProviderRoute('opencode-go').short, 'OpenCode Go')
+  assert.equal(describeProviderRoute('opencode').short, 'OpenCode Zen')
+  assert.equal(providerUsesLocalOAuth('xai'), true)
+  assert.equal(providerUsesLocalOAuth('deepseek-official'), false)
+  assert.equal(providerUsesLocalOAuth('opencode-go'), false)
 })
