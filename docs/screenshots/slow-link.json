@@ -1,0 +1,10 @@
+{
+  "cols": 88,
+  "rows": 30,
+  "throttleBps": 2048,
+  "paints": 14,
+  "keyFrames": 7,
+  "bytes": 15507,
+  "throttleMs": 7572,
+  "compared": "official headless stdout vs this TUI on a throttled SSH pipe; not other TUI skins"
+}

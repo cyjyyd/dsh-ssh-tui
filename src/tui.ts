@@ -7,7 +7,8 @@
  *
  * The renderer uses plain ANSI and coalesces each frame into one stdout
  * write of dirty rows only — jump-host / proxied SSH should see one packet
- * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS (default 160).
+ * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS, else local 80 ms
+ * or an SSH tier from a CSI 6n round-trip (default 160 ms).
  */
 
 import { spawn } from 'node:child_process'
@@ -308,21 +309,49 @@ export interface TuiController {
 }
 
 const RENDER_INTERVAL_MS = 160
+const LOCAL_PAINT_INTERVAL_MS = 80
 const WAIT_INDICATOR_MS = 8000
 const MIN_PAINT_INTERVAL_MS = 40
 const MAX_PAINT_INTERVAL_MS = 1000
+const DSR_PROBE_TIMEOUT_MS = 800
+
+export type PaintLinkKind = 'local' | 'ssh'
 
 /**
- * Paint cadence for jump-host / proxied SSH. Token ticks coalesce into one
- * frame; the default stays snappy, slower links raise `DSH_TUI_PAINT_MS`.
+ * Explicit env/config always wins. Otherwise local TTYs stay snappy and SSH
+ * sessions pick a tier from a measured round-trip (CSI 6n), falling back to
+ * 160 ms when the probe is missing.
  */
 export function resolvePaintIntervalMs(
   configured?: number,
   env: NodeJS.ProcessEnv = process.env,
+  options: { ssh?: boolean; rttMs?: number } = {},
 ): number {
   const raw = configured ?? Number.parseInt(env.DSH_TUI_PAINT_MS ?? '', 10)
-  if (!Number.isFinite(raw) || raw <= 0) return RENDER_INTERVAL_MS
-  return Math.min(MAX_PAINT_INTERVAL_MS, Math.max(MIN_PAINT_INTERVAL_MS, Math.floor(raw)))
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.min(MAX_PAINT_INTERVAL_MS, Math.max(MIN_PAINT_INTERVAL_MS, Math.floor(raw)))
+  }
+  if (options.ssh === true) return paintIntervalForRtt(options.rttMs)
+  return LOCAL_PAINT_INTERVAL_MS
+}
+
+/** True when this process is attached to an SSH session (jump host / proxy). */
+export function detectSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)
+}
+
+/** Map a CSI-6n round-trip to a paint cadence. Unknown RTT uses the SSH default. */
+export function paintIntervalForRtt(rttMs: number | undefined): number {
+  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs < 0) return RENDER_INTERVAL_MS
+  if (rttMs < 50) return LOCAL_PAINT_INTERVAL_MS
+  if (rttMs < 150) return 160
+  if (rttMs < 350) return 250
+  return 400
+}
+
+export function paintLinkLabel(kind: PaintLinkKind, intervalMs: number, probed: boolean): string {
+  if (kind === 'local') return `本机绘制 ${intervalMs}ms`
+  return probed ? `SSH 绘制 ${intervalMs}ms` : `SSH 绘制 ${intervalMs}ms（未测到往返）`
 }
 
 /** One incremental paint as a single stdout write (one SSH packet when corked). */
@@ -1316,8 +1345,56 @@ export function isEscapePrefix(text: string): boolean {
   if (/^\x1b\[[A-D]$/u.test(text)) return true
   if (/^\x1b\[[HF]$/u.test(text)) return true
   if (/^\x1b\[\d+~?$/u.test(text)) return true
+  if (/^\x1b\[\d+(?:;\d+)?R?$/u.test(text)) return true
   if (/^\x1b\[<(?:\d*;?)*[Mm]?$/u.test(text)) return true
   return false
+}
+
+/** Parse a Device Status Report cursor reply (`CSI row;col R`). */
+export function parseCursorPositionReply(text: string): { row: number; column: number } | undefined {
+  const match = /^\x1b\[(\d+);(\d+)R$/u.exec(text)
+  if (match === null) return undefined
+  return { row: Number(match[1]), column: Number(match[2]) }
+}
+
+/**
+ * Round-trip to the attached terminal via CSI 6n. Returns undefined when the
+ * reply never arrives (dumb pipe, blocked DSR). Does not interpret the
+ * coordinates — only the elapsed milliseconds matter.
+ */
+export async function probeTerminalRttMs(
+  stdin: NodeJS.ReadStream = process.stdin,
+  stdout: NodeJS.WriteStream = process.stdout,
+  timeoutMs = DSR_PROBE_TIMEOUT_MS,
+): Promise<number | undefined> {
+  if (!stdin.isTTY || !stdout.isTTY) return undefined
+  return await new Promise(resolve => {
+    let buffer = ''
+    let settled = false
+    const started = Date.now()
+    const finish = (value: number | undefined): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      stdin.removeListener('data', onData)
+      resolve(value)
+    }
+    const onData = (chunk: Buffer): void => {
+      buffer += chunk.toString('utf8')
+      if (parseCursorPositionReply(buffer) !== undefined) {
+        finish(Math.max(0, Date.now() - started))
+        return
+      }
+      if (buffer.length > 32 && !buffer.includes('\x1b[')) finish(undefined)
+    }
+    const timer = setTimeout(() => finish(undefined), timeoutMs)
+    stdin.on('data', onData)
+    try {
+      stdout.write('\x1b[6n')
+    } catch {
+      finish(undefined)
+    }
+  })
 }
 
 /** Parse a tool call's raw arguments JSON into an object; null when unparsable. */
@@ -2184,7 +2261,9 @@ export class SshTui {
   private lastChromeKey = ''
   private lastPaintWidth = 0
   private lastPaintHeight = 0
-  private readonly paintIntervalMs: number
+  private paintIntervalMs: number
+  private paintLink: PaintLinkKind = 'local'
+  private paintProbed = false
   private searchHits: Row[] = []
   private searchIndex = -1
   private searchQuery = ''
@@ -2213,7 +2292,10 @@ export class SshTui {
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
-    this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs)
+    this.paintLink = detectSshSession() ? 'ssh' : 'local'
+    this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
+      ssh: this.paintLink === 'ssh',
+    })
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
     this.pushRow({ kind: 'system', text: '输入 /help 查看快捷键 · /find 搜索思考/计划/子代理/回复 · 空输入时 ↑/↓ 选卡片' })
@@ -2223,7 +2305,6 @@ export class SshTui {
   start(): void {
     process.stdin.setRawMode(true)
     process.stdin.resume()
-    process.stdin.on('data', this.handleData)
     process.stdout.on('resize', this.markDirty)
     process.on('SIGWINCH', this.markDirty)
 
@@ -2250,6 +2331,29 @@ export class SshTui {
     if (this.resumePicker) {
       void this.runResumeCommand('', true)
     }
+    void this.calibratePaintInterval().finally(() => {
+      if (this.disposed) return
+      process.stdin.on('data', this.handleData)
+      this.startRenderTimer()
+    })
+
+    void this.maybeRunOnboarding().catch((error: unknown) => {
+      if (this.disposed) return
+      this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
+      this.markDirty()
+    })
+    void this.syncSubagentToProvider(this.currentProviderId()).catch((error: unknown) => {
+      if (this.disposed) return
+      this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
+      this.markDirty()
+    })
+  }
+
+  private startRenderTimer(): void {
+    if (this.renderTimer !== undefined) {
+      clearInterval(this.renderTimer)
+      this.renderTimer = undefined
+    }
     this.renderTimer = setInterval(() => {
       const now = Date.now()
       if (this.agent.status === 'running') this.updateTerminalTitle()
@@ -2262,12 +2366,8 @@ export class SshTui {
       if (animating && now - this.lastPaintAt >= Math.max(this.paintIntervalMs, 200)) {
         this.dirty = true
       }
-      // While a turn is waiting on the provider with no new events, repaint at
-      // most once per second so slow SSH links do not drown in redraws.
       const idleWaiting = this.agent.status === 'running' && !this.dirty
       if (idleWaiting && now - this.lastPaintAt < 1000) return
-      // Running with no fresh events only needs the seconds-bearing status
-      // line refreshed; force one repaint per second instead of every tick.
       if (this.agent.status === 'running' && !this.dirty && now - this.lastPaintAt >= 1000) {
         this.dirty = true
       }
@@ -2277,17 +2377,33 @@ export class SshTui {
       }
     }, this.paintIntervalMs)
     this.renderTimer.unref?.()
+  }
 
-    void this.maybeRunOnboarding().catch((error: unknown) => {
-      if (this.disposed) return
-      this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
-      this.markDirty()
+  private async calibratePaintInterval(): Promise<void> {
+    const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
+    if (Number.isFinite(envOverride) && envOverride > 0) {
+      this.paintProbed = false
+      this.pushRow({
+        kind: 'system',
+        text: `${paintLinkLabel(this.paintLink, this.paintIntervalMs, false)} · DSH_TUI_PAINT_MS`,
+      })
+      return
+    }
+    if (this.paintLink !== 'ssh') {
+      this.pushRow({ kind: 'system', text: paintLinkLabel('local', this.paintIntervalMs, false) })
+      return
+    }
+    const rtt = await probeTerminalRttMs()
+    if (this.disposed) return
+    this.paintProbed = rtt !== undefined
+    this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: rtt })
+    this.pushRow({
+      kind: 'system',
+      text: rtt === undefined
+        ? paintLinkLabel('ssh', this.paintIntervalMs, false)
+        : `${paintLinkLabel('ssh', this.paintIntervalMs, true)} · 往返 ${Math.round(rtt)}ms`,
     })
-    void this.syncSubagentToProvider(this.currentProviderId()).catch((error: unknown) => {
-      if (this.disposed) return
-      this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
-      this.markDirty()
-    })
+    this.markDirty()
   }
 
   /** Replay the durable session log so a resumed session renders its history. */
@@ -3289,6 +3405,7 @@ export class SshTui {
     if (inputView.folded) statusText += ' · 输入已折叠 · Ctrl+T 展开'
     else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
+    statusText += ` · ${this.paintLink === 'ssh' ? 'ssh' : '本机'}${this.paintIntervalMs}ms`
     const idleMs = Date.now() - this.lastActivity
     const livePlan = this.findLivePlanRow()
     const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
@@ -5091,6 +5208,7 @@ export class SshTui {
       this.markDirty()
       return
     }
+    if (parseCursorPositionReply(combined) !== undefined) return
     if (combined === '\x1b[H' || combined === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
     if (combined === '\x1b[F' || combined === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
     if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
@@ -5918,6 +6036,7 @@ export class SshTui {
             `preset: ${this.presetName}`,
             `subagents: ${this.activeSubagents.size}`,
             `plan: ${plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off'}`,
+            `paint: ${paintLinkLabel(this.paintLink, this.paintIntervalMs, this.paintProbed)}`,
             waiting > 0 ? `questions: waiting ${waiting}` : 'questions: none',
           ]
           this.pushRow({ kind: 'system', text: lines.join('\n') })

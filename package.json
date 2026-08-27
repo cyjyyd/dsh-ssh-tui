@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
@@ -45,6 +45,7 @@
     "docs/screenshots/compare.png",
     "docs/screenshots/headless.png",
     "docs/screenshots/workspace.png",
+    "docs/screenshots/slow-link.gif",
     "LICENSE"
   ],
   "license": "MIT",
@@ -65,7 +66,8 @@
     "install:npm": "bash scripts/install-npm.sh",
     "uninstall:dsh": "bash scripts/uninstall.sh",
     "verify:dsh": "bash scripts/verify.sh",
-    "screenshots": "npm run build && node scripts/capture-readme-frames.mjs"
+    "screenshots": "npm run build && node scripts/capture-readme-frames.mjs",
+    "screenshots:slow": "npm run build && node scripts/capture-slow-link.mjs"
   },
   "engines": {
     "node": ">=22.19"

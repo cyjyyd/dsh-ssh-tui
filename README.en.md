@@ -1,12 +1,13 @@
 # dsh-ssh-tui
 
 A DeepSeek Harness terminal for jump hosts, headless servers, and high-latency
-SSH. Plain ANSI and incremental redraws. No browser, no Ink/React skin.
+SSH. Plain ANSI and incremental redraws. No browser required.
 
 中文部署指南：[README.md](README.md)
 
-Who it is for: a keyboard-only SSH session on a remote box. Who it is not for:
-a local desktop TUI with many themes — that lane already has a clear winner.
+If you mostly work over SSH — a jump host, a test box, a keyboard-only
+session — start here. A local desktop terminal with themes and layout
+you already like can stay as it is.
 
 ## Official headless vs this TUI
 
@@ -26,6 +27,19 @@ Bottom: reasoning collapsed, full-row red/green diff, each subagent on its
 own card, the plan strip pinned above the input.
 
 Singles: [headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/screenshots/workspace.png)
+
+## Still visible on a slow SSH pipe
+
+Same task, replayed at **2 kB/s** through the real incremental painter
+(88×30, one `stdout.write` per frame). Official headless on that pipe
+would stay blank until the final markdown. Here reasoning, the edit
+diff, subagent cards, and the plan strip appear as the bytes arrive.
+
+![Same task replayed at 2 kB/s SSH](docs/screenshots/slow-link.gif)
+
+Reproducible, no model in the loop: `npm run screenshots:slow` writes
+`docs/screenshots/slow-link.json`. This capture is 14 paints, about
+**15.5 KB**, **7.6 s** at 2 kB/s. Byte ledger for this event sequence.
 
 ## Requirements
 
@@ -323,12 +337,10 @@ switching while running.
 ## Jump-host / proxied SSH
 
 Each paint is one `stdout.write` of dirty rows only, so a jump host or
-corporate proxy does not see one SSH packet per line. Default cadence is
-about 160 ms, enough for most jump hosts. On a very slow path:
-
-```sh
-export DSH_TUI_PAINT_MS=250   # 40–1000; higher = fewer packets, choppier stream
-```
+corporate proxy does not see one SSH packet per line. Local ttys use 80 ms.
+Over SSH the TUI probes CSI 6n once and picks 80 / 160 / 250 / 400 ms from
+the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). `/status` and the
+footer show the active tier.
 
 ## Development
 

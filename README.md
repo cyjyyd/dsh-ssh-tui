@@ -1,12 +1,12 @@
 # dsh-ssh-tui
 
 给跳板机、无桌面服务器、高延迟 SSH 用的 DeepSeek Harness 终端。纯 ANSI、增量重绘，
-不需要浏览器，也不需要 Ink / React 那套皮肤。
+不需要浏览器。
 
 English: [README.en.md](README.en.md)
 
-适合谁：SSH 直连的远程机器、慢链路、只有键盘的会话。不适合谁：本机想要多主题、
-官网级交互的桌面终端——那条赛道已经有明确赢家。
+如果你主要在 SSH 里写代码——公司跳板、测试机、只有键盘的会话——可以从这里开始。
+本机桌面终端若更在意主题和布局，也可以继续用你已经习惯的界面。
 
 SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
 
@@ -22,6 +22,14 @@ SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.c
 下：思考默认折叠、`edit` 整行红/绿 diff、两个子代理各自一张卡、计划条钉在输入框上方。
 
 单独看：[headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/screenshots/workspace.png)
+
+## 弱网 SSH 上过程还在
+
+同一条任务，按 **2 kB/s** 限速回放真实增量绘制（88×30，一帧一次 `stdout.write`）。官方 headless 这条链路上只会在全部结束后突然打出最终 Markdown；这里思考、`edit` diff、子代理卡和计划条是随着字节到达逐步出现的。
+
+![2 kB/s SSH 上回放同一任务](docs/screenshots/slow-link.gif)
+
+协议（可复现，不靠模型估）：`npm run screenshots:slow` → `docs/screenshots/slow-link.json`。这次回放 14 次绘制、约 **15.5 KB**，在 2 kB/s 上大约 **7.6 s** 画完。数字是这条固定事件序的 stdout 字节账。
 
 ## 功能一览
 
@@ -290,10 +298,7 @@ npm run build
 - **标题栏或铃声不生效**：确认终端支持 OSC 0 与 BEL；铃声可用
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
-- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`，避免一行一个 SSH 包。默认约 160 ms 合一帧，多数跳板机不用改。特别慢时：
-  ```bash
-  export DSH_TUI_PAINT_MS=250   # 40–1000；越大越省链路，流式字越顿
-  ```
+- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。`/status` 和底栏显示当前档。
 
 ## License
 

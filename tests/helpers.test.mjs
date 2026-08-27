@@ -24,6 +24,9 @@ import {
   matchTranscriptRows,
   presentToolCall,
   providerUsesLocalOAuth,
+  detectSshSession,
+  paintIntervalForRtt,
+  parseCursorPositionReply,
   resolvePaintIntervalMs,
   renderMarkdownLines,
   renderToolDiff,
@@ -122,11 +125,31 @@ test('composePaintOutput never writes past the terminal height', () => {
 })
 
 test('resolvePaintIntervalMs clamps jump-host cadence', () => {
-  assert.equal(resolvePaintIntervalMs(undefined, {}), 160)
-  assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '250' }), 250)
+  assert.equal(resolvePaintIntervalMs(undefined, {}), 80)
+  assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true }), 160)
+  assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: 20 }), 80)
+  assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: 90 }), 160)
+  assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: 200 }), 250)
+  assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: 500 }), 400)
+  assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '250' }, { ssh: true, rttMs: 20 }), 250)
   assert.equal(resolvePaintIntervalMs(40, { DSH_TUI_PAINT_MS: '9999' }), 40)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '10' }), 40)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '5000' }), 1000)
+})
+
+test('detectSshSession and paintIntervalForRtt do not need a model', () => {
+  assert.equal(detectSshSession({}), false)
+  assert.equal(detectSshSession({ SSH_CONNECTION: '10.0.0.1 22 10.0.0.2 443' }), true)
+  assert.equal(detectSshSession({ SSH_TTY: '/dev/pts/0' }), true)
+  assert.equal(paintIntervalForRtt(undefined), 160)
+  assert.equal(paintIntervalForRtt(12), 80)
+  assert.equal(paintIntervalForRtt(149), 160)
+  assert.equal(paintIntervalForRtt(350), 400)
+})
+
+test('parseCursorPositionReply accepts CSI 6n replies', () => {
+  assert.deepEqual(parseCursorPositionReply('\x1b[24;80R'), { row: 24, column: 80 })
+  assert.equal(parseCursorPositionReply('\x1b[A'), undefined)
 })
 
 test('composePaintOutput is one write of dirty rows only', () => {
