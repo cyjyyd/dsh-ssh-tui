@@ -192,11 +192,12 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
+    const pickerAbort = new AbortController()
     let bootingSessionId = config.sessionId
     const boot = async (): Promise<void> => {
       if (config.resumePicker === true) {
         await ctx.get('loader')?.await()
-        const picked = await showSessionPicker(ctx, config.color !== false)
+        const picked = await showSessionPicker(ctx, config.color !== false, pickerAbort.signal)
         if (disposed) return
         if (picked === null) {
           const exit = ctx.get('appExit')
@@ -231,6 +232,7 @@ export function apply(ctx: Context, config: Config): void {
 
     return async (): Promise<void> => {
       disposed = true
+      pickerAbort.abort()
       await controller?.dispose()
       await handle?.dispose()
     }

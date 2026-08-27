@@ -8,7 +8,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
-import { truncateToWidth } from './tui.js'
+import { isEscapePrefix, truncateToWidth } from './tui.js'
 
 /** What the launch picker decided. */
 export type SessionPickerResult =
@@ -17,19 +17,23 @@ export type SessionPickerResult =
   | null
 
 /**
- * Show the picker and wait for one digit, Enter (new session), or Esc/Ctrl+C
- * (cancel). Restores the terminal before resolving.
+ * Show the picker and wait for one digit, Enter (new session), or a lone
+ * Esc/Ctrl+C (cancel). Incomplete CSI/SS3 sequences are buffered briefly so
+ * arrow keys are ignored instead of cancelling. Restores the terminal before
+ * resolving; an AbortSignal cancels and restores as well.
  * @param ctx - boot context supplying sessionPersistence.
  * @param color - whether to apply ANSI colors.
+ * @param signal - optional abort signal (fiber dispose) to cancel the picker.
  * @returns the selection, or null when cancelled.
  */
-export async function showSessionPicker(ctx: Context, color: boolean): Promise<SessionPickerResult> {
+export async function showSessionPicker(ctx: Context, color: boolean, signal?: AbortSignal): Promise<SessionPickerResult> {
   const persistence = ctx.get('sessionPersistence')
   if (persistence === undefined) {
     process.stderr.write('dsh-ssh-tui: sessionPersistence service is unavailable\n')
     return { kind: 'new' }
   }
   const sessions = await listResumableSessions(persistence, '')
+  if (signal?.aborted) return null
   if (sessions.length === 0) {
     process.stdout.write('dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n')
     return { kind: 'new' }
@@ -65,9 +69,13 @@ export async function showSessionPicker(ctx: Context, color: boolean): Promise<S
 
   return new Promise<SessionPickerResult>((resolve) => {
     let done = false
+    let escapeBuffer = ''
+    let escapeTimer: ReturnType<typeof setTimeout> | undefined
     const cleanup = (result: SessionPickerResult): void => {
       if (done) return
       done = true
+      if (escapeTimer !== undefined) clearTimeout(escapeTimer)
+      signal?.removeEventListener('abort', onAbort)
       process.stdin.removeListener('data', onData)
       try {
         process.stdin.setRawMode(false)
@@ -78,10 +86,44 @@ export async function showSessionPicker(ctx: Context, color: boolean): Promise<S
       process.stdout.write(`\x1b[0m\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}\n`)
       resolve(result)
     }
+    const onAbort = (): void => {
+      cleanup(null)
+    }
     const onData = (chunk: Buffer): void => {
-      const text = decoder.write(chunk)
-      for (const char of text) {
-        if (char === '\x1b' || char === '\x03') {
+      const combined = escapeBuffer + decoder.write(chunk)
+      escapeBuffer = ''
+      if (escapeTimer !== undefined) {
+        clearTimeout(escapeTimer)
+        escapeTimer = undefined
+      }
+
+      // Ignore complete navigation / function-key sequences.
+      if (
+        /^\x1b\[[A-DHF]$/u.test(combined)
+        || /^\x1b\[[1-6]~$/u.test(combined)
+        || /^\x1bO[A-D]$/u.test(combined)
+      ) {
+        return
+      }
+
+      if (isEscapePrefix(combined)) {
+        escapeBuffer = combined
+        escapeTimer = setTimeout(() => {
+          escapeTimer = undefined
+          const pending = escapeBuffer
+          escapeBuffer = ''
+          if (pending === '\x1b') cleanup(null)
+        }, 60)
+        return
+      }
+
+      if (combined.startsWith('\x1b')) {
+        // Unknown / complete escape sequence — ignore rather than cancel.
+        return
+      }
+
+      for (const char of combined) {
+        if (char === '\x03') {
           cleanup(null)
           return
         }
@@ -98,6 +140,11 @@ export async function showSessionPicker(ctx: Context, color: boolean): Promise<S
         }
       }
     }
+    if (signal?.aborted) {
+      cleanup(null)
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
     process.stdin.on('data', onData)
     render()
   })

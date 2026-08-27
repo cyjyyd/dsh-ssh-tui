@@ -129,7 +129,9 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | --- | --- |
 | `Enter` | send the message; while the agent is running, steers it |
 | `Tab` | complete the highlighted slash command |
-| `↑` / `↓` | navigate slash-command suggestions (or input history) |
+| `↑` / `↓` | with empty input, move among thinking/tool/subagent/plan/question cards; otherwise history |
+| `Ctrl+N` / `Ctrl+P` | move among collapsible cards |
+| `Ctrl+R` | expand or collapse all cards |
 | `Esc` / `Ctrl+C` | cancel the running turn |
 | `Ctrl+D` | exit |
 | `Ctrl+L` | redraw |
@@ -164,6 +166,18 @@ remembered under `ssh-tui-subagent` in `$DSH_HOME/settings.yaml`.
 releases selected continuable children using the harness 0.1.1
 `drainContinuableChildren` capability.
 
+Each subagent is its own collapsible card. One or many children start collapsed,
+so the parent transcript stays readable; `Enter`, click, `Ctrl+N`/`Ctrl+P`, and
+`Ctrl+R` expand or collapse them independently. Running cards show a spinner,
+and the status/title line shows `⠋ 子代理 N` instead of mixing child output
+into the parent stream.
+
+Plan mode, user questions, and the current goal also get dedicated surfaces:
+`/plan` shows a `计划模式` card plus a footer hint, `todo_write` folds the task
+list into that card, and `exit_plan_mode` / `ask_user_question` open a dialog
+while leaving a collapsed `计划待审` or `提问用户` card in the transcript.
+`/goal` renders a collapsed `目标` card and a matching footer hint.
+
 Interrupted streaming output keeps the already-generated prefix and is marked
 `⚠ interrupted`; team collaboration session events (`team/*`) are surfaced as
 system messages. Harness slash commands that accept image attachments are
@@ -193,13 +207,13 @@ the raw reasoning as it arrives. Assistant replies render in bold white with
 terminal markdown support: heading levels (H1 enlarged/underlined, H2
 underlined, H3 colored), bold, italic, inline code, fenced code blocks,
 lists, quotes, and links all get ANSI styling while remaining
-width-wrapped for the terminal. Reasoning and tool cards are
+width-wrapped for the terminal. Reasoning, tool, subagent, plan, and question cards are
 each expandable/collapsible independently — `Ctrl+N` / `Ctrl+P` move the
 selection highlight between them, `Ctrl+R` expands/collapses all blocks at once
 (individual blocks use `↑`/`↓` + `Enter`), and `Esc` drops the selection. With
 the input box empty, `↑`/`↓` move the selection and `Enter` toggles the
-selected block directly. Clicking a reasoning or tool header in the transcript
-also toggles it.
+selected block directly. Clicking a card header in the transcript
+also toggles it. Subagent cards start collapsed even when several run at once.
 
 The transcript is scrollable: `PgUp`/`PgDn` or the mouse wheel move back
 through earlier reasoning blocks and tool calls, a `↑ 已回看 N 行` indicator
@@ -237,10 +251,11 @@ While a turn is waiting on the provider, the status line shows
 acknowledged immediately (`⚡ … 排队 N`) and take effect at the next step
 boundary, so the UI never looks frozen. Long-running work is not
 misclassified: while tools are executing the status shows `工具执行中 N`,
-and while subagents are running it shows `子代理执行中 N` (no
-`等待响应`/stall warning). Subagent start/end, child assistant output, child
-tool calls/results, approvals, and `ask_user_question` prompts are all
-rendered with a `[子代理 …]` label; `/subagents` lists active runs.
+and while subagents are running it shows `⠋ 子代理 N` (no
+`等待响应`/stall warning). Plan mode adds `计划模式`, and a pending question
+adds `等待用户回答` / `计划待审`. Child output stays inside that child's
+collapsed card instead of being prefixed onto parent transcript lines;
+`/subagents` lists active runs.
 
 `/mode` opens the agent-mode picker backed by dsh's official preset roster:
 标准模式 (standard), PTC 模式 (code), 极简模式 (minimal), 创造模式 (cordis),

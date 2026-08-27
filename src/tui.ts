@@ -81,6 +81,20 @@ export interface TuiConfig {
   resumePicker?: boolean
 }
 
+type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
+
+/** One child-session event folded into a parent-side subagent card. */
+export interface SubagentLogEntry {
+  kind: SubagentLogKind
+  text: string
+}
+
+/** One todo-list item as the plan card renders it. */
+export interface PlanTodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 type Row =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
@@ -103,12 +117,52 @@ type Row =
       signal?: string
       expanded: boolean
     }
+  | {
+      kind: 'subagent'
+      sessionId: string
+      runId: string
+      provider: string
+      local: boolean
+      label: string
+      status: 'running' | 'ok' | 'error' | 'aborted'
+      startedAt: number
+      endedAt?: number
+      stopReason?: string
+      lastActivity: string
+      logs: SubagentLogEntry[]
+      expanded: boolean
+    }
+  | {
+      kind: 'plan'
+      active: boolean
+      pending: boolean
+      todos: PlanTodoItem[]
+      expanded: boolean
+    }
+  | {
+      kind: 'question'
+      questionId: string
+      title: string
+      header?: string
+      detail?: string
+      intent: 'ask' | 'plan-review'
+      status: 'waiting' | 'answered' | 'cancelled'
+      summary: string
+      expanded: boolean
+    }
+  | {
+      kind: 'goal'
+      objective: string
+      phase: 'active' | 'paused' | 'blocked' | 'complete' | 'cleared'
+      blockedReason?: string
+      expanded: boolean
+    }
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
 
-/** A reasoning/tool row or the live streaming-reasoning block. */
+/** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */
 type CollapsibleBlock =
-  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }>
+  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
 type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path'
@@ -1016,14 +1070,14 @@ function openCodeApiErrorMessage(payload: unknown): string {
 }
 
 /** Whether `text` could still grow into a recognized escape sequence. */
-function isEscapePrefix(text: string): boolean {
+export function isEscapePrefix(text: string): boolean {
   if (text === '\x1b') return true
   if (!text.startsWith('\x1b')) return false
   if (text === '\x1b[') return true
   if (text === '\x1bO' || /^\x1bO[A-Z]?$/u.test(text)) return true
   if (/^\x1b\[[A-D]$/u.test(text)) return true
   if (/^\x1b\[[HF]$/u.test(text)) return true
-  if (/^\x1b\[\d~?$/u.test(text)) return true
+  if (/^\x1b\[\d+~?$/u.test(text)) return true
   if (/^\x1b\[<(?:\d*;?)*[Mm]?$/u.test(text)) return true
   return false
 }
@@ -1098,6 +1152,89 @@ function friendlyArgsSummary(name: string, args: string): string {
 
 const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
+const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
+const MAX_SUBAGENT_LOGS = 80
+
+const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
+  pending: '○',
+  in_progress: '◉',
+  completed: '✓',
+}
+
+/** Parse a todo_write payload into displayable plan items. */
+export function parsePlanTodos(value: unknown): PlanTodoItem[] {
+  const root = typeof value === 'string' ? parseJsonArgs(value) : value
+  const todos = root !== null && typeof root === 'object' && !Array.isArray(root)
+    ? (root as { todos?: unknown }).todos
+    : Array.isArray(root) ? root : undefined
+  if (!Array.isArray(todos)) return []
+  const out: PlanTodoItem[] = []
+  for (const item of todos) {
+    if (typeof item !== 'object' || item === null) continue
+    const content = typeof (item as { content?: unknown }).content === 'string'
+      ? (item as { content: string }).content.trim()
+      : ''
+    if (content === '') continue
+    const status = (item as { status?: unknown }).status
+    out.push({
+      content,
+      status: status === 'in_progress' || status === 'completed' ? status : 'pending',
+    })
+  }
+  return out
+}
+
+/** Compact todo-list summary: done/total plus the first in-progress task. */
+export function todoSummary(value: unknown): string {
+  const todos = parsePlanTodos(value)
+  if (todos.length === 0) return '计划列表'
+  const done = todos.filter(item => item.status === 'completed').length
+  const active = todos.find(item => item.status === 'in_progress')
+  const extra = todos.filter(item => item.status === 'in_progress').length
+  const head = `${done}/${todos.length} 完成`
+  if (active === undefined) return head
+  return extra > 1 ? `${head} · ${active.content} +${extra - 1}` : `${head} · ${active.content}`
+}
+
+/** Compact ask_user_question summary from tool arguments. */
+export function askSummary(value: unknown): string {
+  const root = typeof value === 'string' ? parseJsonArgs(value) : value
+  const questions = root !== null && typeof root === 'object' && !Array.isArray(root)
+    ? (root as { questions?: unknown }).questions
+    : undefined
+  if (!Array.isArray(questions) || questions.length === 0) return '等待回答'
+  const first = questions[0]
+  const text = typeof first === 'object' && first !== null && typeof (first as { question?: unknown }).question === 'string'
+    ? (first as { question: string }).question
+    : '等待回答'
+  return questions.length > 1 ? `${text}（${questions.length} 题）` : text
+}
+
+/** One-line subagent card header used while collapsed. */
+export function subagentHeaderText(row: Extract<Row, { kind: 'subagent' }>, now = Date.now()): string {
+  const elapsed = Math.max(0, Math.floor(((row.endedAt ?? now) - row.startedAt) / 1000))
+  const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`
+  const state = row.status === 'running'
+    ? '运行中'
+    : row.status === 'ok'
+      ? '完成'
+      : row.status === 'aborted'
+        ? '已中断'
+        : '失败'
+  const activity = row.lastActivity === '' ? '' : ` · ${row.lastActivity}`
+  const id = row.sessionId.slice(0, 8)
+  return `${row.label}  [${id}]  ${state} · ${elapsedLabel}${activity}`
+}
+
+function appendSubagentLog(row: Extract<Row, { kind: 'subagent' }>, entry: SubagentLogEntry): void {
+  row.logs.push(entry)
+  if (row.logs.length > MAX_SUBAGENT_LOGS) row.logs.splice(0, row.logs.length - MAX_SUBAGENT_LOGS)
+  row.lastActivity = entry.text
+}
+
+function planReviewOf(question: AskUserQuestionItem): boolean {
+  return question.intent?.kind === 'plan-review' && question.detail !== undefined && question.detail !== ''
+}
 
 /** Derive the intended file change from a mutation tool's arguments. */
 function diffHunksFromArgs(name: string, argsRaw: string): ToolDiffHunk[] | null {
@@ -1163,6 +1300,22 @@ export function presentToolCall(name: string, args: string): {
       summary: path ?? friendlyArgsSummary(name, args),
       ...diff === null || diff === undefined ? {} : { diff },
     }
+  }
+  if (SUBAGENT_TOOL_NAMES.has(name)) {
+    const description = typeof parsed?.description === 'string' ? parsed.description.trim() : ''
+    return {
+      title: name === 'subagent_fork' ? '子代理 fork' : '子代理',
+      summary: description === '' ? friendlyArgsSummary(name, args) : description,
+    }
+  }
+  if (name === 'todo_write' || name === 'todo') {
+    return { title: '计划', summary: todoSummary(parsed) }
+  }
+  if (name === 'ask_user_question') {
+    return { title: '提问用户', summary: askSummary(parsed) }
+  }
+  if (name === 'exit_plan_mode') {
+    return { title: '退出计划模式', summary: '等待确认计划' }
   }
   return { title: name, summary: friendlyArgsSummary(name, args) }
 }
@@ -1513,7 +1666,7 @@ export class SshTui {
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
-    this.pushRow({ kind: 'system', text: 'Type /help for commands · /setup provider & key · ↑/↓ select · Enter expand/collapse · Ctrl+T fold input · Esc cancels' })
+    this.pushRow({ kind: 'system', text: '输入 /help 查看命令 · /setup 配置提供商 · ↑/↓ 选择卡片 · Enter 展开/折叠 · Ctrl+R 全部展开/收起 · Ctrl+T 折叠输入 · Esc 取消' })
   }
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
@@ -1550,9 +1703,13 @@ export class SshTui {
     this.renderTimer = setInterval(() => {
       const now = Date.now()
       if (this.agent.status === 'running') this.updateTerminalTitle()
-      if (this.streaming !== undefined
-        && this.streaming.reasoning !== ''
-        && now - this.lastPaintAt >= 200) {
+      const animating = (this.streaming !== undefined && this.streaming.reasoning !== '')
+        || this.activeSubagents.size > 0
+        || this.rows.some(row =>
+          (row.kind === 'question' && row.status === 'waiting')
+          || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
+          || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked')))
+      if (animating && now - this.lastPaintAt >= 200) {
         this.dirty = true
       }
       // While a turn is waiting on the provider with no new events, repaint at
@@ -1614,7 +1771,7 @@ export class SshTui {
         if (existsSync(credentialFile)) {
           const content = await readFile(credentialFile, 'utf8')
           if (this.disposed) return
-          stored = new RegExp(`^${envRef}\\s*:\\s*\\S`, 'm').test(content)
+          stored = new RegExp(`^${escapeRegex(envRef)}\\s*:\\s*\\S`, 'm').test(content)
         }
       } catch {
         // Ignore unreadable/missing documents; the wizard will ask again.
@@ -1769,13 +1926,73 @@ export class SshTui {
   /** The transcript rows that support per-row expand/collapse. */
   private collapsibleRows(): CollapsibleBlock[] {
     const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' }> =>
-        row.kind === 'reasoning' || row.kind === 'tool')
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' }> =>
+        row.kind === 'reasoning'
+        || row.kind === 'tool'
+        || row.kind === 'subagent'
+        || row.kind === 'plan'
+        || row.kind === 'question'
+        || row.kind === 'goal')
     if (this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
     }
     return rows
+  }
+
+  private spinnerFrame(periodMs = 120): string {
+    return SPINNER[Math.floor(Date.now() / periodMs) % SPINNER.length] ?? '⠋'
+  }
+
+  private findSubagentRow(sessionId: string): Extract<Row, { kind: 'subagent' }> | undefined {
+    return this.rows.findLast((row): row is Extract<Row, { kind: 'subagent' }> =>
+      row.kind === 'subagent' && row.sessionId === sessionId)
+  }
+
+  private findLivePlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
+    return this.rows.findLast((row): row is Extract<Row, { kind: 'plan' }> => row.kind === 'plan')
+  }
+
+  private upsertPlanRow(patch: Partial<Extract<Row, { kind: 'plan' }>>): Extract<Row, { kind: 'plan' }> {
+    const existing = this.findLivePlanRow()
+    if (existing !== undefined) {
+      Object.assign(existing, patch)
+      return existing
+    }
+    const row: Extract<Row, { kind: 'plan' }> = {
+      kind: 'plan',
+      active: patch.active ?? false,
+      pending: patch.pending ?? false,
+      todos: patch.todos ?? [],
+      expanded: false,
+    }
+    this.pushRow(row)
+    return row
+  }
+
+  private paintCollapsibleHeader(
+    addDisplay: (line: string, ref?: CollapsibleBlock) => void,
+    row: CollapsibleBlock,
+    kind: DisplayKind,
+    header: string,
+    width: number,
+    colorize?: (line: string) => string,
+  ): void {
+    const focused = this.focusedRow === row
+    const marker = row.expanded ? '▾' : '▸'
+    const prefix = focused ? '▶ ' : '  '
+    const plain = `${prefix}${marker} ${header}`
+    const paint = colorize ?? ((line: string) => this.styleLine(kind, line))
+    if (!row.expanded) {
+      const collapsed = truncateToWidth(plain, Math.max(1, width - 2))
+      const styled = paint(collapsed)
+      addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+      return
+    }
+    for (const wrapped of wrap(plain, width)) {
+      const styled = paint(wrapped)
+      addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+    }
   }
 
   /** Move the expand/collapse focus among reasoning and tool rows. */
@@ -1883,6 +2100,7 @@ export class SshTui {
           if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', line)
           return `${this.styleLine('tool', line.slice(0, dotIndex))}\x1b[${dotColor}m●${this.styleLine('tool', line.slice(dotIndex + 1))}`
         }
+        const spinner = running ? ` ${this.spinnerFrame()}` : ''
         const state = running ? 'running…' : ok ? 'ok' : 'error'
         const summary = row.summary === '' ? '' : `  ${row.summary}`
         const exit = !running && row.command !== undefined
@@ -1894,7 +2112,7 @@ export class SshTui {
           : ''
         const focused = this.focusedRow === row
         const marker = row.expanded ? '▾' : '▸'
-        const plainHeader = `${marker} ● ${row.title}${summary}  [${state}]${exit}`
+        const plainHeader = `${marker} ● ${row.title}${summary}  [${state}]${exit}${spinner}`
         if (!row.expanded) {
           const collapsed = truncateToWidth(
             `${focused ? '▶ ' : '  '}${plainHeader}`,
@@ -1910,6 +2128,111 @@ export class SshTui {
         for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
           for (const wrapped of wrap(line.text, Math.max(1, width - 2))) {
             addDisplay(this.styleLine(line.kind, `  ${wrapped}`))
+          }
+        }
+        continue
+      }
+      if (row.kind === 'subagent') {
+        const running = row.status === 'running'
+        const ok = row.status === 'ok'
+        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
+        const styleHeader = (line: string): string => {
+          const dotIndex = line.indexOf('●')
+          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', line)
+          return `${this.styleLine('tool', line.slice(0, dotIndex))}\x1b[${dotColor}m●${this.styleLine('tool', line.slice(dotIndex + 1))}`
+        }
+        const spinner = running ? ` ${this.spinnerFrame()}` : ''
+        const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, 'tool', header, width, styleHeader)
+        if (row.expanded) {
+          addDisplay(this.styleLine('tool-result', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`))
+          if (row.stopReason !== undefined) {
+            addDisplay(this.styleLine('tool-result', `  结束原因：${row.stopReason}`))
+          }
+          if (row.logs.length === 0) {
+            addDisplay(this.styleLine('tool-result', running ? '  等待子代理输出…' : '  没有可见输出'))
+          } else {
+            for (const entry of row.logs) {
+              const kind: DisplayKind = entry.kind === 'assistant'
+                ? 'assistant'
+                : entry.kind === 'result' && row.status === 'error'
+                  ? 'error'
+                  : 'tool-result'
+              for (const wrapped of wrap(entry.text, Math.max(1, width - 2))) {
+                addDisplay(this.styleLine(kind, `  ${wrapped}`))
+              }
+            }
+          }
+        }
+        continue
+      }
+      if (row.kind === 'plan') {
+        const running = row.todos.some(item => item.status === 'in_progress')
+        const spinner = (row.active || row.pending || running) ? ` ${this.spinnerFrame()}` : ''
+        const mode = row.pending
+          ? '切换中'
+          : row.active
+            ? '计划模式'
+            : '计划'
+        const header = `● ${mode}${spinner} · ${todoSummary(row.todos)}${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, 'system', header, width)
+        if (row.expanded) {
+          addDisplay(this.styleLine('system', row.active
+            ? '  当前处于计划模式：只规划、不改代码，确认后再执行。'
+            : '  计划模式已关闭。可用 /plan 重新进入。'))
+          if (row.pending) addDisplay(this.styleLine('system', '  模式切换将在下一步生效。'))
+          if (row.todos.length === 0) {
+            addDisplay(this.styleLine('tool-result', '  还没有任务列表'))
+          } else {
+            for (const item of row.todos) {
+              const mark = TODO_STATUS_MARK[item.status]
+              for (const wrapped of wrap(`${mark} ${item.content}`, Math.max(1, width - 2))) {
+                addDisplay(this.styleLine(item.status === 'completed' ? 'system' : 'tool', `  ${wrapped}`))
+              }
+            }
+          }
+        }
+        continue
+      }
+      if (row.kind === 'question') {
+        const waiting = row.status === 'waiting'
+        const spinner = waiting ? ` ${this.spinnerFrame()}` : ''
+        const state = waiting ? '等待回答' : row.status === 'answered' ? '已回答' : '已取消'
+        const title = row.intent === 'plan-review' ? '计划待审' : '提问用户'
+        const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, waiting ? 'tool' : 'system', header, width)
+        if (row.expanded) {
+          if (row.header !== undefined) addDisplay(this.styleLine('system', `  ${row.header}`))
+          for (const wrapped of wrap(row.title, Math.max(1, width - 2))) {
+            addDisplay(this.styleLine('assistant', `  ${wrapped}`))
+          }
+          if (row.detail !== undefined && row.detail !== '') {
+            for (const wrapped of wrap(row.detail, Math.max(1, width - 2))) {
+              addDisplay(this.styleLine('tool-result', `  ${wrapped}`))
+            }
+          }
+          addDisplay(this.styleLine('system', waiting
+            ? '  用下方对话框选择，数字/字母选中，Enter 提交，Esc 取消。'
+            : `  ${row.summary}`))
+        }
+        continue
+      }
+      if (row.kind === 'goal') {
+        const live = row.phase === 'active' || row.phase === 'blocked'
+        const spinner = live ? ` ${this.spinnerFrame()}` : ''
+        const phase = row.phase === 'active' ? '进行中'
+          : row.phase === 'paused' ? '已暂停'
+          : row.phase === 'blocked' ? '受阻'
+          : row.phase === 'complete' ? '已完成'
+          : '已清除'
+        const header = `● 目标${spinner} · ${phase} · ${row.objective}${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, live ? 'tool' : 'system', header, width)
+        if (row.expanded) {
+          addDisplay(this.styleLine('system', '  用 /goal 查看、暂停、恢复或清除当前目标。'))
+          if (row.blockedReason !== undefined) {
+            for (const wrapped of wrap(row.blockedReason, Math.max(1, width - 2))) {
+              addDisplay(this.styleLine('error', `  ${wrapped}`))
+            }
           }
         }
         continue
@@ -2014,21 +2337,33 @@ export class SshTui {
         }
       } else {
         const d = this.dialog
-        addDialog(`Question ${d.index + 1}/${d.total}: ${d.question.question}`)
-        if (d.question.detail !== undefined && d.question.detail !== '') {
-          addDialog(truncate(d.question.detail, 6))
+        const review = planReviewOf(d.question)
+        if (review) {
+          addDialog(`计划待审 ${d.index + 1}/${d.total}${d.question.header === undefined ? '' : ` · ${d.question.header}`}`)
+          addDialog(d.question.question)
+          if (d.question.detail !== undefined && d.question.detail !== '') {
+            addDialog(truncate(d.question.detail, 12))
+          }
+        } else {
+          addDialog(`提问用户 ${d.index + 1}/${d.total}: ${d.question.question}`)
+          if (d.question.header !== undefined && d.question.header !== '') addDialog(d.question.header)
+          if (d.question.detail !== undefined && d.question.detail !== '') {
+            addDialog(truncate(d.question.detail, 6))
+          }
         }
         const options = d.question.options ?? []
+        const approve = d.question.intent?.approve
         for (const [index, option] of options.entries()) {
           const marker = d.selected.has(index) ? '●' : '○'
           const key = QUESTION_OPTION_KEYS[index] ?? '?'
+          const recommended = option.label === approve ? '（推荐）' : ''
           const extra = option.description === undefined ? '' : ` — ${option.description}`
-          addDialog(`  ${key} ${marker} ${option.label}${extra}`)
+          addDialog(`  ${key} ${marker} ${option.label}${recommended}${extra}`)
         }
         if (options.length === 0) {
-          addDialog('  (free text: type below and press Enter)')
+          addDialog('  （自由输入：在下方输入后按 Enter）')
         }
-        addDialog(`  ${d.question.multiSelect === true ? 'digits/letters toggle, Enter submit' : 'digit/letter to select, Enter submit'}, Esc to cancel`)
+        addDialog(`  ${d.question.multiSelect === true ? '数字/字母切换，Enter 提交' : '数字/字母选择，Enter 提交'}，Esc 取消`)
       }
     }
 
@@ -2144,8 +2479,23 @@ export class SshTui {
     else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
     if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
     const idleMs = Date.now() - this.lastActivity
-    if (this.agent.status === 'running' && this.activeSubagents.size > 0) {
-      statusText += ` · 子代理执行中 ${this.activeSubagents.size}`
+    const livePlan = this.findLivePlanRow()
+    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
+    if (waitingQuestions || this.dialog?.kind === 'questions') {
+      statusText += this.dialog?.kind === 'questions' && planReviewOf(this.dialog.question)
+        ? ' · 计划待审'
+        : ' · 等待用户回答'
+    } else if (livePlan?.active === true || livePlan?.pending === true) {
+      statusText += livePlan.pending ? ' · 计划模式切换中' : ' · 计划模式'
+    }
+    const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
+    if (liveGoal !== undefined && (liveGoal.phase === 'active' || liveGoal.phase === 'paused' || liveGoal.phase === 'blocked')) {
+      const phase = liveGoal.phase === 'active' ? '目标进行中' : liveGoal.phase === 'paused' ? '目标已暂停' : '目标受阻'
+      statusText += ` · ${phase}`
+    }
+    if (this.activeSubagents.size > 0) {
+      const spinner = this.spinnerFrame(160)
+      statusText += ` · ${spinner} 子代理 ${this.activeSubagents.size}`
     } else if (this.agent.status === 'running' && this.openToolCalls.size > 0) {
       statusText += ` · 工具执行中 ${this.openToolCalls.size}`
     } else if (this.agent.status === 'running' && idleMs > WAIT_INDICATOR_MS) {
@@ -2181,6 +2531,9 @@ export class SshTui {
       this.pendingMessages.size,
       this.commandSuggestions.length,
       this.suggestionIndex,
+      this.activeSubagents.size,
+      this.dialog?.kind ?? '',
+      this.findLivePlanRow()?.active === true ? 'plan' : '',
     ].join('\x1f')
     const chromeChanged = chromeKey !== this.lastChromeKey
 
@@ -2298,8 +2651,19 @@ export class SshTui {
       this.lastTitleUpdateAt = now
       const spinner = SPINNER[Math.floor(now / 800) % SPINNER.length]
       let detail = '运行中'
-      if (this.openToolCalls.size > 0) detail = `运行中 · 工具 ${this.openToolCalls.size}`
-      else if (this.activeSubagents.size > 0) detail = `运行中 · 子代理 ${this.activeSubagents.size}`
+      if (this.dialog?.kind === 'questions') {
+        detail = planReviewOf(this.dialog.question) ? '计划待审' : '等待用户回答'
+      } else if (this.activeSubagents.size > 0) {
+        detail = `运行中 · 子代理 ${this.activeSubagents.size}`
+      } else if (this.openToolCalls.size > 0) {
+        detail = `运行中 · 工具 ${this.openToolCalls.size}`
+      } else if (this.findLivePlanRow()?.active === true) {
+        detail = '计划模式'
+      } else {
+        const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
+        if (liveGoal?.phase === 'active') detail = '目标进行中'
+        else if (liveGoal?.phase === 'blocked') detail = '目标受阻'
+      }
       this.write(`\x1b]0;dsh ${spinner} ${detail}\x07`)
       return
     }
@@ -2356,7 +2720,7 @@ export class SshTui {
    * owns the route); direct children created by tool-subagent inherit the
    * parent provider unless `/submodel` stored an explicit subagent provider.
    */
-  private readonly handleAgentRequest = async (
+  readonly handleAgentRequest = async (
     { agent }: { agent: Agent },
     next: () => Promise<LlmCallConfig>,
   ): Promise<LlmCallConfig> => {
@@ -2371,7 +2735,7 @@ export class SshTui {
     }
   }
 
-  private readonly handleSessionEvent = (session: { id: SessionId }, event: SessionEvent): void => {
+  readonly handleSessionEvent = (session: { id: SessionId }, event: SessionEvent): void => {
     if (session.id !== this.agent.id) {
       if (this.subagentSessions.has(session.id)) this.handleSubagentSessionEvent(session.id, event)
       return
@@ -2486,7 +2850,7 @@ export class SshTui {
           ...present.command === undefined ? {} : { command: present.command },
           ...present.cwd === undefined ? {} : { cwd: present.cwd },
           ...present.diff === undefined ? {} : { diff: present.diff },
-          expanded: DIFF_TOOL_NAMES.has(event.data.name),
+          expanded: DIFF_TOOL_NAMES.has(event.data.name) && !SUBAGENT_TOOL_NAMES.has(event.data.name),
         }
         this.pushRow(row)
         this.streaming = undefined
@@ -2596,11 +2960,13 @@ export class SshTui {
         this.markDirty()
         break
       }
+      case 'todo/write': {
+        this.upsertPlanRow({ todos: parsePlanTodos(event.data.todos) })
+        this.markDirty()
+        break
+      }
       default:
-        if (event.type.startsWith('team/')) {
-          this.pushRow({ kind: 'system', text: `[团队] ${event.type}` })
-          this.markDirty()
-        }
+        this.handleExtensionEvent(event)
         break
     }
   }
@@ -2610,6 +2976,7 @@ export class SshTui {
     this.lastActivity = Date.now()
     if (status === 'running') {
       this.completionSignaled = false
+      this.completedAt = 0
     } else if (!this.completionSignaled && this.status === 'running') {
       this.completionSignaled = true
       this.completedAt = Date.now()
@@ -2645,72 +3012,223 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** Render a live subagent's own session events so its progress is visible. */
-  private readonly handleSubagentSessionEvent = (sessionId: SessionId, event: SessionEvent): void => {
-    const label = `[子代理 ${String(sessionId).slice(0, 8)}]`
+  /** Plan-mode / command / team events that plugins merge into SessionEventMap. */
+  private handleExtensionEvent(event: SessionEvent): void {
+    const type = String(event.type)
+    const data = (event as SessionEvent & { data?: unknown }).data as { active?: unknown; name?: unknown; args?: unknown } | undefined
+    if (type === 'plan/mode') {
+      const active = data?.active === true
+      this.upsertPlanRow({ active, pending: false })
+      this.pushRow({
+        kind: 'system',
+        text: active
+          ? '已进入计划模式：先规划、等确认后再改代码。可用 /plan off 退出。'
+          : '已退出计划模式，可以继续执行改动。',
+      })
+      this.markDirty()
+      return
+    }
+    if (type === 'command/run' && data?.name === 'plan') {
+      const args = String(data.args ?? '').trim()
+      const wantsActive = args !== 'off'
+      const current = this.findLivePlanRow()
+      this.upsertPlanRow({
+        pending: current !== undefined && current.active !== wantsActive,
+        active: current?.active ?? false,
+      })
+      this.pushRow({
+        kind: 'system',
+        text: wantsActive ? '已请求进入计划模式。' : '已请求退出计划模式。',
+      })
+      this.markDirty()
+      return
+    }
+    if (type === 'goal/change') {
+      this.handleGoalChange(data)
+      return
+    }
+    if (type.startsWith('team/')) {
+      this.pushRow({ kind: 'system', text: `[团队] ${type}` })
+      this.markDirty()
+    }
+  }
+
+  private handleGoalChange(data: unknown): void {
+    const payload = data !== null && typeof data === 'object' ? data as Record<string, unknown> : {}
+    const existing = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
+    if (payload.operation === 'clear') {
+      if (existing !== undefined) {
+        existing.phase = 'cleared'
+        existing.blockedReason = undefined
+      } else {
+        this.pushRow({ kind: 'goal', objective: '（已清除）', phase: 'cleared', expanded: false })
+      }
+      this.pushRow({ kind: 'system', text: '当前目标已清除。' })
+      this.markDirty()
+      return
+    }
+    const goal = payload.goal !== null && typeof payload.goal === 'object' ? payload.goal as Record<string, unknown> : {}
+    const objective = typeof goal.objective === 'string' && goal.objective.trim() !== '' ? goal.objective.trim() : '（未命名目标）'
+    const phase = goal.phase === 'paused' || goal.phase === 'blocked' || goal.phase === 'complete' ? goal.phase : 'active'
+    const blocked = goal.blockedReason !== null && typeof goal.blockedReason === 'object'
+      ? (goal.blockedReason as { message?: unknown }).message
+      : undefined
+    const blockedReason = typeof blocked === 'string' ? blocked : undefined
+    if (existing !== undefined) {
+      existing.objective = objective
+      existing.phase = phase
+      existing.blockedReason = blockedReason
+    } else {
+      this.pushRow({
+        kind: 'goal',
+        objective,
+        phase,
+        ...(blockedReason === undefined ? {} : { blockedReason }),
+        expanded: false,
+      })
+    }
+    const notice = phase === 'active' ? '已设置目标'
+      : phase === 'paused' ? '目标已暂停'
+      : phase === 'blocked' ? '目标受阻'
+      : '目标已完成'
+    this.pushRow({ kind: 'system', text: `${notice}：${objective}` })
+    this.markDirty()
+  }
+
+  private handleSubagentExtensionEvent(row: Extract<Row, { kind: 'subagent' }>, event: SessionEvent): void {
+    const type = String(event.type)
+    const data = (event as SessionEvent & { data?: unknown }).data as { active?: unknown } | undefined
+    if (type === 'plan/mode') {
+      appendSubagentLog(row, {
+        kind: 'system',
+        text: data?.active === true ? '进入计划模式' : '退出计划模式',
+      })
+      return
+    }
+    if (type.startsWith('team/')) {
+      appendSubagentLog(row, { kind: 'team', text: `[团队] ${type}` })
+    }
+  }
+
+  /** Fold a live subagent's own session events into that child's card. */
+  readonly handleSubagentSessionEvent = (sessionId: SessionId, event: SessionEvent): void => {
+    const row = this.findSubagentRow(String(sessionId))
+    if (row === undefined) return
     switch (event.type) {
       case 'user/message': {
         const text = collectText(event.data.content)
-        if (text !== '') this.pushRow({ kind: 'system', text: `${label} ❯ ${truncate(text, 6)}` })
+        if (text !== '') appendSubagentLog(row, { kind: 'user', text: `❯ ${truncate(text, 4)}` })
         break
       }
-      case 'assistant/chunk': {
-        // Child chunks are coalesced into assistant/message to avoid flooding.
+      case 'assistant/chunk':
         break
-      }
       case 'assistant/message': {
         const text = collectText(event.data.message.content)
-        if (text !== '') this.pushRow({ kind: 'assistant', text: `${label} ${truncate(text, 12)}` })
+        if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: truncate(text, 8) })
         break
       }
-      case 'tool/call':
-        this.pushRow({ kind: 'system', text: `${label} ▶ ${event.data.name} ${sliceCodePoints(event.data.arguments, 160)}` })
+      case 'tool/call': {
+        const present = presentToolCall(event.data.name, event.data.arguments)
+        appendSubagentLog(row, { kind: 'tool', text: `▶ ${present.title} ${present.summary}` })
         break
+      }
       case 'tool/result': {
-        const output = truncate(collectText(event.data.message.content), 4)
-        const ok = event.data.error === undefined && !event.data.message.content[0]?.isError
-        this.pushRow({ kind: 'system', text: `${label} ${ok ? '✓' : '✗'} ${event.data.message.source.callId}${output === '' ? '' : `\n  ${output}`}` })
+        const output = truncate(collectText(event.data.message.content), 3)
+        const ok = event.data.error === undefined && event.data.message.content[0]?.isError !== true
+        appendSubagentLog(row, {
+          kind: 'result',
+          text: `${ok ? '✓' : '✗'} ${event.data.message.source.callId}${output === '' ? '' : ` · ${output}`}`,
+        })
         break
       }
       case 'turn/end':
-        this.pushRow({ kind: 'system', text: `${label} 轮次结束（${event.data.reason.kind}）` })
+        appendSubagentLog(row, { kind: 'turn', text: `轮次结束（${event.data.reason.kind}）` })
         break
       case 'approval/asked':
-        this.pushRow({ kind: 'system', text: `${label} 等待审批：${event.data.toolName}` })
+        appendSubagentLog(row, { kind: 'approval', text: `等待审批：${event.data.toolName}` })
         break
       default:
-        if (event.type.startsWith('team/')) {
-          this.pushRow({ kind: 'system', text: `${label} [团队] ${event.type}` })
-        }
+        this.handleSubagentExtensionEvent(row, event)
         break
     }
     this.lastActivity = Date.now()
     this.markDirty()
   }
 
-  private readonly handleSubagentStart = (info: SubagentRunInfo): void => {
+  readonly handleSubagentStart = (info: SubagentRunInfo): void => {
+    const sessionId = String(info.id)
     this.activeSubagents.set(String(info.runId), {
-      id: String(info.id),
+      id: sessionId,
       provider: info.provider,
       startedAt: Date.now(),
     })
-    this.subagentSessions.add(String(info.id))
+    this.subagentSessions.add(sessionId)
     this.lastActivity = Date.now()
-    this.pushRow({ kind: 'system', text: `▶ 子代理 ${info.id} 已启动（${info.provider}${info.local ? '' : '，外部进程'}）` })
+    const existing = this.findSubagentRow(sessionId)
+    if (existing !== undefined) {
+      existing.runId = String(info.runId)
+      existing.provider = info.provider
+      existing.local = info.local
+      existing.status = 'running'
+      existing.startedAt = Date.now()
+      existing.endedAt = undefined
+      existing.stopReason = undefined
+      existing.lastActivity = '已启动'
+      existing.expanded = false
+      appendSubagentLog(existing, { kind: 'system', text: `已启动（${info.provider}${info.local ? '' : '，外部进程'}）` })
+    } else {
+      this.pushRow({
+        kind: 'subagent',
+        sessionId,
+        runId: String(info.runId),
+        provider: info.provider,
+        local: info.local,
+        label: `子代理 ${info.provider}`,
+        status: 'running',
+        startedAt: Date.now(),
+        lastActivity: '已启动',
+        logs: [{ kind: 'system', text: `已启动（${info.provider}${info.local ? '' : '，外部进程'}）` }],
+        expanded: false,
+      })
+    }
     this.markDirty()
   }
 
-  private readonly handleSubagentEnd = (info: SubagentRunEndInfo): void => {
+  readonly handleSubagentEnd = (info: SubagentRunEndInfo): void => {
     this.activeSubagents.delete(String(info.runId))
     this.subagentSessions.delete(String(info.id))
     this.lastActivity = Date.now()
     const output = info.lastAssistantMessage === undefined
       ? ''
       : truncate(collectText(info.lastAssistantMessage), 6)
-    this.pushRow({
-      kind: 'system',
-      text: `✓ 子代理 ${info.id} 结束（${info.stopReason}）${output === '' ? '' : `\n  ${output}`}`,
-    })
+    const row = this.findSubagentRow(String(info.id)) ?? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+      candidate.kind === 'subagent' && candidate.runId === String(info.runId))
+    const failed = info.stopReason !== 'completed'
+    if (row !== undefined) {
+      row.status = info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok'
+      row.endedAt = Date.now()
+      row.stopReason = info.stopReason
+      appendSubagentLog(row, {
+        kind: failed ? 'result' : 'assistant',
+        text: `结束（${info.stopReason}）${output === '' ? '' : ` · ${output}`}`,
+      })
+    } else {
+      this.pushRow({
+        kind: 'subagent',
+        sessionId: String(info.id),
+        runId: String(info.runId),
+        provider: info.provider,
+        local: info.local,
+        label: `子代理 ${info.provider}`,
+        status: info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok',
+        startedAt: Date.now(),
+        endedAt: Date.now(),
+        stopReason: info.stopReason,
+        lastActivity: `结束（${info.stopReason}）`,
+        logs: [{ kind: 'system', text: `结束（${info.stopReason}）${output === '' ? '' : ` · ${output}`}` }],
+        expanded: false,
+      })
+    }
     this.markDirty()
   }
 
@@ -2745,42 +3263,80 @@ export class SshTui {
     })
   }
 
-  private readonly handleUserQuestions = async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
+  readonly handleUserQuestions = async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
     const answers: AskUserQuestionAnswer['answers'] = []
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined
       : `子代理 ${request.agent.id}`
-    for (const [index, question] of request.questions.entries()) {
-      const answer = await new Promise<DialogAnswer>((resolve, reject) => {
-        const fail = (error: unknown): void => {
-          request.signal?.removeEventListener('abort', onAbort)
-          reject(error)
-        }
-        const onAbort = (): void => {
-          request.signal?.removeEventListener('abort', onAbort)
-          if (dialog !== undefined) {
-            dialog.reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
-          } else {
-            reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
-          }
-        }
-        let dialog: QuestionDialog | undefined
-        request.signal?.addEventListener('abort', onAbort, { once: true })
-        if (request.signal?.aborted === true) {
-          onAbort()
-          return
-        }
-        const labeled: AskUserQuestionItem = agentLabel === undefined
-          ? question
-          : { ...question, question: `[${agentLabel}] ${question.question}` }
-        dialog = this.openQuestion(labeled, index, request.questions.length, (selection) => {
-          request.signal?.removeEventListener('abort', onAbort)
-          resolve(selection)
-        }, fail)
-      })
-      answers.push({ id: question.id, selected: answer.selected, custom: answer.custom })
+    const cards: Extract<Row, { kind: 'question' }>[] = []
+    for (const question of request.questions) {
+      const card: Extract<Row, { kind: 'question' }> = {
+        kind: 'question',
+        questionId: question.id,
+        title: question.question,
+        ...(question.header === undefined ? {} : { header: question.header }),
+        ...(question.detail === undefined ? {} : { detail: question.detail }),
+        intent: planReviewOf(question) ? 'plan-review' : 'ask',
+        status: 'waiting',
+        summary: question.question,
+        expanded: false,
+      }
+      cards.push(card)
+      this.pushRow(card)
     }
-    return { answers }
+    this.markDirty()
+    const settleCards = (status: 'answered' | 'cancelled', summary: string): void => {
+      for (const card of cards) {
+        if (card.status === 'waiting') {
+          card.status = status
+          card.summary = summary
+        }
+      }
+    }
+    try {
+      for (const [index, question] of request.questions.entries()) {
+        const answer = await new Promise<DialogAnswer>((resolve, reject) => {
+          const fail = (error: unknown): void => {
+            request.signal?.removeEventListener('abort', onAbort)
+            reject(error)
+          }
+          const onAbort = (): void => {
+            request.signal?.removeEventListener('abort', onAbort)
+            if (dialog !== undefined) {
+              dialog.reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+            } else {
+              reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+            }
+          }
+          let dialog: QuestionDialog | undefined
+          request.signal?.addEventListener('abort', onAbort, { once: true })
+          if (request.signal?.aborted === true) {
+            onAbort()
+            return
+          }
+          const labeled: AskUserQuestionItem = agentLabel === undefined
+            ? question
+            : { ...question, question: `[${agentLabel}] ${question.question}` }
+          dialog = this.openQuestion(labeled, index, request.questions.length, (selection) => {
+            request.signal?.removeEventListener('abort', onAbort)
+            resolve(selection)
+          }, fail)
+        })
+        answers.push({ id: question.id, selected: answer.selected, custom: answer.custom })
+        const card = cards[index]
+        if (card !== undefined) {
+          card.status = 'answered'
+          card.summary = answer.custom !== undefined && answer.custom !== ''
+            ? answer.custom
+            : answer.selected.join(', ') || '已回答'
+        }
+      }
+      settleCards('answered', '已回答')
+      return { answers }
+    } catch (error) {
+      settleCards('cancelled', error instanceof UserQuestionError ? error.message : '已取消')
+      throw error
+    }
   }
 
   /** Queue one dialog behind an already-open one instead of overwriting it. */
@@ -4049,7 +4605,6 @@ export class SshTui {
     const home = dshHomeDir()
     const file = join(home, IS_WINDOWS ? 'env.cmd' : 'env.sh')
     await mkdir(home, { recursive: true, mode: 0o700 })
-    const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 
     if (IS_WINDOWS) {
       let previous = ''
@@ -4103,6 +4658,7 @@ export class SshTui {
 
   /** Idempotently source $DSH_HOME/env.sh from the user's POSIX shell rc files. */
   private async ensurePosixEnvHook(): Promise<void> {
+    if (process.env.DSH_TUI_NO_RC_HOOK === '1' || process.env.DSH_TUI_NO_RC_HOOK === 'true') return
     const envFile = join(dshHomeDir(), 'env.sh')
     const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
     const sourceLine = `[ -f ${quote(envFile)} ] && . ${quote(envFile)}`
@@ -4246,7 +4802,9 @@ export class SshTui {
             ...local,
             ...dsh,
             '',
-            'Enter while running steers the agent; Esc or Ctrl+C cancels the turn.',
+            '运行中按 Enter 可插入指示；Esc / Ctrl+C 取消当前轮次。',
+            '↑/↓ 或 Ctrl+N/P 选择思考、工具、子代理、计划或提问卡片；Enter 展开/折叠；Ctrl+R 全部展开或收起。',
+            '计划模式、提问用户和当前目标会显示独立卡片；多个子代理默认各自折叠，互不混排。',
           ].join('\n'),
         })
         break
@@ -4301,12 +4859,24 @@ export class SshTui {
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
         this.focusedRow = null
+        this.pushRow({ kind: 'system', text: '转录已清空。子代理、计划与提问卡片会在新事件到达时重新出现。' })
         break
       case 'status':
-        this.pushRow({
-          kind: 'system',
-          text: `session: ${this.agent.id}\nmodel: ${this.agent.options.model ?? 'default'}\nprovider: ${this.agent.options.provider ?? 'default'}\nstatus: ${this.agent.status}`,
-        })
+        {
+          const plan = this.findLivePlanRow()
+          const waiting = this.rows.filter(row => row.kind === 'question' && row.status === 'waiting').length
+          const lines = [
+            `session: ${this.agent.id}`,
+            `model: ${this.agent.options.model ?? 'default'}`,
+            `provider: ${this.agent.options.provider ?? 'default'}`,
+            `status: ${this.agent.status}`,
+            `preset: ${this.presetName}`,
+            `subagents: ${this.activeSubagents.size}`,
+            `plan: ${plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off'}`,
+            waiting > 0 ? `questions: waiting ${waiting}` : 'questions: none',
+          ]
+          this.pushRow({ kind: 'system', text: lines.join('\n') })
+        }
         break
       case 'usage':
       case 'quota':
@@ -4345,10 +4915,13 @@ export class SshTui {
         if (this.activeSubagents.size === 0) {
           this.pushRow({ kind: 'system', text: '当前没有活动的子代理。' })
         } else {
-          const lines = [...this.activeSubagents.entries()].map(([runId, sub]) =>
-            `▶ ${sub.id}（${sub.provider}）运行 ${Math.floor((Date.now() - sub.startedAt) / 1000)}s  [${runId.slice(0, 8)}]`,
-          )
-          this.pushRow({ kind: 'system', text: lines.join('\n') })
+          const lines = [...this.activeSubagents.entries()].map(([runId, sub]) => {
+            const card = this.findSubagentRow(sub.id)
+            const label = card?.label ?? sub.id
+            const activity = card?.lastActivity ? ` · ${card.lastActivity}` : ''
+            return `▶ ${label}  ${sub.id}（${sub.provider}）运行 ${Math.floor((Date.now() - sub.startedAt) / 1000)}s  [${runId.slice(0, 8)}]${activity}`
+          })
+          this.pushRow({ kind: 'system', text: `${lines.join('\n')}\n↑/↓ 选择对应卡片，Enter 展开/折叠，Ctrl+R 全部展开或收起。` })
         }
         break
       }
@@ -4517,6 +5090,11 @@ export class SshTui {
 
 function optionsLength(dialog: Dialog): number {
   return dialog.kind === 'questions' ? dialog.question.options?.length ?? 0 : 0
+}
+
+/** Escape a string for safe interpolation into a RegExp source. */
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
 function envRefForId(providerId: string): string {

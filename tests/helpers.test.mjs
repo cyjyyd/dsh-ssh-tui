@@ -2,14 +2,20 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  askSummary,
   foldInputView,
   formatOpenCodeGoUsage,
   friendlyJsonLines,
+  isEscapePrefix,
   openCodeSourceFor,
   parseExitStatus,
+  parsePlanTodos,
+  presentToolCall,
   renderMarkdownLines,
   renderToolDiff,
   SshTui,
+  subagentHeaderText,
+  todoSummary,
   toolBodyLines,
   truncateToWidth,
 } from '../lib/tui.js'
@@ -18,6 +24,16 @@ test('truncateToWidth never splits a surrogate pair', () => {
   const cut = truncateToWidth('🙂🙂', 1)
   assert.equal(cut, '…')
   assert.ok(!cut.includes('\uFFFD'))
+})
+
+test('isEscapePrefix keeps multi-digit CSI / paste / SGR prefixes buffered', () => {
+  assert.equal(isEscapePrefix('\x1b'), true)
+  assert.equal(isEscapePrefix('\x1b[20'), true)
+  assert.equal(isEscapePrefix('\x1b[200'), true)
+  assert.equal(isEscapePrefix('\x1b[201'), true)
+  assert.equal(isEscapePrefix('\x1b[<0;5;1'), true)
+  assert.equal(isEscapePrefix('\x1b[1~'), true)
+  assert.equal(isEscapePrefix('a'), false)
 })
 
 test('foldInputView keeps wide characters intact around the cursor', () => {
@@ -94,4 +110,105 @@ test('subagent request waterfall applies model/effort but leaves the parent alon
   assert.equal(parent.provider, 'opencode-go')
   assert.equal(parent.model, 'deepseek-v4-pro')
   assert.equal(parent.reasoningEffort, undefined)
+})
+
+test('parsePlanTodos and todoSummary keep parallel in-progress counts', () => {
+  const todos = parsePlanTodos({
+    todos: [
+      { content: 'inspect logs', status: 'completed' },
+      { content: 'write tests', status: 'in_progress' },
+      { content: 'fix renderer', status: 'in_progress' },
+    ],
+  })
+  assert.equal(todos.length, 3)
+  assert.equal(todoSummary(todos), '1/3 完成 · write tests +1')
+})
+
+test('askSummary names the first question and counts the rest', () => {
+  assert.equal(askSummary({ questions: [{ question: 'Continue?' }, { question: 'Why?' }] }), 'Continue?（2 题）')
+})
+
+test('presentToolCall distinguishes subagent, plan, and ask tools', () => {
+  assert.deepEqual(
+    presentToolCall('subagent', JSON.stringify({ description: 'scan repo', prompt: 'go' })),
+    { title: '子代理', summary: 'scan repo' },
+  )
+  assert.equal(presentToolCall('todo_write', JSON.stringify({ todos: [{ content: 'plan it', status: 'pending' }] })).title, '计划')
+  assert.equal(presentToolCall('ask_user_question', JSON.stringify({ questions: [{ question: 'Ship it?' }] })).title, '提问用户')
+  assert.equal(presentToolCall('exit_plan_mode', '{}').title, '退出计划模式')
+})
+
+test('subagent cards stay collapsed, isolated, and animate while running', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentStart({ runId: 'run-b', id: 'child-b', provider: 'fork', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: 'alpha working' }] } },
+  })
+  tui.handleSubagentSessionEvent('child-b', {
+    type: 'tool/call',
+    data: { name: 'bash', arguments: '{"command":"ls"}' },
+  })
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(cards.length, 2)
+  assert.equal(cards[0].expanded, false)
+  assert.equal(cards[1].expanded, false)
+  assert.ok(cards[0].logs.some(entry => entry.text.includes('alpha working')))
+  assert.ok(cards[1].logs.some(entry => entry.text.includes('bash')))
+  assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('运行中'), true)
+  tui.handleSubagentEnd({
+    runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'alpha done' }],
+  })
+  assert.equal(cards[0].status, 'ok')
+  assert.equal(cards[0].expanded, false)
+})
+
+test('plan mode and ask-user questions get their own collapsed cards', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, { type: 'plan/mode', data: { active: true } })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [{ content: 'outline the change', status: 'in_progress' }] },
+  })
+  const plan = tui.rows.findLast(row => row.kind === 'plan')
+  assert.equal(plan?.active, true)
+  assert.equal(plan?.expanded, false)
+  assert.equal(plan?.todos[0]?.content, 'outline the change')
+
+  const pending = tui.handleUserQuestions({
+    questions: [{
+      id: 'q1',
+      question: 'Approve this plan?',
+      detail: '# Do the work',
+      intent: { kind: 'plan-review', approve: 'Approve' },
+      options: [{ label: 'Approve' }, { label: 'Keep planning' }],
+    }],
+    agent,
+  })
+  const question = tui.rows.findLast(row => row.kind === 'question')
+  assert.equal(question?.intent, 'plan-review')
+  assert.equal(question?.status, 'waiting')
+  assert.equal(question?.expanded, false)
+  assert.equal(tui.dialog?.kind, 'questions')
+  void pending.catch(() => {})
+})
+
+test('goal cards stay collapsed and report the current phase', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'goal/change',
+    data: { operation: 'create', goal: { objective: 'finish the TUI cards', phase: 'active' } },
+  })
+  const goal = tui.rows.findLast(row => row.kind === 'goal')
+  assert.equal(goal?.phase, 'active')
+  assert.equal(goal?.expanded, false)
+  assert.equal(goal?.objective, 'finish the TUI cards')
 })
