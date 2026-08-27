@@ -1,14 +1,27 @@
 # dsh-ssh-tui
 
-DeepSeek Harness（`dsh`）的 SSH 友好交互终端插件：纯 ANSI 聊天式转录、流式输出、
-工具卡片、git 风格 diff、历史会话选择、滚动回看与鼠标点击展开，并带终端标题栏
-进度与完成提示音。
+给跳板机、无桌面服务器、高延迟 SSH 用的 DeepSeek Harness 终端。纯 ANSI、增量重绘，
+不需要浏览器，也不需要 Ink / React 那套皮肤。
 
 English: [README.en.md](README.en.md)
 
-本插件面向慢速 SSH / 远程终端，不和 Ink 系 TUI 比皮肤。
+适合谁：SSH 直连的远程机器、慢链路、只有键盘的会话。不适合谁：本机想要多主题、
+官网级交互的桌面终端——那条赛道已经有明确赢家。
 
 SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
+
+## 官方 headless 和这个 TUI
+
+官方没有预置 TUI。远程机器上的默认终端入口是 `dsh --profile headless`：跑完一个任务，把**最后一条助手回复**打到 stdout 就退出。思考、工具调用、子代理、计划都在会话日志里，终端上看不到。
+
+下面两帧是**同一条任务**。上：官方 headless 的 stdout（按 `@deepseek-ai/dsh-headless` 的契约：只打印最终文本）。下：本插件把同一组事件画进 88 列 SSH 窗口。
+
+![官方 headless stdout 对照 dsh-ssh-tui](docs/screenshots/compare.png)
+
+上：`$ dsh --profile headless "…"` 之后只有最终 Markdown。  
+下：思考默认折叠、`edit` 整行红/绿 diff、两个子代理各自一张卡、计划条钉在输入框上方。
+
+单独看：[headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/screenshots/workspace.png)
 
 ## 功能一览
 

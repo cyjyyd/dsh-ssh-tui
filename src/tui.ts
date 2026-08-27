@@ -524,6 +524,18 @@ export function padToWidth(text: string, width: number): string {
   return used >= width ? clipped : `${clipped}${' '.repeat(width - used)}`
 }
 
+/**
+ * Pad an already-styled ANSI line to `width` cells without resetting SGR.
+ * Diff add/del rows keep their background across the whole terminal row
+ * instead of only the glyphs.
+ */
+export function padAnsiToWidth(text: string, width: number): string {
+  if (width <= 0) return ''
+  const clipped = clipAnsiToWidth(text, width)
+  const used = visibleWidth(clipped)
+  return used >= width ? clipped : `${clipped}${' '.repeat(width - used)}`
+}
+
 /** Visible width of an ANSI-styled line, ignoring SGR sequences. */
 export function visibleWidth(text: string): number {
   return displayWidth(text.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, ''))
@@ -892,8 +904,24 @@ export function clipAnsiToWidth(text: string, width: number): string {
   let index = 0
   while (index < text.length) {
     if (text.charCodeAt(index) === 0x1b) {
-      const end = text.slice(index + 1).search(/[@-~]/u)
-      const seqEnd = end === -1 ? text.length : index + 1 + end + 1
+      // CSI / OSC / other ESC sequences: consume through the final byte.
+      // Do not use [@-~] — that class includes digits (`5`) and would
+      // truncate 256-color SGR such as `38;5;22;48;5;194m`.
+      let seqEnd = index + 1
+      if (text.charCodeAt(seqEnd) === 0x5b) {
+        seqEnd += 1
+        while (seqEnd < text.length) {
+          const code = text.charCodeAt(seqEnd)
+          seqEnd += 1
+          if (code >= 0x40 && code <= 0x7e) break
+        }
+      } else {
+        while (seqEnd < text.length) {
+          const code = text.charCodeAt(seqEnd)
+          seqEnd += 1
+          if (code >= 0x40 && code <= 0x7e) break
+        }
+      }
       out += text.slice(index, seqEnd)
       index = seqEnd
       continue
@@ -2168,6 +2196,24 @@ export class SshTui {
 
   // ── terminal output ─────────────────────────────────────────────────────
 
+  /** Capture one painted frame. Used by README screenshot fixtures. */
+  captureFrame(columns = 80, rows = 24): string[] {
+    const previousColumns = process.stdout.columns
+    const previousRows = process.stdout.rows
+    const previousWrite = this.write.bind(this)
+    this.write = () => {}
+    process.stdout.columns = columns
+    process.stdout.rows = rows
+    try {
+      this.paint()
+      return [...this.lastPaintRows]
+    } finally {
+      this.write = previousWrite
+      process.stdout.columns = previousColumns
+      process.stdout.rows = previousRows
+    }
+  }
+
   private write(chunk: string): void {
     process.stdout.write(chunk)
   }
@@ -2450,8 +2496,11 @@ export class SshTui {
           addDisplay(styleToolHeader(wrapped), row)
         }
         for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
-          for (const wrapped of wrap(line.text, Math.max(1, width - 2))) {
-            addDisplay(this.styleLine(line.kind, `  ${wrapped}`))
+          const inner = Math.max(1, width - 2)
+          const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
+          for (const wrapped of wrap(line.text, inner)) {
+            const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
+            addDisplay(this.styleLine(line.kind, body))
           }
         }
         continue
@@ -2871,9 +2920,8 @@ export class SshTui {
     for (let i = 0; i < maxRows; i++) {
       const current = paintRows[i]
       if (current === this.lastPaintRows[i] && !(chromeChanged && i >= chromeStart) && i < height) continue
-      const clipped = current === undefined ? '' : clipAnsiToWidth(current, width)
-      const pad = Math.max(0, width - visibleWidth(clipped))
-      this.write(`\x1b[${i + 1};1H\x1b[0m${clipped}\x1b[0m${' '.repeat(pad)}\x1b[K`)
+      const clipped = current === undefined ? '' : padAnsiToWidth(current, width)
+      this.write(`\x1b[${i + 1};1H\x1b[0m${clipped}\x1b[K`)
     }
     if (paintRows.length < Math.max(this.lastPaintRows.length, height)) {
       this.write(`\x1b[${paintRows.length + 1};1H\x1b[J`)

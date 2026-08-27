@@ -23,3 +23,6 @@ sessions/
 # editor/IDE
 .vscode/
 .idea/
+docs/screenshots/*-labeled.png
+docs/screenshots/*.ansi.txt
+docs/screenshots/*.pango

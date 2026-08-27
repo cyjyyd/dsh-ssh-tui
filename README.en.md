@@ -1,13 +1,31 @@
 # dsh-ssh-tui
 
-An SSH-friendly interactive terminal (TUI) plugin for [DeepSeek
-Harness](https://github.com/deepseek-ai/deepseek-harness). It renders the agent
-session as a plain-ANSI chat transcript, streams model output, shows tool calls,
-answers approvals and `ask_user_question` prompts from the keyboard, and lets
-you resume persisted sessions. No browser, no mouse, no heavy terminal
-framework — designed for slow/remote SSH links.
+A DeepSeek Harness terminal for jump hosts, headless servers, and high-latency
+SSH. Plain ANSI and incremental redraws. No browser, no Ink/React skin.
 
 中文部署指南：[README.md](README.md)
+
+Who it is for: a keyboard-only SSH session on a remote box. Who it is not for:
+a local desktop TUI with many themes — that lane already has a clear winner.
+
+## Official headless vs this TUI
+
+There is no shipped TUI. The default terminal entry on a remote box is
+`dsh --profile headless`: one task, then the **last assistant message** on
+stdout. Reasoning, tool calls, subagents, and the plan stay in the session
+log.
+
+Both frames below are the **same task**. Top: official headless stdout
+(`@deepseek-ai/dsh-headless` prints `outcome.text` only). Bottom: this plugin
+painting the same events in an 88-column SSH window.
+
+![Official headless stdout vs dsh-ssh-tui](docs/screenshots/compare.png)
+
+Top: `$ dsh --profile headless "…"` then the final markdown.  
+Bottom: reasoning collapsed, full-row red/green diff, each subagent on its
+own card, the plan strip pinned above the input.
+
+Singles: [headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/screenshots/workspace.png)
 
 ## Requirements
 

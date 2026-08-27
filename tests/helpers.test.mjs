@@ -6,6 +6,7 @@ import {
   clipAnsiToWidth,
   describeProviderRoute,
   displayWidth,
+  padAnsiToWidth,
   foldInputView,
   formatOpenCodeGoUsage,
   friendlyJsonLines,
@@ -25,6 +26,7 @@ import {
   todoSummary,
   toolBodyLines,
   truncateToWidth,
+  visibleWidth,
 } from '../lib/tui.js'
 import {
   defaultSubagentModelForProvider,
@@ -55,6 +57,18 @@ test('clipAnsiToWidth keeps SGR and never exceeds the cell budget', () => {
   const clipped = clipAnsiToWidth(styled, 8)
   assert.ok(clipped.startsWith('\x1b[33m'))
   assert.ok(displayWidth(clipped.replace(/\x1b\[[0-9;]*m/gu, '')) <= 8)
+  const color256 = clipAnsiToWidth('\x1b[38;5;22;48;5;194m+ hello', 12)
+  assert.ok(color256.startsWith('\x1b[38;5;22;48;5;194m'))
+  assert.ok(color256.includes('+ hello'))
+})
+
+test('padAnsiToWidth keeps diff background across the whole row', () => {
+  const styled = '\x1b[38;5;22;48;5;194m+ hello'
+  const padded = padAnsiToWidth(styled, 12)
+  assert.ok(padded.startsWith('\x1b[38;5;22;48;5;194m'))
+  assert.equal(visibleWidth(padded), 12)
+  assert.ok(padded.endsWith(' '.repeat(5)))
+  assert.equal(padded.includes('\x1b[0m'), false)
 })
 
 test('prompt plus ASCII input cursor stays on integer columns', () => {
@@ -228,6 +242,26 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   })
   assert.equal(cards[0].status, 'ok')
   assert.equal(cards[0].expanded, false)
+})
+
+test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.handleSessionEvent(agent.session, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } },
+  })
+  const frame = tui.captureFrame(80, 24)
+  assert.equal(frame.length, 24)
+  assert.ok(frame.some(line => line.includes('hello')))
+  assert.ok(frame.some(line => line.includes('DeepSeek Harness')))
 })
 
 test('plan mode and ask-user questions get their own collapsed cards', () => {
