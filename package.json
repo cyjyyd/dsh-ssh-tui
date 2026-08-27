@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
@@ -42,7 +42,9 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
-    "docs/screenshots",
+    "docs/screenshots/compare.png",
+    "docs/screenshots/headless.png",
+    "docs/screenshots/workspace.png",
     "LICENSE"
   ],
   "license": "MIT",

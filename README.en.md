@@ -35,6 +35,26 @@ Singles: [headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/
 
 ## Install
 
+On a remote box with `dsh` and pnpm already installed (no clone):
+
+```sh
+dsh plugin --profile tui add dsh-ssh-tui
+# optional: reuse a SuperGrok / grok-bridge token already on the machine
+dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
+dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
+```
+
+Smoke the route before opening the TUI. The TUI exits immediately without a TTY:
+
+```sh
+dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
+dsh --profile tui
+```
+
+From a checkout: `bash scripts/smoke-headless.sh` (prints an outcome summary, never a token).
+
+From git:
+
 ```sh
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
 cd dsh-ssh-tui
@@ -47,14 +67,6 @@ Or manually:
 npm install --no-audit --no-fund
 npm run build
 dsh plugin --profile tui add "link:$(pwd)"
-```
-
-Or install the published npm package directly (requires `@deepseek-ai/dsh` and
-`pnpm`, no local clone needed):
-
-```sh
-dsh plugin --profile tui add dsh-ssh-tui
-# or from a repo checkout: bash scripts/install-npm.sh
 ```
 
 For the optional **智能路由模式 (routing-suite)** mode, also run:
@@ -151,7 +163,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Ctrl+R` | expand or collapse all cards |
 | `Ctrl+T` | fold the input box (display-only) |
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
-| `/find [kind] query` | search cards (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
+| `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; exit when idle |
@@ -195,7 +207,9 @@ into the parent stream.
 The plan strip pins only the **latest incomplete plan**. When the model
 opens a new plan in the same turn, the previous one archives into the
 scrolling transcript and the dock shows the new one. A finished plan says
-「计划任务已全部完成」, not 「计划模式已关闭」. The `/` menu and
+「计划任务已全部完成」, not 「计划模式已关闭」. If a turn ends with open todos, the strip says 「本轮未收尾」, stops
+spinning, and sends one follow-up asking the model to `todo_write` the
+real statuses. The `/` menu and
 approval/question dialogs yield that bottom space. `exit_plan_mode` is
 markdown. `ask_user_question` still opens a dialog and leaves a collapsed
 `提问用户` card. `/goal` is a collapsed `目标` card. `/find thinking foo`
@@ -310,7 +324,7 @@ switching while running.
 
 Each paint is one `stdout.write` of dirty rows only, so a jump host or
 corporate proxy does not see one SSH packet per line. Default cadence is
-about 120 ms. On high-RTT paths raise it:
+about 160 ms, enough for most jump hosts. On a very slow path:
 
 ```sh
 export DSH_TUI_PAINT_MS=250   # 40–1000; higher = fewer packets, choppier stream

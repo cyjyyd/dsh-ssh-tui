@@ -16,6 +16,8 @@ import {
   parseExitStatus,
   parseFindQuery,
   parsePlanTodos,
+  applyTurnEndToPlan,
+  planCloseNudgeText,
   planDockNote,
   planIsLive,
   planTitleFromMarkdown,
@@ -120,7 +122,7 @@ test('composePaintOutput never writes past the terminal height', () => {
 })
 
 test('resolvePaintIntervalMs clamps jump-host cadence', () => {
-  assert.equal(resolvePaintIntervalMs(undefined, {}), 120)
+  assert.equal(resolvePaintIntervalMs(undefined, {}), 160)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '250' }), 250)
   assert.equal(resolvePaintIntervalMs(40, { DSH_TUI_PAINT_MS: '9999' }), 40)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '10' }), 40)
@@ -374,6 +376,73 @@ test('planDockNote follows task status instead of always saying plan mode is off
     pending: false,
     todos: [],
   }), '计划模式已关闭，可用 /plan 重新进入。')
+  assert.equal(planDockNote({
+    active: false,
+    pending: false,
+    turnLeftOpen: true,
+    todos: [
+      { content: 'a', status: 'in_progress' },
+      { content: 'b', status: 'pending' },
+    ],
+  }), '本轮未收尾：还剩 2 项待办（会话日志未改）。')
+})
+
+test('turn/end marks leftover todos as display-stale and asks once to close them', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const followups = []
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+    followup(message) { followups.push(message) },
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [
+      { content: 'pin the dock', status: 'in_progress' },
+      { content: 'search cards', status: 'pending' },
+    ] },
+  })
+  tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  const plan = tui.rows.find(row => row.kind === 'plan')
+  assert.equal(plan.turnLeftOpen, true)
+  assert.equal(plan.todos[0].status, 'in_progress')
+  assert.equal(followups.length, 1)
+  assert.ok(String(followups[0].content[0].text).includes('todo_write'))
+  assert.ok(String(followups[0].content[0].text).includes('pin the dock'))
+  const frame = tui.captureFrame(80, 24)
+  assert.ok(frame.some(line => line.includes('本轮未收尾')))
+  tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(followups.length, 1)
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [
+      { content: 'pin the dock', status: 'completed' },
+      { content: 'search cards', status: 'completed' },
+    ] },
+  })
+  assert.equal(tui.rows.find(row => row.kind === 'plan').turnLeftOpen, false)
+})
+
+test('planCloseNudgeText lists leftover items only', () => {
+  const text = planCloseNudgeText({
+    todos: [
+      { content: 'done already', status: 'completed' },
+      { content: 'still open', status: 'in_progress' },
+    ],
+  })
+  assert.equal(text.includes('done already'), false)
+  assert.ok(text.includes('still open'))
+})
+
+test('applyTurnEndToPlan is a no-op when every todo is completed', () => {
+  const plan = applyTurnEndToPlan({
+    todos: [{ content: 'done', status: 'completed' }],
+  })
+  assert.equal(plan.turnLeftOpen, false)
 })
 
 test('planIsLive treats completed archived plans as dock-ineligible', () => {
@@ -451,6 +520,34 @@ test('parseFindQuery and matchTranscriptRows filter thinking vs reply', () => {
   const replies = matchTranscriptRows(tui.rows, '回复 overflow')
   assert.equal(replies.length, 1)
   assert.equal(replies[0]?.kind, 'assistant')
+})
+
+test('/find jumps to the matching reply and keeps it in the painted frame', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: 'early reply about widgets' }] } },
+  })
+  for (let i = 0; i < 12; i++) {
+    tui.handleSessionEvent(agent.session, {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: `noise ${i} ${'x'.repeat(40)}` }], source: { kind: 'user' } },
+    })
+  }
+  tui.handleSessionEvent(agent.session, {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'reasoning', text: 'unique-needle lives only in this thought' }, { type: 'text', text: 'later answer' }] } },
+  })
+  tui.runCommand('/find unique-needle')
+  const frame = tui.captureFrame(80, 16)
+  assert.ok(frame.some(line => line.includes('unique-needle')))
+  assert.ok(frame.some(line => line.includes('»') || line.includes('已思考')))
 })
 
 test('plan mode and ask-user questions get their own collapsed cards', () => {

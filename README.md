@@ -53,7 +53,25 @@ SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.c
 
 ## 部署指南
 
-### 方式一：一键脚本（推荐）
+远程机器最短路径（已有 `dsh` 和 pnpm，无需 clone）：
+
+```bash
+dsh plugin --profile tui add dsh-ssh-tui
+# 可选：本机已有 SuperGrok / grok-bridge token 时
+dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
+dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
+```
+
+先确认链路再开 TUI（无 TTY 时 TUI 会直接退出）：
+
+```bash
+dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
+dsh --profile tui          # 必须在真实终端 / SSH 会话里
+```
+
+仓库内也可：`bash scripts/smoke-headless.sh`（记录出口摘要，不打印 token）。
+
+### 方式一：从 git clone 安装
 
 ```bash
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
@@ -79,14 +97,10 @@ npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
-### 方式三：npm 安装（发布后）
-
-前置要求：已全局安装 `@deepseek-ai/dsh`（`npm i -g @deepseek-ai/dsh`）且有 pnpm。
+### 方式三：指定其它 profile 的 npm 安装
 
 ```bash
-dsh plugin --profile tui add dsh-ssh-tui
-# 或在仓库内快捷执行：bash scripts/install-npm.sh
-# 指定其它 profile：bash scripts/install-npm.sh work
+bash scripts/install-npm.sh work
 ```
 
 `dsh plugin add` 会从 npm 拉取包、写入 profile 依赖，并自动把 `dsh-ssh-tui`
@@ -132,7 +146,7 @@ dsh --profile tui --no-color
 | `Ctrl+R` | 全部展开或全部收起 |
 | `Ctrl+T` | 折叠输入框（只影响显示） |
 | `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复 |
-| `/find [类] 关键字` | 搜索卡片。类：`思考` `计划` `子代理` `回复`。`Ctrl+/` 或 `Alt+/` 打开 |
+| `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮）。类：`思考` `计划` `子代理` `回复`。`Ctrl+/` 或 `Alt+/` 打开 |
 | `Ctrl+G` / `Alt+N` | 下一条搜索结果；`Alt+P` 上一条 |
 | 鼠标左键 | 点击卡片标题展开/收起 |
 | `PgUp` / `PgDn`、滚轮 | 转录回看 |
@@ -171,7 +185,9 @@ SuperGrok / X Premium 走本机 OAuth，不需要填 Key。`/status` 和底栏�
 
 计划条只钉**最新一条未完成的计划**。同一轮次里模型再开新计划时，旧计划归档进
 工作区随转录上滚，底栏换成新计划。任务全部完成后计划条会说「计划任务已全部完成」，
-不再误报「计划模式已关闭」。打开 `/` 命令选单或批准/提问对话框时，计划条让出底栏。
+不再误报「计划模式已关闭」。一轮结束时若待办仍是进行中/待处理，计划条改成「本轮未收尾」并停止转圈，
+同时自动追问模型补一次 `todo_write`（同一列表只问一次，不改会话里的旧状态）。
+打开 `/` 命令选单或批准/提问对话框时，计划条让出底栏。
 `exit_plan_mode` 按 markdown 渲染。`ask_user_question` 仍弹对话框，并留下折叠的
 `提问用户` 卡片。`/goal` 是折叠的 `目标` 卡片。`/find 思考 padAnsi` 或 `Alt+1..4`
 可跳到对应类别的最新卡片。
@@ -274,7 +290,7 @@ npm run build
 - **标题栏或铃声不生效**：确认终端支持 OSC 0 与 BEL；铃声可用
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
-- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`，避免一行一个 SSH 包。默认约 120 ms 合一帧。穿透代理、RTT 很大时：
+- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`，避免一行一个 SSH 包。默认约 160 ms 合一帧，多数跳板机不用改。特别慢时：
   ```bash
   export DSH_TUI_PAINT_MS=250   # 40–1000；越大越省链路，流式字越顿
   ```

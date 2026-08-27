@@ -7,7 +7,7 @@
  *
  * The renderer uses plain ANSI and coalesces each frame into one stdout
  * write of dirty rows only — jump-host / proxied SSH should see one packet
- * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS (default 120).
+ * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS (default 160).
  */
 
 import { spawn } from 'node:child_process'
@@ -84,7 +84,7 @@ export interface TuiConfig {
   /**
    * Minimum milliseconds between paints while a turn is streaming.
    * Jump-host / proxied SSH can raise this so token ticks do not flood the
-   * link. Defaults from `DSH_TUI_PAINT_MS` (120).
+   * link. Defaults from `DSH_TUI_PAINT_MS` (160).
    */
   paintIntervalMs?: number
 }
@@ -149,6 +149,11 @@ type Row =
       expanded: boolean
       /** When true the plan stays in the scrolling transcript, not the dock. */
       archived?: boolean
+      /**
+       * Display-only: the last turn ended while todos were still open.
+       * Does not rewrite the session log.
+       */
+      turnLeftOpen?: boolean
     }
   | {
       kind: 'question'
@@ -302,7 +307,7 @@ export interface TuiController {
   dispose(): Promise<void>
 }
 
-const RENDER_INTERVAL_MS = 120
+const RENDER_INTERVAL_MS = 160
 const WAIT_INDICATOR_MS = 8000
 const MIN_PAINT_INTERVAL_MS = 40
 const MAX_PAINT_INTERVAL_MS = 1000
@@ -1408,6 +1413,38 @@ export function planIsLive(plan: {
   return false
 }
 
+/** Open todos left behind when a turn ends without a completing todo_write. */
+export function planTurnLeftOpen(plan: {
+  todos: readonly PlanTodoItem[]
+}): boolean {
+  return plan.todos.some(item => item.status !== 'completed')
+}
+
+/** Mark leftover in-progress/pending todos as display-stale after turn/end. */
+export function applyTurnEndToPlan<T extends {
+  todos: PlanTodoItem[]
+  turnLeftOpen?: boolean
+}>(plan: T): T {
+  if (!planTurnLeftOpen(plan)) {
+    plan.turnLeftOpen = false
+    return plan
+  }
+  plan.turnLeftOpen = true
+  return plan
+}
+
+/** Follow-up that asks the model to close leftover todos. One per open list. */
+export function planCloseNudgeText(plan: {
+  todos: readonly PlanTodoItem[]
+}): string {
+  const leftover = plan.todos.filter(item => item.status !== 'completed')
+  const lines = leftover.map(item => `- [${item.status}] ${item.content}`)
+  return [
+    '本轮结束时计划条还有未完成待办。请立刻再调用一次 todo_write，把已经做完的标成 completed，还没做的留 pending。不要开新任务。',
+    ...lines,
+  ].join('\n')
+}
+
 export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal'
 
 /** Category for jump / search. Assistant replies are not collapsible cards. */
@@ -1503,9 +1540,14 @@ export function planDockNote(plan: {
   pending: boolean
   todos: readonly PlanTodoItem[]
   planMarkdown?: string
+  turnLeftOpen?: boolean
 }): string {
   const running = plan.todos.some(item => item.status === 'in_progress')
   const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
+  const leftover = plan.todos.filter(item => item.status !== 'completed').length
+  if (plan.turnLeftOpen === true && leftover > 0) {
+    return `本轮未收尾：还剩 ${leftover} 项待办（会话日志未改）。`
+  }
   if (plan.pending) return '模式切换将在下一步生效。'
   if (plan.active) return '只规划、不改代码；确认后再执行。'
   if (running) return '正在按计划执行。'
@@ -2146,6 +2188,8 @@ export class SshTui {
   private searchHits: Row[] = []
   private searchIndex = -1
   private searchQuery = ''
+  private planNudgePending = false
+  private pendingReveal: Row | CollapsibleBlock | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -2511,6 +2555,10 @@ export class SshTui {
     if (existing !== undefined && planIsLive(existing)) {
       Object.assign(existing, patch)
       existing.archived = false
+      if (patch.todos !== undefined || patch.active !== undefined || patch.pending !== undefined) {
+        existing.turnLeftOpen = false
+        this.planNudgePending = false
+      }
       if (!planIsLive(existing)) {
         existing.archived = true
         existing.expanded = false
@@ -2543,6 +2591,25 @@ export class SshTui {
     return this.findLivePlanRow() !== undefined
   }
 
+  /** One follow-up per leftover list; replay and cancelled turns stay quiet. */
+  private queuePlanCloseNudge(plan: Extract<Row, { kind: 'plan' }>): void {
+    if (this.replaying || this.agentGone || this.planNudgePending) return
+    if (this.agent.status === 'running') return
+    this.planNudgePending = true
+    const text = planCloseNudgeText(plan)
+    this.pushRow({ kind: 'system', text: '已请模型补一次待办状态（本轮只问一次）。' })
+    const message = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    })
+    try {
+      this.agent.followup(message)
+    } catch (error: unknown) {
+      this.planNudgePending = false
+      this.pushRow({ kind: 'error', text: `补待办状态失败：${errorChain(error)}` })
+    }
+  }
+
   /** Compact web-style plan strip pinned above the input, not in the transcript. */
   private paintPlanDock(width: number, yieldBottom: boolean): string[] {
     const plan = this.findLivePlanRow()
@@ -2550,8 +2617,14 @@ export class SshTui {
     const inner = Math.max(1, width - 2)
     const running = plan.todos.some(item => item.status === 'in_progress')
     const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
-    const spinner = (plan.active || plan.pending || running) ? ` ${this.spinnerFrame()}` : ''
-    const mode = plan.pending ? '切换中' : plan.active ? '计划模式' : running ? '计划' : allDone ? '计划完成' : '计划'
+    const leftOpen = plan.turnLeftOpen === true && !allDone && !plan.pending
+    const spinner = (plan.pending || ((plan.active || running) && !leftOpen)) ? ` ${this.spinnerFrame()}` : ''
+    const mode = plan.pending ? '切换中'
+      : leftOpen ? '本轮未收尾'
+      : plan.active ? '计划模式'
+      : running ? '计划'
+      : allDone ? '计划完成'
+      : '计划'
     const counts = todoProgressLabel(plan.todos)
     const title = planTitleFromMarkdown(plan.planMarkdown ?? '')
     const summary = title ?? (counts === '' ? '还没有任务' : counts)
@@ -2590,7 +2663,7 @@ export class SshTui {
   }
 
   private paintCollapsibleHeader(
-    addDisplay: (line: string, ref?: CollapsibleBlock) => void,
+    addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
     row: CollapsibleBlock,
     kind: DisplayKind,
     header: string,
@@ -2653,15 +2726,25 @@ export class SshTui {
     this.markDirty()
   }
 
-  private focusCard(row: Row | CollapsibleBlock | undefined): void {
+  private highlightSearchLine(line: string): string {
+    if (line.includes('\x1b[7m')) return line
+    return this.color ? `\x1b[7m${line}\x1b[27m` : `» ${line}`
+  }
+
+  private revealRow(row: Row | CollapsibleBlock | undefined): void {
     if (row === undefined) return
-    if (row.kind === 'assistant') {
-      this.focusedRow = null
-    } else if ('expanded' in row) {
+    if (row.kind !== 'assistant' && 'expanded' in row) {
+      row.expanded = true
       this.focusedRow = row as CollapsibleBlock
+    } else {
+      this.focusedRow = null
     }
-    this.scrollOffset = 0
+    this.pendingReveal = row
     this.markDirty()
+  }
+
+  private focusCard(row: Row | CollapsibleBlock | undefined): void {
+    this.revealRow(row)
   }
 
   /** Jump to the newest card in a category (thinking / plan / subagent / reply). */
@@ -2671,6 +2754,7 @@ export class SshTui {
       if (live !== undefined) {
         this.focusCard(live)
         this.pushRow({ kind: 'system', text: `已跳到${CARD_CATEGORY_LABEL[category]}（底栏计划条）。` })
+        this.revealRow(live)
         return
       }
     }
@@ -2680,9 +2764,8 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if ('expanded' in target) target.expanded = true
-    this.focusCard(target)
     this.pushRow({ kind: 'system', text: `已跳到最新${CARD_CATEGORY_LABEL[category]}。` })
+    this.revealRow(target)
   }
 
   private applySearchHits(query: string, hits: Row[]): void {
@@ -2696,13 +2779,12 @@ export class SshTui {
     }
     this.searchIndex = hits.length - 1
     const hit = hits[this.searchIndex]
-    if (hit !== undefined && 'expanded' in hit) hit.expanded = true
-    this.focusCard(hit)
     const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
     this.pushRow({
       kind: 'system',
       text: `找到 ${hits.length} 条${query === '' ? '' : `「${query}」`} · 第 ${hits.length}/${hits.length} 条（${where}）。Ctrl+G / Alt+N 下一条，Alt+P 上一条。`,
     })
+    this.revealRow(hit)
   }
 
   private runFindCommand(arg: string): void {
@@ -2721,13 +2803,12 @@ export class SshTui {
     const count = this.searchHits.length
     this.searchIndex = (this.searchIndex + delta + count) % count
     const hit = this.searchHits[this.searchIndex]
-    if (hit !== undefined && 'expanded' in hit) hit.expanded = true
-    this.focusCard(hit)
     const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
     this.pushRow({
       kind: 'system',
       text: `搜索「${this.searchQuery}」· 第 ${this.searchIndex + 1}/${count} 条（${where}）。`,
     })
+    this.revealRow(hit)
   }
 
   private paint = (): void => {
@@ -2736,23 +2817,25 @@ export class SshTui {
     const height = Math.max(6, process.stdout.rows || 24)
 
     const display: string[] = []
-    const displayRefs: (CollapsibleBlock | undefined)[] = []
+    const displayRefs: (Row | CollapsibleBlock | undefined)[] = []
+    const searchHit = this.searchHits[this.searchIndex]
     const addDisplay = (
       line: string,
-      ref?: CollapsibleBlock,
+      ref?: Row | CollapsibleBlock,
     ): void => {
-      display.push(line)
+      const hit = ref !== undefined && ref === searchHit
+      display.push(hit ? this.highlightSearchLine(line) : line)
       displayRefs.push(ref)
     }
-    const pushRow = (kind: DisplayKind, text: string): void => {
+    const pushRow = (kind: DisplayKind, text: string, ref?: Row): void => {
       if (kind === 'assistant') {
         for (const line of renderMarkdownLines(text, width, this.color)) {
-          addDisplay(line)
+          addDisplay(line, ref)
         }
         return
       }
       for (const line of wrap(text, width)) {
-        addDisplay(this.styleLine(kind, line))
+        addDisplay(this.styleLine(kind, line), ref)
       }
     }
 
@@ -2779,7 +2862,7 @@ export class SshTui {
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
         if (row.expanded) {
           for (const wrapped of wrap(row.text, width)) {
-            addDisplay(this.styleLine('reasoning', wrapped))
+            addDisplay(this.styleLine('reasoning', wrapped), row)
           }
         }
         continue
@@ -2828,7 +2911,7 @@ export class SshTui {
           const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
           for (const wrapped of wrap(line.text, inner)) {
             const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
-            addDisplay(this.styleLine(line.kind, body))
+            addDisplay(this.styleLine(line.kind, body), row)
           }
         }
         continue
@@ -2848,12 +2931,12 @@ export class SshTui {
         const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : ' · Enter 展开'}`
         this.paintCollapsibleHeader(addDisplay, row, 'tool', header, width, styleHeader)
         if (row.expanded) {
-          addDisplay(this.styleLine('tool-result', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`))
+          addDisplay(this.styleLine('tool-result', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`), row)
           if (row.stopReason !== undefined) {
-            addDisplay(this.styleLine('tool-result', `  结束原因：${row.stopReason}`))
+            addDisplay(this.styleLine('tool-result', `  结束原因：${row.stopReason}`), row)
           }
           if (row.logs.length === 0) {
-            addDisplay(this.styleLine('tool-result', running ? '  等待子代理输出…' : '  没有可见输出'))
+            addDisplay(this.styleLine('tool-result', running ? '  等待子代理输出…' : '  没有可见输出'), row)
           } else {
             for (const entry of row.logs) {
               const kind: DisplayKind = entry.kind === 'assistant'
@@ -2862,7 +2945,7 @@ export class SshTui {
                   ? 'error'
                   : 'tool-result'
               for (const wrapped of wrap(entry.text, Math.max(1, width - 2))) {
-                addDisplay(this.styleLine(kind, `  ${wrapped}`))
+                addDisplay(this.styleLine(kind, `  ${wrapped}`), row)
               }
             }
           }
@@ -2877,16 +2960,16 @@ export class SshTui {
         const header = `计划 · ${summary}${row.expanded ? '' : ' · Enter 展开'}`
         this.paintCollapsibleHeader(addDisplay, row, 'plan-dock', header, width)
         if (row.expanded) {
-          addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`))
+          addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`), row)
           if (row.planMarkdown !== undefined && row.planMarkdown !== '') {
             for (const line of renderMarkdownLines(row.planMarkdown, Math.max(1, width - 2), this.color).slice(0, 8)) {
-              addDisplay(`  ${line}`)
+              addDisplay(`  ${line}`, row)
             }
           }
           for (const item of row.todos) {
             const mark = TODO_STATUS_MARK[item.status]
             for (const wrapped of wrap(`${mark} ${item.content}`, Math.max(1, width - 2))) {
-              addDisplay(this.styleLine(todoItemKind(item.status), `  ${wrapped}`))
+              addDisplay(this.styleLine(todoItemKind(item.status), `  ${wrapped}`), row)
             }
           }
         }
@@ -2900,24 +2983,24 @@ export class SshTui {
         const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : ' · Enter 展开'}`
         this.paintCollapsibleHeader(addDisplay, row, waiting ? 'tool' : 'system', header, width)
         if (row.expanded) {
-          if (row.header !== undefined) addDisplay(this.styleLine('system', `  ${row.header}`))
+          if (row.header !== undefined) addDisplay(this.styleLine('system', `  ${row.header}`), row)
           for (const wrapped of wrap(row.title, Math.max(1, width - 2))) {
-            addDisplay(this.styleLine('assistant', `  ${wrapped}`))
+            addDisplay(this.styleLine('assistant', `  ${wrapped}`), row)
           }
           if (row.detail !== undefined && row.detail !== '') {
             if (row.intent === 'plan-review') {
               for (const line of renderMarkdownLines(row.detail, Math.max(1, width - 2), this.color)) {
-                addDisplay(`  ${line}`)
+                addDisplay(`  ${line}`, row)
               }
             } else {
               for (const wrapped of wrap(row.detail, Math.max(1, width - 2))) {
-                addDisplay(this.styleLine('tool-result', `  ${wrapped}`))
+                addDisplay(this.styleLine('tool-result', `  ${wrapped}`), row)
               }
             }
           }
           addDisplay(this.styleLine('system', waiting
             ? '  用下方对话框选择，数字/字母选中，Enter 提交，Esc 取消。'
-            : `  ${row.summary}`))
+            : `  ${row.summary}`), row)
         }
         continue
       }
@@ -2932,16 +3015,16 @@ export class SshTui {
         const header = `● 目标${spinner} · ${phase} · ${row.objective}${row.expanded ? '' : ' · Enter 展开'}`
         this.paintCollapsibleHeader(addDisplay, row, live ? 'tool' : 'system', header, width)
         if (row.expanded) {
-          addDisplay(this.styleLine('system', '  用 /goal 查看、暂停、恢复或清除当前目标。'))
+          addDisplay(this.styleLine('system', '  用 /goal 查看、暂停、恢复或清除当前目标。'), row)
           if (row.blockedReason !== undefined) {
             for (const wrapped of wrap(row.blockedReason, Math.max(1, width - 2))) {
-              addDisplay(this.styleLine('error', `  ${wrapped}`))
+              addDisplay(this.styleLine('error', `  ${wrapped}`), row)
             }
           }
         }
         continue
       }
-      pushRow(row.kind, row.text)
+      pushRow(row.kind, row.text, row)
     }
 
     if (this.streaming !== undefined) {
@@ -2960,7 +3043,7 @@ export class SshTui {
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, block)
         if (block.expanded) {
           for (const wrapped of wrap(this.streaming.reasoning, width)) {
-            addDisplay(this.styleLine('reasoning', wrapped))
+            addDisplay(this.styleLine('reasoning', wrapped), block)
           }
         }
       }
@@ -3159,6 +3242,17 @@ export class SshTui {
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
     const available = Math.max(1, height - reserved - dialogLines.length)
     const maxOffset = Math.max(0, display.length - available)
+    const reveal = this.pendingReveal
+    if (reveal !== undefined) {
+      this.pendingReveal = undefined
+      const first = displayRefs.findIndex(ref => ref === reveal)
+      if (first !== -1) {
+        let last = first
+        while (last + 1 < displayRefs.length && displayRefs[last + 1] === reveal) last += 1
+        const span = last - first + 1
+        this.scrollOffset = Math.max(0, display.length - available - first)
+      }
+    }
     if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset
     const start = Math.max(0, display.length - available - this.scrollOffset)
     const visible = display.slice(start, start + available)
@@ -3171,7 +3265,7 @@ export class SshTui {
     this.clickableRows.clear()
     for (let index = 0; index < visibleRefs.length; index++) {
       const ref = visibleRefs[index]
-      if (ref !== undefined) this.clickableRows.set(headerLines.length + index + 1, ref)
+      if (ref !== undefined && 'expanded' in ref) this.clickableRows.set(headerLines.length + index + 1, ref)
     }
     const dockPlan = this.findLivePlanRow()
     if (dockPlan !== undefined && planDockLines.length > 0) {
@@ -3202,6 +3296,8 @@ export class SshTui {
       statusText += this.dialog?.kind === 'questions' && planReviewOf(this.dialog.question)
         ? ' · 计划待审'
         : ' · 等待用户回答'
+    } else if (livePlan?.turnLeftOpen === true) {
+      statusText += ' · 本轮未收尾'
     } else if (livePlan?.active === true || livePlan?.pending === true) {
       statusText += livePlan.pending ? ' · 计划模式切换中' : ' · 计划模式'
     }
@@ -3696,6 +3792,17 @@ export class SshTui {
             : `idle (${reason.kind})`
         if (reason.kind === 'error') {
           this.pushRow({ kind: 'error', text: `Turn ${event.data.turn} failed: ${reason.error.message}` })
+        }
+        const livePlan = this.findLivePlanRow()
+        if (livePlan !== undefined && reason.kind === 'completed') {
+          applyTurnEndToPlan(livePlan)
+          if (livePlan.turnLeftOpen === true) {
+            this.pushRow({
+              kind: 'system',
+              text: planDockNote(livePlan),
+            })
+            this.queuePlanCloseNudge(livePlan)
+          }
         }
         this.markDirty()
         break
@@ -5791,6 +5898,8 @@ export class SshTui {
         this.searchHits = []
         this.searchIndex = -1
         this.searchQuery = ''
+        this.planNudgePending = false
+        this.pendingReveal = undefined
         this.pushRow({ kind: 'system', text: '转录已清空。子代理、计划与提问卡片会在新事件到达时重新出现。' })
         break
       case 'status':

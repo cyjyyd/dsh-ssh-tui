@@ -81,4 +81,4 @@
         maxToolOutputLines: 6
         color: !!js ctx.sshTuiStartup.noColor !== true
         # Jump-host SSH: coalesce token ticks into one stdout write per frame.
-        paintIntervalMs: !!js Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '120', 10) || 120
+        paintIntervalMs: !!js Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '160', 10) || 160
