@@ -30,9 +30,11 @@ export async function defaultReasoningEffort(
     if (info?.reasoning?.defaultEffort !== undefined) return info.reasoning.defaultEffort
     const nonOff = efforts.filter(effort => effort.id !== 'off')
     if (nonOff.length === 0) return undefined
-    const max = nonOff.find(effort => effort.id === 'max')
-    const chosen = max ?? nonOff[0]
-    return chosen?.id
+    const preferred = nonOff.find(effort => effort.id === 'max')
+      ?? nonOff.find(effort => effort.id === 'xhigh')
+      ?? nonOff.find(effort => effort.id === 'high')
+      ?? nonOff[0]
+    return preferred?.id
   } catch {
     return undefined
   }

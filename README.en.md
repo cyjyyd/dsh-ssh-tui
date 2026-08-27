@@ -145,10 +145,11 @@ commands with every command the harness registers (`/goal`, `/plan`,
 `/compact`, `/permission`, `/feedback`, ...). `Tab` completes, `Enter` runs.
 `/help` lists everything.
 
-`/model` first picks a provider, then a model and reasoning effort. Provider
-rows are labelled by kind: DeepSeek official, SuperGrok / X Premium, OpenCode
-Go, OpenCode Zen. `/status` and the footer show the same route, so a Grok
-subscription is not mistaken for a missing API key.
+`/model` lists models for the **current** provider first. On SuperGrok that
+is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). Switching
+to DeepSeek or OpenCode is an explicit “change provider” step. `/setup` is
+only for API-key providers; SuperGrok / X Premium uses local OAuth and does
+not need a key. `/status` and the footer show the same route.
 
 For OpenCode and other third-party providers, `/model` queries the provider's
 endpoint (`GET {baseURL}/models`) for a live model list, falling back to the
@@ -171,11 +172,14 @@ so the parent transcript stays readable; `Enter`, click, `Ctrl+N`/`Ctrl+P`, and
 and the status/title line shows `⠋ 子代理 N` instead of mixing child output
 into the parent stream.
 
-Plan mode, user questions, and the current goal also get dedicated surfaces:
-`/plan` shows a `计划模式` card plus a footer hint, `todo_write` folds the task
-list into that card, and `exit_plan_mode` / `ask_user_question` open a dialog
-while leaving a collapsed `计划待审` or `提问用户` card in the transcript.
-`/goal` renders a collapsed `目标` card and a matching footer hint.
+Plan mode is pinned to the bottom of the workspace, just above the input.
+The strip stays collapsed as `计划模式 · 1 completed · 2 in progress` and
+expands into the task list (spinning ring for in-progress, filled dot for
+done). Opening the `/` command menu or an approval/question dialog yields
+that bottom space. `exit_plan_mode` renders the plan as markdown instead of
+raw JSON; the review dialog does the same. `ask_user_question` still opens a
+dialog and leaves a collapsed `提问用户` card. `/goal` renders a collapsed
+`目标` card and a matching footer hint.
 
 Interrupted streaming output keeps the already-generated prefix and is marked
 `⚠ interrupted`; team collaboration session events (`team/*`) are surfaced as

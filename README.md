@@ -6,7 +6,7 @@ DeepSeek Harness（`dsh`）的 SSH 友好交互终端插件：纯 ANSI 聊天式
 
 English: [README.en.md](README.en.md)
 
-定位与路线：[COMPETITIVENESS.md](COMPETITIVENESS.md)。本插件面向慢速 SSH / 远程终端，不和 Ink 系 TUI 比皮肤。
+本插件面向慢速 SSH / 远程终端，不和 Ink 系 TUI 比皮肤。
 
 SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
 
@@ -131,11 +131,15 @@ dsh --profile tui --no-color
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。harness 命令若声明
 支持图片附件，会在命令列表和补全提示中标注“可附图”。
 
-`/model` 先选提供商，再选模型和思考强度。提供商会标明类型：DeepSeek 官方、
-SuperGrok / X Premium 订阅、OpenCode Go、OpenCode Zen。`/status` 和底栏同样
-显示这条路由，避免把 Grok 订阅误当成还要填 API Key。
+`/model` 默认列出**当前提供商**的模型。已经在 SuperGrok 时，直接选
+`grok-4.6` / `grok-4.5` 和思考强度（`grok-4.6` 含 `xhigh`）；要换 DeepSeek
+或 OpenCode 再选「更换提供商」。`/setup` 只用于配置 API Key 提供商，
+SuperGrok / X Premium 走本机 OAuth，不需要填 Key。`/status` 和底栏同样
+显示这条路由。
 
-子代理默认跟随父会话的提供方，模型默认为轻量的 `deepseek-v4-flash`：
+子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：DeepSeek 用
+`deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`，xAI 用 `grok-4.5`。
+`/model` 或 `/setup` 换提供商（OAuth / API Key 都一样）时会自动同步子代理：
 
 - `/submodel [model-id]`：打开子代理模型选择器；带参数时直接指定模型；
 - `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”；
@@ -150,11 +154,12 @@ SuperGrok / X Premium 订阅、OpenCode Go、OpenCode Zen。`/status` 和底栏�
 用户消息、工具调用和结果；`Ctrl+R` 可一次展开或收起全部卡片。运行中的卡片带旋转
 动画，状态栏和窗口标题显示 `⠋ 子代理 N`。
 
-计划模式、提问用户和当前目标也有独立显示：`/plan` 进入后出现 `计划模式` 卡片和底部
-`计划模式` 提示；`todo_write` 的任务列表叠在同一张卡片里。`exit_plan_mode` 或
-`ask_user_question` 会弹出对话框，并在转录区留下默认折叠的 `计划待审` /
-`提问用户` 卡片，选项键和推荐项会标出来。`/goal` 设置的目标会显示为默认折叠的
-`目标 · 进行中` 卡片，底部状态栏同步提示。
+计划模式钉在工作区下方、输入框上方：默认折叠成一条 `计划模式 · 1 已完成 · 2 进行中`
+计划条，展开后显示任务列表（进行中为旋转圈、已完成为实心点）。打开 `/` 命令选单
+或遇到批准/提问对话框时，计划条会让出最下方空间。`exit_plan_mode` 的计划正文按
+markdown 渲染，不再堆原始 JSON；待审计划对话框同样可视化。`ask_user_question`
+仍会弹出对话框，并在转录区留下默认折叠的 `提问用户` 卡片。`/goal` 设置的目标会
+显示为默认折叠的 `目标 · 进行中` 卡片，底部状态栏同步提示。
 
 `/usage` 在当前提供商为 OpenCode 源时可用，并区分两种计费方式：
 

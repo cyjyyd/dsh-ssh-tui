@@ -33,6 +33,8 @@ import { defaultReasoningEffort } from './reasoning.js'
 import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
+  defaultSubagentModelForProvider,
+  subagentModelMatchesProvider,
   subagentSettingsValue,
   type SubagentSelection,
   type SubagentSelectionRef,
@@ -137,6 +139,7 @@ type Row =
       active: boolean
       pending: boolean
       todos: PlanTodoItem[]
+      planMarkdown?: string
       expanded: boolean
     }
   | {
@@ -165,7 +168,7 @@ type CollapsibleBlock =
   | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
-type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path'
+type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'plan-dock'
 
 /** One file's change, matching the web diff-card contract (`card: 'diff'`). */
 interface ToolDiffHunk {
@@ -463,11 +466,23 @@ const LOCAL_COMMANDS = [
   { name: 'quota', description: 'alias of /usage for OpenCode Go quota' },
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
-  { name: 'setup', description: 're-open provider / API key setup' },
+  { name: 'setup', description: 'configure an API-key provider (DeepSeek / OpenCode); SuperGrok uses local OAuth' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
 
-function displayWidth(text: string): number {
+/**
+ * Terminal cell width for one string.
+ *
+ * Match glibc wcwidth / typical UTF-8 SSH terminals: CJK ideographs and
+ * fullwidth forms occupy two cells; East-Asian Ambiguous box-drawing and
+ * ornaments (`─`, `●`, `·`, `▸`, `❯`, Braille spinners) occupy one. Counting
+ * those ambiguous glyphs as two made `repeatToWidth('─', cols)` paint a
+ * half-width rule and parked the input cursor half a cell past the text.
+ *
+ * Overflow into the input box is handled by clipping/padding painted rows to
+ * the measured column count, not by inflating glyph width.
+ */
+export function displayWidth(text: string): number {
   let width = 0
   for (const char of text) {
     if (char === '\t') {
@@ -477,12 +492,20 @@ function displayWidth(text: string): number {
       continue
     }
     const cp = char.codePointAt(0) ?? 0
+    if (cp === 0x00ad || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2060 && cp <= 0x2064) || cp === 0xfeff) {
+      continue
+    }
+    if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) {
+      continue
+    }
     const wide =
       (cp >= 0x1100 && cp <= 0x115f) ||
+      cp === 0x2329 || cp === 0x232a ||
       (cp >= 0x2e80 && cp <= 0xa4cf) ||
       (cp >= 0xac00 && cp <= 0xd7a3) ||
       (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xfe30 && cp <= 0xfe4f) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
       (cp >= 0xff00 && cp <= 0xff60) ||
       (cp >= 0xffe0 && cp <= 0xffe6) ||
       (cp >= 0x1f300 && cp <= 0x1faff) ||
@@ -490,6 +513,29 @@ function displayWidth(text: string): number {
     width += wide ? 2 : 1
   }
   return width
+}
+
+/** Pad or clip one already-sanitized line so it occupies exactly `width` cells. */
+export function padToWidth(text: string, width: number): string {
+  const safe = sanitizeTerminalText(text)
+  if (width <= 0) return ''
+  const clipped = truncateToWidth(safe, width)
+  const used = displayWidth(clipped)
+  return used >= width ? clipped : `${clipped}${' '.repeat(width - used)}`
+}
+
+/** Visible width of an ANSI-styled line, ignoring SGR sequences. */
+export function visibleWidth(text: string): number {
+  return displayWidth(text.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, ''))
+}
+
+/** Repeat a glyph until it occupies exactly `width` cells. */
+export function repeatToWidth(glyph: string, width: number): string {
+  if (width <= 0) return ''
+  const unit = displayWidth(glyph)
+  if (unit <= 0) return ' '.repeat(width)
+  const count = Math.max(1, Math.floor(width / unit))
+  return padToWidth(glyph.repeat(count), width)
 }
 
 /** Strip terminal control sequences and expand tabs for display output. */
@@ -506,6 +552,7 @@ function firstCodePointLength(text: string): number {
 }
 
 function wrap(text: string, width: number): string[] {
+  const limit = Math.max(1, width)
   const lines: string[] = []
   for (const sourceLine of text.split('\n')) {
     if (sourceLine === '') {
@@ -513,16 +560,20 @@ function wrap(text: string, width: number): string[] {
       continue
     }
     let rest = sanitizeTerminalText(sourceLine)
-    while (displayWidth(rest) > width) {
+    while (displayWidth(rest) > limit) {
       let cut = 0
       let used = 0
       for (const char of rest) {
         const charWidth = displayWidth(char)
-        if (used + charWidth > width) break
+        if (charWidth > 0 && used + charWidth > limit) break
         used += charWidth
         cut += char.length
       }
-      if (cut === 0) cut = firstCodePointLength(rest)
+      if (cut === 0) {
+        // A single double-width glyph on a 1-cell row still has to occupy a
+        // line; the next wrap continues after it so we never stall.
+        cut = firstCodePointLength(rest)
+      }
       lines.push(rest.slice(0, cut))
       rest = rest.slice(cut)
     }
@@ -615,8 +666,14 @@ function wrapMarkdownSegments(
       const slice = forwardSliceByWidth(rest, available)
       let chunk = slice.text
       if (chunk === '') {
-        // A wide character does not fit the remaining cell; take one code
-        // point so the loop always makes progress. The terminal wraps it.
+        // A wide character does not fit the remaining cell: wrap to the next
+        // row instead of overflowing that cell into the input area.
+        if (used > 0) {
+          lines.push(current)
+          current = []
+          used = 0
+          continue
+        }
         chunk = Array.from(rest)[0] ?? rest.slice(0, 1)
       }
       current.push({ kind: segment.kind, text: chunk })
@@ -756,7 +813,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
     if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/u.test(raw) && raw.trim() !== '') {
       lines.push(renderMarkdownBlockLine({
         base: 'rule',
-        segments: [{ kind: 'text', text: '─'.repeat(Math.max(1, width)) }],
+        segments: [{ kind: 'text', text: repeatToWidth('─', Math.max(1, width)) }],
       }, color))
       continue
     }
@@ -822,6 +879,37 @@ export function truncateToWidth(text: string, width: number): string {
   if (cut === 0) cut = firstCodePointLength(safe)
   return `${safe.slice(0, cut)}…`
 }
+
+/**
+ * Clip an already-styled ANSI line to `width` terminal cells without dropping
+ * the reset/SGR sequences. Used by the incremental painter so a leftover wide
+ * glyph cannot wrap into the next row.
+ */
+export function clipAnsiToWidth(text: string, width: number): string {
+  if (width <= 0) return ''
+  let used = 0
+  let out = ''
+  let index = 0
+  while (index < text.length) {
+    if (text.charCodeAt(index) === 0x1b) {
+      const end = text.slice(index + 1).search(/[@-~]/u)
+      const seqEnd = end === -1 ? text.length : index + 1 + end + 1
+      out += text.slice(index, seqEnd)
+      index = seqEnd
+      continue
+    }
+    const cp = text.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    const charWidth = displayWidth(char)
+    if (used + charWidth > width) break
+    out += char
+    used += charWidth
+    index += char.length
+  }
+  return out
+}
+
 /** One renderable view of the input line: text plus the cursor's visual offset. */
 interface InputView {
   text: string
@@ -1177,8 +1265,40 @@ const MAX_SUBAGENT_LOGS = 80
 
 const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
   pending: '○',
-  in_progress: '◉',
-  completed: '✓',
+  in_progress: '◐',
+  completed: '●',
+}
+
+/** Compact per-status counts matching the web plan strip. */
+export function todoProgressLabel(todos: readonly PlanTodoItem[]): string {
+  const done = todos.filter(item => item.status === 'completed').length
+  const active = todos.filter(item => item.status === 'in_progress').length
+  const pending = todos.length - done - active
+  const parts: string[] = []
+  if (done > 0) parts.push(`${done} 已完成`)
+  if (active > 0) parts.push(`${active} 进行中`)
+  if (pending > 0) parts.push(`${pending} 待处理`)
+  return parts.join(' · ')
+}
+
+function todoItemKind(status: PlanTodoItem['status']): DisplayKind {
+  if (status === 'completed') return 'todo-done'
+  if (status === 'in_progress') return 'todo-active'
+  return 'todo-pending'
+}
+
+function planMarkdownFromArgs(value: unknown): string | undefined {
+  const root = typeof value === 'string' ? parseJsonArgs(value) : value
+  if (root === null || typeof root !== 'object' || Array.isArray(root)) return undefined
+  const plan = (root as { plan?: unknown }).plan
+  return typeof plan === 'string' && plan.trim() !== '' ? plan : undefined
+}
+
+/** First markdown heading of an exit_plan_mode plan body. */
+export function planTitleFromMarkdown(markdown: string): string | undefined {
+  const match = /^\s*#\s+(.+)$/mu.exec(markdown)
+  const title = match?.[1]?.trim()
+  return title === undefined || title === '' ? undefined : title
 }
 
 /** Parse a todo_write payload into displayable plan items. */
@@ -1329,13 +1449,40 @@ export function presentToolCall(name: string, args: string): {
     }
   }
   if (name === 'todo_write' || name === 'todo') {
-    return { title: '计划', summary: todoSummary(parsed) }
+    return { title: '更新待办', summary: todoSummary(parsed) }
   }
   if (name === 'ask_user_question') {
     return { title: '提问用户', summary: askSummary(parsed) }
   }
   if (name === 'exit_plan_mode') {
-    return { title: '退出计划模式', summary: '等待确认计划' }
+    const plan = typeof parsed?.plan === 'string' ? parsed.plan : ''
+    return { title: '提交计划', summary: planTitleFromMarkdown(plan) ?? '等待确认计划' }
+  }
+  if (name === 'read') {
+    const path = typeof parsed?.path === 'string' ? parsed.path
+      : typeof parsed?.file_path === 'string' ? parsed.file_path
+        : typeof parsed?.url === 'string' ? parsed.url
+          : ''
+    return { title: '读取', summary: path || friendlyArgsSummary(name, args) }
+  }
+  if (name === 'grep') {
+    const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern : ''
+    const path = typeof parsed?.path === 'string' ? parsed.path : ''
+    return { title: '搜索', summary: [pattern, path].filter(Boolean).join('  ') || friendlyArgsSummary(name, args) }
+  }
+  if (name === 'glob') {
+    const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern
+      : typeof parsed?.glob_pattern === 'string' ? parsed.glob_pattern
+        : ''
+    return { title: '匹配文件', summary: pattern || friendlyArgsSummary(name, args) }
+  }
+  if (name === 'web_search') {
+    const query = typeof parsed?.query === 'string' ? parsed.query : typeof parsed?.q === 'string' ? parsed.q : ''
+    return { title: '网页搜索', summary: query || friendlyArgsSummary(name, args) }
+  }
+  if (name === 'web_fetch') {
+    const url = typeof parsed?.url === 'string' ? parsed.url : ''
+    return { title: '抓取网页', summary: url || friendlyArgsSummary(name, args) }
   }
   return { title: name, summary: friendlyArgsSummary(name, args) }
 }
@@ -1480,6 +1627,7 @@ export function friendlyJsonLines(value: unknown, depth = 0): string[] {
 
 /** Minimal tool-row shape the expanded-body renderer reads. */
 interface ToolBodySource {
+  name?: string
   diff?: ToolDiffHunk[]
   command?: string
   status?: 'running' | 'ok' | 'error'
@@ -1522,6 +1670,9 @@ export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDispla
     return out
   }
 
+  const specialized = specializedToolBody(row)
+  if (specialized !== null) return capDisplayLines(specialized, maxLines)
+
   const out: DiffDisplayLine[] = []
   const args = parseJsonArgs(row.args)
   if (args !== null && Object.keys(args).length > 0) {
@@ -1544,6 +1695,87 @@ export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDispla
     }
   }
   return capDisplayLines(out, maxLines)
+}
+
+interface NamedToolBodySource extends ToolBodySource {
+  name?: string
+}
+
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+  return ''
+}
+
+function specializedToolBody(row: NamedToolBodySource): DiffDisplayLine[] | null {
+  const name = row.name ?? ''
+  const args = parseJsonArgs(row.args)
+  if (name === 'todo_write' || name === 'todo') {
+    const todos = parsePlanTodos(args ?? row.args)
+    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: todoProgressLabel(todos) || '待办列表' }]
+    if (todos.length === 0) {
+      out.push({ kind: 'tool-result', text: '还没有任务' })
+    } else {
+      for (const item of todos) {
+        out.push({ kind: todoItemKind(item.status), text: `${TODO_STATUS_MARK[item.status]} ${item.content}` })
+      }
+    }
+    return out
+  }
+  if (name === 'exit_plan_mode') {
+    const markdown = planMarkdownFromArgs(args ?? row.args) ?? ''
+    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: planTitleFromMarkdown(markdown) ?? '待审计划' }]
+    if (markdown === '') {
+      out.push({ kind: 'tool-result', text: '计划正文为空' })
+    } else {
+      for (const line of markdown.split('\n')) {
+        out.push({ kind: 'assistant', text: line })
+      }
+    }
+    return out
+  }
+  if (name === 'read' && args !== null) {
+    const path = firstString(args, ['path', 'file_path', 'url'])
+    const out: DiffDisplayLine[] = []
+    if (path !== '') out.push({ kind: 'diff-path', text: path })
+    const offset = typeof args.offset === 'number' ? args.offset : undefined
+    const limit = typeof args.limit === 'number' ? args.limit : undefined
+    if (offset !== undefined || limit !== undefined) {
+      out.push({ kind: 'tool-result', text: `offset ${offset ?? 1}${limit === undefined ? '' : ` · limit ${limit}`}` })
+    }
+    if (row.output !== '') {
+      for (const line of truncate(row.output, 40).split('\n')) {
+        out.push({ kind: 'tool-result', text: line })
+      }
+    } else if (row.status === 'running') {
+      out.push({ kind: 'tool-result', text: '读取中…' })
+    }
+    return out.length > 0 ? out : null
+  }
+  if ((name === 'grep' || name === 'glob') && args !== null) {
+    const pattern = firstString(args, ['pattern', 'glob_pattern', 'query'])
+    const path = firstString(args, ['path', 'glob'])
+    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: [pattern, path].filter(Boolean).join('  ') || name }]
+    if (row.output !== '') {
+      for (const line of truncate(row.output, 30).split('\n')) {
+        out.push({ kind: 'tool-result', text: line })
+      }
+    }
+    return out
+  }
+  if ((name === 'web_search' || name === 'web_fetch') && args !== null) {
+    const query = firstString(args, ['query', 'q', 'url'])
+    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: query || name }]
+    if (row.output !== '') {
+      for (const line of truncate(row.output, 24).split('\n')) {
+        out.push({ kind: 'assistant', text: line })
+      }
+    }
+    return out
+  }
+  return null
 }
 
 /** Recover the shell tools' exit marker, mirroring @deepseek-ai/dsh-shell/render. */
@@ -1661,6 +1893,8 @@ export class SshTui {
   private lastTitleUpdateAt = 0
   private lastPaintRows: string[] = []
   private lastChromeKey = ''
+  private lastPaintWidth = 0
+  private lastPaintHeight = 0
 
   constructor(
     private readonly ctx: Context,
@@ -1686,7 +1920,7 @@ export class SshTui {
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
-    this.pushRow({ kind: 'system', text: '输入 /help 查看命令 · /setup 配置提供商 · ↑/↓ 选择卡片 · Enter 展开/折叠 · Ctrl+R 全部展开/收起 · Ctrl+T 折叠输入 · Esc 取消' })
+    this.pushRow({ kind: 'system', text: '输入 /help 查看命令 · /model 切换模型 · ↑/↓ 选择卡片 · Enter 展开/折叠 · Ctrl+R 全部展开/收起 · Ctrl+T 折叠输入 · Esc 取消' })
   }
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
@@ -1753,6 +1987,11 @@ export class SshTui {
       this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
       this.markDirty()
     })
+    void this.syncSubagentToProvider(this.currentProviderId()).catch((error: unknown) => {
+      if (this.disposed) return
+      this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
+      this.markDirty()
+    })
   }
 
   /** Replay the durable session log so a resumed session renders its history. */
@@ -1779,7 +2018,7 @@ export class SshTui {
     if (providerUsesLocalOAuth(provider)) {
       this.pushRow({
         kind: 'system',
-        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），使用本机 OAuth token，无需 API Key。如需改回 Key 提供商，输入 /setup。`,
+        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），走本机 SuperGrok / X Premium OAuth，无需 API Key。用 /model 切换 Grok 模型和思考强度；只有要改成 DeepSeek 官方或 OpenCode 这类 Key 提供商时才需要 /setup。`,
       })
       this.markDirty()
       return
@@ -1992,10 +2231,67 @@ export class SshTui {
       active: patch.active ?? false,
       pending: patch.pending ?? false,
       todos: patch.todos ?? [],
+      ...(patch.planMarkdown === undefined ? {} : { planMarkdown: patch.planMarkdown }),
       expanded: false,
     }
     this.pushRow(row)
     return row
+  }
+
+  /** Whether the live plan strip should occupy the workspace footer. */
+  private shouldDockPlan(): boolean {
+    const plan = this.findLivePlanRow()
+    if (plan === undefined) return false
+    return plan.active || plan.pending || plan.todos.length > 0 || (plan.planMarkdown !== undefined && plan.planMarkdown !== '')
+  }
+
+  /** Compact web-style plan strip pinned above the input, not in the transcript. */
+  private paintPlanDock(width: number, yieldBottom: boolean): string[] {
+    const plan = this.findLivePlanRow()
+    if (plan === undefined) return []
+    const inner = Math.max(1, width - 2)
+    const running = plan.todos.some(item => item.status === 'in_progress')
+    const spinner = (plan.active || plan.pending || running) ? ` ${this.spinnerFrame()}` : ''
+    const mode = plan.pending ? '切换中' : plan.active ? '计划模式' : '计划'
+    const counts = todoProgressLabel(plan.todos)
+    const title = planTitleFromMarkdown(plan.planMarkdown ?? '')
+    const summary = title ?? (counts === '' ? '还没有任务' : counts)
+    const marker = plan.expanded ? '▾' : '▸'
+    const focused = this.focusedRow === plan ? '▶ ' : '  '
+    const header = `${focused}${marker} ${mode}${spinner} · ${summary}${plan.expanded || yieldBottom ? '' : ' · Enter 展开'}`
+    const lines = [this.styleLine('plan-dock', padToWidth(header, width))]
+    if (yieldBottom || !plan.expanded) return lines
+
+    const note = plan.pending
+      ? '模式切换将在下一步生效。'
+      : plan.active
+        ? '只规划、不改代码；确认后再执行。'
+        : '计划模式已关闭，可用 /plan 重新进入。'
+    lines.push(this.styleLine('plan-dock', padToWidth(`   ${note}`, width)))
+    if (plan.planMarkdown !== undefined && plan.planMarkdown !== '') {
+      const markdown = renderMarkdownLines(plan.planMarkdown, inner, this.color)
+      const budget = Math.max(4, Math.min(12, markdown.length))
+      for (const line of markdown.slice(0, budget)) {
+        lines.push(`${clipAnsiToWidth(`  ${line}`, width)}\x1b[0m`)
+      }
+      if (markdown.length > budget) {
+        lines.push(this.styleLine('plan-dock', padToWidth(`   … 还有 ${markdown.length - budget} 行计划`, width)))
+      }
+    }
+    if (plan.todos.length === 0) {
+      if (plan.planMarkdown === undefined || plan.planMarkdown === '') {
+        lines.push(this.styleLine('todo-pending', padToWidth('   还没有任务列表', width)))
+      }
+    } else {
+      for (const item of plan.todos) {
+        const mark = TODO_STATUS_MARK[item.status]
+        const kind = todoItemKind(item.status)
+        for (const wrapped of wrap(`${mark} ${item.content}`, inner)) {
+          lines.push(this.styleLine(kind, padToWidth(`  ${wrapped}`, width)))
+        }
+      }
+    }
+    return lines
   }
 
   private paintCollapsibleHeader(
@@ -2195,31 +2491,8 @@ export class SshTui {
         continue
       }
       if (row.kind === 'plan') {
-        const running = row.todos.some(item => item.status === 'in_progress')
-        const spinner = (row.active || row.pending || running) ? ` ${this.spinnerFrame()}` : ''
-        const mode = row.pending
-          ? '切换中'
-          : row.active
-            ? '计划模式'
-            : '计划'
-        const header = `● ${mode}${spinner} · ${todoSummary(row.todos)}${row.expanded ? '' : ' · Enter 展开'}`
-        this.paintCollapsibleHeader(addDisplay, row, 'system', header, width)
-        if (row.expanded) {
-          addDisplay(this.styleLine('system', row.active
-            ? '  当前处于计划模式：只规划、不改代码，确认后再执行。'
-            : '  计划模式已关闭。可用 /plan 重新进入。'))
-          if (row.pending) addDisplay(this.styleLine('system', '  模式切换将在下一步生效。'))
-          if (row.todos.length === 0) {
-            addDisplay(this.styleLine('tool-result', '  还没有任务列表'))
-          } else {
-            for (const item of row.todos) {
-              const mark = TODO_STATUS_MARK[item.status]
-              for (const wrapped of wrap(`${mark} ${item.content}`, Math.max(1, width - 2))) {
-                addDisplay(this.styleLine(item.status === 'completed' ? 'system' : 'tool', `  ${wrapped}`))
-              }
-            }
-          }
-        }
+        // The live plan occupies the workspace footer (web TodoDock). Keep it
+        // out of the scrolling transcript so it never collides with the input.
         continue
       }
       if (row.kind === 'question') {
@@ -2235,8 +2508,14 @@ export class SshTui {
             addDisplay(this.styleLine('assistant', `  ${wrapped}`))
           }
           if (row.detail !== undefined && row.detail !== '') {
-            for (const wrapped of wrap(row.detail, Math.max(1, width - 2))) {
-              addDisplay(this.styleLine('tool-result', `  ${wrapped}`))
+            if (row.intent === 'plan-review') {
+              for (const line of renderMarkdownLines(row.detail, Math.max(1, width - 2), this.color)) {
+                addDisplay(`  ${line}`)
+              }
+            } else {
+              for (const wrapped of wrap(row.detail, Math.max(1, width - 2))) {
+                addDisplay(this.styleLine('tool-result', `  ${wrapped}`))
+              }
             }
           }
           addDisplay(this.styleLine('system', waiting
@@ -2370,7 +2649,9 @@ export class SshTui {
           addDialog(`计划待审 ${d.index + 1}/${d.total}${d.question.header === undefined ? '' : ` · ${d.question.header}`}`)
           addDialog(d.question.question)
           if (d.question.detail !== undefined && d.question.detail !== '') {
-            addDialog(truncate(d.question.detail, 12))
+            for (const line of renderMarkdownLines(d.question.detail, Math.max(1, width - 2), this.color).slice(0, 16)) {
+              dialogLines.push(this.styleLine('assistant', line))
+            }
           }
         } else {
           addDialog(`提问用户 ${d.index + 1}/${d.total}: ${d.question.question}`)
@@ -2398,13 +2679,11 @@ export class SshTui {
     const fitLine = (text: string): string => truncateToWidth(text, Math.max(1, width))
     const headerLines = [
       this.styleLine('system', fitLine(`DeepSeek Harness — SSH TUI  [${this.presetName}]  ${this.currentSelectionLabel()}`)),
-      this.styleLine('system', '─'.repeat(width)),
+      this.styleLine('system', repeatToWidth('─', width)),
     ]
     if (this.scrollOffset > 0) {
       headerLines.push(this.styleLine('system', fitLine(`↑ 已回看 ${this.scrollOffset} 行 · PgUp/PgDn/滚轮滚动 · Esc 回到底部`)))
     }
-    const inputDivider = this.styleLine('system', '─'.repeat(width))
-
     this.commandSuggestions = this.dialog === undefined ? this.buildSuggestions() : []
     if (this.suggestionIndex >= this.commandSuggestions.length) {
       this.suggestionIndex = Math.max(0, this.commandSuggestions.length - 1)
@@ -2423,7 +2702,7 @@ export class SshTui {
     const promptWidth = displayWidth(promptPlain)
     const masked = this.dialog?.kind === 'onboarding' && this.onboarding?.step === 'key'
     const inputView: InputView = masked
-      ? { text: '•'.repeat(this.input.length), cursorOffset: this.cursor, folded: false }
+      ? { text: '•'.repeat(this.input.length), cursorOffset: displayWidth('•'.repeat(this.cursor)), folded: false }
       : this.inputFolded
         ? foldInputView(this.input, this.cursor, Math.max(1, width - promptWidth))
         : { text: this.input, cursorOffset: displayWidth(this.input.slice(0, this.cursor)), folded: false }
@@ -2475,7 +2754,12 @@ export class SshTui {
     }
     const inputRows = Math.max(1, inputDisplayLines.length)
 
-    const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + 1 // +1 input divider
+    const yieldPlanDock = this.dialog !== undefined || suggestionLines.length > 0
+    const planDockLines = this.shouldDockPlan()
+      ? this.paintPlanDock(width, yieldPlanDock)
+      : []
+    const inputDivider = this.styleLine('system', repeatToWidth('─', width))
+    const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
     const available = Math.max(1, height - reserved - dialogLines.length)
     const maxOffset = Math.max(0, display.length - available)
     if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset
@@ -2491,6 +2775,11 @@ export class SshTui {
     for (let index = 0; index < visibleRefs.length; index++) {
       const ref = visibleRefs[index]
       if (ref !== undefined) this.clickableRows.set(headerLines.length + index + 1, ref)
+    }
+    const dockPlan = this.findLivePlanRow()
+    if (dockPlan !== undefined && planDockLines.length > 0) {
+      const dockTop = headerLines.length + visible.length + 1
+      this.clickableRows.set(dockTop, dockPlan)
     }
 
     const statsText = this.statsText()
@@ -2534,6 +2823,7 @@ export class SshTui {
     const paintRows: string[] = [
       ...headerLines,
       ...visible,
+      ...planDockLines,
       ...dialogLines,
       inputDivider,
       ...suggestionLines,
@@ -2545,7 +2835,7 @@ export class SshTui {
     // Bottom chrome is force-repainted whenever its state changes while the
     // agent is working; this clears any stale cell left behind by a previous
     // frame even when the row strings happen to be identical.
-    const chromeStart = Math.max(0, paintRows.length - inputRows - 3)
+    const chromeStart = Math.max(0, paintRows.length - inputRows - suggestionLines.length - dialogLines.length - planDockLines.length - 3)
     const chromeKey = [
       this.status,
       this.agent.status,
@@ -2556,32 +2846,45 @@ export class SshTui {
       inputView.folded,
       inputRows,
       paintRows.length,
+      width,
+      height,
       this.pendingMessages.size,
       this.commandSuggestions.length,
       this.suggestionIndex,
       this.activeSubagents.size,
       this.dialog?.kind ?? '',
-      this.findLivePlanRow()?.active === true ? 'plan' : '',
+      planDockLines.join('\n'),
     ].join('\x1f')
     const chromeChanged = chromeKey !== this.lastChromeKey
+    const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight
 
     // Incremental repaint: rewrite only rows whose content changed, so slow
     // SSH links don't rebuild (and flicker) the whole screen on every tick.
+    // Always erase to the end of the line *and* clip to the measured cell
+    // width: leftover wide glyphs otherwise wrap into the input box.
     this.write('\x1b[?25l')
-    const maxRows = Math.max(paintRows.length, this.lastPaintRows.length)
+    if (sizeChanged) {
+      this.write('\x1b[H\x1b[J')
+      this.lastPaintRows = []
+    }
+    const maxRows = Math.max(paintRows.length, this.lastPaintRows.length, height)
     for (let i = 0; i < maxRows; i++) {
       const current = paintRows[i]
-      if (current === this.lastPaintRows[i] && !(chromeChanged && i >= chromeStart)) continue
-      this.write(`\x1b[${i + 1};1H\x1b[0m${current ?? ''}\x1b[K`)
+      if (current === this.lastPaintRows[i] && !(chromeChanged && i >= chromeStart) && i < height) continue
+      const clipped = current === undefined ? '' : clipAnsiToWidth(current, width)
+      const pad = Math.max(0, width - visibleWidth(clipped))
+      this.write(`\x1b[${i + 1};1H\x1b[0m${clipped}\x1b[0m${' '.repeat(pad)}\x1b[K`)
     }
-    if (paintRows.length < this.lastPaintRows.length) {
+    if (paintRows.length < Math.max(this.lastPaintRows.length, height)) {
       this.write(`\x1b[${paintRows.length + 1};1H\x1b[J`)
     }
     this.write('\x1b[0m')
     this.lastPaintRows = paintRows
     this.lastChromeKey = chromeKey
+    this.lastPaintWidth = width
+    this.lastPaintHeight = height
 
-    const inputTopRow = visible.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
+    const inputTopRow = visible.length + planDockLines.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
     const row = Math.min(height, inputTopRow + cursorRowOffset)
     this.write(`\x1b[${row};${Math.max(1, column)}H\x1b[?25h`)
   }
@@ -2740,6 +3043,10 @@ export class SshTui {
       kind === 'diff-add' ? '38;5;22;48;5;194' :
       kind === 'diff-del' ? '38;5;124;48;5;224' :
       kind === 'diff-path' ? '1;36' :
+      kind === 'todo-done' ? '2;32' :
+      kind === 'todo-active' ? '1;36' :
+      kind === 'todo-pending' ? '90' :
+      kind === 'plan-dock' ? '38;5;180' :
       kind === 'error' ? '31' :
       '90'
     return `\x1b[${code}m${safe}`
@@ -2760,10 +3067,15 @@ export class SshTui {
     const resolved = await next()
     if (agent === this.agent) return resolved
     const selection = this.subagentSelection.current
+    const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
+    const provider = selection.provider ?? parentProvider
+    const model = subagentModelMatchesProvider(provider, selection.model)
+      ? selection.model
+      : defaultSubagentModelForProvider(provider)
     return {
       ...resolved,
-      ...(selection.provider === undefined ? {} : { provider: selection.provider }),
-      model: selection.model,
+      provider,
+      model,
       ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
     }
   }
@@ -2886,6 +3198,10 @@ export class SshTui {
           expanded: DIFF_TOOL_NAMES.has(event.data.name) && !SUBAGENT_TOOL_NAMES.has(event.data.name),
         }
         this.pushRow(row)
+        if (event.data.name === 'exit_plan_mode') {
+          const markdown = planMarkdownFromArgs(event.data.arguments)
+          if (markdown !== undefined) this.upsertPlanRow({ planMarkdown: markdown, expanded: false })
+        }
         this.streaming = undefined
         this.markDirty()
         break
@@ -3441,13 +3757,14 @@ export class SshTui {
     total: number,
     resolve: (answer: DialogAnswer) => void,
     reject: (error: unknown) => void,
+    preselected?: number,
   ): QuestionDialog {
     const dialog: QuestionDialog = {
       kind: 'questions',
       question,
       index,
       total,
-      selected: new Set(),
+      selected: new Set(preselected !== undefined && preselected >= 0 ? [preselected] : []),
       resolve: (selection) => {
         this.settleQuestion(dialog, () => resolve(selection))
       },
@@ -3460,9 +3777,9 @@ export class SshTui {
   }
 
   /** Open one question dialog and await its answer (cancellation rejects). */
-  private askQuestion(question: AskUserQuestionItem, index = 0, total = 1): Promise<DialogAnswer> {
+  private askQuestion(question: AskUserQuestionItem, index = 0, total = 1, preselected?: number): Promise<DialogAnswer> {
     return new Promise<DialogAnswer>((resolve, reject) => {
-      this.openQuestion(question, index, total, resolve, reject)
+      this.openQuestion(question, index, total, resolve, reject, preselected)
     })
   }
 
@@ -3581,11 +3898,12 @@ export class SshTui {
       }))
       if (hasPrev) options.push({ label: this.MODEL_PAGE_PREV, description: undefined })
       if (hasNext) options.push({ label: this.MODEL_PAGE_NEXT, description: undefined })
+      const currentIndex = page.findIndex(option => option.id === currentModel && option.id !== '__switch_provider__')
       const answer = await this.askQuestion({
         id: 'model-pick',
         question: `选择模型（提供商 ${provider} · ${sourceLabel}${hasPrev || hasNext ? `，第 ${currentPage}/${pageCount} 页` : ''}）`,
         options,
-      })
+      }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
       const picked = options.find(option => option.label === answer.selected[0])
       if (picked === undefined) return undefined
       if (picked.label === this.MODEL_PAGE_NEXT) {
@@ -3613,23 +3931,33 @@ export class SshTui {
       const display = name !== undefined && name !== '' && name !== id ? name : kind.short
       out.push({ id, label: `${display} · ${id}` })
     }
-    for (const info of llm?.listProviders() ?? []) add(info.id, info.name)
     add(current)
-    add('deepseek-official', 'DeepSeek 官方')
+    for (const info of llm?.listProviders() ?? []) add(info.id, info.name)
     add('xai', 'SuperGrok')
+    add('deepseek-official', 'DeepSeek 官方')
     add('opencode-go', 'OpenCode Go')
     add('opencode', 'OpenCode Zen')
     return out
   }
 
-  /** /model: pick a provider, then a model and reasoning effort on that route. */
+  /** Built-in SuperGrok catalog used when the live adapter list is still warming up. */
+  private static readonly XAI_FALLBACK_MODELS: { id: string; label: string }[] = [
+    { id: 'grok-4.6', label: 'Grok 4.6' },
+    { id: 'grok-4.5', label: 'Grok 4.5' },
+    { id: 'grok-4.3', label: 'Grok 4.3' },
+  ]
+
+  /** /model: stay on the current provider by default; switching providers is opt-in. */
   private async runModelCommand(): Promise<void> {
     const llm = this.ctx.get('llm')
     const current = this.selectionRef?.current
     const providers = this.listSelectableProviders()
     let provider = this.currentProviderId()
-    if (providers.length > 1) {
-      const answer = await this.askQuestion({
+    const SWITCH_PROVIDER_ID = '__switch_provider__'
+    const pickProvider = async (): Promise<string | undefined> => {
+      if (providers.length <= 1) return provider
+      const currentIndex = Math.max(0, providers.findIndex(option => option.id === provider))
+      const pickedAnswer = await this.askQuestion({
         id: 'provider-pick',
         question: '选择提供商',
         options: providers.map(option => ({
@@ -3638,10 +3966,8 @@ export class SshTui {
             ? `${describeProviderRoute(option.id).kind} · 当前`
             : describeProviderRoute(option.id).kind,
         })),
-      })
-      const picked = providers.find(option => option.label === answer.selected[0])
-      if (picked === undefined) return
-      provider = picked.id
+      }, 0, 1, currentIndex)
+      return providers.find(option => option.label === pickedAnswer.selected[0])?.id
     }
 
     let modelOptions: { id: string; label: string }[] = []
@@ -3686,43 +4012,113 @@ export class SshTui {
         modelOptions = []
       }
     }
+    if (modelOptions.length === 0 && providerUsesLocalOAuth(provider)) {
+      modelOptions = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
+      modelSource = 'SuperGrok 目录'
+    }
     if (modelOptions.length === 0) {
-      const fallback = current?.model ?? this.agent.options.model ?? 'deepseek-v4-flash'
+      const fallback = current?.model ?? this.agent.options.model ?? (
+        providerUsesLocalOAuth(provider) ? 'grok-4.6' : 'deepseek-v4-flash'
+      )
       modelOptions = [{ id: fallback, label: fallback }]
     }
+    if (current?.model !== undefined && !modelOptions.some(option => option.id === current.model)) {
+      modelOptions = [{ id: current.model, label: current.model }, ...modelOptions]
+    }
 
+    if (providers.length > 1) {
+      modelOptions = [
+        ...modelOptions,
+        { id: SWITCH_PROVIDER_ID, label: '更换提供商…' },
+      ]
+    }
     const selected = await this.pickModelOption(modelOptions, provider, modelSource, current?.model)
     if (selected === undefined) return
-    if (!(await this.ensureProviderModelConfigured(provider, selected.id))) return
+    if (selected.id === SWITCH_PROVIDER_ID) {
+      const nextProvider = await pickProvider()
+      if (nextProvider === undefined || nextProvider === provider) return
+      provider = nextProvider
+      modelOptions = []
+      modelSource = '已配置列表'
+      // Reload the model list for the newly chosen provider.
+      if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
+        try {
+          modelOptions = await this.discoverEndpointModels(provider)
+          if (modelOptions.length > 0) modelSource = '端点实时列表'
+        } catch {
+          modelOptions = []
+        }
+      }
+      if (modelOptions.length === 0) {
+        try {
+          const listed = (await llm?.listModels(provider)) ?? []
+          modelOptions = listed.map(model => ({ id: model.id, label: model.name || model.id }))
+        } catch {
+          modelOptions = []
+        }
+      }
+      if (modelOptions.length === 0 && providerUsesLocalOAuth(provider)) {
+        modelOptions = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
+        modelSource = 'SuperGrok 目录'
+      }
+      if (modelOptions.length === 0) {
+        const fallback = providerUsesLocalOAuth(provider) ? 'grok-4.6' : 'deepseek-v4-flash'
+        modelOptions = [{ id: fallback, label: fallback }]
+      }
+      const switched = await this.pickModelOption(modelOptions, provider, modelSource, undefined)
+      if (switched === undefined) return
+      return await this.applyModelSelection(provider, switched.id, undefined)
+    }
+    await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id).filter(id => id !== SWITCH_PROVIDER_ID))
+  }
 
+  /** Persist a provider/model/effort choice and keep the subagent on the same family. */
+  private async applyModelSelection(provider: string, modelId: string, listed: readonly string[] = []): Promise<void> {
+    if (!(await this.ensureProviderModelConfigured(provider, modelId))) return
+    const llm = this.ctx.get('llm')
+    const current = this.selectionRef?.current
     let effortOptions: { id: string; label: string }[] = []
     try {
-      const info = await llm?.resolveModelInfo(provider, selected.id)
+      const info = await llm?.resolveModelInfo(provider, modelId)
       effortOptions = (info?.reasoning?.efforts ?? []).map(effort => ({ id: String(effort.id), label: effort.name }))
     } catch {
       effortOptions = []
     }
-    if (effortOptions.length === 0) {
-      // No selectable reasoning effort for this model: do not invent
-      // `off/high/max`, which the adapter may reject for the exact model.
+    if (effortOptions.length === 0 && providerUsesLocalOAuth(provider)) {
+      effortOptions = modelId === 'grok-4.6'
+        ? [
+            { id: 'off', label: 'Off' },
+            { id: 'low', label: 'Low' },
+            { id: 'medium', label: 'Medium' },
+            { id: 'high', label: 'High' },
+            { id: 'xhigh', label: 'Extra high' },
+          ]
+        : [
+            { id: 'off', label: 'Off' },
+            { id: 'low', label: 'Low' },
+            { id: 'medium', label: 'Medium' },
+            { id: 'high', label: 'High' },
+          ]
     }
 
     let effort: string | undefined
     if (effortOptions.length > 0) {
+      const currentEffort = current?.provider === provider ? String(current?.reasoningEffort ?? '') : ''
+      const currentIndex = Math.max(0, effortOptions.findIndex(option => option.id === currentEffort))
       const effortAnswer = await this.askQuestion({
         id: 'effort-pick',
-        question: `选择思考强度（${selected.id}）`,
+        question: `选择思考强度（${modelId}）`,
         options: effortOptions.map(option => ({
           label: option.label,
-          description: option.id === String(current?.reasoningEffort) ? '当前' : undefined,
+          description: option.id === currentEffort ? '当前' : undefined,
         })),
-      })
+      }, 0, 1, currentIndex)
       effort = effortOptions.find(option => option.label === effortAnswer.selected[0])?.id
     }
 
     const next: ModelSelection = {
       provider,
-      model: selected.id,
+      model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
     if (this.selectionRef !== undefined) this.selectionRef.current = next
@@ -3731,8 +4127,9 @@ export class SshTui {
     const kind = describeProviderRoute(provider)
     this.pushRow({
       kind: 'system',
-      text: `已切换到 ${kind.kind}：${provider}/${selected.id}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
+      text: `已切换到 ${kind.kind}：${provider}/${modelId}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
     })
+    await this.syncSubagentToProvider(provider, listed.filter(id => id !== '__switch_provider__' && id !== ''))
     this.markDirty()
   }
 
@@ -3742,6 +4139,37 @@ export class SshTui {
       ?? this.selectionRef?.current?.provider
       ?? this.agent.options.provider
       ?? this.providerName
+  }
+
+  /**
+   * When the parent provider changes (OAuth or API key), keep the subagent
+   * on a same-family model. An explicit leftover DeepSeek flash id after
+   * switching to xAI is treated as stale.
+   */
+  private async syncSubagentToProvider(provider: string, listed: readonly string[] = []): Promise<void> {
+    const current = this.subagentSelection.current
+    if (current.provider !== undefined && current.provider !== provider) return
+    if (subagentModelMatchesProvider(provider, current.model, listed)) return
+    let catalog = [...listed]
+    if (catalog.length === 0) {
+      try {
+        const { options } = await this.subagentModelOptions(provider)
+        catalog = options.map(option => option.id)
+      } catch {
+        catalog = []
+      }
+    }
+    const nextModel = defaultSubagentModelForProvider(provider, catalog)
+    if (nextModel === current.model) return
+    const persisted = await this.saveSubagentSelection({
+      ...current,
+      model: nextModel,
+      reasoningEffort: undefined,
+    })
+    this.pushRow({
+      kind: 'system',
+      text: `子代理已跟随提供商 ${provider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
+    })
   }
 
   /** Persist one subagent selection and publish it to the live request waterfall. */
@@ -4288,7 +4716,14 @@ export class SshTui {
       case '\x08': this.backspace(); return
       case '\x03': this.handleCtrlC(); return
       case '\x04': void this.requestExit(0); return
-      case '\x0c': this.dirty = true; this.render(); return
+      case '\x0c':
+        this.lastPaintRows = []
+        this.lastChromeKey = ''
+        this.lastPaintWidth = 0
+        this.lastPaintHeight = 0
+        this.dirty = true
+        this.render()
+        return
       case '\x01': this.cursor = 0; this.markDirty(); return
       case '\x05': this.cursor = this.input.length; this.markDirty(); return
       case '\x15': this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
@@ -4571,6 +5006,7 @@ export class SshTui {
           this.selectionRef.current = { provider: 'deepseek-official', model }
         }
         this.onSelectionChanged?.({ provider: 'deepseek-official', model })
+        await this.syncSubagentToProvider('deepseek-official', state.models)
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
           this.pushRow({ kind: 'system', text: `Base URL 已保存 → ${displayDshPath('settings.yaml')}` })
@@ -4630,6 +5066,7 @@ export class SshTui {
             this.selectionRef.current = selection
           }
           this.onSelectionChanged?.(selection)
+          await this.syncSubagentToProvider(state.providerId, state.models)
           this.pushRow({
             kind: 'system',
             text: `配置完成，已记住默认提供商/模型：${state.providerId} / ${model}。以后直接运行 dsh --profile tui 即可（--provider/--model 可临时覆盖）。`,
@@ -4877,7 +5314,8 @@ export class SshTui {
             '运行中按 Enter 可插入指示；Esc / Ctrl+C 取消当前轮次。',
             '↑/↓ 或 Ctrl+N/P 选择思考、工具、子代理、计划或提问卡片；Enter 展开/折叠；Ctrl+R 全部展开或收起。',
             '计划模式、提问用户和当前目标会显示独立卡片；多个子代理默认各自折叠，互不混排。',
-            '/model 先选提供商（DeepSeek 官方 / SuperGrok 订阅 / OpenCode …），再选模型和思考强度。',
+            '/model 默认列出当前提供商的模型；当前是 SuperGrok 时直接选 grok-4.6 / grok-4.5 和思考强度（含 xhigh）。要换提供商再选「更换提供商」。',
+            '/setup 只用于配置 API Key 提供商。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。',
             '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，还是其它已注册提供商。',
           ].join('\n'),
         })

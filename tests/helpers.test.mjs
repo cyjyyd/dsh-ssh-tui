@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 
 import {
   askSummary,
+  clipAnsiToWidth,
   describeProviderRoute,
-  providerUsesLocalOAuth,
+  displayWidth,
   foldInputView,
   formatOpenCodeGoUsage,
   friendlyJsonLines,
@@ -12,20 +13,58 @@ import {
   openCodeSourceFor,
   parseExitStatus,
   parsePlanTodos,
+  planTitleFromMarkdown,
   presentToolCall,
+  providerUsesLocalOAuth,
   renderMarkdownLines,
   renderToolDiff,
+  repeatToWidth,
   SshTui,
   subagentHeaderText,
+  todoProgressLabel,
   todoSummary,
   toolBodyLines,
   truncateToWidth,
 } from '../lib/tui.js'
+import {
+  defaultSubagentModelForProvider,
+  subagentModelMatchesProvider,
+} from '../lib/subagent-model.js'
 
 test('truncateToWidth never splits a surrogate pair', () => {
   const cut = truncateToWidth('🙂🙂', 1)
   assert.equal(cut, '…')
   assert.ok(!cut.includes('\uFFFD'))
+})
+
+test('displayWidth matches glibc wcwidth for CJK vs ambiguous TUI glyphs', () => {
+  assert.equal(displayWidth('计划'), 4)
+  assert.equal(displayWidth('─'), 1)
+  assert.equal(displayWidth('●'), 1)
+  assert.equal(displayWidth('·'), 1)
+  assert.equal(displayWidth('▸'), 1)
+  assert.equal(displayWidth('❯'), 1)
+  assert.equal(displayWidth('⠋'), 1)
+  assert.equal(repeatToWidth('─', 8), '────────')
+  assert.equal(displayWidth(repeatToWidth('─', 80)), 80)
+  assert.equal(displayWidth('❯ hello'), 7)
+})
+
+test('clipAnsiToWidth keeps SGR and never exceeds the cell budget', () => {
+  const styled = '\x1b[33m● 计划模式\x1b[0m'
+  const clipped = clipAnsiToWidth(styled, 8)
+  assert.ok(clipped.startsWith('\x1b[33m'))
+  assert.ok(displayWidth(clipped.replace(/\x1b\[[0-9;]*m/gu, '')) <= 8)
+})
+
+test('prompt plus ASCII input cursor stays on integer columns', () => {
+  const prompt = '❯ '
+  assert.equal(displayWidth(prompt), 2)
+  const text = 'hello\nworld'
+  const cursor = text.indexOf('w')
+  const first = 'hello'
+  assert.equal(displayWidth(prompt) + displayWidth(first), 7)
+  assert.equal(displayWidth(text.slice(cursor)), 5)
 })
 
 test('isEscapePrefix keeps multi-digit CSI / paste / SGR prefixes buffered', () => {
@@ -93,10 +132,11 @@ test('parseExitStatus keeps exit-code and signal parsing', () => {
 
 test('subagent request waterfall applies model/effort but leaves the parent alone', async () => {
   const ctx = { get: () => undefined }
-  const agent = { id: 'main-session' }
+  const agent = { id: 'main-session', options: { provider: 'opencode-go', model: 'deepseek-v4-pro' } }
   const tui = new SshTui(ctx, agent, {
     sessionId: 'main-session',
     color: false,
+    provider: 'opencode-go',
     subagentSelection: {
       current: { model: 'deepseek-v4-flash', reasoningEffort: 'max' },
     },
@@ -112,6 +152,25 @@ test('subagent request waterfall applies model/effort but leaves the parent alon
   assert.equal(parent.provider, 'opencode-go')
   assert.equal(parent.model, 'deepseek-v4-pro')
   assert.equal(parent.reasoningEffort, undefined)
+})
+
+test('subagent waterfall follows the parent xAI route instead of leftover DeepSeek flash', async () => {
+  const ctx = { get: () => undefined }
+  const agent = { id: 'main-session', options: { provider: 'xai', model: 'grok-4.6' } }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'xai',
+    subagentSelection: {
+      current: { model: 'deepseek-v4-flash' },
+    },
+  })
+  const child = await tui.handleAgentRequest(
+    { agent: { id: 'child-session' } },
+    async () => ({ provider: 'xai', model: 'grok-4.6' }),
+  )
+  assert.equal(child.provider, 'xai')
+  assert.equal(child.model, 'grok-4.5')
 })
 
 test('parsePlanTodos and todoSummary keep parallel in-progress counts', () => {
@@ -135,9 +194,11 @@ test('presentToolCall distinguishes subagent, plan, and ask tools', () => {
     presentToolCall('subagent', JSON.stringify({ description: 'scan repo', prompt: 'go' })),
     { title: '子代理', summary: 'scan repo' },
   )
-  assert.equal(presentToolCall('todo_write', JSON.stringify({ todos: [{ content: 'plan it', status: 'pending' }] })).title, '计划')
+  assert.equal(presentToolCall('todo_write', JSON.stringify({ todos: [{ content: 'plan it', status: 'pending' }] })).title, '更新待办')
   assert.equal(presentToolCall('ask_user_question', JSON.stringify({ questions: [{ question: 'Ship it?' }] })).title, '提问用户')
-  assert.equal(presentToolCall('exit_plan_mode', '{}').title, '退出计划模式')
+  assert.equal(presentToolCall('exit_plan_mode', JSON.stringify({ plan: '# Add greeting flag\n\n- locate parser' })).title, '提交计划')
+  assert.equal(presentToolCall('read', JSON.stringify({ path: 'src/tui.ts' })).title, '读取')
+  assert.equal(presentToolCall('grep', JSON.stringify({ pattern: 'TODO', path: 'src' })).summary, 'TODO  src')
 })
 
 test('subagent cards stay collapsed, isolated, and animate while running', () => {
@@ -213,6 +274,47 @@ test('goal cards stay collapsed and report the current phase', () => {
   assert.equal(goal?.phase, 'active')
   assert.equal(goal?.expanded, false)
   assert.equal(goal?.objective, 'finish the TUI cards')
+})
+
+test('todo and exit_plan_mode cards render lists/markdown instead of raw JSON', () => {
+  const todos = parsePlanTodos({
+    todos: [
+      { content: '梳理需求', status: 'completed' },
+      { content: '实现 fixture', status: 'in_progress' },
+      { content: '浏览器验收', status: 'pending' },
+    ],
+  })
+  assert.equal(todoProgressLabel(todos), '1 已完成 · 1 进行中 · 1 待处理')
+  const todoBody = toolBodyLines({
+    name: 'todo_write',
+    args: JSON.stringify({ todos }),
+    output: '',
+  }, 20)
+  assert.ok(todoBody.some(line => line.text.includes('实现 fixture')))
+  assert.equal(todoBody.some(line => line.text.includes('{')), false)
+  assert.equal(planTitleFromMarkdown('# Add greeting flag\n\n- locate parser'), 'Add greeting flag')
+  const planBody = toolBodyLines({
+    name: 'exit_plan_mode',
+    args: JSON.stringify({ plan: '# Add greeting flag\n\n- locate parser' }),
+    output: '',
+  }, 20)
+  assert.ok(planBody.some(line => line.text.includes('Add greeting flag')))
+  assert.equal(planBody.some(line => line.kind === 'diff-path' && line.text === '参数'), false)
+})
+
+test('default subagent model follows the parent provider family', () => {
+  assert.equal(defaultSubagentModelForProvider('deepseek-official'), 'deepseek-v4-flash')
+  assert.equal(defaultSubagentModelForProvider('xai'), 'grok-4.5')
+  assert.equal(
+    defaultSubagentModelForProvider('xai', ['grok-4.6', 'grok-4.5', 'grok-4.3']),
+    'grok-4.5',
+  )
+  assert.equal(
+    defaultSubagentModelForProvider('opencode-go', ['deepseek-v4-pro', 'deepseek-v4-flash-vision-exp']),
+    'deepseek-v4-flash-vision-exp',
+  )
+  assert.equal(subagentModelMatchesProvider('xai', 'deepseek-v4-flash'), false)
+  assert.equal(subagentModelMatchesProvider('deepseek-official', 'deepseek-v4-flash'), true)
 })
 
 test('describeProviderRoute labels DeepSeek, SuperGrok, and OpenCode routes', () => {
