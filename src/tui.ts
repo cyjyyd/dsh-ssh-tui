@@ -174,12 +174,24 @@ type Row =
       blockedReason?: string
       expanded: boolean
     }
+  | {
+      kind: 'compaction'
+      compactionId: string
+      status: 'running' | 'ok' | 'error'
+      startedAt: number
+      endedAt?: number
+      pruneCount: number
+      prunedTokens: number
+      summary?: string
+      error?: string
+      expanded: boolean
+    }
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
 
 /** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */
 type CollapsibleBlock =
-  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' }>
+  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
 type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'plan-dock'
@@ -556,8 +568,8 @@ const LOCAL_COMMANDS = [
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
   { name: 'status', description: 'show session, provider and model status' },
-  { name: 'usage', description: 'show OpenCode Zen billing / Go quota usage' },
-  { name: 'quota', description: 'alias of /usage for OpenCode Go quota' },
+  { name: 'usage', description: 'show remaining quota for the current provider (OpenCode Go / SuperGrok)' },
+  { name: 'quota', description: 'alias of /usage' },
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
   { name: 'setup', description: 'configure an API-key provider (DeepSeek / OpenCode); SuperGrok uses local OAuth' },
@@ -1207,6 +1219,10 @@ function reasoningEffortsForDefault(reasoning: unknown): Record<string, string |
 
 const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
 const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1'
+const SUPERGROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
+const QUOTA_ALERT_THRESHOLDS = [50, 25, 10, 5] as const
+/** Remaining % at or below this is “close” and uses the faster cadence. */
+const QUOTA_NEAR_THRESHOLD_PERCENT = 55
 
 /**
  * Classify the currently selected provider as an OpenCode route. Built-in
@@ -1307,19 +1323,152 @@ function formatOpenCodeGoWindow(label: string, value: unknown): string {
   return `  ${parts.join(' · ')}`
 }
 
-/** Render the OpenCode Go quota payload as a transcript block. */
-export function formatOpenCodeGoUsage(payload: unknown, source: OpenCodeSource): string {
+export type QuotaPeriod = 'hourly' | 'weekly' | 'monthly' | 'unknown'
+
+export interface QuotaWindow {
+  label: string
+  period: QuotaPeriod
+  /** Remaining percent of the window (100 = unused). */
+  remainingPercent: number
+  resetsAt?: string
+}
+
+export interface QuotaSnapshot {
+  provider: string
+  plan: string
+  windows: QuotaWindow[]
+}
+
+export function remainingPercentFromUsed(usedPercent: number): number {
+  if (!Number.isFinite(usedPercent)) return 100
+  return Math.max(0, Math.min(100, Math.round((100 - usedPercent) * 10) / 10))
+}
+
+/** Cross a remaining-percent threshold from above (50 / 25 / 10 / 5). */
+export function crossedQuotaThresholds(previousRemaining: number | undefined, remaining: number): number[] {
+  return QUOTA_ALERT_THRESHOLDS.filter(threshold =>
+    remaining <= threshold && (previousRemaining === undefined || previousRemaining > threshold))
+}
+
+export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): string {
+  const reset = window.resetsAt === undefined ? '' : `（${formatQuotaReset(window.resetsAt)}）`
+  return `⚠ 请注意你的 ${snapshot.plan} 的每${quotaPeriodLabel(window.period)}额度还剩余 ${window.remainingPercent.toFixed(0)}%${reset}，请合理规划剩余额度的使用。`
+}
+
+/**
+ * How often to re-fetch quota, based on the tightest window.
+ * Hourly/5h: every 10 turns, every 4 when near a threshold.
+ * Weekly: every 50 turns, every 10 when near.
+ * Monthly: every 80 turns, every 20 when near.
+ */
+export function quotaRefreshEveryTurns(window: QuotaWindow | undefined): number {
+  if (window === undefined) return 10
+  const near = window.remainingPercent <= QUOTA_NEAR_THRESHOLD_PERCENT
+  if (window.period === 'hourly') return near ? 4 : 10
+  if (window.period === 'weekly') return near ? 10 : 50
+  if (window.period === 'monthly') return near ? 20 : 80
+  return near ? 10 : 50
+}
+
+function quotaPeriodLabel(period: QuotaPeriod): string {
+  if (period === 'hourly') return '5 小时'
+  if (period === 'weekly') return '周'
+  if (period === 'monthly') return '月'
+  return '周期'
+}
+
+function formatQuotaReset(iso: string): string {
+  const reset = new Date(iso)
+  if (Number.isNaN(reset.getTime())) return iso
+  const until = reset.getTime() - Date.now()
+  return until > 0 ? `约 ${formatRelativeDuration(until)} 后重置` : `已于 ${reset.toLocaleString()} 重置`
+}
+
+export function parseSuperGrokBilling(payload: unknown): QuotaSnapshot {
+  if (payload === null || typeof payload !== 'object') {
+    throw new Error('SuperGrok 额度接口返回格式无法识别')
+  }
+  const root = payload as Record<string, unknown>
+  const cfg = root.config
+  if (cfg === null || typeof cfg !== 'object') {
+    throw new Error('SuperGrok 额度接口返回格式无法识别')
+  }
+  const config = cfg as Record<string, unknown>
+  const usedRaw = config.creditUsagePercent ?? config.credit_usage_percent
+  const used = typeof usedRaw === 'number' && Number.isFinite(usedRaw) ? usedRaw : 0
+  const periodRaw = config.currentPeriod ?? config.current_period
+  const periodObj = periodRaw !== null && typeof periodRaw === 'object' ? periodRaw as Record<string, unknown> : undefined
+  const type = typeof periodObj?.type === 'string' ? periodObj.type : ''
+  const period: QuotaPeriod = type.includes('WEEKLY') ? 'weekly' : type.includes('MONTHLY') ? 'monthly' : 'unknown'
+  const end = typeof periodObj?.end === 'string'
+    ? periodObj.end
+    : typeof config.billingPeriodEnd === 'string'
+      ? config.billingPeriodEnd
+      : typeof config.billing_period_end === 'string'
+        ? config.billing_period_end
+        : undefined
+  const plan = typeof root.subscription_tier === 'string' && root.subscription_tier.trim() !== ''
+    ? root.subscription_tier.trim()
+    : typeof root.subscriptionTier === 'string' && root.subscriptionTier.trim() !== ''
+      ? root.subscriptionTier.trim()
+      : 'SuperGrok'
+  return {
+    provider: 'xai',
+    plan,
+    windows: [{
+      label: period === 'monthly' ? '本月' : '本周',
+      period: period === 'unknown' ? 'weekly' : period,
+      remainingPercent: remainingPercentFromUsed(used),
+      ...(end === undefined ? {} : { resetsAt: end }),
+    }],
+  }
+}
+
+export function parseOpenCodeGoQuota(payload: unknown, provider: string): QuotaSnapshot {
   const raw = payload as OpenCodeGoUsagePayload | null | undefined
   const usage = raw?.usage
-  if (usage === null || usage === undefined) {
-    throw new Error('额度接口返回格式无法识别')
+  if (usage === null || usage === undefined) throw new Error('额度接口返回格式无法识别')
+  const windows: QuotaWindow[] = []
+  const push = (label: string, period: QuotaPeriod, value: unknown): void => {
+    const window = openCodeGoUsageWindow(value)
+    if (window?.percent === undefined) return
+    windows.push({
+      label,
+      period,
+      remainingPercent: remainingPercentFromUsed(window.percent),
+      ...(window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt }),
+    })
   }
-  return [
-    `OpenCode Go 额度（${source.provider}）`,
-    formatOpenCodeGoWindow('滚动 5 小时', usage.rolling),
-    formatOpenCodeGoWindow('本周', usage.weekly),
-    formatOpenCodeGoWindow('本月', usage.monthly),
-  ].join('\n')
+  push('滚动 5 小时', 'hourly', usage.rolling)
+  push('本周', 'weekly', usage.weekly)
+  push('本月', 'monthly', usage.monthly)
+  if (windows.length === 0) throw new Error('额度接口返回格式无法识别')
+  return { provider, plan: 'OpenCode Go', windows }
+}
+
+export function formatQuotaSnapshot(snapshot: QuotaSnapshot): string {
+  const lines = [`${snapshot.plan} 额度（${snapshot.provider}）`]
+  for (const window of snapshot.windows) {
+    const remaining = Math.max(0, Math.min(100, window.remainingPercent))
+    const barWidth = 16
+    const filled = Math.round(remaining / 100 * barWidth)
+    const reset = window.resetsAt === undefined ? '' : ` · ${formatQuotaReset(window.resetsAt)}`
+    lines.push(`  ${window.label} · ${'█'.repeat(filled)}${'░'.repeat(barWidth - filled)} 剩余 ${remaining.toFixed(1)}%${reset}`)
+  }
+  return lines.join('\n')
+}
+
+/** Tightest remaining window — used for threshold alerts. */
+export function tightestQuotaWindow(snapshot: QuotaSnapshot): QuotaWindow | undefined {
+  return snapshot.windows.reduce<QuotaWindow | undefined>((best, window) => {
+    if (best === undefined || window.remainingPercent < best.remainingPercent) return window
+    return best
+  }, undefined)
+}
+
+/** Render the OpenCode Go quota payload as a transcript block. */
+export function formatOpenCodeGoUsage(payload: unknown, source: OpenCodeSource): string {
+  return formatQuotaSnapshot(parseOpenCodeGoQuota(payload, source.provider))
 }
 
 /** Extract a safe human-readable message from an OpenCode error payload. */
@@ -1533,6 +1682,7 @@ export function cardCategoryOf(row: { kind: string }): CardCategory | undefined 
   if (row.kind === 'tool') return 'tool'
   if (row.kind === 'question') return 'question'
   if (row.kind === 'goal') return 'goal'
+  if (row.kind === 'compaction') return 'tool'
   return undefined
 }
 
@@ -1590,9 +1740,27 @@ function rowSearchHaystack(row: Row): string {
       return `${row.title} ${row.summary} ${row.detail ?? ''} ${row.header ?? ''}`
     case 'goal':
       return `${row.objective} ${row.blockedReason ?? ''}`
+    case 'compaction':
+      return `${row.summary ?? ''} ${row.error ?? ''}`
     default:
       return ''
   }
+}
+
+export function compactionHeaderText(row: {
+  status: 'running' | 'ok' | 'error'
+  pruneCount: number
+  prunedTokens: number
+  error?: string
+}): string {
+  const recovered = row.prunedTokens > 0
+    ? `回收 ${formatTokens(row.prunedTokens)} token`
+    : row.pruneCount > 0
+      ? `修剪 ${row.pruneCount} 段`
+      : '准备摘要'
+  if (row.status === 'running') return `压缩上下文 · ${recovered}`
+  if (row.status === 'error') return `压缩失败 · ${row.error ?? '未知错误'}`
+  return `压缩完成 · ${recovered}`
 }
 
 /** Transcript rows matching a `/find` query, newest last. */
@@ -2264,6 +2432,12 @@ export class SshTui {
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
+  private sessionTitle = ''
+  private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
+  private quotaSnapshot: QuotaSnapshot | undefined
+  private quotaAlerted = new Set<string>()
+  private quotaTurnsSinceRefresh = 0
+  private quotaRefreshInFlight = false
   private searchHits: Row[] = []
   private searchIndex = -1
   private searchQuery = ''
@@ -2347,6 +2521,9 @@ export class SshTui {
       this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
       this.markDirty()
     })
+    void this.refreshQuota({ reason: 'start', announce: true }).catch(() => {
+      // Start-up quota is best-effort; /usage still reports errors.
+    })
   }
 
   private startRenderTimer(): void {
@@ -2362,7 +2539,8 @@ export class SshTui {
         || this.rows.some(row =>
           (row.kind === 'question' && row.status === 'waiting')
           || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
-          || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked')))
+          || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked'))
+          || (row.kind === 'compaction' && row.status === 'running'))
       if (animating && now - this.lastPaintAt >= Math.max(this.paintIntervalMs, 200)) {
         this.dirty = true
       }
@@ -2623,13 +2801,14 @@ export class SshTui {
   /** The transcript rows that support per-row expand/collapse. */
   private collapsibleRows(): CollapsibleBlock[] {
     const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' }> =>
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }> =>
         row.kind === 'reasoning'
         || row.kind === 'tool'
         || row.kind === 'subagent'
         || row.kind === 'plan'
         || row.kind === 'question'
-        || row.kind === 'goal')
+        || row.kind === 'goal'
+        || row.kind === 'compaction')
     if (this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
@@ -3140,6 +3319,26 @@ export class SshTui {
         }
         continue
       }
+      if (row.kind === 'compaction') {
+        const running = row.status === 'running'
+        const spinner = running ? ` ${this.spinnerFrame()}` : ''
+        const elapsed = Math.max(0, Math.floor(((row.endedAt ?? Date.now()) - row.startedAt) / 1000))
+        const header = `● ${compactionHeaderText(row)}${spinner} · ${elapsed}s${row.expanded ? '' : ' · Enter 展开'}`
+        this.paintCollapsibleHeader(addDisplay, row, running ? 'tool' : row.status === 'error' ? 'error' : 'system', header, width)
+        if (row.expanded) {
+          addDisplay(this.styleLine('system', running
+            ? '  正在压缩会话上下文，完成后旧工具结果会被摘要替换。'
+            : row.status === 'error'
+              ? `  ${row.error ?? '压缩失败'}`
+              : '  压缩已写入会话日志，模型下一轮会看到更短的历史。'), row)
+          if (row.summary !== undefined && row.summary !== '') {
+            for (const wrapped of wrap(row.summary, Math.max(1, width - 2)).slice(0, 12)) {
+              addDisplay(this.styleLine('assistant', `  ${wrapped}`), row)
+            }
+          }
+        }
+        continue
+      }
       pushRow(row.kind, row.text, row)
     }
 
@@ -3423,13 +3622,22 @@ export class SshTui {
       const phase = liveGoal.phase === 'active' ? '目标进行中' : liveGoal.phase === 'paused' ? '目标已暂停' : '目标受阻'
       statusText += ` · ${phase}`
     }
-    if (this.activeSubagents.size > 0) {
+    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+    if (compacting) {
+      statusText += ` · ${this.spinnerFrame()} 压缩上下文`
+    } else if (this.activeSubagents.size > 0) {
       const spinner = this.spinnerFrame(160)
       statusText += ` · ${spinner} 子代理 ${this.activeSubagents.size}`
     } else if (this.agent.status === 'running' && this.openToolCalls.size > 0) {
       statusText += ` · 工具执行中 ${this.openToolCalls.size}`
+    } else if (this.llmRetry !== undefined) {
+      statusText += ` · 重试 ${this.llmRetry.retry}/${this.llmRetry.maxRetries}`
     } else if (this.agent.status === 'running' && idleMs > WAIT_INDICATOR_MS) {
       statusText += ` · 等待响应 ${Math.floor(idleMs / 1000)}s`
+    }
+    const quotaWindow = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
+    if (quotaWindow !== undefined) {
+      statusText += ` · ${this.quotaSnapshot?.plan} 剩余 ${quotaWindow.remainingPercent.toFixed(0)}%`
     }
     const statusLine = this.styleLine('system', fitLine(statusText))
 
@@ -3582,8 +3790,9 @@ export class SshTui {
     // Completion wins over a still-running agent status: the turn/end event
     // lands before agent/status flips to idle, and the title must not stay
     // on the running spinner until the next repaint trigger.
+    const titleSuffix = this.sessionTitle === '' ? '' : ` · ${this.sessionTitle}`
     if (this.completedAt !== 0 && now - this.completedAt < 5000) {
-      this.write('\x1b]0;dsh ✓ 已完成\x07')
+      this.write(`\x1b]0;dsh ✓ 已完成${titleSuffix}\x07`)
       return
     }
     if (this.agent.status === 'running') {
@@ -3593,6 +3802,8 @@ export class SshTui {
       let detail = '运行中'
       if (this.dialog?.kind === 'questions') {
         detail = planReviewOf(this.dialog.question) ? '计划待审' : '等待用户回答'
+      } else if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+        detail = '压缩上下文'
       } else if (this.activeSubagents.size > 0) {
         detail = `运行中 · 子代理 ${this.activeSubagents.size}`
       } else if (this.openToolCalls.size > 0) {
@@ -3604,10 +3815,10 @@ export class SshTui {
         if (liveGoal?.phase === 'active') detail = '目标进行中'
         else if (liveGoal?.phase === 'blocked') detail = '目标受阻'
       }
-      this.write(`\x1b]0;dsh ${spinner} ${detail}\x07`)
+      this.write(`\x1b]0;dsh ${spinner} ${detail}${titleSuffix}\x07`)
       return
     }
-    this.write('\x1b]0;dsh 待命\x07')
+    this.write(`\x1b]0;dsh 待命${titleSuffix}\x07`)
   }
 
   /** Terminal bell on completion (opt out with DSH_TUI_NO_BELL=1). */
@@ -3882,10 +4093,19 @@ export class SshTui {
       }
       case 'turn/start':
         this.stalledWarningShown = false
+        this.llmRetry = undefined
         this.status = `turn ${event.data.turn} running`
         this.markDirty()
         break
       case 'turn/end': {
+        this.quotaTurnsSinceRefresh += 1
+        const every = quotaRefreshEveryTurns(this.quotaSnapshot === undefined
+          ? undefined
+          : tightestQuotaWindow(this.quotaSnapshot))
+        if (this.quotaTurnsSinceRefresh >= every) {
+          this.quotaTurnsSinceRefresh = 0
+          void this.refreshQuota({ reason: 'turn', announce: false }).catch(() => {})
+        }
         const reason = event.data.reason
         this.openToolCalls.clear()
         this.pendingToolTimes.clear()
@@ -3992,8 +4212,137 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if (type === 'command/run' && data?.name === 'plan') {
-      const args = String(data.args ?? '').trim()
+    if (type === 'command/run') {
+      this.handleCommandRun(data)
+      return
+    }
+    if (type === 'command/done') {
+      this.handleCommandDone(data)
+      return
+    }
+    if (type === 'session/title') {
+      const title = typeof (data as { title?: unknown } | undefined)?.title === 'string'
+        ? (data as { title: string }).title.trim()
+        : ''
+      if (title !== '') {
+        this.sessionTitle = title
+        this.updateTerminalTitle()
+        this.markDirty()
+      }
+      return
+    }
+    if (type === 'session/title-llm-request') {
+      this.pushRow({ kind: 'system', text: '正在用模型生成会话标题…' })
+      this.markDirty()
+      return
+    }
+    if (type === 'llm/retry') {
+      const retry = typeof (data as { retry?: unknown } | undefined)?.retry === 'number' ? (data as { retry: number }).retry : 1
+      const maxRetries = typeof (data as { maxRetries?: unknown } | undefined)?.maxRetries === 'number' ? (data as { maxRetries: number }).maxRetries : retry
+      const delayMs = typeof (data as { delayMs?: unknown } | undefined)?.delayMs === 'number' ? (data as { delayMs: number }).delayMs : 0
+      const failure = (data as { failure?: { message?: unknown } } | undefined)?.failure
+      const message = typeof failure?.message === 'string' ? failure.message : '模型请求失败，正在重试'
+      this.llmRetry = { retry, maxRetries, delayMs, message }
+      this.pushRow({
+        kind: 'system',
+        text: `模型请求失败，${Math.round(delayMs)}ms 后重试 ${retry}/${maxRetries}：${message}`,
+      })
+      this.markDirty()
+      return
+    }
+    if (type === 'llm/retry-started') {
+      if (this.llmRetry !== undefined) {
+        this.pushRow({ kind: 'system', text: `开始第 ${this.llmRetry.retry} 次重试。` })
+      }
+      this.markDirty()
+      return
+    }
+    if (type === 'goal/change') {
+      this.handleGoalChange(data)
+      return
+    }
+    if (type.startsWith('compaction/')) {
+      this.handleCompactionEvent(type, event)
+      return
+    }
+    if (type.startsWith('team/')) {
+      this.pushRow({ kind: 'system', text: `[团队] ${type}` })
+      this.markDirty()
+    }
+  }
+
+  private findCompactionRow(id?: string): Extract<Row, { kind: 'compaction' }> | undefined {
+    if (id !== undefined && id !== '') {
+      const named = this.rows.findLast((row): row is Extract<Row, { kind: 'compaction' }> =>
+        row.kind === 'compaction' && row.compactionId === id)
+      if (named !== undefined) return named
+    }
+    return this.rows.findLast((row): row is Extract<Row, { kind: 'compaction' }> =>
+      row.kind === 'compaction' && row.status === 'running')
+  }
+
+  private handleCompactionEvent(type: string, event: SessionEvent): void {
+    const payload = (event as SessionEvent & { data?: unknown }).data
+    const data = payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}
+    const compactionId = typeof data.compactionId === 'string' ? data.compactionId : ''
+    if (type === 'compaction/start') {
+      this.pushRow({
+        kind: 'compaction',
+        compactionId,
+        status: 'running',
+        startedAt: event.time || Date.now(),
+        pruneCount: 0,
+        prunedTokens: 0,
+        expanded: false,
+      })
+      this.status = '压缩上下文…'
+      this.markDirty()
+      return
+    }
+    const row = this.findCompactionRow(compactionId)
+    if (type === 'compaction/prune') {
+      const tokens = typeof data.shadowedTokenCount === 'number' ? data.shadowedTokenCount : 0
+      if (row !== undefined) {
+        row.pruneCount += 1
+        row.prunedTokens += Math.max(0, tokens)
+      }
+      this.markDirty()
+      return
+    }
+    if (type === 'compaction/summary') {
+      const blocks = Array.isArray(data.summary) ? data.summary : []
+      const text = blocks.map(block => {
+        if (typeof block === 'string') return block
+        if (block !== null && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string') {
+          return (block as { text: string }).text
+        }
+        return ''
+      }).filter(part => part !== '').join('\n')
+      if (row !== undefined && text !== '') row.summary = text.slice(0, 4000)
+      this.markDirty()
+      return
+    }
+    if (type === 'compaction/end') {
+      const error = typeof data.error === 'string' && data.error !== '' ? data.error : undefined
+      if (row !== undefined) {
+        row.status = error === undefined ? 'ok' : 'error'
+        row.endedAt = event.time || Date.now()
+        if (error !== undefined) row.error = error
+      } else {
+        this.pushRow({
+          kind: 'system',
+          text: error === undefined ? '上下文压缩已完成。' : `上下文压缩失败：${error}`,
+        })
+      }
+      if (this.status.startsWith('压缩')) this.status = this.agent.status === 'running' ? 'running' : 'idle'
+      this.markDirty()
+    }
+  }
+
+  private handleCommandRun(data: { name?: unknown; args?: unknown } | undefined): void {
+    const name = String(data?.name ?? '').trim()
+    const args = String(data?.args ?? '').trim()
+    if (name === 'plan') {
       const wantsActive = args !== 'off'
       const current = this.findLivePlanRow()
       this.upsertPlanRow({
@@ -4007,14 +4356,31 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if (type === 'goal/change') {
-      this.handleGoalChange(data)
+    if (name === 'compact') {
+      this.status = '压缩上下文…'
+      this.markDirty()
       return
     }
-    if (type.startsWith('team/')) {
-      this.pushRow({ kind: 'system', text: `[团队] ${type}` })
+    if (name === '') return
+    this.pushRow({
+      kind: 'system',
+      text: args === '' ? `/${name}` : `/${name} ${args}`,
+    })
+    this.markDirty()
+  }
+
+  private handleCommandDone(data: unknown): void {
+    const payload = data !== null && typeof data === 'object' ? data as Record<string, unknown> : {}
+    const kind = typeof payload.kind === 'string' ? payload.kind : ''
+    const text = typeof payload.text === 'string' ? payload.text.trim() : ''
+    if (kind === 'error') {
+      this.pushRow({ kind: 'error', text: text === '' ? '命令失败。' : text })
+      if (this.status.startsWith('压缩')) this.status = this.agent.status === 'running' ? 'running' : 'idle'
       this.markDirty()
+      return
     }
+    if (text !== '') this.pushRow({ kind: 'system', text })
+    this.markDirty()
   }
 
   private handleGoalChange(data: unknown): void {
@@ -5090,43 +5456,118 @@ export class SshTui {
     ].join('\n')
   }
 
-  /** /usage and /quota: show Zen billing info or live Go quota usage. */
+  /** /usage and /quota: remaining quota for the current subscription provider. */
   private async runUsageCommand(): Promise<void> {
-    const provider = this.currentProvider()
-    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
-    const source = openCodeSourceFor(provider, llmPiAi)
-    if (source === null) {
-      this.pushRow({
-        kind: 'error',
-        text: `当前提供商 ${provider} 不是 OpenCode 源；/usage 仅对 OpenCode Zen/Go 可用。`,
-      })
-      this.markDirty()
-      return
-    }
-    if (source.flavor === 'zen') {
-      this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
-      this.markDirty()
-      return
-    }
-    const apiKey = await this.resolveCredential(source.apiKeyEnv)
-    if (apiKey === undefined) {
-      this.pushRow({
-        kind: 'error',
-        text: `未找到 OpenCode Go 凭据 ${source.apiKeyEnv}；请先运行 /setup 配置，或导出该环境变量。`,
-      })
-      this.markDirty()
-      return
-    }
     const previousStatus = this.status
-    this.status = `querying ${source.provider} usage…`
+    this.status = '查询额度…'
     this.markDirty()
     try {
-      const payload = await this.fetchOpenCodeGoUsage(apiKey)
-      this.pushRow({ kind: 'system', text: formatOpenCodeGoUsage(payload, source) })
+      const snapshot = await this.refreshQuota({ reason: 'command', announce: true })
+      if (snapshot === undefined) {
+        const provider = this.currentProviderId()
+        const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+        const source = openCodeSourceFor(provider, llmPiAi)
+        if (source?.flavor === 'zen') {
+          this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
+        } else {
+          this.pushRow({
+            kind: 'system',
+            text: `当前提供商 ${provider} 没有固定额度接口。OpenCode Go 与 SuperGrok 可查剩余额度；DeepSeek 官方按 API 计费。`,
+          })
+        }
+      }
+    } catch (error: unknown) {
+      this.pushRow({ kind: 'error', text: `/usage failed: ${errorChain(error)}` })
     } finally {
       this.status = previousStatus
       this.markDirty()
     }
+  }
+
+  private applyQuotaSnapshot(snapshot: QuotaSnapshot, announce: boolean): void {
+    const previous = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
+    this.quotaSnapshot = snapshot
+    if (announce) this.pushRow({ kind: 'system', text: formatQuotaSnapshot(snapshot) })
+    const window = tightestQuotaWindow(snapshot)
+    if (window !== undefined) {
+      for (const threshold of crossedQuotaThresholds(previous?.remainingPercent, window.remainingPercent)) {
+        const key = `${snapshot.provider}:${window.period}:${threshold}`
+        if (this.quotaAlerted.has(key)) continue
+        this.quotaAlerted.add(key)
+        this.pushRow({ kind: 'system', text: quotaAlertText(snapshot, window) })
+      }
+    }
+    this.markDirty()
+  }
+
+  private async refreshQuota(options: { reason: 'start' | 'turn' | 'command'; announce: boolean }): Promise<QuotaSnapshot | undefined> {
+    if (this.quotaRefreshInFlight && options.reason !== 'command') return this.quotaSnapshot
+    this.quotaRefreshInFlight = true
+    try {
+      const provider = this.currentProviderId()
+      const snapshot = await this.fetchQuotaSnapshot(provider)
+      if (snapshot !== undefined) this.applyQuotaSnapshot(snapshot, options.announce)
+      return snapshot
+    } finally {
+      this.quotaRefreshInFlight = false
+    }
+  }
+
+  private async fetchQuotaSnapshot(provider: string): Promise<QuotaSnapshot | undefined> {
+    if (providerUsesLocalOAuth(provider)) {
+      const token = await this.resolveSuperGrokToken()
+      if (token === undefined) throw new Error('未找到 SuperGrok OAuth token（~/.grok-bridge/auth.json）')
+      const payload = await this.fetchJson(SUPERGROK_BILLING_URL, {
+        authorization: `Bearer ${token}`,
+        accept: 'application/json',
+        'x-grok-client-mode': 'cli',
+        'x-grok-client-version': '1.0.0',
+      }, 'SuperGrok')
+      return parseSuperGrokBilling(payload)
+    }
+    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const source = openCodeSourceFor(provider, llmPiAi)
+    if (source === null || source.flavor !== 'go') return undefined
+    const apiKey = await this.resolveCredential(source.apiKeyEnv)
+    if (apiKey === undefined) throw new Error(`未找到 OpenCode Go 凭据 ${source.apiKeyEnv}`)
+    const payload = await this.fetchOpenCodeGoUsage(apiKey)
+    return parseOpenCodeGoQuota(payload, source.provider)
+  }
+
+  private async resolveSuperGrokToken(): Promise<string | undefined> {
+    const fromFile = async (path: string): Promise<string | undefined> => {
+      try {
+        const parsed = JSON.parse(await readFile(path, 'utf8')) as {
+          access_token?: unknown
+          accessToken?: unknown
+        }
+        const token = typeof parsed.access_token === 'string' ? parsed.access_token : parsed.accessToken
+        return typeof token === 'string' && token.trim() !== '' ? token.trim() : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return await fromFile(join(homedir(), '.grok-bridge', 'auth.json'))
+      ?? await fromFile(join(homedir(), '.grok', 'auth.json'))
+  }
+
+  private async fetchJson(url: string, headers: Record<string, string>, label: string): Promise<unknown> {
+    let response: Response
+    try {
+      response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) })
+    } catch (error) {
+      throw new Error(`无法访问 ${label} 额度接口：${errorChain(error)}`)
+    }
+    let payload: unknown
+    try {
+      payload = await response.json() as unknown
+    } catch {
+      payload = undefined
+    }
+    if (!response.ok) {
+      throw new Error(`${label} 额度接口返回 HTTP ${response.status}`)
+    }
+    return payload
   }
 
   // ── keyboard ────────────────────────────────────────────────────────────

@@ -165,7 +165,9 @@ dsh --profile tui --no-color
 
 斜杠命令：`/help`、`/find`、`/model`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/quota` 同义）、`/setup`、`/clear`，
-以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。harness 命令若声明
+以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
+「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
+进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
 支持图片附件，会在命令列表和补全提示中标注“可附图”。
 
 `/model` 默认列出**当前提供商**的模型。已经在 SuperGrok 时，直接选
@@ -200,12 +202,13 @@ SuperGrok / X Premium 走本机 OAuth，不需要填 Key。`/status` 和底栏�
 `提问用户` 卡片。`/goal` 是折叠的 `目标` 卡片。`/find 思考 padAnsi` 或 `Alt+1..4`
 可跳到对应类别的最新卡片。
 
-`/usage` 在当前提供商为 OpenCode 源时可用，并区分两种计费方式：
+`/usage`（`/quota` 同义）按**当前提供商**查额度：
 
-- **OpenCode Go**：调用官方额度接口，显示滚动 5 小时 / 本周 / 本月用量
-  百分比、限流状态与重置时间；
-- **OpenCode Zen**：按 API 账单计费、没有固定额度，TUI 不假装查询余额，
-  只提示到 `https://opencode.ai/zen` 查看，并附本会话已记录的 token 用量。
+- **SuperGrok**：`GET cli-chat-proxy.grok.com/v1/billing`，显示本周剩余%；
+- **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
+- **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
+
+启动时查一次。之后按最紧窗口调查询：5 小时额度每 10 轮（接近阈值改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。剩余跨过 50% / 25% / 10% / 5% 时用 ⚠ 提示合理规划。底栏显示最紧窗口的剩余百分比。
 
 ## 配置
 

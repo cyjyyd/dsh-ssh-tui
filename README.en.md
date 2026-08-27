@@ -189,7 +189,9 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
 commands (`/find`, `/model`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
-`Tab` completes, `Enter` runs. `/help` lists everything.
+`/compact` shows a spinning 「压缩上下文」 card and footer until it
+finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
+`/help` lists everything.
 
 `/model` lists models for the **current** provider first. On SuperGrok that
 is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). Switching
@@ -234,14 +236,17 @@ Interrupted streaming output keeps the already-generated prefix and is marked
 system messages. Harness slash commands that accept image attachments are
 labelled `(images ok)` in the command list and completion hints.
 
-`/usage` (alias `/quota`) works when the current provider is an OpenCode
-source and keeps the two billing models distinct:
+`/usage` (alias `/quota`) follows the **current** provider:
 
-- **OpenCode Go** queries the official quota endpoint and shows rolling
-  5-hour / weekly / monthly usage percentages, limit state, and reset times;
-- **OpenCode Zen** is metered per API bill and has no fixed quota, so the TUI
-  points to `https://opencode.ai/zen` for balance/billing and shows the
-  session token usage it has recorded instead of inventing a quota.
+- **SuperGrok** reads `GET cli-chat-proxy.grok.com/v1/billing` (weekly remaining %);
+- **OpenCode Go** reads the official `/v1/usage` windows (5-hour / week / month);
+- **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
+
+Quota is fetched at startup. Recheck cadence follows the tightest window:
+every 10 turns for a 5-hour cap (every 4 when near a threshold), every 50
+for weekly (every 10 when near), every 80 for monthly (every 20 when near).
+Crossing 50% / 25% / 10% / 5% remaining posts a ⚠ planning reminder. The
+footer shows the tightest window.
 
 The startup screen shows the official DeepSeek whale logo (rendered from the
 harness favicon) in the DeepSeek brand color, with the wordmark below it. The

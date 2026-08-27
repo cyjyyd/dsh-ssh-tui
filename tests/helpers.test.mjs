@@ -10,6 +10,14 @@ import {
   padAnsiToWidth,
   foldInputView,
   formatOpenCodeGoUsage,
+  formatQuotaSnapshot,
+  parseSuperGrokBilling,
+  parseOpenCodeGoQuota,
+  remainingPercentFromUsed,
+  crossedQuotaThresholds,
+  quotaAlertText,
+  quotaRefreshEveryTurns,
+  tightestQuotaWindow,
   friendlyJsonLines,
   isEscapePrefix,
   openCodeSourceFor,
@@ -32,6 +40,7 @@ import {
   renderToolDiff,
   repeatToWidth,
   SshTui,
+  compactionHeaderText,
   subagentHeaderText,
   todoProgressLabel,
   todoSummary,
@@ -251,6 +260,44 @@ test('formatOpenCodeGoUsage rejects unrecognized payloads', () => {
     () => formatOpenCodeGoUsage({}, { provider: 'x', flavor: 'go', label: 'x', apiKeyEnv: 'K' }),
     /无法识别/u,
   )
+})
+
+test('parseSuperGrokBilling maps creditUsagePercent to remaining quota', () => {
+  const snap = parseSuperGrokBilling({
+    config: {
+      creditUsagePercent: 18,
+      currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', end: '2026-09-02T02:22:49.432697+00:00' },
+    },
+  })
+  assert.equal(snap.plan, 'SuperGrok')
+  assert.equal(snap.windows[0]?.period, 'weekly')
+  assert.equal(snap.windows[0]?.remainingPercent, 82)
+  assert.equal(remainingPercentFromUsed(100), 0)
+  assert.deepEqual(crossedQuotaThresholds(60, 48), [50])
+  assert.deepEqual(crossedQuotaThresholds(50, 49), [])
+  assert.deepEqual(crossedQuotaThresholds(undefined, 8), [50, 25, 10])
+  const alert = quotaAlertText(snap, snap.windows[0])
+  assert.match(alert, /^⚠ /u)
+  assert.match(alert, /SuperGrok/)
+  assert.match(alert, /每周额度还剩余 82%/)
+  assert.equal(quotaRefreshEveryTurns(snap.windows[0]), 50)
+  assert.equal(quotaRefreshEveryTurns({ label: '本周', period: 'weekly', remainingPercent: 48 }), 10)
+  assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 80 }), 10)
+  assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 50 }), 4)
+  assert.equal(quotaRefreshEveryTurns({ label: '本月', period: 'monthly', remainingPercent: 90 }), 80)
+})
+
+test('parseOpenCodeGoQuota keeps remaining percent for each window', () => {
+  const snap = parseOpenCodeGoQuota({
+    usage: {
+      rolling: { status: 'ok', percent: 40 },
+      weekly: { status: 'ok', percent: 10 },
+      monthly: { status: 'ok', percent: 70 },
+    },
+  }, 'opencode-go')
+  assert.equal(tightestQuotaWindow(snap)?.period, 'monthly')
+  assert.equal(tightestQuotaWindow(snap)?.remainingPercent, 30)
+  assert.match(formatQuotaSnapshot(snap), /剩余 30\.0%/)
 })
 
 test('parseExitStatus keeps exit-code and signal parsing', () => {
@@ -617,6 +664,81 @@ test('goal cards stay collapsed and report the current phase', () => {
   assert.equal(goal?.phase, 'active')
   assert.equal(goal?.expanded, false)
   assert.equal(goal?.objective, 'finish the TUI cards')
+})
+
+test('slash commands that call the model or rewrite the session surface progress', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'command/run',
+    data: { commandId: 'cmd-1', name: 'compact', args: '', source: { kind: 'user' } },
+  })
+  assert.equal(tui.status.includes('压缩'), true)
+  tui.handleSessionEvent(agent.session, {
+    type: 'command/done',
+    data: { commandId: 'cmd-1', kind: 'error', text: 'Compaction is unavailable because the agent is not idle.' },
+  })
+  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('Compaction is unavailable')))
+  tui.handleSessionEvent(agent.session, {
+    type: 'llm/retry',
+    data: {
+      retry: 1, maxRetries: 5, delayMs: 500,
+      failure: { message: 'xAI API stream failed', code: 'TRANSPORT' },
+    },
+  })
+  const retry = tui.captureFrame(80, 24)
+  assert.ok(retry.some(line => line.includes('重试 1/5')))
+  tui.handleSessionEvent(agent.session, {
+    type: 'session/title',
+    data: { title: '慢链路绘制', source: { kind: 'provider' } },
+  })
+  assert.equal(tui.sessionTitle, '慢链路绘制')
+})
+
+test('compaction start/prune/end show a progress card instead of staying silent', () => {
+  assert.equal(compactionHeaderText({
+    status: 'running', pruneCount: 0, prunedTokens: 0,
+  }), '压缩上下文 · 准备摘要')
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/start',
+    time: 1000,
+    data: { compactionId: 'c1', sourceCommandId: 'cmd-1' },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/prune',
+    time: 1100,
+    data: { compactionId: 'c1', shadowedTokenCount: 2500 },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/prune',
+    time: 1200,
+    data: { compactionId: 'c1', shadowedTokenCount: 1500 },
+  })
+  let card = tui.rows.find(row => row.kind === 'compaction')
+  assert.equal(card.status, 'running')
+  assert.equal(card.pruneCount, 2)
+  assert.equal(card.prunedTokens, 4000)
+  const mid = tui.captureFrame(80, 24)
+  assert.ok(mid.some(line => line.includes('压缩上下文') && line.includes('4K')))
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/summary',
+    time: 1300,
+    data: { compactionId: 'c1', summary: [{ type: 'text', text: 'Kept the SSH paint work.' }] },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/end',
+    time: 1400,
+    data: { compactionId: 'c1' },
+  })
+  card = tui.rows.find(row => row.kind === 'compaction')
+  assert.equal(card.status, 'ok')
+  assert.equal(card.summary.includes('SSH paint'), true)
+  const done = tui.captureFrame(80, 24)
+  assert.ok(done.some(line => line.includes('压缩完成')))
 })
 
 test('todo and exit_plan_mode cards render lists/markdown instead of raw JSON', () => {
