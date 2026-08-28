@@ -13,14 +13,19 @@
       directory is {{cwd}}. Verify your work by running the code or tests.
       Keep answers brief and factual.
 
-# The shared module-reload HMR row stays off; the launcher's watch-only
-# fallback keeps user patch layers live until the TUI exits.
+# A patch replaces the targeted row's whole `config`, so restating `root`
+# keeps the official HMR row complete while the TUI keeps module reload off.
+# The launcher's watch-only fallback still keeps user patch layers live.
 - id: hmr
   disabled: true
+  config:
+    root: ['.']
 
 - id: tools
   config:
-    mode: !!js process.env.DSH_TOOLS_MODE
+    # 0.1.2 renamed the tools-mode value `code` → `ptc` with no alias.
+    # Map either env value onto the schema this dsh install actually accepts.
+    mode: !!js (function () { var mode = process.env.DSH_TOOLS_MODE; if (mode !== 'code' && mode !== 'ptc') return mode; try { var req = process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/'); var ver = req('@deepseek-ai/dsh-tools/package.json').version || ''; if (!/^0\.(0|1)\.(0|1)/.test(ver)) return 'ptc'; return 'code' } catch (err) { if (mode === 'code') return 'ptc'; return mode } })()
 
 # The `main` agent is created by the TUI plugin itself after the loader
 # settles, so it can read the saved default provider/model from
@@ -62,6 +67,15 @@
       name: '@deepseek-ai/dsh-agent-presets'
       config:
         default: standard
+
+    # Host-plane PTC runtime used by the shipped `ptc` preset. Absent on
+    # dsh-base; web/headless insert it themselves. Keep it optional so an
+    # older dsh install without the package still boots standard mode.
+    # Disabled when the package is not installed (older dsh 0.1.1 runtimes
+    # still boot; 0.1.2's ptc preset can mount once the worker is on disk).
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+      disabled: !!js (function () { try { process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/').resolve('@deepseek-ai/dsh-code-runtime-worker-thread'); return false } catch (err) { return true } })()
 
     - id: ssh-tui-startup
       name: 'dsh-ssh-tui/startup'

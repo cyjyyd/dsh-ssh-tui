@@ -198,6 +198,8 @@ dsh --profile tui --no-color
 | `Ctrl+D` | 退出 |
 | `Ctrl+L` | 重绘整个画面 |
 
+`/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
+
 斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示

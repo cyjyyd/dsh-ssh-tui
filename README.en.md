@@ -360,7 +360,7 @@ collapsed card instead of being prefixed onto parent transcript lines;
 `/subagents` lists active runs.
 
 `/mode` opens the agent-mode picker backed by dsh's official preset roster:
-标准模式 (standard), PTC 模式 (code), 极简模式 (minimal), 创造模式 (cordis),
+标准模式 (standard), PTC 模式 (ptc; `code` on dsh 0.1.1), 极简模式 (minimal), 创造模式 (cordis),
 智能路由模式 (routing-suite, from `dsh-routing-suite`),
 plus any locally authored presets (e.g. `whoami-standard`). On a session that
 has not produced work the switch applies immediately; otherwise it is remembered

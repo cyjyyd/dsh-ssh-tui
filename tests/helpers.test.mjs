@@ -21,6 +21,7 @@ import {
   crossedQuotaThresholds,
   quotaAlertText,
   quotaRefreshEveryTurns,
+  quotaRefreshEverySteps,
   tightestQuotaWindow,
   friendlyJsonLines,
   isEscapePrefix,
@@ -90,15 +91,15 @@ test('clipAnsiToWidth keeps SGR and never exceeds the cell budget', () => {
   const clipped = clipAnsiToWidth(styled, 8)
   assert.ok(clipped.startsWith('\x1b[33m'))
   assert.ok(displayWidth(clipped.replace(/\x1b\[[0-9;]*m/gu, '')) <= 8)
-  const color256 = clipAnsiToWidth('\x1b[38;5;22;48;5;194m+ hello', 12)
-  assert.ok(color256.startsWith('\x1b[38;5;22;48;5;194m'))
+  const color256 = clipAnsiToWidth('\x1b[38;2;122;168;116;48;2;18;42;24m+ hello', 12)
+  assert.ok(color256.startsWith('\x1b[38;2;122;168;116;48;2;18;42;24m'))
   assert.ok(color256.includes('+ hello'))
 })
 
 test('padAnsiToWidth keeps diff background across the whole row', () => {
-  const styled = '\x1b[38;5;22;48;5;194m+ hello'
+  const styled = '\x1b[38;2;122;168;116;48;2;18;42;24m+ hello'
   const padded = padAnsiToWidth(styled, 12)
-  assert.ok(padded.startsWith('\x1b[38;5;22;48;5;194m'))
+  assert.ok(padded.startsWith('\x1b[38;2;122;168;116;48;2;18;42;24m'))
   assert.equal(visibleWidth(padded), 12)
   assert.ok(padded.endsWith(' '.repeat(5)))
   assert.equal(padded.includes('\x1b[0m'), false)
@@ -148,6 +149,26 @@ test('composePaintOutput repaints chrome when a card expansion moves the input b
   assert.ok(frame.includes('\x1b[5;1H'))
   assert.ok(frame.includes('\x1b[6;1H'))
   assert.ok(frame.includes('\x1b[7;1H'))
+})
+
+test('composePaintOutput full-repaints when the transcript viewport scrolls', () => {
+  const previous = ['title', 'old-tool-body', 'prompt']
+  const next = ['title', 'thinking', 'prompt']
+  const frame = composePaintOutput({
+    width: 12,
+    height: 3,
+    paintRows: next,
+    previousRows: previous,
+    sizeChanged: true,
+    chromeChanged: false,
+    chromeStart: 2,
+    cursorRow: 3,
+    cursorColumn: 1,
+  })
+  assert.ok(frame.includes('\x1b[H\x1b[J'))
+  assert.ok(frame.includes('\x1b[1;1H'))
+  assert.ok(frame.includes('\x1b[2;1H'))
+  assert.ok(frame.includes('\x1b[3;1H'))
 })
 
 test('composePaintOutput never writes past the terminal height', () => {
@@ -368,7 +389,8 @@ test('parseSuperGrokBilling maps creditUsagePercent to remaining quota', () => {
   assert.equal(remainingPercentFromUsed(100), 0)
   assert.deepEqual(crossedQuotaThresholds(60, 48), [50])
   assert.deepEqual(crossedQuotaThresholds(50, 49), [])
-  assert.deepEqual(crossedQuotaThresholds(undefined, 8), [50, 25, 10])
+  assert.deepEqual(crossedQuotaThresholds(undefined, 8), [10])
+  assert.deepEqual(crossedQuotaThresholds(undefined, 4), [5])
   const alert = quotaAlertText(snap, snap.windows[0])
   assert.match(alert, /^⚠ /u)
   assert.match(alert, /SuperGrok/)
@@ -378,6 +400,8 @@ test('parseSuperGrokBilling maps creditUsagePercent to remaining quota', () => {
   assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 80 }), 10)
   assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 50 }), 4)
   assert.equal(quotaRefreshEveryTurns({ label: '本月', period: 'monthly', remainingPercent: 90 }), 80)
+  assert.equal(quotaRefreshEverySteps(snap.windows[0]), 50)
+  assert.deepEqual(crossedQuotaThresholds(80, 4), [5])
 })
 
 test('parseDeepSeekBalance reads official user/balance wire format', () => {
@@ -549,6 +573,40 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   })
   assert.equal(cards[0].status, 'ok')
   assert.equal(cards[0].expanded, false)
+})
+
+test('streaming a collapsed thinking line does not keep a scrolled tool body on the title', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.rows.push({
+    kind: 'tool',
+    callId: 'call-1',
+    name: 'read',
+    title: '读取',
+    summary: 'src/tui.ts',
+    args: '{"path":"src/tui.ts"}',
+    output: 'TOOL_BODY_SHOULD_NOT_COVER_TITLE',
+    status: 'ok',
+    expanded: true,
+  })
+  const before = tui.captureFrame(40, 12)
+  tui.streaming = { text: '', reasoning: '思考折叠中的内容应当只占一行' }
+  tui.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
+  const after = tui.captureFrame(40, 12)
+  assert.ok(after.some(line => line.includes('DeepSeek Harness')))
+  const title = after.find(line => line.includes('DeepSeek Harness')) ?? ''
+  assert.equal(title.includes('TOOL_BODY_SHOULD_NOT_COVER_TITLE'), false)
+  const input = after.find(line => line.startsWith('> ') || line.startsWith('❯ ')) ?? ''
+  assert.equal(input.includes('TOOL_BODY_SHOULD_NOT_COVER_TITLE'), false)
+  assert.equal(before.length, 12)
+  assert.equal(after.length, 12)
 })
 
 test('expanding any collapsible card does not leave body glyphs on the input row', () => {

@@ -27,6 +27,7 @@ import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, t
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
+
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -50,7 +51,6 @@ import {
   type SubagentSelectionRef,
 } from './subagent-model.js'
 
-const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -59,6 +59,56 @@ import {
 } from '@deepseek-ai/dsh-user-questions'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 
+/** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-alpha.1.
+ *  0.1.1 reads `request.signal`; 0.1.2 reads the third argument and dropped
+ *  `signal` from the request type. Passing both keeps cancellation on either. */
+type ModelDiscoveryHost = {
+  discoverModels(
+    settingsNs: ReturnType<typeof settingsNamespace>,
+    request: {
+      baseURL?: string
+      api?: string
+      apiKey?: string
+      provider?: string
+      signal?: AbortSignal
+    },
+    signal?: AbortSignal,
+  ): Promise<Array<{ id: string; name?: string }>>
+}
+
+function discoverProviderModels(
+  llm: ModelDiscoveryHost,
+  request: { baseURL: string; api?: string; apiKey?: string },
+  signal: AbortSignal,
+): Promise<Array<{ id: string; name?: string }>> {
+  return llm.discoverModels(settingsNamespace('llm-pi-ai'), { ...request, signal }, signal)
+}
+
+/** 0.1.1 registers a provider object; 0.1.2 answers through the waterfall. */
+type UserQuestionAnswerer = {
+  registerProvider?(provider: { ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer> }): () => void
+}
+
+function installUserQuestionAnswerer(
+  ctx: Context,
+  questions: object,
+  ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer>,
+): () => void {
+  const provider = questions as UserQuestionAnswerer
+  if (typeof provider.registerProvider === 'function') {
+    return provider.registerProvider({ ask })
+  }
+  return ctx.on('user-questions/request', async (request: AskUserQuestionRequest, next: () => Promise<AskUserQuestionAnswer>) => {
+    try {
+      return await ask(request)
+    } catch (error: unknown) {
+      if (error instanceof UserQuestionError && error.code === 'ASK_ABORTED') throw error
+      return await next()
+    }
+  })
+}
+
+const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
 /** Presentation configuration for the terminal channel. */
 export interface TuiConfig {
   /** Exact shared agent/session identity driven by this terminal. */
@@ -809,7 +859,7 @@ const LOCAL_COMMANDS = [
   { name: 'provider', description: 'switch provider, then model and reasoning effort' },
   { name: 'submodel', description: `select subagent model (default ${DEFAULT_SUBAGENT_MODEL}, same provider as parent)` },
   { name: 'subeffort', description: 'select subagent reasoning effort (default follows provider)' },
-  { name: 'mode', description: 'switch agent mode / preset (standard, minimal, code, cordis, routing-suite, ...)' },
+  { name: 'mode', description: 'switch agent mode / preset (standard, minimal, ptc, cordis, routing-suite, ...)' },
   { name: 'quit', description: 'exit the TUI' },
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
@@ -1598,10 +1648,14 @@ export function remainingPercentFromUsed(usedPercent: number): number {
   return Math.max(0, Math.min(100, Math.round((100 - usedPercent) * 10) / 10))
 }
 
-/** Cross a remaining-percent threshold from above (50 / 25 / 10 / 5). */
+/** Cross a remaining-percent threshold from above (50 / 25 / 10 / 5).
+ *  Only the tightest (lowest) crossed threshold is returned, so one drop
+ *  never paints 50/25/10 as three identical warnings. */
 export function crossedQuotaThresholds(previousRemaining: number | undefined, remaining: number): number[] {
-  return QUOTA_ALERT_THRESHOLDS.filter(threshold =>
+  const crossed = QUOTA_ALERT_THRESHOLDS.filter(threshold =>
     remaining <= threshold && (previousRemaining === undefined || previousRemaining > threshold))
+  if (crossed.length === 0) return []
+  return [crossed[crossed.length - 1] as number]
 }
 
 export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): string {
@@ -1611,11 +1665,13 @@ export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): st
 
 /**
  * How often to re-fetch quota, based on the tightest window.
- * Hourly/5h: every 10 turns, every 4 when near a threshold.
- * Weekly: every 50 turns, every 10 when near.
- * Monthly: every 80 turns, every 20 when near.
+ * Counted in model steps (not conversation turns): a turn with several
+ * tool/LLM steps should refresh more often because it spends more quota.
+ * Hourly/5h: every 10 steps, every 4 when near a threshold.
+ * Weekly: every 50 steps, every 10 when near.
+ * Monthly: every 80 steps, every 20 when near.
  */
-export function quotaRefreshEveryTurns(window: QuotaWindow | undefined): number {
+export function quotaRefreshEverySteps(window: QuotaWindow | undefined): number {
   if (window === undefined) return 10
   const near = window.remainingPercent <= QUOTA_NEAR_THRESHOLD_PERCENT
   if (window.period === 'hourly') return near ? 4 : 10
@@ -1623,6 +1679,9 @@ export function quotaRefreshEveryTurns(window: QuotaWindow | undefined): number 
   if (window.period === 'monthly') return near ? 20 : 80
   return near ? 10 : 50
 }
+
+/** @deprecated Same cadence as {@link quotaRefreshEverySteps}; the name predates step accounting. */
+export const quotaRefreshEveryTurns = quotaRefreshEverySteps
 
 function quotaPeriodLabel(period: QuotaPeriod): string {
   if (period === 'hourly') return '5 小时'
@@ -2771,6 +2830,7 @@ export class SshTui {
   private lastPaintWidth = 0
   private lastPaintHeight = 0
   private lastChromeStart = 0
+  private lastTranscriptStart = -1
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -2779,7 +2839,7 @@ export class SshTui {
   private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
   private quotaSnapshot: QuotaSnapshot | undefined
   private quotaAlerted = new Set<string>()
-  private quotaTurnsSinceRefresh = 0
+  private quotaStepsSinceRefresh = 0
   private quotaRefreshInFlight = false
   private searchHits: Row[] = []
   private searchIndex = -1
@@ -2839,7 +2899,7 @@ export class SshTui {
     )
     const questions = this.ctx.get('userQuestions')
     if (questions !== undefined) {
-      this.userQuestionDisposer = questions.registerProvider({ ask: this.handleUserQuestions })
+      this.userQuestionDisposer = installUserQuestionAnswerer(this.ctx, questions, this.handleUserQuestions)
     }
 
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
@@ -4049,7 +4109,8 @@ export class SshTui {
       String(chromeStart),
     ].join('\x1f')
     const chromeChanged = chromeKey !== this.lastChromeKey || chromeStart !== this.lastChromeStart
-    const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight
+    const transcriptScrolled = start !== this.lastTranscriptStart
+    const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight || transcriptScrolled
 
     // One stdout write per frame: dirty rows only, so jump-host SSH sees a
     // single packet instead of one write per line. Clip/pad so leftover
@@ -4073,6 +4134,7 @@ export class SshTui {
     this.lastPaintWidth = width
     this.lastPaintHeight = height
     this.lastChromeStart = chromeStart
+    this.lastTranscriptStart = start
   }
 
   private buildSuggestions(): { name: string; description: string; local: boolean }[] {
@@ -4221,8 +4283,9 @@ export class SshTui {
       kind === 'reasoning' ? '2;3' :
       kind === 'brand' ? '1;38;2;77;107;253' :
       kind === 'tool' || kind === 'tool-result' ? '33' :
-      kind === 'diff-add' ? '38;5;22;48;5;194' :
-      kind === 'diff-del' ? '38;5;124;48;5;224' :
+      // Codex-like: muted add/del that blend into the terminal background.
+      kind === 'diff-add' ? '38;2;122;168;116;48;2;18;42;24' :
+      kind === 'diff-del' ? '38;2;196;122;122;48;2;48;20;20' :
       kind === 'diff-path' ? '1;36' :
       kind === 'todo-done' ? '2;32' :
       kind === 'todo-active' ? '1;36' :
@@ -4454,6 +4517,16 @@ export class SshTui {
         // Usage accounting is complete for this step; the map only exists to
         // deduplicate repeated usage reports during the step.
         this.usageByStep.delete(`${event.data.turn}:${event.data.step}`)
+        if (!this.replaying) {
+          this.quotaStepsSinceRefresh += 1
+          const every = quotaRefreshEverySteps(this.quotaSnapshot === undefined
+            ? undefined
+            : tightestQuotaWindow(this.quotaSnapshot))
+          if (this.quotaStepsSinceRefresh >= every) {
+            this.quotaStepsSinceRefresh = 0
+            void this.refreshQuota({ reason: 'step', announce: false }).catch(() => {})
+          }
+        }
         this.markDirty()
         break
       }
@@ -4464,14 +4537,6 @@ export class SshTui {
         this.markDirty()
         break
       case 'turn/end': {
-        this.quotaTurnsSinceRefresh += 1
-        const every = quotaRefreshEveryTurns(this.quotaSnapshot === undefined
-          ? undefined
-          : tightestQuotaWindow(this.quotaSnapshot))
-        if (this.quotaTurnsSinceRefresh >= every) {
-          this.quotaTurnsSinceRefresh = 0
-          void this.refreshQuota({ reason: 'turn', announce: false }).catch(() => {})
-        }
         const reason = event.data.reason
         this.openToolCalls.clear()
         this.pendingToolTimes.clear()
@@ -4507,11 +4572,6 @@ export class SshTui {
             this.queuePlanCloseNudge(livePlan)
           }
         }
-        this.markDirty()
-        break
-      }
-      case 'todo/write': {
-        this.upsertPlanRow({ todos: parsePlanTodos(event.data.todos) })
         this.markDirty()
         break
       }
@@ -4575,6 +4635,11 @@ export class SshTui {
           ? '已进入计划模式：先规划、等确认后再改代码。可用 /plan off 退出。'
           : '已退出计划模式，可以继续执行改动。',
       })
+      this.markDirty()
+      return
+    }
+    if (type === 'todo/write') {
+      this.upsertPlanRow({ todos: parsePlanTodos((data as { todos?: unknown } | undefined)?.todos) })
       this.markDirty()
       return
     }
@@ -5165,12 +5230,11 @@ export class SshTui {
     const apiKey = apiKeyEnv === undefined ? undefined : await this.resolveCredential(apiKeyEnv)
     const llm = this.ctx.get('llm')
     if (llm === undefined) return []
-    const discovered = await llm.discoverModels(settingsNamespace('llm-pi-ai'), {
+    const discovered = await discoverProviderModels(llm, {
       baseURL,
       ...(api === undefined ? {} : { api }),
       ...(apiKey === undefined ? {} : { apiKey }),
-      signal: AbortSignal.timeout(15_000),
-    })
+    }, AbortSignal.timeout(15_000))
     return discovered.map(model => ({ id: model.id, label: model.name || model.id }))
   }
 
@@ -5579,7 +5643,7 @@ export class SshTui {
     if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) return
     this.quotaSnapshot = undefined
     this.quotaAlerted.clear()
-    this.quotaTurnsSinceRefresh = 0
+    this.quotaStepsSinceRefresh = 0
     this.markDirty()
   }
 
@@ -5725,7 +5789,7 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** /mode: pick an agent preset (standard / minimal / code / cordis / routing-suite / ...). */
+  /** /mode: pick an agent preset (standard / minimal / ptc / cordis / routing-suite / ...). */
   private async runModeCommand(): Promise<void> {
     const agentPresets = this.ctx.get('agentPresets')
     if (agentPresets === undefined) {
@@ -5934,7 +5998,7 @@ export class SshTui {
     this.markDirty()
   }
 
-  private async refreshQuota(options: { reason: 'start' | 'turn' | 'command'; announce: boolean }): Promise<QuotaSnapshot | undefined> {
+  private async refreshQuota(options: { reason: 'start' | 'step' | 'command'; announce: boolean }): Promise<QuotaSnapshot | undefined> {
     if (this.quotaRefreshInFlight && options.reason !== 'command') return this.quotaSnapshot
     this.quotaRefreshInFlight = true
     try {
@@ -6519,12 +6583,11 @@ export class SshTui {
     try {
       const llm = this.ctx.get('llm')
       if (llm === undefined) throw new Error('llm 服务不可用')
-      const discovered = await llm.discoverModels(settingsNamespace('llm-pi-ai'), {
+      const discovered = await discoverProviderModels(llm, {
         baseURL,
         ...(template.api === undefined ? {} : { api: template.api }),
         ...(key === '' ? {} : { apiKey: key }),
-        signal: AbortSignal.timeout(15_000),
-      })
+      }, AbortSignal.timeout(15_000))
       // Apply only if the wizard is still on the same draft the fetch started
       // from, so a stale reply cannot overwrite a newer edit or a reset.
       const stillCurrent = this.onboarding === state
