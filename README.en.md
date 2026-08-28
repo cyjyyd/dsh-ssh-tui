@@ -72,8 +72,8 @@ because the manifest declares `dsh.bundle`.
 Optional: reuse a SuperGrok / grok-bridge token already on the machine:
 
 ```sh
-dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
-dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
+dsh plugin --profile tui add dsh-llm-xai-oauth
+dsh plugin --profile headless add dsh-llm-xai-oauth
 ```
 
 Smoke the route before opening the TUI. The TUI exits immediately without a TTY:

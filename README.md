@@ -79,8 +79,8 @@ dsh --profile tui
 可选：本机已有 SuperGrok / grok-bridge token 时再装配套 OAuth：
 
 ```bash
-dsh plugin --profile tui add github:cyjyyd/dsh-llm-xai-oauth
-dsh plugin --profile headless add github:cyjyyd/dsh-llm-xai-oauth
+dsh plugin --profile tui add dsh-llm-xai-oauth
+dsh plugin --profile headless add dsh-llm-xai-oauth
 ```
 
 先确认链路再开 TUI（无 TTY 时 TUI 会直接退出）：
