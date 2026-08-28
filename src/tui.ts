@@ -34,6 +34,13 @@ import { formatSessionTime, listResumableSessions } from './session-list.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { checkForPluginUpdate } from './update-check.js'
 import {
+  ROUTE_MEMORY_NAMESPACE,
+  parseRouteMemory,
+  rememberedRouteFor,
+  upsertRememberedRoute,
+  type RememberedRoute,
+} from './route-memory.js'
+import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
   defaultSubagentModelForProvider,
@@ -42,6 +49,8 @@ import {
   type SubagentSelection,
   type SubagentSelectionRef,
 } from './subagent-model.js'
+
+const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -331,6 +340,27 @@ const DSR_PROBE_TIMEOUT_MS = 800
 
 export type PaintLinkKind = 'local' | 'ssh'
 
+/** Compact token count, matching the web stats line (517 / 12.2K / 1.2M). */
+export function formatTokens(n: number): string {
+  const scaled = (value: number): string =>
+    value >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) return `${scaled(n / 1_000)}K`
+  return `${scaled(n / 1_000_000)}M`
+}
+
+/** Compact duration, matching the web stats line (45.2s / 2m42s). */
+export function formatDuration(ms: number): string {
+  const seconds = ms / 1_000
+  if (seconds < 60) return `${Math.round(seconds * 10) / 10}s`
+  const whole = Math.round(seconds)
+  return `${Math.floor(whole / 60)}m${whole % 60}s`
+}
+
+export function formatTokensPerSecond(tokensPerSecond: number): string {
+  return `${Math.round(tokensPerSecond)} tok/s`
+}
+
 /**
  * Explicit env/config always wins. Otherwise local TTYs stay snappy and SSH
  * sessions pick a tier from a measured round-trip (CSI 6n), falling back to
@@ -368,6 +398,203 @@ export function paintLinkLabel(kind: PaintLinkKind, intervalMs: number, probed: 
   return probed ? `SSH 绘制 ${intervalMs}ms` : `SSH 绘制 ${intervalMs}ms（未测到往返）`
 }
 
+export type LinkQuality = 'local' | 'good' | 'ok' | 'slow' | 'poor' | 'unknown'
+
+/** Signal-bar quality from a measured SSH round-trip, or local TTY. */
+export function linkQualityOf(kind: PaintLinkKind, rttMs: number | undefined): LinkQuality {
+  if (kind === 'local') return 'local'
+  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs < 0) return 'unknown'
+  if (rttMs < 50) return 'good'
+  if (rttMs < 150) return 'ok'
+  if (rttMs < 350) return 'slow'
+  return 'poor'
+}
+
+/** How many filled signal pips: 4 local/fast, 3 ok, 2 slow, 1 poor, 0 unknown. */
+export function linkSignalPips(quality: LinkQuality): number {
+  if (quality === 'local' || quality === 'good') return 4
+  if (quality === 'ok') return 3
+  if (quality === 'slow') return 2
+  if (quality === 'poor') return 1
+  return 0
+}
+
+const LINK_PIP_COLOR: Record<number, string> = {
+  0: '90',
+  1: '31',
+  2: '33',
+  3: '32',
+  4: '32',
+}
+
+/** Compact footer chip: `SSH ●●●○ 90ms` — 1 pip red, 2 yellow, 3+ green. */
+export function formatLinkQualityChip(
+  kind: PaintLinkKind,
+  intervalMs: number,
+  rttMs: number | undefined,
+  probed: boolean,
+  color = false,
+): string {
+  const quality = linkQualityOf(kind, probed ? rttMs : undefined)
+  const filled = linkSignalPips(quality)
+  const pips = `${'●'.repeat(filled)}${'○'.repeat(4 - filled)}`
+  const colored = color
+    ? `\x1b[${LINK_PIP_COLOR[filled] ?? '90'}m${pips}\x1b[0m`
+    : pips
+  if (kind === 'local') return `本机 ${colored}`
+  const delay = probed && rttMs !== undefined && Number.isFinite(rttMs)
+    ? `${Math.round(rttMs)}ms`
+    : `${intervalMs}ms`
+  return `SSH ${colored} ${delay}`
+}
+
+export function providerShortCode(provider: string): string {
+  const id = provider.trim()
+  if (id === 'deepseek-official' || id === 'deepseek') return 'DeepSeek 官方'
+  if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) return 'SuperGrok'
+  if (id === 'opencode-go') return 'OpenCode Go'
+  if (id === 'opencode') return 'OpenCode Zen'
+  return id
+}
+
+export interface FooterStatsInput {
+  turns: number
+  steps: number
+  llmMs: number
+  toolMs: number
+  ttftMs: number
+  ttftSteps: number
+  decodeMs: number
+  decodeTokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
+/** Stats groups in drop order (last is dropped first when the row is too wide). */
+export function footerStatsGroups(stats: FooterStatsInput): string[] {
+  const groups: string[] = []
+  if (stats.steps > 0) groups.push(`${stats.turns} 轮 · ${stats.steps} 步`)
+  const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
+  if (billedInput > 0 || stats.outputTokens > 0) {
+    groups.push(`输入 ${formatTokens(billedInput)} · 输出 ${formatTokens(stats.outputTokens)}`)
+  }
+  const speeds: string[] = []
+  if (stats.decodeMs > 0 && stats.decodeTokens > 0) {
+    speeds.push(formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1_000)))
+  } else if (stats.ttftSteps > 0) {
+    speeds.push(`首字 ${formatDuration(stats.ttftMs / stats.ttftSteps)}`)
+  }
+  if (speeds.length > 0) groups.push(speeds.join(' '))
+  const durations: string[] = []
+  if (stats.llmMs > 0) durations.push(`模型 ${formatDuration(stats.llmMs)}`)
+  if (stats.toolMs > 0) durations.push(`工具 ${formatDuration(stats.toolMs)}`)
+  if (durations.length > 0) groups.push(durations.join(' '))
+  if (billedInput > 0) groups.push(`缓存命中 ${Math.round(stats.cacheReadTokens / billedInput * 100)}%`)
+  return groups
+}
+
+export function fitFooterStatsLine(chip: string, groups: readonly string[], width: number): string {
+  const kept = [...groups]
+  const render = (): string => kept.length === 0 ? chip : `${chip} │ ${kept.join(' │ ')}`
+  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
+  return truncateToWidth(render(), Math.max(1, width))
+}
+
+export type FooterActivityKind =
+  | 'plan-review'
+  | 'waiting'
+  | 'compacting'
+  | 'retry'
+  | 'subagents'
+  | 'tools'
+  | 'plan-open'
+  | 'plan-pending'
+  | 'goal'
+  | 'waiting-llm'
+  | 'idle'
+
+export interface FooterStatusInput {
+  running: boolean
+  planReview: boolean
+  waitingQuestion: boolean
+  compacting: boolean
+  retry?: { retry: number; maxRetries: number }
+  subagents: number
+  tools: number
+  planLeftOpen: boolean
+  planPending: boolean
+  planActive: boolean
+  goalPhase?: 'active' | 'paused' | 'blocked'
+  idleMs: number
+  model: string
+  effort?: string
+  preset?: string
+  provider: string
+  parentModel: string
+  subModel: string
+  subDiffers: boolean
+  quotaCode?: string
+  quotaPercent?: number
+  search?: { index: number; total: number }
+  foldedInput: boolean
+  multiLineInput: boolean
+  queued: number
+}
+
+export function footerActivity(input: FooterStatusInput): { kind: FooterActivityKind; text: string } {
+  if (input.planReview) return { kind: 'plan-review', text: '计划待审' }
+  if (input.waitingQuestion) return { kind: 'waiting', text: '等待回答' }
+  if (input.compacting) return { kind: 'compacting', text: '压缩中' }
+  if (input.retry !== undefined) {
+    return { kind: 'retry', text: `重试 ${input.retry.retry}/${input.retry.maxRetries}` }
+  }
+  if (input.subagents > 0) return { kind: 'subagents', text: `子代理 ${input.subagents}` }
+  if (input.running && input.tools > 0) return { kind: 'tools', text: `工具 ${input.tools}` }
+  if (input.planLeftOpen) return { kind: 'plan-open', text: '本轮未收尾' }
+  if (input.planPending) return { kind: 'plan-pending', text: '计划切换中' }
+  if (input.planActive) return { kind: 'plan-pending', text: '计划模式' }
+  if (input.goalPhase === 'active') return { kind: 'goal', text: '目标进行中' }
+  if (input.goalPhase === 'paused') return { kind: 'goal', text: '目标已暂停' }
+  if (input.goalPhase === 'blocked') return { kind: 'goal', text: '目标受阻' }
+  if (input.running && input.idleMs > WAIT_INDICATOR_MS) {
+    return { kind: 'waiting-llm', text: `等待 ${Math.floor(input.idleMs / 1000)}s` }
+  }
+  if (input.running) return { kind: 'idle', text: '运行中' }
+  return { kind: 'idle', text: '空闲' }
+}
+
+/** Short remaining-quota bar: 8 pips, filled from the left. */
+export function formatQuotaBar(remainingPercent: number, width = 8): string {
+  const remaining = Math.max(0, Math.min(100, remainingPercent))
+  const filled = Math.round(remaining / 100 * width)
+  return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
+}
+
+export function footerIdentityParts(input: FooterStatusInput): string[] {
+  const parts: string[] = []
+  if (input.preset !== undefined && input.preset !== '') parts.push(`[${input.preset}]`)
+  const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
+  if (model !== '') parts.push(model)
+  if (input.subDiffers) parts.push(`sub:${input.subModel}`)
+  if (input.quotaCode !== undefined && input.quotaPercent !== undefined) {
+    parts.push(`${input.quotaCode} ${formatQuotaBar(input.quotaPercent)} ${input.quotaPercent.toFixed(0)}%`)
+  }
+  if (input.search !== undefined) parts.push(`搜索 ${input.search.index + 1}/${input.search.total}`)
+  if (input.foldedInput) parts.push('输入已折叠')
+  else if (input.multiLineInput) parts.push('多行输入')
+  if (input.queued > 0) parts.push(`排队 ${input.queued}`)
+  return parts
+}
+
+export function fitFooterStatusLine(activity: string, identity: readonly string[], width: number): string {
+  const kept = [...identity]
+  const render = (): string => kept.length === 0 ? activity : `${activity}  ${kept.join(' · ')}`
+  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
+  return truncateToWidth(render(), Math.max(1, width))
+}
+
 /** One incremental paint as a single stdout write (one SSH packet when corked). */
 export function composePaintOutput(options: {
   width: number
@@ -377,10 +604,17 @@ export function composePaintOutput(options: {
   sizeChanged: boolean
   chromeChanged: boolean
   chromeStart: number
+  previousChromeStart?: number
   cursorRow: number
   cursorColumn: number
 }): string {
   const { width, height, paintRows, previousRows, sizeChanged, chromeChanged, chromeStart } = options
+  const previousChromeStart = options.previousChromeStart ?? chromeStart
+  // When a card expands, the input box moves up. Rows that used to be
+  // transcript may now be chrome (or vice versa); force-repaint from the
+  // higher of the two chrome starts so leftover tool-body glyphs cannot sit
+  // on the prompt.
+  const dirtyChromeStart = Math.min(chromeStart, previousChromeStart)
   let out = '\x1b[?25l'
   const prev = sizeChanged ? [] : previousRows
   if (sizeChanged) out += '\x1b[H\x1b[J'
@@ -389,7 +623,7 @@ export function composePaintOutput(options: {
   const rowCount = Math.min(height, paintRows.length)
   for (let i = 0; i < rowCount; i++) {
     const current = paintRows[i] ?? ''
-    if (current === prev[i] && !(chromeChanged && i >= chromeStart)) continue
+    if (current === prev[i] && !(chromeChanged && i >= dirtyChromeStart)) continue
     const clipped = padAnsiToWidth(current, width)
     // EL2 *before* the glyphs, from column 1. A full-width write followed
     // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
@@ -571,7 +805,8 @@ export function providerUsesLocalOAuth(provider: string): boolean {
 
 const LOCAL_COMMANDS = [
   { name: 'help', description: 'show all available commands' },
-  { name: 'model', description: 'select provider, model and reasoning effort' },
+  { name: 'model', description: 'select model and reasoning effort for the current provider' },
+  { name: 'provider', description: 'switch provider, then model and reasoning effort' },
   { name: 'submodel', description: `select subagent model (default ${DEFAULT_SUBAGENT_MODEL}, same provider as parent)` },
   { name: 'subeffort', description: 'select subagent reasoning effort (default follows provider)' },
   { name: 'mode', description: 'switch agent mode / preset (standard, minimal, code, cordis, routing-suite, ...)' },
@@ -579,11 +814,11 @@ const LOCAL_COMMANDS = [
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
   { name: 'status', description: 'show session, provider, model, paint, and plugin version' },
-  { name: 'usage', description: 'show remaining quota for the current provider (OpenCode Go / SuperGrok)' },
-  { name: 'quota', description: 'alias of /usage' },
+  { name: 'usage', description: 'show remaining quota or account balance for the current provider' },
+  { name: 'balance', description: 'alias of /usage: DeepSeek / OpenAI-compatible balance, or subscription quota' },
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
-  { name: 'setup', description: 'configure an API-key provider (DeepSeek / OpenCode); SuperGrok uses local OAuth' },
+  { name: 'setup', description: 'add or update an API-key provider without wiping other saved routes' },
   { name: 'find', description: 'search thinking / plan / subagent / reply cards' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
@@ -1231,6 +1466,14 @@ function reasoningEffortsForDefault(reasoning: unknown): Record<string, string |
 const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
 const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1'
 const SUPERGROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
+const DEEPSEEK_PUBLIC_BASE_URL = 'https://api.deepseek.com'
+/** OpenAI-completions gateways: probe these relative to the configured base URL. */
+const OPENAI_COMPAT_BALANCE_PATHS = [
+  '/user/balance',
+  '/dashboard/billing/credit_grants',
+  '/v1/dashboard/billing/credit_grants',
+  '/v1/dashboard/billing/subscription',
+] as const
 const QUOTA_ALERT_THRESHOLDS = [50, 25, 10, 5] as const
 /** Remaining % at or below this is “close” and uses the faster cadence. */
 const QUOTA_NEAR_THRESHOLD_PERCENT = 55
@@ -1480,6 +1723,114 @@ export function tightestQuotaWindow(snapshot: QuotaSnapshot): QuotaWindow | unde
 /** Render the OpenCode Go quota payload as a transcript block. */
 export function formatOpenCodeGoUsage(payload: unknown, source: OpenCodeSource): string {
   return formatQuotaSnapshot(parseOpenCodeGoQuota(payload, source.provider))
+}
+
+export interface AccountBalanceLine {
+  label: string
+  amount: string
+  currency?: string
+}
+
+export interface AccountBalanceSnapshot {
+  provider: string
+  plan: string
+  available?: boolean
+  lines: AccountBalanceLine[]
+  sourcePath?: string
+}
+
+export function joinUrl(base: string, path: string): string {
+  const root = base.replace(/\/+$/u, '')
+  const suffix = path.startsWith('/') ? path : `/${path}`
+  if (root.endsWith('/v1') && suffix.startsWith('/v1/')) return `${root}${suffix.slice(3)}`
+  return `${root}${suffix}`
+}
+
+export function parseDeepSeekBalance(payload: unknown, provider = 'deepseek-official'): AccountBalanceSnapshot {
+  if (payload === null || typeof payload !== 'object') {
+    throw new Error('DeepSeek 余额接口返回格式无法识别')
+  }
+  const raw = payload as Record<string, unknown>
+  const infos = Array.isArray(raw.balance_infos) ? raw.balance_infos : []
+  const lines: AccountBalanceLine[] = []
+  for (const item of infos) {
+    if (item === null || typeof item !== 'object') continue
+    const row = item as Record<string, unknown>
+    const currency = typeof row.currency === 'string' ? row.currency : undefined
+    const total = typeof row.total_balance === 'string' ? row.total_balance : typeof row.total_balance === 'number' ? String(row.total_balance) : undefined
+    if (total === undefined) continue
+    lines.push({
+      label: '可用余额',
+      amount: total,
+      ...(currency === undefined ? {} : { currency }),
+    })
+    const granted = typeof row.granted_balance === 'string' ? row.granted_balance : undefined
+    const topped = typeof row.topped_up_balance === 'string' ? row.topped_up_balance : undefined
+    if (granted !== undefined) lines.push({ label: '赠送余额', amount: granted, ...(currency === undefined ? {} : { currency }) })
+    if (topped !== undefined) lines.push({ label: '充值余额', amount: topped, ...(currency === undefined ? {} : { currency }) })
+  }
+  if (lines.length === 0) throw new Error('DeepSeek 余额接口返回格式无法识别')
+  return {
+    provider,
+    plan: 'DeepSeek 官方',
+    available: typeof raw.is_available === 'boolean' ? raw.is_available : undefined,
+    lines,
+    sourcePath: '/user/balance',
+  }
+}
+
+function numberish(value: unknown): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  return undefined
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Best-effort parse of OpenAI-compatible credit/balance JSON. */
+export function parseOpenAiCompatibleBalance(payload: unknown, provider: string, path: string): AccountBalanceSnapshot | undefined {
+  const raw = recordOf(payload)
+  if (raw === undefined) return undefined
+  const lines: AccountBalanceLine[] = []
+  const totalGranted = numberish(raw.total_granted)
+  const totalUsed = numberish(raw.total_used)
+  const totalAvailable = numberish(raw.total_available)
+  if (totalAvailable !== undefined) lines.push({ label: '剩余额度', amount: totalAvailable, currency: 'USD' })
+  if (totalGranted !== undefined) lines.push({ label: '总额度', amount: totalGranted, currency: 'USD' })
+  if (totalUsed !== undefined) lines.push({ label: '已用', amount: totalUsed, currency: 'USD' })
+  const hardLimit = numberish(raw.hard_limit_usd ?? raw.hard_limit)
+  const softLimit = numberish(raw.soft_limit_usd ?? raw.soft_limit)
+  if (hardLimit !== undefined) lines.push({ label: '硬限额', amount: hardLimit, currency: 'USD' })
+  if (softLimit !== undefined) lines.push({ label: '软限额', amount: softLimit, currency: 'USD' })
+  const data = recordOf(raw.data) ?? raw
+  const balance = numberish(data.balance ?? data.total_balance ?? data.credit ?? data.credits ?? data.quota)
+  if (lines.length === 0 && balance !== undefined) {
+    lines.push({ label: '余额', amount: balance, currency: typeof data.currency === 'string' ? data.currency : undefined })
+  }
+  if (Array.isArray(raw.balance_infos)) {
+    try {
+      return { ...parseDeepSeekBalance(raw, provider), plan: provider, sourcePath: path }
+    } catch {
+      // Not DeepSeek-shaped despite the field name.
+    }
+  }
+  if (lines.length === 0) return undefined
+  return { provider, plan: provider, lines, sourcePath: path }
+}
+
+export function formatAccountBalance(snapshot: AccountBalanceSnapshot): string {
+  const header = [`${snapshot.plan} 余额（${snapshot.provider}）`]
+  if (snapshot.available === false) header.push('账号当前不可用')
+  for (const line of snapshot.lines) {
+    const currency = line.currency === undefined ? '' : ` ${line.currency}`
+    header.push(`  ${line.label} · ${line.amount}${currency}`)
+  }
+  if (snapshot.sourcePath !== undefined) header.push(`  来源 ${snapshot.sourcePath}`)
+  return header.join('\n')
 }
 
 /** Extract a safe human-readable message from an OpenCode error payload. */
@@ -2340,27 +2691,6 @@ export function parseExitStatus(text: string): {
   return { body: text, exitCode: 0 }
 }
 
-/** Compact token count, matching the web stats line (517 / 12.2K / 1.2M). */
-export function formatTokens(n: number): string {
-  const scaled = (value: number): string =>
-    value >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
-  if (n < 1_000) return String(n)
-  if (n < 1_000_000) return `${scaled(n / 1_000)}K`
-  return `${scaled(n / 1_000_000)}M`
-}
-
-/** Compact duration, matching the web stats line (45.2s / 2m42s). */
-export function formatDuration(ms: number): string {
-  const seconds = ms / 1_000
-  if (seconds < 60) return `${Math.round(seconds * 10) / 10}s`
-  const whole = Math.round(seconds)
-  return `${Math.floor(whole / 60)}m${whole % 60}s`
-}
-
-export function formatTokensPerSecond(tokensPerSecond: number): string {
-  return `${Math.round(tokensPerSecond)} tok/s`
-}
-
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 /** Owns one interactive terminal channel and its agent event wiring. */
@@ -2440,9 +2770,11 @@ export class SshTui {
   private lastChromeKey = ''
   private lastPaintWidth = 0
   private lastPaintHeight = 0
+  private lastChromeStart = 0
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
+  private paintRttMs: number | undefined
   private sessionTitle = ''
   private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
   private quotaSnapshot: QuotaSnapshot | undefined
@@ -2532,8 +2864,8 @@ export class SshTui {
       this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
       this.markDirty()
     })
-    void this.refreshQuota({ reason: 'start', announce: true }).catch(() => {
-      // Start-up quota is best-effort; /usage still reports errors.
+    void this.refreshQuota({ reason: 'start', announce: false }).catch(() => {
+      // Start-up quota is silent; /usage and threshold alerts still report.
     })
     void this.notifyPluginUpdate().catch(() => {
       // Update check is best-effort and never blocks the TUI.
@@ -2582,26 +2914,18 @@ export class SshTui {
     const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
     if (Number.isFinite(envOverride) && envOverride > 0) {
       this.paintProbed = false
-      this.pushRow({
-        kind: 'system',
-        text: `${paintLinkLabel(this.paintLink, this.paintIntervalMs, false)} · DSH_TUI_PAINT_MS`,
-      })
+      this.markDirty()
       return
     }
     if (this.paintLink !== 'ssh') {
-      this.pushRow({ kind: 'system', text: paintLinkLabel('local', this.paintIntervalMs, false) })
+      this.markDirty()
       return
     }
     const rtt = await probeTerminalRttMs()
     if (this.disposed) return
     this.paintProbed = rtt !== undefined
+    this.paintRttMs = rtt
     this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: rtt })
-    this.pushRow({
-      kind: 'system',
-      text: rtt === undefined
-        ? paintLinkLabel('ssh', this.paintIntervalMs, false)
-        : `${paintLinkLabel('ssh', this.paintIntervalMs, true)} · 往返 ${Math.round(rtt)}ms`,
-    })
     this.markDirty()
   }
 
@@ -2629,7 +2953,7 @@ export class SshTui {
     if (providerUsesLocalOAuth(provider)) {
       this.pushRow({
         kind: 'system',
-        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），走本机 SuperGrok / X Premium OAuth，无需 API Key。用 /model 切换 Grok 模型和思考强度；只有要改成 DeepSeek 官方或 OpenCode 这类 Key 提供商时才需要 /setup。`,
+        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），走本机 SuperGrok / X Premium OAuth，无需 API Key。用 /model 切换 Grok 模型和思考强度；换官方或 OpenCode 用 /provider。只有要新增 API Key 提供商时才需要 /setup。`,
       })
       this.markDirty()
       return
@@ -3139,8 +3463,9 @@ export class SshTui {
       line: string,
       ref?: Row | CollapsibleBlock,
     ): void => {
+      const clipped = clipAnsiToWidth(line, width)
       const hit = ref !== undefined && ref === searchHit
-      display.push(hit ? this.highlightSearchLine(line) : line)
+      display.push(hit ? this.highlightSearchLine(clipped) : clipped)
       displayRefs.push(ref)
     }
     const pushRow = (kind: DisplayKind, text: string, ref?: Row): void => {
@@ -3219,7 +3544,7 @@ export class SshTui {
           addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
           continue
         }
-        for (const wrapped of wrap(plainHeader, width)) {
+        for (const wrapped of wrap(`${focused ? '▶ ' : '  '}${plainHeader}`, width)) {
           addDisplay(styleToolHeader(wrapped), row)
         }
         for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
@@ -3609,58 +3934,83 @@ export class SshTui {
       this.clickableRows.set(dockTop, dockPlan)
     }
 
-    const statsText = this.statsText()
-    const statsLine = this.styleLine('system', fitLine(statsText === '' ? '— 尚无会话统计' : statsText))
+    const linkChip = formatLinkQualityChip(
+      this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color,
+    )
+    const statsGroups = footerStatsGroups({
+      turns: this.stats.turns,
+      steps: this.stats.steps,
+      llmMs: this.stats.llmMs,
+      toolMs: this.stats.toolMs,
+      ttftMs: this.stats.ttftMs,
+      ttftSteps: this.stats.ttftSteps,
+      decodeMs: this.stats.decodeMs,
+      decodeTokens: this.stats.decodeTokens,
+      inputTokens: this.stats.usage.inputTokens,
+      outputTokens: this.stats.usage.outputTokens,
+      cacheReadTokens: this.stats.usage.cacheReadTokens,
+      cacheWriteTokens: this.stats.usage.cacheWriteTokens,
+    })
+    const statsPlain = fitFooterStatsLine(
+      formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false),
+      statsGroups,
+      Math.max(1, width),
+    )
+    const chipVisible = formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false)
+    const statsLine = statsPlain.startsWith(chipVisible)
+      ? clipAnsiToWidth(`${linkChip}${this.styleLine('system', statsPlain.slice(chipVisible.length))}`, Math.max(1, width))
+      : this.styleLine('system', statsPlain)
 
-    let statusText = `${this.status}  [${this.presetName}]  ${this.currentSelectionLabel()}`
-    const sub = this.subagentSelection.current
-    const subProvider = sub.provider ?? this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
-    const subEffort = sub.reasoningEffort === undefined ? '' : `(${sub.reasoningEffort})`
-    statusText += sub.provider === undefined
-      ? ` · sub:${sub.model}${subEffort}`
-      : ` · sub:${subProvider}/${sub.model}${subEffort}`
-    if (this.searchHits.length > 0 && this.searchIndex >= 0) {
-      statusText += ` · 搜索 ${this.searchIndex + 1}/${this.searchHits.length}`
-    }
-    if (inputView.folded) statusText += ' · 输入已折叠 · Ctrl+T 展开'
-    else if (inputRows > 1) statusText += ' · Ctrl+T 折叠输入'
-    if (this.pendingMessages.size > 0) statusText += ` · 排队 ${this.pendingMessages.size}`
-    statusText += ` · ${this.paintLink === 'ssh' ? 'ssh' : '本机'}${this.paintIntervalMs}ms`
     const idleMs = Date.now() - this.lastActivity
     const livePlan = this.findLivePlanRow()
-    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
-    if (waitingQuestions || this.dialog?.kind === 'questions') {
-      statusText += this.dialog?.kind === 'questions' && planReviewOf(this.dialog.question)
-        ? ' · 计划待审'
-        : ' · 等待用户回答'
-    } else if (livePlan?.turnLeftOpen === true) {
-      statusText += ' · 本轮未收尾'
-    } else if (livePlan?.active === true || livePlan?.pending === true) {
-      statusText += livePlan.pending ? ' · 计划模式切换中' : ' · 计划模式'
-    }
     const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
-    if (liveGoal !== undefined && (liveGoal.phase === 'active' || liveGoal.phase === 'paused' || liveGoal.phase === 'blocked')) {
-      const phase = liveGoal.phase === 'active' ? '目标进行中' : liveGoal.phase === 'paused' ? '目标已暂停' : '目标受阻'
-      statusText += ` · ${phase}`
-    }
-    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
-    if (compacting) {
-      statusText += ` · ${this.spinnerFrame()} 压缩上下文`
-    } else if (this.activeSubagents.size > 0) {
-      const spinner = this.spinnerFrame(160)
-      statusText += ` · ${spinner} 子代理 ${this.activeSubagents.size}`
-    } else if (this.agent.status === 'running' && this.openToolCalls.size > 0) {
-      statusText += ` · 工具执行中 ${this.openToolCalls.size}`
-    } else if (this.llmRetry !== undefined) {
-      statusText += ` · 重试 ${this.llmRetry.retry}/${this.llmRetry.maxRetries}`
-    } else if (this.agent.status === 'running' && idleMs > WAIT_INDICATOR_MS) {
-      statusText += ` · 等待响应 ${Math.floor(idleMs / 1000)}s`
-    }
     const quotaWindow = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
-    if (quotaWindow !== undefined) {
-      statusText += ` · ${this.quotaSnapshot?.plan} 剩余 ${quotaWindow.remainingPercent.toFixed(0)}%`
-    }
-    const statusLine = this.styleLine('system', fitLine(statusText))
+    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
+    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+    const current = this.selectionRef?.current
+    const provider = this.currentProviderId()
+    const parentModel = current?.model ?? this.agent.options.model ?? ''
+    const sub = this.subagentSelection.current
+    const footer = {
+      running: this.agent.status === 'running',
+      planReview: this.dialog?.kind === 'questions' && planReviewOf(this.dialog.question),
+      waitingQuestion: waitingQuestions || (this.dialog?.kind === 'questions' && !planReviewOf(this.dialog.question)),
+      compacting,
+      ...(this.llmRetry === undefined ? {} : { retry: this.llmRetry }),
+      subagents: this.activeSubagents.size,
+      tools: this.openToolCalls.size,
+      planLeftOpen: livePlan?.turnLeftOpen === true,
+      planPending: livePlan?.pending === true,
+      planActive: livePlan?.active === true,
+      ...(liveGoal?.phase === 'active' || liveGoal?.phase === 'paused' || liveGoal?.phase === 'blocked'
+        ? { goalPhase: liveGoal.phase }
+        : {}),
+      idleMs,
+      model: parentModel,
+      preset: this.presetName,
+      ...(current?.reasoningEffort === undefined ? {} : { effort: current.reasoningEffort }),
+      provider,
+      parentModel,
+      subModel: sub.model,
+      subDiffers: sub.model !== parentModel,
+      ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
+        ? {}
+        : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
+      ...(this.searchHits.length > 0 && this.searchIndex >= 0
+        ? { search: { index: this.searchIndex, total: this.searchHits.length } }
+        : {}),
+      foldedInput: inputView.folded,
+      multiLineInput: inputRows > 1,
+      queued: this.pendingMessages.size,
+    } satisfies FooterStatusInput
+    const activity = footerActivity(footer)
+    const activityText = activity.kind === 'compacting'
+      ? `${this.spinnerFrame()} ${activity.text}`
+      : activity.kind === 'subagents'
+        ? `${this.spinnerFrame(160)} ${activity.text}`
+        : activity.text
+    const statusText = fitFooterStatusLine(activityText, footerIdentityParts(footer), Math.max(1, width))
+    const statusLine = this.styleLine('system', statusText)
 
     const paintRows: string[] = [
       ...headerLines,
@@ -3682,7 +4032,7 @@ export class SshTui {
       this.status,
       this.agent.status,
       this.scrollOffset,
-      statsText,
+      statsPlain,
       statusText,
       inputView.text,
       inputView.folded,
@@ -3696,8 +4046,9 @@ export class SshTui {
       this.activeSubagents.size,
       this.dialog?.kind ?? '',
       planDockLines.join('\n'),
+      String(chromeStart),
     ].join('\x1f')
-    const chromeChanged = chromeKey !== this.lastChromeKey
+    const chromeChanged = chromeKey !== this.lastChromeKey || chromeStart !== this.lastChromeStart
     const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight
 
     // One stdout write per frame: dirty rows only, so jump-host SSH sees a
@@ -3713,6 +4064,7 @@ export class SshTui {
       sizeChanged,
       chromeChanged,
       chromeStart,
+      previousChromeStart: this.lastChromeStart,
       cursorRow: row,
       cursorColumn: column,
     }))
@@ -3720,6 +4072,7 @@ export class SshTui {
     this.lastChromeKey = chromeKey
     this.lastPaintWidth = width
     this.lastPaintHeight = height
+    this.lastChromeStart = chromeStart
   }
 
   private buildSuggestions(): { name: string; description: string; local: boolean }[] {
@@ -3778,30 +4131,22 @@ export class SshTui {
     this.usageByStep.set(key, next)
   }
 
-  /** The web-aligned session stats strip: counts, timings, cache, tokens. */
+  /** Compact session stats groups for the first footer row. */
   private statsText(): string {
-    const stats = this.stats
-    const groups: string[] = []
-    if (stats.steps > 0) groups.push(`${stats.turns} 轮 · ${stats.steps} 步`)
-    const durations: string[] = []
-    if (stats.llmMs > 0) durations.push(`模型 ${formatDuration(stats.llmMs)}`)
-    if (stats.toolMs > 0) durations.push(`工具 ${formatDuration(stats.toolMs)}`)
-    if (durations.length > 0) groups.push(durations.join(' · '))
-    const speeds: string[] = []
-    if (stats.ttftSteps > 0) speeds.push(`首字 ${formatDuration(stats.ttftMs / stats.ttftSteps)}`)
-    if (stats.decodeMs > 0 && stats.decodeTokens > 0) {
-      speeds.push(formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1_000)))
-    }
-    if (speeds.length > 0) groups.push(speeds.join(' · '))
-    const usage = stats.usage
-    const billedInput = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-    if (billedInput > 0 || usage.outputTokens > 0) {
-      if (billedInput > 0) {
-        groups.push(`缓存命中 ${Math.round(usage.cacheReadTokens / billedInput * 100)}%`)
-      }
-      groups.push(`输入 ${formatTokens(billedInput)} · 输出 ${formatTokens(usage.outputTokens)}`)
-    }
-    return groups.join(' | ')
+    return footerStatsGroups({
+      turns: this.stats.turns,
+      steps: this.stats.steps,
+      llmMs: this.stats.llmMs,
+      toolMs: this.stats.toolMs,
+      ttftMs: this.stats.ttftMs,
+      ttftSteps: this.stats.ttftSteps,
+      decodeMs: this.stats.decodeMs,
+      decodeTokens: this.stats.decodeTokens,
+      inputTokens: this.stats.usage.inputTokens,
+      outputTokens: this.stats.usage.outputTokens,
+      cacheReadTokens: this.stats.usage.cacheReadTokens,
+      cacheWriteTokens: this.stats.usage.cacheWriteTokens,
+    }).join(' │ ')
   }
 
   /** Refresh the terminal window title (throttled while running). */
@@ -4949,50 +5294,24 @@ export class SshTui {
     { id: 'grok-4.3', label: 'Grok 4.3' },
   ]
 
-  /** /model: stay on the current provider by default; switching providers is opt-in. */
-  private async runModelCommand(): Promise<void> {
+  private async loadModelOptions(provider: string): Promise<{ options: { id: string; label: string }[]; source: string }> {
     const llm = this.ctx.get('llm')
-    const current = this.selectionRef?.current
-    const providers = this.listSelectableProviders()
-    let provider = this.currentProviderId()
-    const SWITCH_PROVIDER_ID = '__switch_provider__'
-    const pickProvider = async (): Promise<string | undefined> => {
-      if (providers.length <= 1) return provider
-      const currentIndex = Math.max(0, providers.findIndex(option => option.id === provider))
-      const pickedAnswer = await this.askQuestion({
-        id: 'provider-pick',
-        question: '选择提供商',
-        options: providers.map(option => ({
-          label: option.label,
-          description: option.id === provider
-            ? `${describeProviderRoute(option.id).kind} · 当前`
-            : describeProviderRoute(option.id).kind,
-        })),
-      }, 0, 1, currentIndex)
-      return providers.find(option => option.label === pickedAnswer.selected[0])?.id
-    }
-
-    let modelOptions: { id: string; label: string }[] = []
-    let modelSource = '已配置列表'
-    // OpenCode and other third-party routes are interrogated live so the picker
-    // shows what the endpoint actually serves, not just the stored catalog.
+    let options: { id: string; label: string }[] = []
+    let source = '已配置列表'
     if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
       const previousStatus = this.status
       try {
         this.status = `正在从端点获取 ${provider} 的模型列表…`
         this.markDirty()
-        modelOptions = await this.discoverEndpointModels(provider)
-        if (modelOptions.length > 0) {
-          modelSource = '端点实时列表'
-          // Keep models the endpoint does not list (e.g. ones already stored
-          // for the route) selectable, so the live list never hides the
-          // current model.
+        options = await this.discoverEndpointModels(provider)
+        if (options.length > 0) {
+          source = '端点实时列表'
           try {
             const listed = (await llm?.listModels(provider)) ?? []
-            const endpointIds = new Set(modelOptions.map(model => model.id))
+            const endpointIds = new Set(options.map(model => model.id))
             for (const model of listed) {
               if (!endpointIds.has(model.id)) {
-                modelOptions.push({ id: model.id, label: model.name || model.id })
+                options.push({ id: model.id, label: model.name || model.id })
               }
             }
           } catch {
@@ -5000,82 +5319,116 @@ export class SshTui {
           }
         }
       } catch {
-        modelOptions = []
+        options = []
       } finally {
         this.status = previousStatus
         this.markDirty()
       }
     }
-    if (modelOptions.length === 0) {
+    if (options.length === 0) {
       try {
         const listed = (await llm?.listModels(provider)) ?? []
-        modelOptions = listed.map(model => ({ id: model.id, label: model.name || model.id }))
+        options = listed.map(model => ({ id: model.id, label: model.name || model.id }))
       } catch {
-        modelOptions = []
+        options = []
       }
     }
-    if (modelOptions.length === 0 && providerUsesLocalOAuth(provider)) {
-      modelOptions = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
-      modelSource = 'SuperGrok 目录'
+    if (options.length === 0 && providerUsesLocalOAuth(provider)) {
+      options = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
+      source = 'SuperGrok 目录'
     }
-    if (modelOptions.length === 0) {
-      const fallback = current?.model ?? this.agent.options.model ?? (
-        providerUsesLocalOAuth(provider) ? 'grok-4.6' : 'deepseek-v4-flash'
-      )
-      modelOptions = [{ id: fallback, label: fallback }]
+    if (options.length === 0) {
+      const remembered = this.rememberedRoute(provider)?.model
+      const fallback = remembered
+        ?? (providerUsesLocalOAuth(provider) ? 'grok-4.6' : 'deepseek-v4-flash')
+      options = [{ id: fallback, label: fallback }]
     }
+    return { options, source }
+  }
+
+  /** /model: models and effort for the current provider only. */
+  private async runModelCommand(): Promise<void> {
+    const provider = this.currentProviderId()
+    const current = this.selectionRef?.current
+    const loaded = await this.loadModelOptions(provider)
+    let modelOptions = loaded.options
     if (current?.model !== undefined && !modelOptions.some(option => option.id === current.model)) {
       modelOptions = [{ id: current.model, label: current.model }, ...modelOptions]
     }
-
-    if (providers.length > 1) {
-      modelOptions = [
-        ...modelOptions,
-        { id: SWITCH_PROVIDER_ID, label: '更换提供商…' },
-      ]
-    }
-    const selected = await this.pickModelOption(modelOptions, provider, modelSource, current?.model)
+    const selected = await this.pickModelOption(modelOptions, provider, loaded.source, current?.model)
     if (selected === undefined) return
-    if (selected.id === SWITCH_PROVIDER_ID) {
-      const nextProvider = await pickProvider()
-      if (nextProvider === undefined || nextProvider === provider) return
-      provider = nextProvider
-      modelOptions = []
-      modelSource = '已配置列表'
-      // Reload the model list for the newly chosen provider.
-      if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
-        try {
-          modelOptions = await this.discoverEndpointModels(provider)
-          if (modelOptions.length > 0) modelSource = '端点实时列表'
-        } catch {
-          modelOptions = []
-        }
-      }
-      if (modelOptions.length === 0) {
-        try {
-          const listed = (await llm?.listModels(provider)) ?? []
-          modelOptions = listed.map(model => ({ id: model.id, label: model.name || model.id }))
-        } catch {
-          modelOptions = []
-        }
-      }
-      if (modelOptions.length === 0 && providerUsesLocalOAuth(provider)) {
-        modelOptions = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
-        modelSource = 'SuperGrok 目录'
-      }
-      if (modelOptions.length === 0) {
-        const fallback = providerUsesLocalOAuth(provider) ? 'grok-4.6' : 'deepseek-v4-flash'
-        modelOptions = [{ id: fallback, label: fallback }]
-      }
-      const switched = await this.pickModelOption(modelOptions, provider, modelSource, undefined)
-      if (switched === undefined) return
-      return await this.applyModelSelection(provider, switched.id, undefined)
+    await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id))
+  }
+
+  /** /provider: pick a provider, then its model (remembered route pre-filled). */
+  private async runProviderCommand(): Promise<void> {
+    const providers = this.listSelectableProviders()
+    const current = this.currentProviderId()
+    if (providers.length === 0) {
+      this.pushRow({ kind: 'error', text: '没有可切换的提供商。用 /setup 先配置一条 API Key 路由。' })
+      this.markDirty()
+      return
     }
-    await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id).filter(id => id !== SWITCH_PROVIDER_ID))
+    const currentIndex = Math.max(0, providers.findIndex(option => option.id === current))
+    const pickedAnswer = await this.askQuestion({
+      id: 'provider-pick',
+      question: '选择提供商',
+      options: providers.map(option => ({
+        label: option.label,
+        description: option.id === current
+          ? `${describeProviderRoute(option.id).kind} · 当前`
+          : describeProviderRoute(option.id).kind,
+      })),
+    }, 0, 1, currentIndex)
+    const provider = providers.find(option => option.label === pickedAnswer.selected[0])?.id
+    if (provider === undefined) return
+    const remembered = this.rememberedRoute(provider)
+    const loaded = await this.loadModelOptions(provider)
+    let modelOptions = loaded.options
+    if (remembered !== undefined && !modelOptions.some(option => option.id === remembered.model)) {
+      modelOptions = [{ id: remembered.model, label: remembered.model }, ...modelOptions]
+    }
+    const selected = await this.pickModelOption(
+      modelOptions,
+      provider,
+      loaded.source,
+      remembered?.model ?? (provider === current ? this.selectionRef?.current?.model : undefined),
+    )
+    if (selected === undefined) return
+    await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id), remembered?.reasoningEffort)
   }
 
   /** Persist a provider/model/effort choice and keep the subagent on the same family. */
-  private async applyModelSelection(provider: string, modelId: string, listed: readonly string[] = []): Promise<void> {
+  private rememberedRoute(provider: string): RememberedRoute | undefined {
+    const section = this.ctx.get('settings')?.get(ROUTE_MEMORY_NS)
+    const memory = section !== null && typeof section === 'object' && !Array.isArray(section)
+      ? parseRouteMemory((section as Record<string, unknown>).providers)
+      : {}
+    return rememberedRouteFor(memory, provider)
+  }
+
+  private async rememberRoute(selection: ModelSelection): Promise<void> {
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) return
+    const section = settings.get(ROUTE_MEMORY_NS)
+    const memory = section !== null && typeof section === 'object' && !Array.isArray(section)
+      ? parseRouteMemory((section as Record<string, unknown>).providers)
+      : {}
+    const next = upsertRememberedRoute(memory, selection.provider, {
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: String(selection.reasoningEffort) }),
+    })
+    await settings.mutate(ROUTE_MEMORY_NS, [
+      { op: 'set', path: ['providers'], value: next },
+    ])
+  }
+
+  private async applyModelSelection(
+    provider: string,
+    modelId: string,
+    listed: readonly string[] = [],
+    preferredEffort?: string,
+  ): Promise<void> {
     if (!(await this.ensureProviderModelConfigured(provider, modelId))) return
     const llm = this.ctx.get('llm')
     const current = this.selectionRef?.current
@@ -5105,7 +5458,10 @@ export class SshTui {
 
     let effort: string | undefined
     if (effortOptions.length > 0) {
-      const currentEffort = current?.provider === provider ? String(current?.reasoningEffort ?? '') : ''
+      const rememberedEffort = this.rememberedRoute(provider)?.reasoningEffort ?? preferredEffort ?? ''
+      const currentEffort = current?.provider === provider
+        ? String(current?.reasoningEffort ?? '')
+        : rememberedEffort
       const currentIndex = Math.max(0, effortOptions.findIndex(option => option.id === currentEffort))
       const effortAnswer = await this.askQuestion({
         id: 'effort-pick',
@@ -5126,12 +5482,22 @@ export class SshTui {
     if (this.selectionRef !== undefined) this.selectionRef.current = next
     this.onSelectionChanged?.(next)
     await this.ctx.get('agentDefaultModel')?.saveSelection(next)
+    await this.rememberRoute(next)
     const kind = describeProviderRoute(provider)
     this.pushRow({
       kind: 'system',
       text: `已切换到 ${kind.kind}：${provider}/${modelId}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
     })
-    await this.syncSubagentToProvider(provider, listed.filter(id => id !== '__switch_provider__' && id !== ''))
+    const listedIds = listed.filter(id => id !== '__switch_provider__' && id !== '')
+    const previousProvider = current?.provider ?? this.agent.options.provider ?? this.providerName
+    if (previousProvider !== provider) {
+      await this.syncSubagentToProvider(provider, listedIds, true)
+      await this.promptSubagentAfterProviderSwitch(provider)
+      this.clearQuotaForProvider(provider)
+      void this.refreshQuota({ reason: 'command', announce: false }).catch(() => {})
+    } else {
+      await this.syncSubagentToProvider(provider, listedIds)
+    }
     this.markDirty()
   }
 
@@ -5148,10 +5514,14 @@ export class SshTui {
    * on a same-family model. An explicit leftover DeepSeek flash id after
    * switching to xAI is treated as stale.
    */
-  private async syncSubagentToProvider(provider: string, listed: readonly string[] = []): Promise<void> {
+  private async syncSubagentToProvider(
+    provider: string,
+    listed: readonly string[] = [],
+    force = false,
+  ): Promise<void> {
     const current = this.subagentSelection.current
-    if (current.provider !== undefined && current.provider !== provider) return
-    if (subagentModelMatchesProvider(provider, current.model, listed)) return
+    if (!force && current.provider !== undefined && current.provider !== provider) return
+    if (!force && subagentModelMatchesProvider(provider, current.model, listed)) return
     let catalog = [...listed]
     if (catalog.length === 0) {
       try {
@@ -5162,9 +5532,8 @@ export class SshTui {
       }
     }
     const nextModel = defaultSubagentModelForProvider(provider, catalog)
-    if (nextModel === current.model) return
+    if (!force && nextModel === current.model && current.provider === undefined) return
     const persisted = await this.saveSubagentSelection({
-      ...current,
       model: nextModel,
       reasoningEffort: undefined,
     })
@@ -5172,6 +5541,46 @@ export class SshTui {
       kind: 'system',
       text: `子代理已跟随提供商 ${provider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
     })
+  }
+
+  private async promptSubagentAfterProviderSwitch(provider: string): Promise<void> {
+    const current = this.subagentSelection.current
+    try {
+      const { options, source } = await this.subagentModelOptions(provider)
+      const listed = options.length === 0
+        ? [{ id: current.model, label: current.model }]
+        : options
+      if (!listed.some(option => option.id === current.model)) {
+        listed.unshift({ id: current.model, label: current.model })
+      }
+      const selected = await this.pickModelOption(
+        listed,
+        provider,
+        source,
+        current.model,
+      )
+      if (selected === undefined || selected.id === current.model) return
+      if (!(await this.ensureProviderModelConfigured(provider, selected.id))) return
+      const persisted = await this.saveSubagentSelection({ model: selected.id })
+      this.pushRow({
+        kind: 'system',
+        text: `子代理模型已设为 ${selected.id}（提供方跟随 ${provider}）${persisted ? '' : '（仅当前会话）'}。`,
+      })
+    } catch (error: unknown) {
+      if (error instanceof UserQuestionError) {
+        this.pushRow({ kind: 'system', text: `子代理沿用 ${current.model}。之后可用 /submodel 再改。` })
+        return
+      }
+      this.pushRow({ kind: 'error', text: `选择子代理模型失败：${errorChain(error)}` })
+    }
+  }
+
+  private clearQuotaForProvider(provider: string): void {
+    if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) return
+    this.quotaSnapshot = undefined
+    this.quotaAlerted.clear()
+    this.quotaTurnsSinceRefresh = 0
+    this.markDirty()
   }
 
   /** Persist one subagent selection and publish it to the live request waterfall. */
@@ -5477,28 +5886,32 @@ export class SshTui {
     ].join('\n')
   }
 
-  /** /usage and /quota: remaining quota for the current subscription provider. */
+  /** /usage and /balance: remaining quota or prepaid balance for the current provider. */
   private async runUsageCommand(): Promise<void> {
     const previousStatus = this.status
     this.status = '查询额度…'
     this.markDirty()
     try {
-      const snapshot = await this.refreshQuota({ reason: 'command', announce: true })
-      if (snapshot === undefined) {
-        const provider = this.currentProviderId()
-        const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
-        const source = openCodeSourceFor(provider, llmPiAi)
-        if (source?.flavor === 'zen') {
-          this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
-        } else {
-          this.pushRow({
-            kind: 'system',
-            text: `当前提供商 ${provider} 没有固定额度接口。OpenCode Go 与 SuperGrok 可查剩余额度；DeepSeek 官方按 API 计费。`,
-          })
-        }
+      const quota = await this.refreshQuota({ reason: 'command', announce: true })
+      if (quota !== undefined) return
+      const balance = await this.fetchAccountBalance(this.currentProviderId())
+      if (balance !== undefined) {
+        this.pushRow({ kind: 'system', text: formatAccountBalance(balance) })
+        return
+      }
+      const provider = this.currentProviderId()
+      const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+      const source = openCodeSourceFor(provider, llmPiAi)
+      if (source?.flavor === 'zen') {
+        this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
+      } else {
+        this.pushRow({
+          kind: 'system',
+          text: `当前提供商 ${provider} 没有可用的余额或额度接口。DeepSeek 官方走 /user/balance；OpenAI Completions 兼容网关会探测 credit_grants；OpenCode Go 与 SuperGrok 走订阅额度。`,
+        })
       }
     } catch (error: unknown) {
-      this.pushRow({ kind: 'error', text: `/usage failed: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: `/balance failed: ${errorChain(error)}` })
     } finally {
       this.status = previousStatus
       this.markDirty()
@@ -5527,11 +5940,60 @@ export class SshTui {
     try {
       const provider = this.currentProviderId()
       const snapshot = await this.fetchQuotaSnapshot(provider)
-      if (snapshot !== undefined) this.applyQuotaSnapshot(snapshot, options.announce)
-      return snapshot
+      if (snapshot !== undefined) {
+        this.applyQuotaSnapshot(snapshot, options.announce)
+        return snapshot
+      }
+      if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider !== provider) {
+        this.quotaSnapshot = undefined
+        this.quotaAlerted.clear()
+        this.markDirty()
+      }
+      return undefined
     } finally {
       this.quotaRefreshInFlight = false
     }
+  }
+
+  private async fetchAccountBalance(provider: string): Promise<AccountBalanceSnapshot | undefined> {
+    if (provider === 'deepseek-official' || provider === 'deepseek') {
+      const apiKey = await this.resolveCredential('DEEPSEEK_API_KEY')
+      if (apiKey === undefined) throw new Error('未找到 DEEPSEEK_API_KEY')
+      const section = this.ctx.get('settings')?.get(settingsNamespace('llm-deepseek')) as { baseURL?: unknown } | undefined
+      const baseURL = typeof section?.baseURL === 'string' && section.baseURL.trim() !== ''
+        ? section.baseURL.trim()
+        : (process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_PUBLIC_BASE_URL)
+      const payload = await this.fetchJson(joinUrl(baseURL, '/user/balance'), {
+        authorization: `Bearer ${apiKey}`,
+        accept: 'application/json',
+      }, 'DeepSeek')
+      return parseDeepSeekBalance(payload, provider)
+    }
+    const profile = this.piAiProviderProfile(provider)
+    const api = typeof profile?.api === 'string' ? profile.api : undefined
+    const baseURL = typeof profile?.baseURL === 'string' && profile.baseURL.trim() !== '' ? profile.baseURL.trim() : undefined
+    if (baseURL === undefined || (api !== undefined && api !== 'openai-completions')) return undefined
+    const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
+      ? profile.apiKeyEnv.trim()
+      : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
+    const apiKey = await this.resolveCredential(apiKeyEnv)
+    if (apiKey === undefined) throw new Error(`未找到凭据 ${apiKeyEnv}`)
+    const errors: string[] = []
+    for (const path of OPENAI_COMPAT_BALANCE_PATHS) {
+      const url = joinUrl(baseURL, path)
+      try {
+        const payload = await this.fetchJson(url, {
+          authorization: `Bearer ${apiKey}`,
+          accept: 'application/json',
+        }, provider)
+        const parsed = parseOpenAiCompatibleBalance(payload, provider, path)
+        if (parsed !== undefined) return parsed
+        errors.push(`${path}: 返回无法识别`)
+      } catch (error: unknown) {
+        errors.push(`${path}: ${errorChain(error)}`)
+      }
+    }
+    throw new Error(`OpenAI 兼容网关未找到余额接口（${errors.join('；')}）`)
   }
 
   private async fetchQuotaSnapshot(provider: string): Promise<QuotaSnapshot | undefined> {
@@ -6106,6 +6568,7 @@ export class SshTui {
           this.selectionRef.current = { provider: 'deepseek-official', model }
         }
         this.onSelectionChanged?.({ provider: 'deepseek-official', model })
+        await this.rememberRoute({ provider: 'deepseek-official', model })
         await this.syncSubagentToProvider('deepseek-official', state.models)
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
@@ -6114,7 +6577,7 @@ export class SshTui {
         if (saved) {
           this.pushRow({
             kind: 'system',
-            text: `配置完成，已记住默认提供商/模型：deepseek-official / ${model}。以后直接运行 dsh --profile tui 即可。`,
+            text: `配置完成，已记住 deepseek-official / ${model}。用 /provider 可切回其它已保存的提供商，无需再 /setup。`,
           })
         }
       } else {
@@ -6132,12 +6595,37 @@ export class SshTui {
         const reasoningEfforts = defaultEffort === undefined
           ? undefined
           : { off: null, [defaultEffort]: defaultEffort }
+        const existing = this.piAiProviderProfile(state.providerId)
+        const existingModels = Array.isArray(existing?.models) ? existing.models : []
+        const mergedIds: string[] = []
+        const seen = new Set<string>()
+        for (const id of state.models) {
+          if (id !== '' && !seen.has(id)) {
+            seen.add(id)
+            mergedIds.push(id)
+          }
+        }
+        for (const raw of existingModels) {
+          const id = typeof raw === 'string'
+            ? raw
+            : typeof raw === 'object' && raw !== null && typeof (raw as { id?: unknown }).id === 'string'
+              ? (raw as { id: string }).id
+              : ''
+          if (id !== '' && !seen.has(id)) {
+            seen.add(id)
+            mergedIds.push(id)
+          }
+        }
         const profile = {
-          displayName: template.label,
+          displayName: typeof existing?.displayName === 'string' && existing.displayName.trim() !== ''
+            ? existing.displayName
+            : template.label,
           apiKeyEnv: envRef,
-          api: template.api,
-          baseURL: state.baseUrl === '' ? template.defaultBaseUrl : state.baseUrl,
-          models: state.models.map(id => ({
+          api: template.api ?? existing?.api,
+          baseURL: state.baseUrl === ''
+            ? (typeof existing?.baseURL === 'string' && existing.baseURL !== '' ? existing.baseURL : template.defaultBaseUrl)
+            : state.baseUrl,
+          models: mergedIds.map(id => ({
             id,
             ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
           })),
@@ -6166,10 +6654,11 @@ export class SshTui {
             this.selectionRef.current = selection
           }
           this.onSelectionChanged?.(selection)
+          await this.rememberRoute(selection)
           await this.syncSubagentToProvider(state.providerId, state.models)
           this.pushRow({
             kind: 'system',
-            text: `配置完成，已记住默认提供商/模型：${state.providerId} / ${model}。以后直接运行 dsh --profile tui 即可（--provider/--model 可临时覆盖）。`,
+            text: `配置完成，已记住 ${state.providerId} / ${model}。其它提供商的模型和 Key 仍保留；用 /provider 切换，下一步请求生效。`,
           })
         }
       }
@@ -6415,8 +6904,8 @@ export class SshTui {
             '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开；Ctrl+R 全部展开/收起；Ctrl+T 折叠输入。',
             'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
             '/find [思考|计划|子代理|回复] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',
-            '/model 默认列出当前提供商的模型；当前是 SuperGrok 时直接选 grok-4.6 / grok-4.5 和思考强度（含 xhigh）。要换提供商再选「更换提供商」。',
-            '/setup 只用于配置 API Key 提供商。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。',
+            '/model 只换当前提供商的模型和思考强度。/provider 换提供商（并选模型），下一步请求生效，无需重启。',
+            '/setup 只新增或更新某一条 API Key 提供商，不会删掉其它已保存的路由。SuperGrok 走本机 OAuth，不需要填 Key。',
             '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，还是其它已注册提供商。',
           ].join('\n'),
         })
@@ -6432,6 +6921,16 @@ export class SshTui {
             this.pushRow({ kind: 'system', text: '模型选择已取消。' })
           } else {
             this.pushRow({ kind: 'error', text: `/model failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
+      case 'provider':
+        void this.runProviderCommand().catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: '提供商选择已取消。' })
+          } else {
+            this.pushRow({ kind: 'error', text: `/provider failed: ${errorChain(error)}` })
           }
           this.markDirty()
         })
@@ -6499,13 +6998,14 @@ export class SshTui {
             `preset: ${this.presetName}`,
             `subagents: ${this.activeSubagents.size}`,
             `plan: ${plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off'}`,
-            `paint: ${paintLinkLabel(this.paintLink, this.paintIntervalMs, this.paintProbed)}`,
+            `paint: ${formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed)}`,
             waiting > 0 ? `questions: waiting ${waiting}` : 'questions: none',
           ]
           this.pushRow({ kind: 'system', text: lines.join('\n') })
         }
         break
       case 'usage':
+      case 'balance':
       case 'quota':
         void this.runUsageCommand().catch((error: unknown) => {
           this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })

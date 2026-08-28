@@ -10,7 +10,11 @@ import {
   padAnsiToWidth,
   foldInputView,
   formatOpenCodeGoUsage,
+  formatAccountBalance,
   formatQuotaSnapshot,
+  joinUrl,
+  parseDeepSeekBalance,
+  parseOpenAiCompatibleBalance,
   parseSuperGrokBilling,
   parseOpenCodeGoQuota,
   remainingPercentFromUsed,
@@ -33,6 +37,15 @@ import {
   presentToolCall,
   providerUsesLocalOAuth,
   detectSshSession,
+  formatLinkQualityChip,
+  formatQuotaBar,
+  footerActivity,
+  footerIdentityParts,
+  footerStatsGroups,
+  fitFooterStatsLine,
+  fitFooterStatusLine,
+  linkQualityOf,
+  providerShortCode,
   paintIntervalForRtt,
   parseCursorPositionReply,
   resolvePaintIntervalMs,
@@ -116,6 +129,27 @@ test('composePaintOutput pads a short card line so the next row cannot inherit g
   assert.ok(frame.includes('\x1b[2;1H\x1b[0m\x1b[2K'))
 })
 
+test('composePaintOutput repaints chrome when a card expansion moves the input box', () => {
+  const previous = ['card', 'body', 'more', '────', '> ', 'stats', 'idle']
+  const next = ['card', 'body', 'more', 'extra', '────', '> ', 'stats']
+  const frame = composePaintOutput({
+    width: 8,
+    height: 7,
+    paintRows: next,
+    previousRows: previous,
+    sizeChanged: false,
+    chromeChanged: true,
+    chromeStart: 4,
+    previousChromeStart: 3,
+    cursorRow: 6,
+    cursorColumn: 3,
+  })
+  assert.ok(frame.includes('\x1b[4;1H'))
+  assert.ok(frame.includes('\x1b[5;1H'))
+  assert.ok(frame.includes('\x1b[6;1H'))
+  assert.ok(frame.includes('\x1b[7;1H'))
+})
+
 test('composePaintOutput never writes past the terminal height', () => {
   const frame = composePaintOutput({
     width: 8,
@@ -144,6 +178,65 @@ test('resolvePaintIntervalMs clamps jump-host cadence', () => {
   assert.equal(resolvePaintIntervalMs(40, { DSH_TUI_PAINT_MS: '9999' }), 40)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '10' }), 40)
   assert.equal(resolvePaintIntervalMs(undefined, { DSH_TUI_PAINT_MS: '5000' }), 1000)
+})
+
+test('footer stats drop cache first when the row is narrow', () => {
+  const groups = footerStatsGroups({
+    turns: 3, steps: 12, llmMs: 80_000, toolMs: 8400,
+    ttftMs: 1200, ttftSteps: 1, decodeMs: 2000, decodeTokens: 84,
+    inputTokens: 6100, outputTokens: 640, cacheReadTokens: 12_100, cacheWriteTokens: 0,
+  })
+  assert.deepEqual(groups.slice(0, 2), ['3 轮 · 12 步', '输入 18.2K · 输出 640'])
+  assert.equal(groups.at(-1)?.startsWith('缓存命中'), true)
+  const fitted = fitFooterStatsLine('SSH ●●○○ 210ms', groups, 42)
+  assert.equal(fitted.includes('缓存'), false)
+  assert.match(fitted, /^SSH ●●○○ 210ms/)
+  assert.ok(displayWidth(fitted) <= 42)
+})
+
+test('footer status keeps one activity and drops identity from the right', () => {
+  assert.equal(providerShortCode('xai'), 'SuperGrok')
+  const activity = footerActivity({
+    running: true, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
+    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.equal(activity.text, '子代理 2')
+  const identity = footerIdentityParts({
+    running: true, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
+    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 1,
+  })
+  assert.deepEqual(identity, ['[标准模式]', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, '排队 1'])
+  const line = fitFooterStatusLine('子代理 2', identity, 28)
+  assert.match(line, /^子代理 2/)
+  assert.equal(line.includes('排队'), false)
+  assert.ok(displayWidth(line) <= 28)
+})
+
+test('formatQuotaBar is an 8-pip remaining bar', () => {
+  assert.equal(formatQuotaBar(100), '████████')
+  assert.equal(formatQuotaBar(82), '███████░')
+  assert.equal(formatQuotaBar(50), '████░░░░')
+  assert.equal(formatQuotaBar(0), '░░░░░░░░')
+})
+
+test('formatLinkQualityChip is a compact colored signal bar', () => {
+  assert.equal(linkQualityOf('local', undefined), 'local')
+  assert.equal(linkQualityOf('ssh', 20), 'good')
+  assert.equal(linkQualityOf('ssh', 90), 'ok')
+  assert.equal(linkQualityOf('ssh', 200), 'slow')
+  assert.equal(linkQualityOf('ssh', 500), 'poor')
+  assert.equal(formatLinkQualityChip('ssh', 160, 90, true), 'SSH ●●●○ 90ms')
+  assert.equal(formatLinkQualityChip('ssh', 400, 500, true), 'SSH ●○○○ 500ms')
+  assert.equal(formatLinkQualityChip('local', 80, undefined, false), '本机 ●●●●')
+  assert.match(formatLinkQualityChip('ssh', 400, 500, true, true), /\x1b\[31m●○○○\x1b\[0m/)
+  assert.match(formatLinkQualityChip('ssh', 250, 200, true, true), /\x1b\[33m●●○○\x1b\[0m/)
+  assert.match(formatLinkQualityChip('ssh', 160, 90, true, true), /\x1b\[32m●●●○\x1b\[0m/)
 })
 
 test('detectSshSession and paintIntervalForRtt do not need a model', () => {
@@ -287,6 +380,36 @@ test('parseSuperGrokBilling maps creditUsagePercent to remaining quota', () => {
   assert.equal(quotaRefreshEveryTurns({ label: '本月', period: 'monthly', remainingPercent: 90 }), 80)
 })
 
+test('parseDeepSeekBalance reads official user/balance wire format', () => {
+  const snap = parseDeepSeekBalance({
+    is_available: true,
+    balance_infos: [{
+      currency: 'CNY',
+      total_balance: '86.42',
+      granted_balance: '10.00',
+      topped_up_balance: '76.42',
+    }],
+  })
+  assert.equal(snap.plan, 'DeepSeek 官方')
+  assert.equal(snap.available, true)
+  assert.equal(snap.lines[0]?.amount, '86.42')
+  assert.match(formatAccountBalance(snap), /可用余额 · 86\.42 CNY/)
+})
+
+test('parseOpenAiCompatibleBalance accepts credit_grants and DeepSeek-shaped gateways', () => {
+  const grants = parseOpenAiCompatibleBalance({
+    total_granted: 20, total_used: 5, total_available: 15,
+  }, 'my-gateway', '/dashboard/billing/credit_grants')
+  assert.equal(grants?.lines[0]?.amount, '15')
+  assert.equal(joinUrl('https://api.example.com/v1', '/v1/dashboard/billing/credit_grants'),
+    'https://api.example.com/v1/dashboard/billing/credit_grants')
+  const shaped = parseOpenAiCompatibleBalance({
+    is_available: true,
+    balance_infos: [{ currency: 'USD', total_balance: '3.2' }],
+  }, 'my-gateway', '/user/balance')
+  assert.equal(shaped?.lines[0]?.amount, '3.2')
+})
+
 test('parseOpenCodeGoQuota keeps remaining percent for each window', () => {
   const snap = parseOpenCodeGoQuota({
     usage: {
@@ -303,6 +426,29 @@ test('parseOpenCodeGoQuota keeps remaining percent for each window', () => {
 test('parseExitStatus keeps exit-code and signal parsing', () => {
   assert.deepEqual(parseExitStatus('out\n[exit code: 7]'), { body: 'out', exitCode: 7 })
   assert.deepEqual(parseExitStatus('out\n[killed by signal: SIGTERM]'), { body: 'out', signal: 'SIGTERM' })
+})
+
+test('syncSubagentToProvider force-follows a parent provider switch', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'xai',
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
+  })
+  tui.quotaSnapshot = { provider: 'xai', plan: 'SuperGrok', windows: [{ label: '本周', period: 'weekly', remainingPercent: 82 }] }
+  await tui.syncSubagentToProvider('opencode-go', ['deepseek-v4-flash', 'deepseek-v4-pro'], true)
+  assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
+  assert.equal(tui.subagentSelection.current.provider, undefined)
+  tui.clearQuotaForProvider('opencode-go')
+  assert.equal(tui.quotaSnapshot, undefined)
 })
 
 test('subagent request waterfall applies model/effort but leaves the parent alone', async () => {
@@ -405,6 +551,41 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   assert.equal(cards[0].expanded, false)
 })
 
+test('expanding any collapsible card does not leave body glyphs on the input row', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.rows.push({
+    kind: 'tool',
+    callId: 'call-1',
+    name: 'read',
+    title: '读取',
+    summary: 'src/tui.ts',
+    args: '{"path":"src/tui.ts"}',
+    output: 'ALPHA_BODY_LINE\nBETA_BODY_LINE\nGAMMA_BODY_LINE',
+    status: 'ok',
+    expanded: false,
+  })
+  const collapsed = tui.captureFrame(48, 16)
+  const tool = tui.rows.find(row => row.kind === 'tool')
+  assert.equal(tool?.kind, 'tool')
+  tool.expanded = true
+  tui.focusedRow = tool
+  const expanded = tui.captureFrame(48, 16)
+  const inputIndex = expanded.findIndex(line => line.startsWith('> ') || line.startsWith('❯ '))
+  assert.ok(inputIndex >= 0)
+  assert.equal(expanded[inputIndex]?.includes('ALPHA_BODY_LINE'), false)
+  assert.equal(expanded[inputIndex]?.includes('BETA_BODY_LINE'), false)
+  assert.equal(collapsed.length, 16)
+  assert.equal(expanded.length, 16)
+})
+
 test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
@@ -423,6 +604,7 @@ test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => 
   assert.equal(frame.length, 24)
   assert.ok(frame.some(line => line.includes('hello')))
   assert.ok(frame.some(line => line.includes('DeepSeek Harness')))
+  assert.ok(frame.some(line => /本机 ●●●●|SSH [●○]{4}/u.test(line)))
 })
 
 test('planDockNote follows task status instead of always saying plan mode is off', () => {

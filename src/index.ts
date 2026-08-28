@@ -17,6 +17,7 @@ import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
 import { acquireSessionLock, releaseSessionLock, sessionLockDisabled } from './session-lock.js'
+import { installRouteMemory } from './route-memory.js'
 
 export const name = 'ssh-tui'
 
@@ -53,6 +54,7 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session')
   }
   const subagentSelection = createSubagentSelection(ctx)
+  installRouteMemory(ctx)
   ctx.effect(() => {
     let disposed = false
     let switching = false

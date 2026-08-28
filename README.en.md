@@ -226,17 +226,18 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/provider`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/compact` shows a spinning 「压缩上下文」 card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
 `/help` lists everything.
 
-`/model` lists models for the **current** provider first. On SuperGrok that
-is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). Switching
-to DeepSeek or OpenCode is an explicit “change provider” step. `/setup` is
-only for API-key providers; SuperGrok / X Premium uses local OAuth and does
-not need a key. `/status` and the footer show the same route.
+`/model` lists models for the **current** provider only. On SuperGrok that
+is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). `/provider`
+switches provider, then model; it takes effect on the **next request** — no
+restart. Each provider’s last model and effort is remembered. `/setup` adds
+or updates one API-key provider without wiping the others. SuperGrok / X
+Premium uses local OAuth and does not need a key.
 
 For OpenCode and other third-party providers, `/model` queries the provider's
 endpoint (`GET {baseURL}/models`) for a live model list, falling back to the
@@ -275,17 +276,20 @@ Interrupted streaming output keeps the already-generated prefix and is marked
 system messages. Harness slash commands that accept image attachments are
 labelled `(images ok)` in the command list and completion hints.
 
-`/usage` (alias `/quota`) follows the **current** provider:
+`/usage` (alias `/balance`; `/quota` still works) follows the **current** provider:
 
+- **DeepSeek official** `GET {baseURL}/user/balance`;
+- **OpenAI Completions gateways** probe `/user/balance` and `credit_grants`;
 - **SuperGrok** reads `GET cli-chat-proxy.grok.com/v1/billing` (weekly remaining %);
 - **OpenCode Go** reads the official `/v1/usage` windows (5-hour / week / month);
 - **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
 
-Quota is fetched at startup. Recheck cadence follows the tightest window:
-every 10 turns for a 5-hour cap (every 4 when near a threshold), every 50
-for weekly (every 10 when near), every 80 for monthly (every 20 when near).
-Crossing 50% / 25% / 10% / 5% remaining posts a ⚠ planning reminder. The
-footer shows the tightest window.
+OpenCode Go / SuperGrok quota is fetched silently at start and on a
+window-based cadence; the footer shows remaining %. A ⚠ transcript line
+appears only when remaining crosses 50% / 25% / 10% / 5%. `/usage` or
+`/balance` still prints the full snapshot. Cadence: every 10 turns for a
+5-hour cap (every 4 when near), every 50 for weekly (every 10 when near),
+every 80 for monthly (every 20 when near).
 
 The startup screen shows the official DeepSeek whale logo (rendered from the
 harness favicon) in the DeepSeek brand color, with the wordmark below it. The
@@ -383,8 +387,9 @@ switching while running.
 Each paint is one `stdout.write` of dirty rows only, so a jump host or
 corporate proxy does not see one SSH packet per line. Local ttys use 80 ms.
 Over SSH the TUI probes CSI 6n once and picks 80 / 160 / 250 / 400 ms from
-the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). `/status` and the
-footer show the active tier.
+the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
+starts with `SSH ●●●○ 90ms` (1 pip red, 2 yellow, 3+ green). The probe
+does not write into the transcript.
 
 SSH disconnect still kills a TUI that is not inside tmux. Do not start a
 second copy of the same session from another window.

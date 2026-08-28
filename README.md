@@ -51,8 +51,8 @@ dsh --profile tui
   编辑工具 git 风格 diff（`-` 浅红底 / `+` 浅绿底 / 文件统计，编辑卡片默认展开且
   diff 内容不截断）、JSON 参数与结果自动转可读内容；
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
-- 输入框下方会话统计行：轮次/步数、模型与工具耗时、TTFT、tok/s、缓存命中率、
-  输入/输出 token（与 web 端口径一致）；
+- 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
+  第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧；
 - 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
@@ -194,18 +194,18 @@ dsh --profile tui --no-color
 | `Ctrl+D` | 退出 |
 | `Ctrl+L` | 重绘整个画面 |
 
-斜杠命令：`/help`、`/find`、`/model`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
-`/status`、`/subagents`、`/usage`（`/quota` 同义）、`/setup`、`/clear`，
+斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+`/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
 「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
 进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
 支持图片附件，会在命令列表和补全提示中标注“可附图”。
 
-`/model` 默认列出**当前提供商**的模型。已经在 SuperGrok 时，直接选
-`grok-4.6` / `grok-4.5` 和思考强度（`grok-4.6` 含 `xhigh`）；要换 DeepSeek
-或 OpenCode 再选「更换提供商」。`/setup` 只用于配置 API Key 提供商，
-SuperGrok / X Premium 走本机 OAuth，不需要填 Key。`/status` 和底栏同样
-显示这条路由。
+`/model` 只换**当前提供商**的模型和思考强度。已经在 SuperGrok 时，直接选
+`grok-4.6` / `grok-4.5`（`grok-4.6` 含 `xhigh`）。要换 DeepSeek / OpenCode /
+其它路由用 `/provider`：先选提供商，再选模型，**下一步请求生效，不用重启**。
+每个提供商上次的模型和思考强度会分开记住。`/setup` 只新增或更新当前这条
+API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。
 
 子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：DeepSeek 用
 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`，xAI 用 `grok-4.5`。
@@ -233,13 +233,15 @@ SuperGrok / X Premium 走本机 OAuth，不需要填 Key。`/status` 和底栏�
 `提问用户` 卡片。`/goal` 是折叠的 `目标` 卡片。`/find 思考 padAnsi` 或 `Alt+1..4`
 可跳到对应类别的最新卡片。
 
-`/usage`（`/quota` 同义）按**当前提供商**查额度：
+`/usage`（`/balance` 同义，旧名 `/quota` 仍可用）按**当前提供商**查额度或余额：
 
+- **DeepSeek 官方**：`GET {baseURL}/user/balance`（文档接口），显示可用/赠送/充值余额；
+- **OpenAI Completions 兼容网关**：按配置的 base URL 探测 `/user/balance`、`/dashboard/billing/credit_grants` 等；
 - **SuperGrok**：`GET cli-chat-proxy.grok.com/v1/billing`，显示本周剩余%；
 - **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
 - **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
 
-启动时查一次。之后按最紧窗口调查询：5 小时额度每 10 轮（接近阈值改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。剩余跨过 50% / 25% / 10% / 5% 时用 ⚠ 提示合理规划。底栏显示最紧窗口的剩余百分比。
+OpenCode Go / SuperGrok 启动和运行中都静默查询，底栏只显示剩余%；跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询节奏按最紧窗口：5 小时额度每 10 轮（接近改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。
 
 ## 配置
 
@@ -259,7 +261,9 @@ ssh-tui-subagent:
 ```
 
 `/model`、`/mode`、`/submodel` 与 `/subeffort` 的修改会写回这里，
-web 端与 TUI 共用同一份设置。
+web 端与 TUI 共用同一份设置。`/model` 换提供商后**下一步请求生效**，不必重启。
+每个提供商上次的模型和思考强度记在 `ssh-tui-routes` 里，切回 SuperGrok / 官方 / Go 时会预填。
+`/setup` 只更新当前这条提供商（模型列表会合并），不会删掉其它路由的 Key 和模型。
 
 对 OpenCode 和其他第三方提供商，`/model` 会先调用提供商的端点
 （`GET {baseURL}/models`）获取实时模型列表；端点不可达时回退到已配置的
@@ -334,7 +338,7 @@ npm run build
 - **标题栏或铃声不生效**：确认终端支持 OSC 0 与 BEL；铃声可用
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
-- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。`/status` 和底栏显示当前档。
+- **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。统计行最左是 `SSH ●●●○ 90ms`（一格红、两格黄、三格及以上绿）。探测不写进转录。
 - **SSH 断了任务也没了**：用 tmux 开 TUI（见上文）。不要在另一个 SSH 窗口再开同一会话。
 - **提示会话已在 pid 运行**：那份 TUI 还活着。`tmux attach -t dsh`；确认进程已死再删 `$DSH_HOME/tui-locks/` 对应文件。
 
