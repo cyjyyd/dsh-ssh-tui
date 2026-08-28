@@ -9,6 +9,10 @@ If you mostly work over SSH — a jump host, a test box, a keyboard-only
 session — start here. A local desktop terminal with themes and layout
 you already like can stay as it is.
 
+Listed on the [dshfind plugin directory](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui):
+
+[![dshfind](https://dshfind.com/api/card/cyjyyd/dsh-ssh-tui?lang=en)](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
+
 Install with the official CLI (no clone):
 
 ```sh

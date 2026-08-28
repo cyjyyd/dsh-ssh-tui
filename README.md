@@ -10,6 +10,10 @@ English: [README.en.md](README.en.md)
 
 SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
 
+本插件已被 [dshfind 插件目录](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui) 收录：
+
+[![dshfind](https://dshfind.com/api/card/cyjyyd/dsh-ssh-tui?lang=zh)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
+
 安装（官方 CLI，无需 clone）：
 
 ```bash
