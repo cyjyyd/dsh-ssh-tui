@@ -89,6 +89,21 @@ type UserQuestionAnswerer = {
   registerProvider?(provider: { ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer> }): () => void
 }
 
+/**
+ * 0.1.2's `'user-questions/request'` is not in 0.1.1-rc.2's `Events`.
+ * Name the listener here so `tsc` against either package can emit the runtime
+ * fallback; the `registerProvider` branch still wins on 0.1.1.
+ */
+type UserQuestionWaterfallHost = {
+  on(
+    event: 'user-questions/request',
+    listener: (
+      request: AskUserQuestionRequest,
+      next: () => Promise<AskUserQuestionAnswer>,
+    ) => Promise<AskUserQuestionAnswer>,
+  ): () => void
+}
+
 function installUserQuestionAnswerer(
   ctx: Context,
   questions: object,
@@ -98,7 +113,7 @@ function installUserQuestionAnswerer(
   if (typeof provider.registerProvider === 'function') {
     return provider.registerProvider({ ask })
   }
-  return ctx.on('user-questions/request', async (request: AskUserQuestionRequest, next: () => Promise<AskUserQuestionAnswer>) => {
+  return (ctx as UserQuestionWaterfallHost).on('user-questions/request', async (request, next) => {
     try {
       return await ask(request)
     } catch (error: unknown) {
