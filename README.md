@@ -51,9 +51,9 @@ dsh --profile tui
   `▸ 已思考 · N 行`，可单独展开；思考过程中也能实时展开/收起查看原文；
 - 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
   粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以粗体白色显示；
-- 工具调用卡片化：彩色状态点（运行黄 / 成功绿 / 失败红）、shell 命令友好展示、
-  编辑工具 git 风格 diff（`-` 浅红底 / `+` 浅绿底 / 文件统计，编辑卡片默认展开且
-  diff 内容不截断）、JSON 参数与结果自动转可读内容；
+- 工具调用卡片化：标题与结果文字跟随执行状态（运行黄 / 成功绿 / 失败红），
+  shell 命令浅灰显示、状态点同色；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
+  文件统计，编辑卡片默认展开且 diff 内容不截断）、JSON 参数与结果自动转可读内容；
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
 - 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
   第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧；
@@ -82,6 +82,14 @@ dsh --profile tui
 dsh plugin --profile tui add dsh-llm-xai-oauth
 dsh plugin --profile headless add dsh-llm-xai-oauth
 ```
+
+SuperGrok 的 access token 大约 1 小时过期。TUI 打开时会刷新即将过期的 token，`/usage` 遇到 401 也会再刷一次。机器长时间不开 dsh 时，请另开刷新进程，否则一打开就是 401：
+
+```bash
+npx dsh-llm-xai-oauth daemon --install
+```
+
+说明见 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)。
 
 先确认链路再开 TUI（无 TTY 时 TUI 会直接退出）：
 
@@ -213,9 +221,10 @@ dsh --profile tui --no-color
 每个提供商上次的模型和思考强度会分开记住。`/setup` 只新增或更新当前这条
 API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。
 
-子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：DeepSeek 用
-`deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`，xAI 用 `grok-4.5`。
-`/model` 或 `/setup` 换提供商（OAuth / API Key 都一样）时会自动同步子代理：
+子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：按父会话所选模型名
+近似匹配，`flash` 结尾的优先——DeepSeek 用 `deepseek-v4-flash`，xAI 用
+`grok-4.5`。`/model` 或 `/provider` 换提供商（OAuth / API Key 都一样）时会
+**自动落盘**子代理模型（不弹窗；想手动改再用 `/submodel`）：
 
 - `/submodel [model-id]`：打开子代理模型选择器；带参数时直接指定模型；
 - `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”；

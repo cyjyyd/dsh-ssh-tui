@@ -41,6 +41,7 @@ import {
   upsertRememberedRoute,
   type RememberedRoute,
 } from './route-memory.js'
+import { AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-agent-default-model'
 import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
@@ -50,6 +51,7 @@ import {
   type SubagentSelection,
   type SubagentSelectionRef,
 } from './subagent-model.js'
+import { resolveFreshSuperGrokToken } from './supergrok-token.js'
 
 import {
   UserQuestionError,
@@ -1065,6 +1067,76 @@ function wrap(text: string, width: number): string[] {
   return lines
 }
 
+/** One colored span inside a tool-card header line. Offsets are UTF-16 char indices. */
+interface TextSegment {
+  start: number
+  end: number
+  sgr: string
+}
+
+/** Wrap plain text and report each output line's char range in the source. */
+function wrapTracked(text: string, width: number): { line: string; start: number; end: number }[] {
+  const limit = Math.max(1, width)
+  const out: { line: string; start: number; end: number }[] = []
+  let base = 0
+  for (const sourceLine of text.split('\n')) {
+    if (sourceLine === '') {
+      out.push({ line: '', start: base, end: base })
+      base += 1
+      continue
+    }
+    let rest = sourceLine
+    let cursor = base
+    while (displayWidth(rest) > limit) {
+      let cut = 0
+      let used = 0
+      for (const char of rest) {
+        const charWidth = displayWidth(char)
+        if (charWidth > 0 && used + charWidth > limit) break
+        used += charWidth
+        cut += char.length
+      }
+      if (cut === 0) cut = firstCodePointLength(rest)
+      out.push({ line: rest.slice(0, cut), start: cursor, end: cursor + cut })
+      rest = rest.slice(cut)
+      cursor += cut
+    }
+    out.push({ line: rest, start: cursor, end: cursor + rest.length })
+    base += sourceLine.length + 1
+  }
+  return out
+}
+
+/** Paint one already-wrapped output line by the segments overlapping its range. */
+function paintSegmentedLine(
+  line: string,
+  start: number,
+  end: number,
+  segments: readonly TextSegment[],
+): string {
+  if (segments.length === 0) return line
+  let out = ''
+  for (const seg of segments) {
+    if (seg.end <= start) continue
+    if (seg.start >= end) break
+    const from = Math.max(seg.start, start)
+    const to = Math.min(seg.end, end)
+    if (to <= from) continue
+    out += `\x1b[${seg.sgr}m${line.slice(from - start, to - start)}\x1b[0m`
+  }
+  return out === '' ? line : out
+}
+
+/** Wrap `text` and color each output line by overlapping `segments`. */
+function wrapSegmented(
+  text: string,
+  width: number,
+  segments: readonly TextSegment[],
+): string[] {
+  return wrapTracked(text, width).map(({ line, start, end }) =>
+    paintSegmentedLine(line, start, end, segments))
+}
+
 function truncate(text: string, maxLines: number): string {
   const lines = text.split('\n')
   if (maxLines <= 0) return ''
@@ -2053,6 +2125,25 @@ function friendlyArgsSummary(name: string, args: string): string {
 const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
 const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
+
+/** Localized card titles for tool names without a dedicated branch. */
+const TOOL_TITLE_MAP: Record<string, string> = {
+  edit: '编辑',
+  write: '写入',
+  str_replace_editor: '替换',
+  fetch: '抓取网页',
+  list_files: '列出文件',
+  list: '列出文件',
+  ls: '列出文件',
+  find: '搜索文件',
+  search: '网页搜索',
+  delete: '删除文件',
+  rm: '删除文件',
+  rename: '重命名文件',
+  mv: '重命名文件',
+  mkdir: '创建目录',
+  skills: '技能',
+}
 const MAX_SUBAGENT_LOGS = 80
 
 const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
@@ -2406,7 +2497,7 @@ export function presentToolCall(name: string, args: string): {
     const diff = diffHunksFromArgs(name, args)
     const path = diff?.[0]?.path
     return {
-      title: name,
+      title: TOOL_TITLE_MAP[name] ?? name,
       summary: path ?? friendlyArgsSummary(name, args),
       ...diff === null || diff === undefined ? {} : { diff },
     }
@@ -2454,7 +2545,7 @@ export function presentToolCall(name: string, args: string): {
     const url = typeof parsed?.url === 'string' ? parsed.url : ''
     return { title: '抓取网页', summary: url || friendlyArgsSummary(name, args) }
   }
-  return { title: name, summary: friendlyArgsSummary(name, args) }
+  return { title: TOOL_TITLE_MAP[name] ?? name, summary: friendlyArgsSummary(name, args) }
 }
 
 /** Validate a tool/result meta payload's structured diff, mirroring the web card. */
@@ -3586,20 +3677,11 @@ export class SshTui {
       if (row.kind === 'tool') {
         const running = row.status === undefined || row.status === 'running'
         const ok = row.status === 'ok'
-        // The status dot carries its own ANSI color. `styleLine` sanitizes its
-        // input, so embedding the escape sequence there would leave literal
-        // "[33m" text on screen; color the dot between two sanitized halves.
-        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
-        const styleToolHeader = (line: string): string => {
-          const safe = sanitizeTerminalText(line)
-          if (!this.color) return safe
-          const dotIndex = safe.indexOf('●')
-          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', safe)
-          return `\x1b[33m${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[33m${safe.slice(dotIndex + 1)}\x1b[0m`
-        }
+        // Header text follows the execution state; the shell command itself
+        // stays dim so it reads like a command, not a status.
+        const stateCode = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
         const spinner = running ? ` ${this.spinnerFrame()}` : ''
         const state = running ? 'running…' : ok ? 'ok' : 'error'
-        const summary = row.summary === '' ? '' : `  ${row.summary}`
         const exit = !running && row.command !== undefined
           ? row.signal !== undefined
             ? `  [信号 ${row.signal}]`
@@ -3609,25 +3691,49 @@ export class SshTui {
           : ''
         const focused = this.focusedRow === row
         const marker = row.expanded ? '▾' : '▸'
-        const plainHeader = `${marker} ● ${row.title}${summary}  [${state}]${exit}${spinner}`
+        const lead = `${focused ? '▶ ' : '  '}${marker} ● ${row.title}`
+        // Summary carries the operand (command / path / pattern), not a status:
+        // keep it dim so the title stays the colored, readable part.
+        const summaryText = row.summary === '' ? '' : `  ${row.summary}`
+        const tail = `  [${state}]${exit}${spinner}`
+        const plainHeader = `${lead}${summaryText}${tail}`
+        const headerSegments: TextSegment[] = stateCode === undefined
+          ? []
+          : [
+              { start: 0, end: lead.length, sgr: stateCode },
+              { start: lead.length, end: lead.length + summaryText.length, sgr: '90' },
+              { start: lead.length + summaryText.length, end: plainHeader.length, sgr: stateCode },
+            ]
         if (!row.expanded) {
-          const collapsed = truncateToWidth(
-            `${focused ? '▶ ' : '  '}${plainHeader}`,
-            Math.max(1, width - 2),
-          )
-          const styled = styleToolHeader(collapsed)
+          const collapsed = truncateToWidth(plainHeader, Math.max(1, width - 2))
+          const styled = stateCode === undefined
+            ? collapsed
+            : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
           addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
           continue
         }
-        for (const wrapped of wrap(`${focused ? '▶ ' : '  '}${plainHeader}`, width)) {
-          addDisplay(styleToolHeader(wrapped), row)
+        const expandedHeaderLines = headerSegments.length === 0
+          ? wrap(plainHeader, width)
+          : wrapSegmented(plainHeader, Math.max(1, width), headerSegments)
+        for (const wrapped of expandedHeaderLines) {
+          addDisplay(wrapped, row)
         }
+        const bodyCode = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
         for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
           const inner = Math.max(1, width - 2)
           const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
           for (const wrapped of wrap(line.text, inner)) {
             const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
-            addDisplay(this.styleLine(line.kind, body), row)
+            // Diffs and todo marks keep their dedicated colors; ordinary
+            // results follow the tool's execution state (yellow running /
+            // green ok / red error).
+            const kind = line.kind
+            const style = kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
+              ? this.styleLine(kind, body)
+              : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
+                ? this.styleLine(kind, body)
+                : this.styleStatusText(bodyCode ?? (kind === 'error' ? '31' : '37'), body)
+            addDisplay(style, row)
           }
         }
         continue
@@ -4289,6 +4395,13 @@ export class SshTui {
     this.paint()
   }
 
+  /** Color one line with an explicit SGR code (tool state colors, etc.). */
+  private styleStatusText(code: string, text: string): string {
+    const safe = sanitizeTerminalText(text)
+    if (!this.color) return safe
+    return `\x1b[${code}m${safe}\x1b[0m`
+  }
+
   private styleLine(kind: DisplayKind, text: string): string {
     const safe = sanitizeTerminalText(text)
     if (!this.color) return safe
@@ -4330,7 +4443,7 @@ export class SshTui {
     const provider = selection.provider ?? parentProvider
     const model = subagentModelMatchesProvider(provider, selection.model)
       ? selection.model
-      : defaultSubagentModelForProvider(provider)
+      : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
     return {
       ...resolved,
       provider,
@@ -5560,7 +5673,7 @@ export class SshTui {
     }
     if (this.selectionRef !== undefined) this.selectionRef.current = next
     this.onSelectionChanged?.(next)
-    await this.ctx.get('agentDefaultModel')?.saveSelection(next)
+    await this.persistDefaultSelection(next)
     await this.rememberRoute(next)
     const kind = describeProviderRoute(provider)
     this.pushRow({
@@ -5571,13 +5684,52 @@ export class SshTui {
     const previousProvider = current?.provider ?? this.agent.options.provider ?? this.providerName
     if (previousProvider !== provider) {
       await this.syncSubagentToProvider(provider, listedIds, true)
-      await this.promptSubagentAfterProviderSwitch(provider)
       this.clearQuotaForProvider(provider)
       void this.refreshQuota({ reason: 'command', announce: false }).catch(() => {})
     } else {
       await this.syncSubagentToProvider(provider, listedIds)
     }
     this.markDirty()
+  }
+
+  /**
+   * Persist the default provider/model selection. `agentDefaultModel` may be
+   * unavailable or its settings namespace may not be registered in this
+   * process, so a failed `saveSelection` falls back to writing the
+   * `agent-default-model` settings section directly and surfaces a warning
+   * when neither path sticks.
+   */
+  private async persistDefaultSelection(next: ModelSelection): Promise<boolean> {
+    const settings = this.ctx.get('settings')
+    const defaultModel = this.ctx.get('agentDefaultModel')
+    if (defaultModel !== undefined) {
+      try {
+        await defaultModel.saveSelection(next)
+        return true
+      } catch {
+        // Fall through to the direct settings write.
+      }
+    }
+    if (settings !== undefined) {
+      try {
+        await settings.replace(AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE, {
+          provider: next.provider,
+          model: next.model,
+          ...(next.reasoningEffort === undefined ? {} : { reasoningEffort: String(next.reasoningEffort) }),
+        })
+        return true
+      } catch (error: unknown) {
+        this.pushRow({
+          kind: 'error',
+          text: `默认选择未能固化：agentDefaultModel 不可用且 settings 写入失败（${errorChain(error)}）。本次切换仅当前会话生效，重启会回退到保存过的提供商。`,
+        })
+        this.markDirty()
+        return false
+      }
+    }
+    this.pushRow({ kind: 'error', text: '默认选择未能固化：settings 服务不可用。本次切换仅当前会话生效。' })
+    this.markDirty()
+    return false
   }
 
   /** Provider route the next subagent request should use. */
@@ -5610,7 +5762,8 @@ export class SshTui {
         catalog = []
       }
     }
-    const nextModel = defaultSubagentModelForProvider(provider, catalog)
+    const parentModel = this.selectionRef?.current?.model ?? this.agent.options.model
+    const nextModel = defaultSubagentModelForProvider(provider, catalog, parentModel)
     if (!force && nextModel === current.model && current.provider === undefined) return
     const persisted = await this.saveSubagentSelection({
       model: nextModel,
@@ -5620,38 +5773,6 @@ export class SshTui {
       kind: 'system',
       text: `子代理已跟随提供商 ${provider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
     })
-  }
-
-  private async promptSubagentAfterProviderSwitch(provider: string): Promise<void> {
-    const current = this.subagentSelection.current
-    try {
-      const { options, source } = await this.subagentModelOptions(provider)
-      const listed = options.length === 0
-        ? [{ id: current.model, label: current.model }]
-        : options
-      if (!listed.some(option => option.id === current.model)) {
-        listed.unshift({ id: current.model, label: current.model })
-      }
-      const selected = await this.pickModelOption(
-        listed,
-        provider,
-        source,
-        current.model,
-      )
-      if (selected === undefined || selected.id === current.model) return
-      if (!(await this.ensureProviderModelConfigured(provider, selected.id))) return
-      const persisted = await this.saveSubagentSelection({ model: selected.id })
-      this.pushRow({
-        kind: 'system',
-        text: `子代理模型已设为 ${selected.id}（提供方跟随 ${provider}）${persisted ? '' : '（仅当前会话）'}。`,
-      })
-    } catch (error: unknown) {
-      if (error instanceof UserQuestionError) {
-        this.pushRow({ kind: 'system', text: `子代理沿用 ${current.model}。之后可用 /submodel 再改。` })
-        return
-      }
-      this.pushRow({ kind: 'error', text: `选择子代理模型失败：${errorChain(error)}` })
-    }
   }
 
   private clearQuotaForProvider(provider: string): void {
@@ -6079,13 +6200,26 @@ export class SshTui {
     if (providerUsesLocalOAuth(provider)) {
       const token = await this.resolveSuperGrokToken()
       if (token === undefined) throw new Error('未找到 SuperGrok OAuth token（~/.grok-bridge/auth.json）')
-      const payload = await this.fetchJson(SUPERGROK_BILLING_URL, {
+      const headers = {
         authorization: `Bearer ${token}`,
         accept: 'application/json',
         'x-grok-client-mode': 'cli',
         'x-grok-client-version': '1.0.0',
-      }, 'SuperGrok')
-      return parseSuperGrokBilling(payload)
+      }
+      try {
+        const payload = await this.fetchJson(SUPERGROK_BILLING_URL, headers, 'SuperGrok')
+        return parseSuperGrokBilling(payload)
+      } catch (error: unknown) {
+        const message = errorChain(error)
+        if (!message.includes('HTTP 401') && !message.includes('HTTP 403')) throw error
+        const retried = await this.resolveSuperGrokToken({ force: true })
+        if (retried === undefined || retried === token) throw error
+        const payload = await this.fetchJson(SUPERGROK_BILLING_URL, {
+          ...headers,
+          authorization: `Bearer ${retried}`,
+        }, 'SuperGrok')
+        return parseSuperGrokBilling(payload)
+      }
     }
     const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
     const source = openCodeSourceFor(provider, llmPiAi)
@@ -6096,21 +6230,8 @@ export class SshTui {
     return parseOpenCodeGoQuota(payload, source.provider)
   }
 
-  private async resolveSuperGrokToken(): Promise<string | undefined> {
-    const fromFile = async (path: string): Promise<string | undefined> => {
-      try {
-        const parsed = JSON.parse(await readFile(path, 'utf8')) as {
-          access_token?: unknown
-          accessToken?: unknown
-        }
-        const token = typeof parsed.access_token === 'string' ? parsed.access_token : parsed.accessToken
-        return typeof token === 'string' && token.trim() !== '' ? token.trim() : undefined
-      } catch {
-        return undefined
-      }
-    }
-    return await fromFile(join(homedir(), '.grok-bridge', 'auth.json'))
-      ?? await fromFile(join(homedir(), '.grok', 'auth.json'))
+  private async resolveSuperGrokToken(options: { force?: boolean } = {}): Promise<string | undefined> {
+    return resolveFreshSuperGrokToken(options)
   }
 
   private async fetchJson(url: string, headers: Record<string, string>, label: string): Promise<unknown> {

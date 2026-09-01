@@ -41,26 +41,53 @@ function modelLooksLike(model: string, markers: readonly string[]): boolean {
   return markers.some(marker => id.includes(marker))
 }
 
+/** Length of the shared leading characters between two model ids. */
+function commonPrefixLength(a: string, b: string): number {
+  let index = 0
+  while (index < a.length && index < b.length && a[index] === b[index]) index += 1
+  return index
+}
+
+function isFlashLike(id: string): boolean {
+  return id.endsWith('flash') || /[-_]flash(?:[-_]|$)/u.test(id)
+}
+
 /**
  * Rank a listed model for automatic subagent selection. Lower is better:
- * exact preferred id, then flash/vision-lite, then other same-family ids.
+ * exact provider default first, then the parent-selected model, then a
+ * flash-like id close to the parent's name (same series), then the rest.
  */
-function scoreSubagentCandidate(model: string, preferred: string[]): number {
+function scoreSubagentCandidate(
+  model: string,
+  preferred: readonly string[],
+  parentModel: string | undefined,
+): number {
   const id = model.trim().toLowerCase()
-  const exact = preferred.findIndex(item => item.toLowerCase() === id)
-  if (exact >= 0) return exact
-  if (id.includes('flash') || id.includes('lite') || id.includes('mini') || id.includes('small')) return preferred.length
-  if (id.includes('vision')) return preferred.length + 1
-  return preferred.length + 8
+  const parent = parentModel?.trim().toLowerCase() ?? ''
+  const exactPreferred = preferred.findIndex(item => item.toLowerCase() === id)
+  if (exactPreferred >= 0) return -100 + exactPreferred
+  if (parent !== '' && id === parent) return -88
+  let score = isFlashLike(id) ? -70 : -50
+  if (parent !== '') {
+    const shared = commonPrefixLength(id, parent)
+    if (shared >= 12) score -= 10
+    else if (shared >= 8) score -= 4
+  }
+  if (id.includes('vision')) score += 6
+  if (id.includes('pro') || id.includes('max') || id.includes('4.6')) score += 12
+  return score
 }
 
 /**
  * Choose the default subagent model for a parent provider, preferring a
- * same-family listed model over a leftover DeepSeek flash id.
+ * same-family listed model over a leftover DeepSeek flash id. When the
+ * parent's own model id is supplied, candidates closest to that name win,
+ * with flash-like ids ranked first.
  */
 export function defaultSubagentModelForProvider(
   provider: string,
   listed: readonly string[] = [],
+  parentModel?: string,
 ): string {
   const family = providerFamily(provider)
   const preferred = family === 'xai'
@@ -76,7 +103,8 @@ export function defaultSubagentModelForProvider(
           : true)
     const pool = sameFamily.length > 0 ? sameFamily : unique
     return [...pool].sort((a, b) => {
-      const delta = scoreSubagentCandidate(a, preferred) - scoreSubagentCandidate(b, preferred)
+      const delta = scoreSubagentCandidate(a, preferred, parentModel)
+        - scoreSubagentCandidate(b, preferred, parentModel)
       return delta !== 0 ? delta : a.localeCompare(b)
     })[0] ?? (preferred[0] ?? unique[0] ?? DEFAULT_SUBAGENT_MODEL)
   }

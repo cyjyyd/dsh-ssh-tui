@@ -8,16 +8,36 @@
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import { errorChain } from '@deepseek-ai/dsh-llm'
+import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import yaml from 'js-yaml'
+
+/** Read the user's `agent-default-model` straight from `$DSH_HOME/settings.yaml`. */
+function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  try {
+    const parsed = yaml.load(readFileSync(join(home, 'settings.yaml'), 'utf8')) as unknown
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const section = (parsed as Record<string, unknown>)['agent-default-model']
+    return section !== null && typeof section === 'object' && !Array.isArray(section)
+      ? section as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
+}
 import { showSessionPicker } from './picker.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
 import { acquireSessionLock, releaseSessionLock, sessionLockDisabled } from './session-lock.js'
-import { installRouteMemory } from './route-memory.js'
+import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
+
 
 export const name = 'ssh-tui'
 
@@ -99,17 +119,52 @@ export function apply(ctx: Context, config: Config): void {
       const agents = ctx.get('agents')
       if (agents === undefined) throw new Error('dsh-ssh-tui: agents service is unavailable')
       const defaultModel = ctx.get('agentDefaultModel')
-      const savedSelection = defaultModel?.currentSelection()
+      const serviceSaved = defaultModel?.currentSelection()
+      // The settings document / on-disk file is the authoritative source for a
+      // default that must survive a restart. The agentDefaultModel service
+      // (or a duplicate settings instance) can report a stale in-memory
+      // selection, so prefer the file when it carries a user section.
+      const settingsSvc = ctx.get('settings') as
+        | { document?: unknown }
+        | undefined
+      const doc = settingsSvc?.document
+      const docSection = doc !== null && typeof doc === 'object' && !Array.isArray(doc)
+        ? (doc as Record<string, unknown>)['agent-default-model']
+        : undefined
+      const fileSection = readAgentDefaultFromFile()
+      const authoritative = (fileSection ?? docSection) as
+        | { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+        | undefined
+      const savedSelection: ModelSelection | undefined =
+        authoritative !== undefined
+          && typeof authoritative.provider === 'string'
+          && typeof authoritative.model === 'string'
+          ? {
+              provider: authoritative.provider,
+              model: authoritative.model,
+              ...(typeof authoritative.reasoningEffort === 'string'
+                ? { reasoningEffort: ReasoningEffortId(authoritative.reasoningEffort) }
+                : {}),
+            }
+          : serviceSaved
+      const hasUserDefaultSection = fileSection !== undefined || docSection !== undefined
+      const rememberedFallback = !hasUserDefaultSection
+        ? latestRememberedRoute(parseRouteMemory(
+            (settingsSvc as { document?: Record<string, unknown> } | undefined)?.document?.['ssh-tui-routes'],
+          ))
+        : undefined
 
       // An explicit in-process change (/setup or /model) wins over launch-time
       // CLI overrides for every session created or resumed later in this process.
       const provider = liveSelection?.provider
         ?? config.provider
         ?? savedSelection?.provider
+        ?? rememberedFallback?.provider
         ?? 'deepseek-official'
       const model = liveSelection?.model
         ?? config.model
         ?? savedSelection?.model
+        ?? rememberedFallback?.model
         ?? 'deepseek-v4-flash'
 
       // Reasoning effort is only meaningful for the exact provider/model it
@@ -117,10 +172,13 @@ export function apply(ctx: Context, config: Config): void {
       // saved effort of a different model.
       let reasoningEffort = liveSelection?.reasoningEffort
       if (reasoningEffort === undefined && liveSelection === undefined) {
-        const sameSavedRoute = savedSelection !== undefined
-          && (config.provider === undefined || config.provider === savedSelection.provider)
-          && (config.model === undefined || config.model === savedSelection.model)
-        if (sameSavedRoute) reasoningEffort = savedSelection.reasoningEffort
+        const sameSavedRoute = (savedSelection ?? rememberedFallback) !== undefined
+          && (config.provider === undefined || config.provider === (savedSelection ?? rememberedFallback)?.provider)
+          && (config.model === undefined || config.model === (savedSelection ?? rememberedFallback)?.model)
+        if (sameSavedRoute) {
+          const rawEffort = (savedSelection ?? rememberedFallback)?.reasoningEffort
+          reasoningEffort = rawEffort === undefined ? undefined : ReasoningEffortId(String(rawEffort))
+        }
       }
       // OpenCode / third-party (llm-pi-ai) routes carry no adapter-level
       // reasoning default, so default a supported effort ourselves when none is

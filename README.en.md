@@ -76,6 +76,14 @@ dsh plugin --profile tui add dsh-llm-xai-oauth
 dsh plugin --profile headless add dsh-llm-xai-oauth
 ```
 
+SuperGrok access tokens last about an hour. The TUI refreshes a due token on open, and `/usage` force-refreshes once after HTTP 401. If dsh is not running overnight, install the companion refresher or the next session starts with 401:
+
+```sh
+npx dsh-llm-xai-oauth daemon --install
+```
+
+See [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth).
+
 Smoke the route before opening the TUI. The TUI exits immediately without a TTY:
 
 ```sh
@@ -249,11 +257,14 @@ configured catalog when the endpoint cannot be reached. Picking a model that
 is not stored in the provider profile automatically adds it to
 `llm-pi-ai.providers.<id>.models` so the harness can serve it.
 
-Subagents follow the parent session's provider by default and run on the
-lightweight `deepseek-v4-flash` model. `/submodel [model-id]` picks (or
-directly sets) the subagent model, and `/subeffort` picks the subagent
-reasoning effort or restores the provider default. Both commands are
-remembered under `ssh-tui-subagent` in `$DSH_HOME/settings.yaml`.
+Subagents follow the parent session's provider by default. Switching
+provider/model persists the subagent model automatically (closest name to
+the parent's, `flash`-suffixed ids first — `deepseek-v4-flash`,
+`grok-4.5`); no dialog is shown, and `/submodel` still overrides it.
+`/submodel [model-id]` picks (or directly sets) the subagent model, and
+`/subeffort` picks the subagent reasoning effort or restores the provider
+default. Both commands are remembered under `ssh-tui-subagent` in
+`$DSH_HOME/settings.yaml`.
 `/subagents` lists active subagents, and `/subagents kill <session-id> [more ids...]`
 releases selected continuable children using the harness 0.1.1
 `drainContinuableChildren` capability.
@@ -327,16 +338,17 @@ animated spinner plus `运行中 · 工具 N` while working, `✓ 已完成` for
 seconds after completion, and `待命` when idle. A terminal bell rings on
 completion (`DSH_TUI_NO_BELL=1` disables it).
 
-Tool calls render as compact cards instead of raw argument JSON. A colored
-dot leads each card — yellow while running, green on success, red on failure
-(a shell command with a non-zero exit or signal also turns red, with a
-`[退出码 N]` / `[信号 X]` suffix). Shell tools show the command as
-`$ command`, file mutations (`edit` / `write` / `str_replace_editor`) render
-the applied change git-style: a path header, `-` lines on a light-red
-background, `+` lines on a light-green background, and a `└ +N -M · K file(s)`
-footer. File-mutation diffs are shown in full (never collapsed to a `… more`
-line) and their cards start expanded. Other tools show a short argument
-summary and start collapsed to a single line (the command, truncated with
+Tool calls render as compact cards instead of raw argument JSON. The card
+header and result text follow the execution state — yellow while running,
+green on success, red on failure (a shell command with a non-zero exit or
+signal also turns red, with a `[退出码 N]` / `[信号 X]` suffix). Shell tools
+show the command as dim-grey `$ command`, file mutations (`edit` / `write` /
+`str_replace_editor`) render the applied change git-style: a path header,
+`-` lines on a dark-red background, `+` lines on a dark-green background,
+and a `└ +N -M · K file(s)` footer. File-mutation diffs are shown in full
+(never collapsed to a `… more` line) and their cards start expanded. Other
+tools show a short argument summary and start collapsed to a single line
+(the command, truncated with
 `…` when long); expand to reveal output or the result body. Expanded generic
 calls convert their JSON arguments and JSON results into readable indented
 content — key/value fields, bullet lists, and multiline blocks for

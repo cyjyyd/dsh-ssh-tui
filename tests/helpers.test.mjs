@@ -546,6 +546,17 @@ test('presentToolCall distinguishes subagent, plan, and ask tools', () => {
   assert.equal(presentToolCall('grep', JSON.stringify({ pattern: 'TODO', path: 'src' })).summary, 'TODO  src')
 })
 
+test('presentToolCall localizes mutation and common file tool names', () => {
+  assert.equal(presentToolCall('edit', JSON.stringify({ file_path: 'a.ts', old_string: 'a', new_string: 'b' })).title, '编辑')
+  assert.equal(presentToolCall('write', JSON.stringify({ file_path: 'a.ts', content: 'x' })).title, '写入')
+  assert.equal(presentToolCall('str_replace_editor', JSON.stringify({ path: 'a.ts', command: 'str_replace' })).title, '替换')
+  assert.equal(presentToolCall('list_files', '{}').title, '列出文件')
+  assert.equal(presentToolCall('find', JSON.stringify({ pattern: '*.ts' })).title, '搜索文件')
+  assert.equal(presentToolCall('delete', JSON.stringify({ path: 'a.ts' })).title, '删除文件')
+  assert.equal(presentToolCall('skills', '{}').title, '技能')
+  assert.equal(presentToolCall('bash', JSON.stringify({ command: 'ls' })).title, 'bash')
+})
+
 test('subagent cards stay collapsed, isolated, and animate while running', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
@@ -642,6 +653,50 @@ test('expanding any collapsible card does not leave body glyphs on the input row
   assert.equal(expanded[inputIndex]?.includes('BETA_BODY_LINE'), false)
   assert.equal(collapsed.length, 16)
   assert.equal(expanded.length, 16)
+})
+
+test('tool card colors follow state: green ok, red error, dim shell command', () => {
+  const prevTerm = process.env.TERM
+  const prevNoColor = process.env.NO_COLOR
+  process.env.TERM = 'xterm-256color'
+  delete process.env.NO_COLOR
+  try {
+    const build = (status, name, summary, title, output) => {
+      const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = {
+      id: 'main-session',
+      options: { provider: 'xai', model: 'grok-4.6' },
+      status: 'idle',
+      session: { id: 'main-session', events: [] },
+      cancel() {},
+    }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, provider: 'xai' })
+    tui.rows.push({
+      kind: 'tool', callId: `c-${name}`, name, title, summary,
+      args: '{}', output, status, expanded: true,
+      ...(name === 'bash' ? { command: summary.slice(2), exitCode: status === 'ok' ? 0 : 1 } : {}),
+    })
+    return tui.captureFrame(72, 18).join('\n')
+  }
+    const okFrame = build('ok', 'bash', '$ npm test', 'bash', '3 passing')
+    assert.match(okFrame, /\x1b\[32m/)
+    assert.match(okFrame, /\x1b\[90m\s*\$\s?npm test/)
+    const errFrame = build('error', 'bash', '$ npm test', 'bash', '1 failing')
+    assert.match(errFrame, /\x1b\[31m/)
+    const readFrame = build('ok', 'read', 'src/tui.ts', '读取', 'export const x = 1')
+    assert.match(readFrame, /\x1b\[32m/)
+    // The path operand is dim (metadata), while the title stays state-colored.
+    assert.match(readFrame, /\x1b\[90m\s+src\/tui\.ts/)
+    assert.equal(readFrame.includes('\x1b[33m'), false)
+    const editFrame = build('ok', 'edit', 'src/tui.ts', '编辑', '')
+    assert.match(editFrame, /\x1b\[32m/)
+    assert.match(editFrame, /\x1b\[90m\s+src\/tui\.ts/)
+  } finally {
+    if (prevTerm === undefined) delete process.env.TERM
+    else process.env.TERM = prevTerm
+    if (prevNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = prevNoColor
+  }
 })
 
 test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
@@ -1018,6 +1073,19 @@ test('default subagent model follows the parent provider family', () => {
     defaultSubagentModelForProvider('opencode-go', ['deepseek-v4-pro', 'deepseek-v4-flash-vision-exp']),
     'deepseek-v4-flash-vision-exp',
   )
+  // With the parent model id, flash-like ids closest to the parent name win.
+  assert.equal(
+    defaultSubagentModelForProvider('deepseek-official', ['deepseek-v4-pro', 'deepseek-v4-flash'], 'deepseek-v4-pro'),
+    'deepseek-v4-flash',
+  )
+  assert.equal(
+    defaultSubagentModelForProvider('deepseek-official', ['deepseek-v4-flash-vision-exp', 'deepseek-v4-flash'], 'deepseek-v4-flash-vision-exp'),
+    'deepseek-v4-flash',
+  )
+  assert.equal(
+    defaultSubagentModelForProvider('xai', ['grok-4.6', 'grok-4.3'], 'grok-4.6'),
+    'grok-4.3',
+  )
   assert.equal(subagentModelMatchesProvider('xai', 'deepseek-v4-flash'), false)
   assert.equal(subagentModelMatchesProvider('deepseek-official', 'deepseek-v4-flash'), true)
 })
@@ -1030,4 +1098,43 @@ test('describeProviderRoute labels DeepSeek, SuperGrok, and OpenCode routes', ()
   assert.equal(providerUsesLocalOAuth('xai'), true)
   assert.equal(providerUsesLocalOAuth('deepseek-official'), false)
   assert.equal(providerUsesLocalOAuth('opencode-go'), false)
+})
+
+import {
+  parseSuperGrokAuthFile,
+  superGrokTokenNeedsRefresh,
+  persistSuperGrokToken,
+} from '../lib/supergrok-token.js'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+test('parseSuperGrokAuthFile reads grok-bridge auth.json', () => {
+  const now = 1_700_000_000_000
+  const parsed = parseSuperGrokAuthFile({
+    access_token: 'abc',
+    refresh_token: 'ref',
+    expires_at: now + 60 * 60 * 1000,
+  }, '/tmp/auth.json')
+  assert.equal(parsed?.accessToken, 'abc')
+  assert.equal(parsed?.refreshToken, 'ref')
+  assert.ok(parsed)
+  assert.equal(superGrokTokenNeedsRefresh(parsed, now), false)
+  assert.equal(superGrokTokenNeedsRefresh(parsed, now + 56 * 60 * 1000), true)
+  assert.equal(superGrokTokenNeedsRefresh({ ...parsed, expiresAt: now - 1 }, now), true)
+})
+
+test('persistSuperGrokToken writes 0600 grok-bridge auth.json', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-grok-'))
+  const path = join(home, 'auth.json')
+  const saved = await persistSuperGrokToken(path, {
+    access_token: 'new',
+    refresh_token: 'next',
+    expires_in: 3600,
+  }, 'prev', 1_700_000_000_000)
+  assert.equal(saved.accessToken, 'new')
+  const raw = JSON.parse(await readFile(path, 'utf8'))
+  assert.equal(raw.access_token, 'new')
+  assert.equal(raw.refresh_token, 'next')
+  assert.equal(raw.expires_at, 1_700_000_000_000 + 3600 * 1000)
 })
