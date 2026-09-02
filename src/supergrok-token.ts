@@ -8,6 +8,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { t } from './i18n/index.js'
 
 export const SUPERGROK_AUTH_PATHS = [
   join(homedir(), '.grok-bridge', 'auth.json'),
@@ -103,7 +104,10 @@ async function postRefresh(refreshToken: string, clientId: string): Promise<{
     const error = stringField(body, 'error')
     const description = stringField(body, 'error_description')
     throw new Error(
-      `SuperGrok token 刷新失败（HTTP ${response.status}）${error || description ? `：${[error, description].filter(Boolean).join(': ')}` : ''}`,
+      t('grok.refreshFail', {
+        status: response.status,
+        detail: error || description ? `：${[error, description].filter(Boolean).join(': ')}` : '',
+      }),
     )
   }
   return {
@@ -128,7 +132,7 @@ export async function persistSuperGrokToken(
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
   const stored = parseSuperGrokAuthFile(record, path)
-  if (stored === undefined) throw new Error(`无法写入 SuperGrok token（${path}）`)
+  if (stored === undefined) throw new Error(t('grok.writeFail', { path }))
   return stored
 }
 
@@ -145,7 +149,7 @@ export async function resolveFreshSuperGrokToken(options: {
   }
   if (current.refreshToken === null) {
     if (options.force === true || superGrokTokenNeedsRefresh({ ...current, refreshToken: 'x' }, now)) {
-      throw new Error(`SuperGrok token 没有 refresh_token，请运行 dsh-llm-xai-oauth login --force`)
+      throw new Error(t('grok.noRefresh'))
     }
     return current.accessToken
   }

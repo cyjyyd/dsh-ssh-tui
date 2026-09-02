@@ -18,8 +18,10 @@ export function compareSemver(a: string, b: string): number {
   return 0
 }
 
+import { t } from './i18n/index.js'
+
 export function formatUpdateNotice(current: string, latest: string): string {
-  return `发现新版本 dsh-ssh-tui ${latest}（当前 ${current}）。更新：dsh plugin --profile tui add dsh-ssh-tui`
+  return t('update.notice', { latest, current })
 }
 
 export async function fetchLatestNpmVersion(

@@ -13,6 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId, type ReasoningEffortId as ReasoningEffort } from '@deepseek-ai/dsh-llm'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { t } from './i18n/index.js'
 
 /** Settings namespace carrying the TUI's subagent model selection. */
 export const SUBAGENT_SETTINGS_NAMESPACE = settingsNamespace('ssh-tui-subagent')
@@ -115,6 +116,10 @@ export function defaultSubagentModelForProvider(
  * True when the stored subagent model still belongs to the parent provider
  * family. An explicit leftover DeepSeek flash id after switching to xAI is
  * treated as stale so the TUI can pick a same-family default.
+ *
+ * A non-empty `listed` catalog is an extra constraint, not a bypass: a dirty
+ * directory that still contains `deepseek-v4-flash` must not keep that id on
+ * an xAI parent.
  */
 export function subagentModelMatchesProvider(
   provider: string,
@@ -123,13 +128,56 @@ export function subagentModelMatchesProvider(
 ): boolean {
   const id = model.trim()
   if (id === '') return false
+  if (listed.length > 0 && !listed.includes(id)) return false
   const family = providerFamily(provider)
-  if (listed.length > 0) return listed.includes(id)
   if (family === 'xai') return modelLooksLike(id, GROK_MODEL_MARKERS)
   if (family === 'deepseek') return modelLooksLike(id, DEEPSEEK_MODEL_MARKERS)
   // Unknown catalog: a leftover Grok id is stale on a non-xAI route.
   if (modelLooksLike(id, GROK_MODEL_MARKERS)) return false
   return true
+}
+
+/** Cheap vs expensive hint for the automatic subagent default. */
+export type SubagentCostClass = 'light' | 'heavy' | 'other'
+
+/**
+ * Classify a model id for the subagent default. Flash / lite / mini / small
+ * and Grok 4.5 / 4.3 count as light; pro / max / 4.6 count as heavy so
+ * `/status` can show when the catalog had nothing cheaper.
+ */
+export function subagentCostClass(model: string): SubagentCostClass {
+  const id = model.trim().toLowerCase()
+  if (id === '') return 'other'
+  if (isFlashLike(id) || id.includes('lite') || id.includes('mini') || id.includes('small')) return 'light'
+  if (modelLooksLike(id, GROK_MODEL_MARKERS) && (id.includes('4.5') || id.includes('4.3'))) return 'light'
+  if (id.includes('pro') || id.includes('max') || id.includes('4.6')) return 'heavy'
+  return 'other'
+}
+
+/** One `/status` line describing the live subagent route vs the parent. */
+export function describeSubagentFit(input: {
+  parentProvider: string
+  parentModel?: string
+  subProvider?: string
+  subModel: string
+}): { line: string; sameFamily: boolean; expensive: boolean; following: boolean } {
+  const following = input.subProvider === undefined
+  const sameFamily = subagentModelMatchesProvider(input.parentProvider, input.subModel)
+  const cost = subagentCostClass(input.subModel)
+  const followLabel = following ? t('sub.followParent') : t('sub.pinned', { provider: input.subProvider ?? '' })
+  const familyLabel = sameFamily ? t('sub.sameFamily') : t('sub.crossFamily')
+  const costLabel = cost === 'light'
+    ? t('sub.light')
+    : cost === 'heavy'
+      ? (following ? t('sub.expensiveNoLight') : t('sub.expensive'))
+      : ''
+  const familyCost = costLabel === '' ? familyLabel : `${familyLabel} · ${costLabel}`
+  return {
+    line: t('sub.line', { model: input.subModel, follow: followLabel, fit: familyCost }),
+    sameFamily,
+    expensive: cost === 'heavy',
+    following,
+  }
 }
 
 /** Raw settings document shape. */

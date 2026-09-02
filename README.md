@@ -51,12 +51,14 @@ dsh --profile tui
   `▸ 已思考 · N 行`，可单独展开；思考过程中也能实时展开/收起查看原文；
 - 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
   粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以粗体白色显示；
-- 工具调用卡片化：标题与结果文字跟随执行状态（运行黄 / 成功绿 / 失败红），
-  shell 命令浅灰显示、状态点同色；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
-  文件统计，编辑卡片默认展开且 diff 内容不截断）、JSON 参数与结果自动转可读内容；
+- 系统提示词 / `system-reminder` / `AGENTS.md` 等注入折叠为「提示词注入:系统预设 AGENTS.MD」卡片，默认收起，Enter 展开看全文；
+- 工具调用卡片化：标题默认色，只把状态点与 `[ok]`/`[error]` 染成黄/绿/红；
+  shell 命令浅灰、路径 cyan；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
+  文件统计）。正文超出窗口时单独全览（Esc 返回），放得下就在工作区展开；JSON 参数与结果自动转可读内容；
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
 - 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
-  第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧；
+  第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧（含 `目录:srv`；点击打印完整工作目录）；
+- 恢复旧会话会切到该会话记录的工作目录；新建会话用启动时的当前目录；
 - 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
@@ -119,7 +121,7 @@ tmux attach -t dsh
 发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
 ```
 
-`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本。
+`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
 仓库内也可：`bash scripts/smoke-headless.sh`（记录出口摘要，不打印 token）。
 
@@ -192,12 +194,12 @@ dsh --profile tui --no-color
 
 | 键 | 作用 |
 | --- | --- |
-| `Enter` | 发送；运行中则插入指示；空输入且已选卡片时展开/收起 |
+| `Enter` | 发送；运行中则插入指示；空输入且已选卡片时展开/收起。工具正文超出窗口则单独全览，`Esc` 返回 |
 | `↑` / `↓` | 空输入：在卡片间移动；有输入：历史。与 `Ctrl+N` / `Ctrl+P` 相同 |
 | `Ctrl+R` | 全部展开或全部收起 |
 | `Ctrl+T` | 折叠输入框（只影响显示） |
 | `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复 |
-| `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮）。类：`思考` `计划` `子代理` `回复`。`Ctrl+/` 或 `Alt+/` 打开 |
+| `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮）。类：`思考` `计划` `子代理` `回复` `提示词`。`Ctrl+/` 或 `Alt+/` 打开 |
 | `Ctrl+G` / `Alt+N` | 下一条搜索结果；`Alt+P` 上一条 |
 | 鼠标左键 | 点击卡片标题展开/收起 |
 | `PgUp` / `PgDn`、滚轮 | 转录回看 |
@@ -208,8 +210,9 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
+界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
 「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
 进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
@@ -256,7 +259,7 @@ API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 O
 - **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
 - **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
 
-OpenCode Go / SuperGrok 启动和运行中都静默查询，底栏只显示剩余%；跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询节奏按最紧窗口：5 小时额度每 10 轮（接近改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。
+OpenCode Go / SuperGrok 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方余额只出现在 `/balance`，不进底栏。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询节奏按最紧窗口：5 小时额度每 10 轮（接近改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。
 
 ## 配置
 
@@ -273,6 +276,8 @@ ssh-tui-subagent:
   model: deepseek-v4-flash
   # provider 可省略：省略时子代理跟随父会话提供方
   # reasoningEffort 可省略：省略时跟随提供商/模型默认
+ssh-tui:
+  language: zh   # 或 en；/language 写入这里。DSH_TUI_LANG 优先
 ```
 
 `/model`、`/mode`、`/submodel` 与 `/subeffort` 的修改会写回这里，
@@ -335,6 +340,7 @@ src/session-list.ts 历史会话扫描与标签（共享给 /resume）
 src/session-lock.ts 同会话防双开
 src/update-check.ts npm 最新版提示（不自动升级）
 src/tui.ts          终端渲染、交互、统计、标题/铃声
+src/i18n/           中英界面字典（/language、DSH_TUI_LANG）
 cordis.patch.yml    dsh bundle patch（挂载 TUI 与 agent-presets）
 scripts/            安装 / 卸载 / 验证脚本
 ```

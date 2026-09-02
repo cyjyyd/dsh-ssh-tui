@@ -5,6 +5,7 @@
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { t } from './i18n/index.js'
 
 export interface SessionLockInfo {
   pid: number
@@ -59,11 +60,7 @@ export function processIsAlive(pid: number): boolean {
 
 export function formatLockHeldMessage(lock: SessionLockInfo): string {
   const tty = lock.tty === undefined ? '' : ` · ${lock.tty}`
-  return [
-    `会话 ${lock.sessionId} 已在 pid ${lock.pid}${tty} 运行。`,
-    '不要再开第二份 TUI。若 SSH 断过：tmux attach -t dsh',
-    '确认进程已死后，删除 $DSH_HOME/tui-locks/ 里对应的锁再启动。',
-  ].join('\n')
+  return t('lock.held', { session: lock.sessionId, pid: lock.pid, tty })
 }
 
 export function sessionLockDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -106,7 +103,7 @@ export async function acquireSessionLock(
       }
     }
   }
-  throw new Error(`无法占用会话锁 ${path}`)
+  throw new Error(t('lock.busy', { path }))
 }
 
 export async function releaseSessionLock(path: string, pid = process.pid): Promise<void> {

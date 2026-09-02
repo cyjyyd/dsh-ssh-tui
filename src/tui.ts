@@ -31,7 +31,17 @@ import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subag
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { formatSessionTime, listResumableSessions } from './session-list.js'
+import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
+import {
+  applySavedLocale,
+  getLocale,
+  localeDisplayName,
+  localeFromTag,
+  setLocale,
+  t,
+  UI_LOCALE_NAMESPACE,
+  type Locale,
+} from './i18n/index.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { checkForPluginUpdate } from './update-check.js'
 import {
@@ -46,6 +56,7 @@ import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
   defaultSubagentModelForProvider,
+  describeSubagentFit,
   subagentModelMatchesProvider,
   subagentSettingsValue,
   type SubagentSelection,
@@ -142,6 +153,8 @@ export interface TuiConfig {
   goodbye?: string
   /** Whether this launch resumes an existing persisted session. */
   resume?: boolean
+  /** One-line notice after entering a resumed session's working directory. */
+  cwdNotice?: string
   /** Provider route selected at launch (defaults to deepseek-official). */
   provider?: string
   /** Model selected at launch (defaults to the saved/fallback model). */
@@ -264,12 +277,19 @@ type Row =
       error?: string
       expanded: boolean
     }
+  | {
+      kind: 'prompt'
+      sources: string[]
+      text: string
+      plugin?: string
+      expanded: boolean
+    }
   | { kind: 'system'; text: string }
   | { kind: 'error'; text: string }
 
 /** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */
 type CollapsibleBlock =
-  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }>
+  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
 type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'plan-dock'
@@ -321,7 +341,14 @@ interface OnboardingDialog {
   kind: 'onboarding'
 }
 
-type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog
+interface InspectDialog {
+  kind: 'inspect'
+  title: string
+  lines: DiffDisplayLine[]
+  offset: number
+}
+
+type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog
 
 type OnboardingProviderType =
   | 'official'
@@ -338,41 +365,43 @@ interface ProviderTemplate {
   defaultModels: string[]
 }
 
-const PROVIDER_TEMPLATES: Record<OnboardingProviderType, ProviderTemplate> = {
+function providerTemplates(): Record<OnboardingProviderType, ProviderTemplate> {
+  return {
   official: {
-    label: 'DeepSeek 官方',
+    label: t('route.deepseek'),
     defaultId: 'deepseek-official',
     defaultBaseUrl: 'https://api.deepseek.com',
     defaultModels: ['deepseek-v4-pro', 'deepseek-v4-flash'],
   },
   'opencode-go': {
-    label: 'OpenCode Go（opencode.ai/zen/go）',
+    label: t('onboard.providerGo'),
     defaultId: 'opencode-go',
     defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
     api: 'openai-responses',
     defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   },
   'openai-completions': {
-    label: '自定义 OpenAI 兼容网关（Completions）',
+    label: t('onboard.providerCompletions'),
     defaultId: 'my-gateway',
     defaultBaseUrl: '',
     api: 'openai-completions',
     defaultModels: ['deepseek-v4-flash'],
   },
   'openai-responses': {
-    label: '自定义 OpenAI Responses 网关',
+    label: t('onboard.providerResponses'),
     defaultId: 'my-responses',
     defaultBaseUrl: '',
     api: 'openai-responses',
     defaultModels: ['deepseek-v4-flash'],
   },
   'anthropic-messages': {
-    label: 'Anthropic Messages 兼容网关',
+    label: t('onboard.providerAnthropic'),
     defaultId: 'my-anthropic',
     defaultBaseUrl: '',
     api: 'anthropic-messages',
     defaultModels: ['deepseek-v4-flash'],
   },
+  }
 }
 
 interface OnboardingState {
@@ -461,8 +490,8 @@ export function paintIntervalForRtt(rttMs: number | undefined): number {
 }
 
 export function paintLinkLabel(kind: PaintLinkKind, intervalMs: number, probed: boolean): string {
-  if (kind === 'local') return `本机绘制 ${intervalMs}ms`
-  return probed ? `SSH 绘制 ${intervalMs}ms` : `SSH 绘制 ${intervalMs}ms（未测到往返）`
+  if (kind === 'local') return t('paint.localMs', { ms: intervalMs })
+  return probed ? t('paint.sshMs', { ms: intervalMs }) : t('paint.sshMsUnprobed', { ms: intervalMs })
 }
 
 export type LinkQuality = 'local' | 'good' | 'ok' | 'slow' | 'poor' | 'unknown'
@@ -508,16 +537,16 @@ export function formatLinkQualityChip(
   const colored = color
     ? `\x1b[${LINK_PIP_COLOR[filled] ?? '90'}m${pips}\x1b[0m`
     : pips
-  if (kind === 'local') return `本机 ${colored}`
+  if (kind === 'local') return t('paint.localChip', { pips: colored })
   const delay = probed && rttMs !== undefined && Number.isFinite(rttMs)
     ? `${Math.round(rttMs)}ms`
     : `${intervalMs}ms`
-  return `SSH ${colored} ${delay}`
+  return t('paint.sshChip', { pips: colored, delay })
 }
 
 export function providerShortCode(provider: string): string {
   const id = provider.trim()
-  if (id === 'deepseek-official' || id === 'deepseek') return 'DeepSeek 官方'
+  if (id === 'deepseek-official' || id === 'deepseek') return t('route.deepseek')
   if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) return 'SuperGrok'
   if (id === 'opencode-go') return 'OpenCode Go'
   if (id === 'opencode') return 'OpenCode Zen'
@@ -542,23 +571,23 @@ export interface FooterStatsInput {
 /** Stats groups in drop order (last is dropped first when the row is too wide). */
 export function footerStatsGroups(stats: FooterStatsInput): string[] {
   const groups: string[] = []
-  if (stats.steps > 0) groups.push(`${stats.turns} 轮 · ${stats.steps} 步`)
+  if (stats.steps > 0) groups.push(t('footer.turnsSteps', { turns: stats.turns, steps: stats.steps }))
   const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
   if (billedInput > 0 || stats.outputTokens > 0) {
-    groups.push(`输入 ${formatTokens(billedInput)} · 输出 ${formatTokens(stats.outputTokens)}`)
+    groups.push(t('footer.tokens', { input: formatTokens(billedInput), output: formatTokens(stats.outputTokens) }))
   }
   const speeds: string[] = []
   if (stats.decodeMs > 0 && stats.decodeTokens > 0) {
     speeds.push(formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1_000)))
   } else if (stats.ttftSteps > 0) {
-    speeds.push(`首字 ${formatDuration(stats.ttftMs / stats.ttftSteps)}`)
+    speeds.push(t('footer.ttft', { duration: formatDuration(stats.ttftMs / stats.ttftSteps) }))
   }
   if (speeds.length > 0) groups.push(speeds.join(' '))
   const durations: string[] = []
-  if (stats.llmMs > 0) durations.push(`模型 ${formatDuration(stats.llmMs)}`)
-  if (stats.toolMs > 0) durations.push(`工具 ${formatDuration(stats.toolMs)}`)
+  if (stats.llmMs > 0) durations.push(t('footer.llmMs', { duration: formatDuration(stats.llmMs) }))
+  if (stats.toolMs > 0) durations.push(t('footer.toolMs', { duration: formatDuration(stats.toolMs) }))
   if (durations.length > 0) groups.push(durations.join(' '))
-  if (billedInput > 0) groups.push(`缓存命中 ${Math.round(stats.cacheReadTokens / billedInput * 100)}%`)
+  if (billedInput > 0) groups.push(t('footer.cacheHit', { percent: Math.round(stats.cacheReadTokens / billedInput * 100) }))
   return groups
 }
 
@@ -608,28 +637,29 @@ export interface FooterStatusInput {
   foldedInput: boolean
   multiLineInput: boolean
   queued: number
+  cwdLabel?: string
 }
 
 export function footerActivity(input: FooterStatusInput): { kind: FooterActivityKind; text: string } {
-  if (input.planReview) return { kind: 'plan-review', text: '计划待审' }
-  if (input.waitingQuestion) return { kind: 'waiting', text: '等待回答' }
-  if (input.compacting) return { kind: 'compacting', text: '压缩中' }
+  if (input.planReview) return { kind: 'plan-review', text: t('footer.planReview') }
+  if (input.waitingQuestion) return { kind: 'waiting', text: t('footer.waiting') }
+  if (input.compacting) return { kind: 'compacting', text: t('footer.compacting') }
   if (input.retry !== undefined) {
-    return { kind: 'retry', text: `重试 ${input.retry.retry}/${input.retry.maxRetries}` }
+    return { kind: 'retry', text: t('footer.retry', { retry: input.retry.retry, max: input.retry.maxRetries }) }
   }
-  if (input.subagents > 0) return { kind: 'subagents', text: `子代理 ${input.subagents}` }
-  if (input.running && input.tools > 0) return { kind: 'tools', text: `工具 ${input.tools}` }
-  if (input.planLeftOpen) return { kind: 'plan-open', text: '本轮未收尾' }
-  if (input.planPending) return { kind: 'plan-pending', text: '计划切换中' }
-  if (input.planActive) return { kind: 'plan-pending', text: '计划模式' }
-  if (input.goalPhase === 'active') return { kind: 'goal', text: '目标进行中' }
-  if (input.goalPhase === 'paused') return { kind: 'goal', text: '目标已暂停' }
-  if (input.goalPhase === 'blocked') return { kind: 'goal', text: '目标受阻' }
+  if (input.subagents > 0) return { kind: 'subagents', text: t('footer.subagents', { count: input.subagents }) }
+  if (input.running && input.tools > 0) return { kind: 'tools', text: t('footer.tools', { count: input.tools }) }
+  if (input.planLeftOpen) return { kind: 'plan-open', text: t('footer.planOpen') }
+  if (input.planPending) return { kind: 'plan-pending', text: t('footer.planSwitching') }
+  if (input.planActive) return { kind: 'plan-pending', text: t('footer.planMode') }
+  if (input.goalPhase === 'active') return { kind: 'goal', text: t('footer.goalActive') }
+  if (input.goalPhase === 'paused') return { kind: 'goal', text: t('footer.goalPaused') }
+  if (input.goalPhase === 'blocked') return { kind: 'goal', text: t('footer.goalBlocked') }
   if (input.running && input.idleMs > WAIT_INDICATOR_MS) {
-    return { kind: 'waiting-llm', text: `等待 ${Math.floor(input.idleMs / 1000)}s` }
+    return { kind: 'waiting-llm', text: t('footer.waitSeconds', { seconds: Math.floor(input.idleMs / 1000) }) }
   }
-  if (input.running) return { kind: 'idle', text: '运行中' }
-  return { kind: 'idle', text: '空闲' }
+  if (input.running) return { kind: 'idle', text: t('footer.running') }
+  return { kind: 'idle', text: t('footer.idle') }
 }
 
 /** Short remaining-quota bar: 8 pips, filled from the left. */
@@ -642,22 +672,46 @@ export function formatQuotaBar(remainingPercent: number, width = 8): string {
 export function footerIdentityParts(input: FooterStatusInput): string[] {
   const parts: string[] = []
   if (input.preset !== undefined && input.preset !== '') parts.push(`[${input.preset}]`)
+  if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
   const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
   if (model !== '') parts.push(model)
   if (input.subDiffers) parts.push(`sub:${input.subModel}`)
-  if (input.quotaCode !== undefined && input.quotaPercent !== undefined) {
-    parts.push(`${input.quotaCode} ${formatQuotaBar(input.quotaPercent)} ${input.quotaPercent.toFixed(0)}%`)
+  if (input.quotaPercent !== undefined) {
+    parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
   }
-  if (input.search !== undefined) parts.push(`搜索 ${input.search.index + 1}/${input.search.total}`)
-  if (input.foldedInput) parts.push('输入已折叠')
-  else if (input.multiLineInput) parts.push('多行输入')
-  if (input.queued > 0) parts.push(`排队 ${input.queued}`)
+  if (input.search !== undefined) parts.push(t('footer.search', { index: input.search.index + 1, total: input.search.total }))
+  if (input.foldedInput) parts.push(t('footer.inputFolded'))
+  else if (input.multiLineInput) parts.push(t('footer.multiLine'))
+  if (input.queued > 0) parts.push(t('footer.queued', { count: input.queued }))
   return parts
+}
+
+/** `SuperGrok ███████░ 82%`, or just the bar + percent when `code` is omitted. */
+export function formatFooterQuota(percent: number, code?: string): string {
+  const bar = `${formatQuotaBar(percent)} ${percent.toFixed(0)}%`
+  return code !== undefined && code.trim() !== '' ? `${code.trim()} ${bar}` : bar
+}
+
+/**
+ * Drop the Go / SuperGrok plan name from a quota identity part, keeping the
+ * remaining-percent bar. Returns true when a part was rewritten.
+ */
+export function dropFooterQuotaPlanName(parts: string[]): boolean {
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]
+    if (part === undefined) continue
+    const barAt = part.search(/ [█░]+ \d+%$/)
+    if (barAt <= 0) continue
+    parts[index] = part.slice(barAt + 1)
+    return true
+  }
+  return false
 }
 
 export function fitFooterStatusLine(activity: string, identity: readonly string[], width: number): string {
   const kept = [...identity]
   const render = (): string => kept.length === 0 ? activity : `${activity}  ${kept.join(' · ')}`
+  if (displayWidth(render()) > width) dropFooterQuotaPlanName(kept)
   while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
   return truncateToWidth(render(), Math.max(1, width))
 }
@@ -717,7 +771,7 @@ const PLUGIN_VERSION = ((): string => {
 const STALL_WARNING_MS = 60000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
-const SUBAGENT_DEFAULT_EFFORT_LABEL = '跟随提供商默认'
+const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
 const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
@@ -850,18 +904,64 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
   },
 ]
 
+export interface StatusReportInput {
+  sessionId: string
+  pluginVersion: string
+  provider: string
+  model: string
+  effort?: string
+  agentStatus: string
+  preset: string
+  activeSubagents: number
+  plan: 'off' | 'pending' | 'on'
+  paint: string
+  waitingQuestions: number
+  quota?: QuotaSnapshot
+  parentModel?: string
+  subProvider?: string
+  subModel: string
+  cwd?: string
+}
+
+/** Lines printed by `/status` — SSH first-boot diagnostics, no extra command. */
+export function formatStatusReport(input: StatusReportInput): string[] {
+  const route = describeProviderRoute(input.provider)
+  const effort = input.effort === undefined ? '' : ` (${input.effort})`
+  const fit = describeSubagentFit({
+    parentProvider: input.provider,
+    parentModel: input.parentModel,
+    subProvider: input.subProvider,
+    subModel: input.subModel,
+  })
+  return [
+    `session: ${input.sessionId}`,
+    `plugin: dsh-ssh-tui ${input.pluginVersion}`,
+    `cwd: ${input.cwd ?? ''}`,
+    `route: ${input.provider}/${input.model}${effort}`,
+    `provider: ${route.kind}`,
+    `status: ${input.agentStatus}`,
+    `preset: ${input.preset}`,
+    `subagents: ${input.activeSubagents}`,
+    fit.line,
+    `plan: ${input.plan}`,
+    formatQuotaStatusLine(input.quota),
+    `paint: ${input.paint}`,
+    input.waitingQuestions > 0 ? `questions: waiting ${input.waitingQuestions}` : 'questions: none',
+  ]
+}
+
 /** Human-facing kind for a live LLM route. */
 export function describeProviderRoute(provider: string): { kind: string; short: string } {
   const id = provider.trim()
   if (id === 'deepseek-official' || id === 'deepseek') {
-    return { kind: 'DeepSeek 官方', short: 'DeepSeek 官方' }
+    return { kind: t('route.deepseek'), short: t('route.deepseek') }
   }
   if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) {
-    return { kind: 'SuperGrok / X Premium 订阅', short: 'SuperGrok' }
+    return { kind: t('route.supergrokKind'), short: t('route.supergrokShort') }
   }
-  if (id === 'opencode-go') return { kind: 'OpenCode Go', short: 'OpenCode Go' }
-  if (id === 'opencode') return { kind: 'OpenCode Zen', short: 'OpenCode Zen' }
-  return { kind: '已注册提供商', short: id }
+  if (id === 'opencode-go') return { kind: t('route.go'), short: t('route.go') }
+  if (id === 'opencode') return { kind: t('route.zen'), short: t('route.zen') }
+  return { kind: t('route.registered'), short: id }
 }
 
 /** Routes that authenticate without a harness API-key credential. */
@@ -880,15 +980,25 @@ const LOCAL_COMMANDS = [
   { name: 'quit', description: 'exit the TUI' },
   { name: 'exit', description: 'exit the TUI' },
   { name: 'clear', description: 'clear the transcript view' },
-  { name: 'status', description: 'show session, provider, model, paint, and plugin version' },
+  { name: 'status', description: 'show session, route, quota window, subagent fit, paint, and plugin version' },
   { name: 'usage', description: 'show remaining quota or account balance for the current provider' },
   { name: 'balance', description: 'alias of /usage: DeepSeek / OpenAI-compatible balance, or subscription quota' },
   { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
   { name: 'resume', description: 'resume a past session (empty = session picker)' },
   { name: 'setup', description: 'add or update an API-key provider without wiping other saved routes' },
   { name: 'find', description: 'search thinking / plan / subagent / reply cards' },
+  { name: 'language', description: 'switch UI language (zh / en); empty opens a picker' },
+  { name: 'lang', description: 'alias of /language' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
+
+function localizedCommands(): { name: string; description: string }[] {
+  return LOCAL_COMMANDS.map(command => (
+    command.name === 'language' || command.name === 'lang'
+      ? { name: command.name, description: t('lang.cmd') }
+      : command
+  ))
+}
 
 /**
  * Terminal cell width for one string.
@@ -1747,7 +1857,12 @@ export function crossedQuotaThresholds(previousRemaining: number | undefined, re
 
 export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): string {
   const reset = window.resetsAt === undefined ? '' : `（${formatQuotaReset(window.resetsAt)}）`
-  return `⚠ 请注意你的 ${snapshot.plan} 的每${quotaPeriodLabel(window.period)}额度还剩余 ${window.remainingPercent.toFixed(0)}%${reset}，请合理规划剩余额度的使用。`
+  return t('quota.alert', {
+    plan: snapshot.plan,
+    period: quotaPeriodLabel(window.period),
+    percent: window.remainingPercent.toFixed(0),
+    reset,
+  })
 }
 
 /**
@@ -1771,10 +1886,10 @@ export function quotaRefreshEverySteps(window: QuotaWindow | undefined): number 
 export const quotaRefreshEveryTurns = quotaRefreshEverySteps
 
 function quotaPeriodLabel(period: QuotaPeriod): string {
-  if (period === 'hourly') return '5 小时'
-  if (period === 'weekly') return '周'
-  if (period === 'monthly') return '月'
-  return '周期'
+  if (period === 'hourly') return t('quota.periodHourly')
+  if (period === 'weekly') return t('quota.periodWeekly')
+  if (period === 'monthly') return t('quota.periodMonthly')
+  return t('quota.periodUnknown')
 }
 
 function formatQuotaReset(iso: string): string {
@@ -1856,6 +1971,20 @@ export function formatQuotaSnapshot(snapshot: QuotaSnapshot): string {
     lines.push(`  ${window.label} · ${'█'.repeat(filled)}${'░'.repeat(barWidth - filled)} 剩余 ${remaining.toFixed(1)}%${reset}`)
   }
   return lines.join('\n')
+}
+
+/** Compact `/status` quota line: tightest window first, then the rest. */
+export function formatQuotaStatusLine(snapshot: QuotaSnapshot | undefined): string {
+  if (snapshot === undefined || snapshot.windows.length === 0) return 'quota: none'
+  const tightest = tightestQuotaWindow(snapshot)
+  const ordered = tightest === undefined
+    ? snapshot.windows
+    : [tightest, ...snapshot.windows.filter(window => window !== tightest)]
+  const parts = ordered.map(window => {
+    const remaining = Math.max(0, Math.min(100, window.remainingPercent))
+    return `${window.label} ${remaining.toFixed(0)}%`
+  })
+  return `quota: ${snapshot.plan} ${parts.join(' · ')}`
 }
 
 /** Tightest remaining window — used for threshold alerts. */
@@ -2126,23 +2255,23 @@ const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
 const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
 
-/** Localized card titles for tool names without a dedicated branch. */
-const TOOL_TITLE_MAP: Record<string, string> = {
-  edit: '编辑',
-  write: '写入',
-  str_replace_editor: '替换',
-  fetch: '抓取网页',
-  list_files: '列出文件',
-  list: '列出文件',
-  ls: '列出文件',
-  find: '搜索文件',
-  search: '网页搜索',
-  delete: '删除文件',
-  rm: '删除文件',
-  rename: '重命名文件',
-  mv: '重命名文件',
-  mkdir: '创建目录',
-  skills: '技能',
+/**
+ * Tool calls that already have a dedicated transcript card (goal/change,
+ * plan dock, question dialog). Showing them again as raw `get_goal` cards
+ * just duplicates chrome.
+ */
+const HIDDEN_TOOL_NAMES = new Set(['get_goal'])
+
+const TOOL_TITLE_KEYS = [
+  'edit', 'write', 'str_replace_editor', 'fetch', 'list_files', 'list', 'ls',
+  'find', 'search', 'delete', 'rm', 'rename', 'mv', 'mkdir', 'skills',
+  'create_goal', 'update_goal', 'complete_goal', 'clear_goal', 'pause_goal',
+  'resume_goal', 'todo_write', 'todo', 'compact', 'glob', 'grep', 'read',
+  'web_search', 'web_fetch',
+] as const
+
+function toolTitle(name: string): string {
+  return t(`toolTitle.${name}`, undefined, name)
 }
 const MAX_SUBAGENT_LOGS = 80
 
@@ -2198,7 +2327,7 @@ export function planCloseNudgeText(plan: {
   ].join('\n')
 }
 
-export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal'
+export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal' | 'prompt'
 
 /** Category for jump / search. Assistant replies are not collapsible cards. */
 export function cardCategoryOf(row: { kind: string }): CardCategory | undefined {
@@ -2209,18 +2338,13 @@ export function cardCategoryOf(row: { kind: string }): CardCategory | undefined 
   if (row.kind === 'tool') return 'tool'
   if (row.kind === 'question') return 'question'
   if (row.kind === 'goal') return 'goal'
+  if (row.kind === 'prompt') return 'prompt'
   if (row.kind === 'compaction') return 'tool'
   return undefined
 }
 
-const CARD_CATEGORY_LABEL: Record<CardCategory, string> = {
-  thinking: '思考',
-  plan: '计划',
-  subagent: '子代理',
-  reply: '回复',
-  tool: '工具',
-  question: '提问',
-  goal: '目标',
+function cardCategoryLabel(category: CardCategory): string {
+  return t(`card.${category}`)
 }
 
 const SEARCHABLE_CATEGORIES: readonly CardCategory[] = ['thinking', 'plan', 'subagent', 'reply']
@@ -2234,6 +2358,7 @@ function parseCardCategoryToken(token: string): CardCategory | undefined {
   if (id === 'tool' || id === '工具') return 'tool'
   if (id === 'question' || id === '提问') return 'question'
   if (id === 'goal' || id === '目标') return 'goal'
+  if (id === 'prompt' || id === '提示词' || id === '注入') return 'prompt'
   return undefined
 }
 
@@ -2269,9 +2394,67 @@ function rowSearchHaystack(row: Row): string {
       return `${row.objective} ${row.blockedReason ?? ''}`
     case 'compaction':
       return `${row.summary ?? ''} ${row.error ?? ''}`
+    case 'prompt':
+      return `${row.sources.join(' ')} ${row.text}`
     default:
       return ''
   }
+}
+
+const PROMPT_SOURCE_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
+  { id: 'AGENTS.MD', pattern: /\bAGENTS\.md\b/iu },
+  { id: 'CLAUDE.MD', pattern: /\bCLAUDE\.md\b/iu },
+  { id: 'GEMINI.MD', pattern: /\bGEMINI\.md\b/iu },
+  { id: 'CURSOR.MD', pattern: /\b(?:\.?cursor(?:\/rules)?|CURSOR\.md)\b/iu },
+  { id: 'COPILOT.MD', pattern: /\b(?:COPILOT\.md|\.github\/copilot-instructions)\b/iu },
+  { id: 'WINDSURF.MD', pattern: /\bWINDSURF\.md\b/iu },
+]
+
+const SYSTEM_PRESET_HINT = /you are an ai agent powered by deepseek harness|powered by DeepSeek Harness|harness identity|deployment persona|system prompt/iu
+const SYSTEM_PRESET_LABEL = (): string => t('prompt.systemPreset')
+const CONTEXT_LABEL = (): string => t('prompt.context')
+
+/** Classify one injected prompt blob into display sources. */
+export function promptInjectionSources(text: string, plugin?: string): string[] {
+  const found: string[] = []
+  const seen = new Set<string>()
+  const add = (id: string): void => {
+    if (seen.has(id)) return
+    seen.add(id)
+    found.push(id)
+  }
+  for (const { id, pattern } of PROMPT_SOURCE_PATTERNS) {
+    if (pattern.test(text)) add(id)
+  }
+  const fromTags = text.matchAll(/Additional instructions from:\s*([^\n<]+)/giu)
+  for (const match of fromTags) {
+    const raw = (match[1] ?? '').trim()
+    const file = raw.split(/[\\/]/u).filter(Boolean).at(-1)
+    if (file !== undefined && /\.md$/iu.test(file)) add(file.toUpperCase())
+  }
+  const looksSystem = SYSTEM_PRESET_HINT.test(text)
+    || plugin === 'system-prompt'
+    || plugin === 'dsh-system-prompt'
+  if (looksSystem) add(SYSTEM_PRESET_LABEL())
+  if (found.length === 0) add(CONTEXT_LABEL())
+  const systemIndex = found.indexOf(SYSTEM_PRESET_LABEL())
+  if (systemIndex > 0) {
+    found.splice(systemIndex, 1)
+    found.unshift(SYSTEM_PRESET_LABEL())
+  }
+  return found
+}
+
+export function promptInjectionTitle(sources: readonly string[]): string {
+  return sources.length === 0 ? t('prompt.inject') : t('prompt.injectWith', { sources: sources.join(' ') })
+}
+
+export function isPromptInjectionMessage(sourceKind: string, text: string, plugin?: string): boolean {
+  if (sourceKind === 'user') return false
+  if (sourceKind === 'plugin') return true
+  return /<system-reminder\b/iu.test(text)
+    || SYSTEM_PRESET_HINT.test(text)
+    || promptInjectionSources(text, plugin).some(id => id !== SYSTEM_PRESET_LABEL())
 }
 
 export function compactionHeaderText(row: {
@@ -2281,13 +2464,13 @@ export function compactionHeaderText(row: {
   error?: string
 }): string {
   const recovered = row.prunedTokens > 0
-    ? `回收 ${formatTokens(row.prunedTokens)} token`
+    ? t('compact.recoverTokens', { tokens: formatTokens(row.prunedTokens) })
     : row.pruneCount > 0
-      ? `修剪 ${row.pruneCount} 段`
-      : '准备摘要'
-  if (row.status === 'running') return `压缩上下文 · ${recovered}`
-  if (row.status === 'error') return `压缩失败 · ${row.error ?? '未知错误'}`
-  return `压缩完成 · ${recovered}`
+      ? t('compact.pruneChunks', { count: row.pruneCount })
+      : t('compact.prepare')
+  if (row.status === 'running') return t('compact.running', { detail: recovered })
+  if (row.status === 'error') return t('compact.failed', { error: row.error ?? t('quota.unknown') })
+  return t('compact.done', { detail: recovered })
 }
 
 /** Transcript rows matching a `/find` query, newest last. */
@@ -2318,16 +2501,16 @@ export function planDockNote(plan: {
   const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
   const leftover = plan.todos.filter(item => item.status !== 'completed').length
   if (plan.turnLeftOpen === true && leftover > 0) {
-    return `本轮未收尾：还剩 ${leftover} 项待办（会话日志未改）。`
+    return t('plan.leftOpen', { count: leftover })
   }
-  if (plan.pending) return '模式切换将在下一步生效。'
-  if (plan.active) return '只规划、不改代码；确认后再执行。'
-  if (running) return '正在按计划执行。'
-  if (allDone) return '计划任务已全部完成。'
+  if (plan.pending) return t('plan.pendingNext')
+  if (plan.active) return t('plan.planningOnly')
+  if (running) return t('plan.executing')
+  if (allDone) return t('plan.allDone')
   if (plan.todos.length > 0 || (plan.planMarkdown !== undefined && plan.planMarkdown !== '')) {
-    return '计划还在，尚未全部完成。'
+    return t('plan.stillOpen')
   }
-  return '计划模式已关闭，可用 /plan 重新进入。'
+  return t('plan.closed')
 }
 
 /** Compact per-status counts matching the web plan strip. */
@@ -2336,9 +2519,9 @@ export function todoProgressLabel(todos: readonly PlanTodoItem[]): string {
   const active = todos.filter(item => item.status === 'in_progress').length
   const pending = todos.length - done - active
   const parts: string[] = []
-  if (done > 0) parts.push(`${done} 已完成`)
-  if (active > 0) parts.push(`${active} 进行中`)
-  if (pending > 0) parts.push(`${pending} 待处理`)
+  if (done > 0) parts.push(t('plan.todoDone', { count: done }))
+  if (active > 0) parts.push(t('plan.todoActive', { count: active }))
+  if (pending > 0) parts.push(t('plan.todoPending', { count: pending }))
   return parts.join(' · ')
 }
 
@@ -2497,7 +2680,7 @@ export function presentToolCall(name: string, args: string): {
     const diff = diffHunksFromArgs(name, args)
     const path = diff?.[0]?.path
     return {
-      title: TOOL_TITLE_MAP[name] ?? name,
+      title: toolTitle(name),
       summary: path ?? friendlyArgsSummary(name, args),
       ...diff === null || diff === undefined ? {} : { diff },
     }
@@ -2505,47 +2688,62 @@ export function presentToolCall(name: string, args: string): {
   if (SUBAGENT_TOOL_NAMES.has(name)) {
     const description = typeof parsed?.description === 'string' ? parsed.description.trim() : ''
     return {
-      title: name === 'subagent_fork' ? '子代理 fork' : '子代理',
+      title: toolTitle(name === 'subagent_fork' ? 'subagent_fork' : 'subagent'),
       summary: description === '' ? friendlyArgsSummary(name, args) : description,
     }
   }
   if (name === 'todo_write' || name === 'todo') {
-    return { title: '更新待办', summary: todoSummary(parsed) }
+    return { title: toolTitle('todo_write'), summary: todoSummary(parsed) }
   }
   if (name === 'ask_user_question') {
-    return { title: '提问用户', summary: askSummary(parsed) }
+    return { title: toolTitle('ask_user_question'), summary: askSummary(parsed) }
   }
   if (name === 'exit_plan_mode') {
     const plan = typeof parsed?.plan === 'string' ? parsed.plan : ''
-    return { title: '提交计划', summary: planTitleFromMarkdown(plan) ?? '等待确认计划' }
+    return { title: toolTitle('exit_plan_mode'), summary: planTitleFromMarkdown(plan) ?? t('plan.waitConfirm') }
+  }
+  if (name === 'update_goal' || name === 'create_goal') {
+    const action = typeof parsed?.action === 'string' ? parsed.action.trim() : ''
+    const objective = typeof parsed?.objective === 'string' ? parsed.objective.trim() : ''
+    const titleKey = name === 'create_goal' || action === 'create' || action === 'set'
+      ? 'create_goal'
+      : action === 'pause' ? 'pause_goal'
+        : action === 'resume' ? 'resume_goal'
+          : action === 'clear' ? 'clear_goal'
+            : action === 'complete' ? 'complete_goal'
+              : 'update_goal'
+    return { title: toolTitle(titleKey), summary: objective || action || friendlyArgsSummary(name, args) }
+  }
+  if (name === 'get_goal') {
+    return { title: toolTitle('get_goal'), summary: friendlyArgsSummary(name, args) }
   }
   if (name === 'read') {
     const path = typeof parsed?.path === 'string' ? parsed.path
       : typeof parsed?.file_path === 'string' ? parsed.file_path
         : typeof parsed?.url === 'string' ? parsed.url
           : ''
-    return { title: '读取', summary: path || friendlyArgsSummary(name, args) }
+    return { title: toolTitle('read'), summary: path || friendlyArgsSummary(name, args) }
   }
   if (name === 'grep') {
     const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern : ''
     const path = typeof parsed?.path === 'string' ? parsed.path : ''
-    return { title: '搜索', summary: [pattern, path].filter(Boolean).join('  ') || friendlyArgsSummary(name, args) }
+    return { title: toolTitle('grep'), summary: [pattern, path].filter(Boolean).join('  ') || friendlyArgsSummary(name, args) }
   }
   if (name === 'glob') {
     const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern
       : typeof parsed?.glob_pattern === 'string' ? parsed.glob_pattern
         : ''
-    return { title: '匹配文件', summary: pattern || friendlyArgsSummary(name, args) }
+    return { title: toolTitle('glob'), summary: pattern || friendlyArgsSummary(name, args) }
   }
   if (name === 'web_search') {
     const query = typeof parsed?.query === 'string' ? parsed.query : typeof parsed?.q === 'string' ? parsed.q : ''
-    return { title: '网页搜索', summary: query || friendlyArgsSummary(name, args) }
+    return { title: toolTitle('web_search'), summary: query || friendlyArgsSummary(name, args) }
   }
   if (name === 'web_fetch') {
     const url = typeof parsed?.url === 'string' ? parsed.url : ''
-    return { title: '抓取网页', summary: url || friendlyArgsSummary(name, args) }
+    return { title: toolTitle('web_fetch'), summary: url || friendlyArgsSummary(name, args) }
   }
-  return { title: TOOL_TITLE_MAP[name] ?? name, summary: friendlyArgsSummary(name, args) }
+  return { title: toolTitle(name), summary: friendlyArgsSummary(name, args) }
 }
 
 /** Validate a tool/result meta payload's structured diff, mirroring the web card. */
@@ -2585,6 +2783,89 @@ function capDisplayLines(lines: readonly DiffDisplayLine[], maxLines: number): D
   const marker: DiffDisplayLine = { kind: 'tool-result', text: `… ${omitted} more line(s) …` }
   if (budget === 1) return [marker]
   return [...lines.slice(0, budget - 2), marker, ...lines.slice(-1)]
+}
+
+/** Running / ok / error → ANSI color for the status dot and status word only. */
+export function toolStateColor(status: 'running' | 'ok' | 'error' | undefined): '33' | '32' | '31' {
+  if (status === 'ok') return '32'
+  if (status === 'error') return '31'
+  return '33'
+}
+
+export function toolStateLabel(status: 'running' | 'ok' | 'error' | undefined): string {
+  if (status === 'ok') return 'ok'
+  if (status === 'error') return 'error'
+  return 'running…'
+}
+
+/** Header + SGR spans: default title, dim operand, colored ● and [ok]/[error]. */
+export function buildToolHeader(input: {
+  focused: boolean
+  expanded: boolean
+  title: string
+  summary: string
+  status?: 'running' | 'ok' | 'error'
+  command?: string
+  signal?: string
+  exitCode?: number
+  spinner?: string
+}): { plain: string; segments: TextSegment[] } {
+  const running = input.status === undefined || input.status === 'running'
+  const state = toolStateLabel(input.status)
+  const exit = !running && input.command !== undefined
+    ? input.signal !== undefined
+      ? `  [信号 ${input.signal}]`
+      : (input.exitCode ?? 0) !== 0
+        ? `  [退出码 ${input.exitCode}]`
+        : ''
+    : ''
+  const spinner = input.spinner ?? ''
+  const prefix = input.focused ? '▶ ' : '  '
+  const marker = input.expanded ? '▾' : '▸'
+  const lead = `${prefix}${marker} ● ${input.title}`
+  const summaryText = input.summary === '' ? '' : `  ${input.summary}`
+  const stateToken = `[${state}]`
+  const tail = `  ${stateToken}${exit}${spinner}`
+  const plain = `${lead}${summaryText}${tail}`
+  const stateCode = toolStateColor(input.status)
+  const dotIndex = lead.indexOf('●')
+  const stateIndex = lead.length + summaryText.length + 2
+  const segments: TextSegment[] = []
+  if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
+  if (summaryText.length > 0) {
+    segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: '90' })
+  }
+  segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
+  if (spinner !== '') {
+    segments.push({
+      start: stateIndex + stateToken.length + exit.length,
+      end: plain.length,
+      sgr: '90',
+    })
+  }
+  return { plain, segments: segments.filter(segment => segment.end > segment.start) }
+}
+
+/** How many terminal rows a tool body occupies after wrapping. */
+export function wrappedToolBodyLineCount(
+  lines: readonly { text: string }[],
+  width: number,
+): number {
+  const inner = Math.max(1, width - 2)
+  let count = 0
+  for (const line of lines) {
+    count += Math.max(1, wrap(line.text, inner).length)
+  }
+  return count
+}
+
+/**
+ * True when the full tool body plus a one-line header fits in the workspace
+ * (the rows between the title bar and the input chrome). Oversized bodies
+ * open a dedicated inspect overlay instead of dumping into the transcript.
+ */
+export function toolBodyFitsWorkspace(bodyLines: number, workspaceRows: number): boolean {
+  return bodyLines + 1 <= Math.max(1, workspaceRows)
 }
 
 /** Flatten hunks into git-style `-`/`+` lines plus the web-compatible footer. */
@@ -2713,17 +2994,19 @@ function parseJsonBody(text: string): unknown | null {
  * converted into readable indented content instead of raw JSON text.
  */
 export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDisplayLine[] {
+  const unlimited = !Number.isFinite(maxLines) || maxLines >= Number.MAX_SAFE_INTEGER
   if (row.diff !== undefined && row.diff.length > 0) {
-    // File-edit diffs are never truncated: omitting hunks would hide the
-    // exact code change the model applied. `maxLines` only governs shell and
-    // generic JSON output bodies.
-    return renderToolDiff(row.diff, Number.MAX_SAFE_INTEGER)
+    // File-edit diffs are never truncated in the card: omitting hunks would
+    // hide the exact code change the model applied. `maxLines` only governs
+    // shell and generic JSON output bodies (and the inspect overlay).
+    return renderToolDiff(row.diff, unlimited ? Number.MAX_SAFE_INTEGER : maxLines)
   }
   if (row.command !== undefined) {
     const out: DiffDisplayLine[] = []
     if (row.output !== '') {
-      for (const line of truncate(row.output, maxLines).split('\n')) {
-        out.push({ kind: row.status === 'error' ? 'error' : 'tool-result', text: line })
+      const text = unlimited ? row.output : truncate(row.output, maxLines)
+      for (const line of text.split('\n')) {
+        out.push({ kind: 'tool-result', text: line })
       }
     } else if (row.status !== 'running' && row.status !== undefined) {
       out.push({ kind: 'tool-result', text: '(无输出)' })
@@ -2731,8 +3014,10 @@ export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDispla
     return out
   }
 
-  const specialized = specializedToolBody(row)
-  if (specialized !== null) return capDisplayLines(specialized, maxLines)
+  const specialized = specializedToolBody(row, unlimited ? Number.MAX_SAFE_INTEGER : maxLines)
+  if (specialized !== null) {
+    return unlimited ? specialized : capDisplayLines(specialized, maxLines)
+  }
 
   const out: DiffDisplayLine[] = []
   const args = parseJsonArgs(row.args)
@@ -2750,12 +3035,13 @@ export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDispla
         out.push({ kind: 'tool-result', text: line })
       }
     } else {
-      for (const line of truncate(row.output, maxLines).split('\n')) {
+      const text = unlimited ? row.output : truncate(row.output, maxLines)
+      for (const line of text.split('\n')) {
         out.push({ kind: 'tool-result', text: line })
       }
     }
   }
-  return capDisplayLines(out, maxLines)
+  return unlimited ? out : capDisplayLines(out, maxLines)
 }
 
 interface NamedToolBodySource extends ToolBodySource {
@@ -2770,9 +3056,12 @@ function firstString(record: Record<string, unknown>, keys: readonly string[]): 
   return ''
 }
 
-function specializedToolBody(row: NamedToolBodySource): DiffDisplayLine[] | null {
+function specializedToolBody(row: NamedToolBodySource, maxLines = Number.MAX_SAFE_INTEGER): DiffDisplayLine[] | null {
   const name = row.name ?? ''
   const args = parseJsonArgs(row.args)
+  const unlimited = !Number.isFinite(maxLines) || maxLines >= Number.MAX_SAFE_INTEGER
+  const take = (text: string, fallback: number): string =>
+    unlimited ? text : truncate(text, Math.min(maxLines, fallback))
   if (name === 'todo_write' || name === 'todo') {
     const todos = parsePlanTodos(args ?? row.args)
     const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: todoProgressLabel(todos) || '待办列表' }]
@@ -2807,7 +3096,7 @@ function specializedToolBody(row: NamedToolBodySource): DiffDisplayLine[] | null
       out.push({ kind: 'tool-result', text: `offset ${offset ?? 1}${limit === undefined ? '' : ` · limit ${limit}`}` })
     }
     if (row.output !== '') {
-      for (const line of truncate(row.output, 40).split('\n')) {
+      for (const line of take(row.output, 40).split('\n')) {
         out.push({ kind: 'tool-result', text: line })
       }
     } else if (row.status === 'running') {
@@ -2820,7 +3109,7 @@ function specializedToolBody(row: NamedToolBodySource): DiffDisplayLine[] | null
     const path = firstString(args, ['path', 'glob'])
     const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: [pattern, path].filter(Boolean).join('  ') || name }]
     if (row.output !== '') {
-      for (const line of truncate(row.output, 30).split('\n')) {
+      for (const line of take(row.output, 30).split('\n')) {
         out.push({ kind: 'tool-result', text: line })
       }
     }
@@ -2830,11 +3119,24 @@ function specializedToolBody(row: NamedToolBodySource): DiffDisplayLine[] | null
     const query = firstString(args, ['query', 'q', 'url'])
     const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: query || name }]
     if (row.output !== '') {
-      for (const line of truncate(row.output, 24).split('\n')) {
+      for (const line of take(row.output, 24).split('\n')) {
         out.push({ kind: 'assistant', text: line })
       }
     }
     return out
+  }
+  if (name === 'update_goal' || name === 'create_goal' || name === 'get_goal') {
+    const objective = args === null ? '' : firstString(args, ['objective', 'goal'])
+    const action = args === null ? '' : firstString(args, ['action'])
+    const out: DiffDisplayLine[] = []
+    if (action !== '') out.push({ kind: 'diff-path', text: action })
+    if (objective !== '') out.push({ kind: 'assistant', text: objective })
+    if (row.output !== '') {
+      for (const line of take(row.output, 12).split('\n')) {
+        out.push({ kind: 'tool-result', text: line })
+      }
+    }
+    return out.length > 0 ? out : null
   }
   return null
 }
@@ -2937,6 +3239,10 @@ export class SshTui {
   private lastPaintHeight = 0
   private lastChromeStart = 0
   private lastTranscriptStart = -1
+  /** 1-based screen row of the footer `目录:` chip, when painted. */
+  private cwdChipRow: number | undefined
+  /** Set when a card expand/collapse moves chrome; next paint full-redraws. */
+  private forceFullPaint = false
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -2981,7 +3287,10 @@ export class SshTui {
     })
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
-    this.pushRow({ kind: 'system', text: '输入 /help 查看快捷键 · /find 搜索思考/计划/子代理/回复 · 空输入时 ↑/↓ 选卡片' })
+    this.pushRow({ kind: 'system', text: t('boot.help') })
+    if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
+      this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
+    }
   }
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
@@ -3312,14 +3621,15 @@ export class SshTui {
   /** The transcript rows that support per-row expand/collapse. */
   private collapsibleRows(): CollapsibleBlock[] {
     const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }> =>
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> =>
         row.kind === 'reasoning'
         || row.kind === 'tool'
         || row.kind === 'subagent'
         || row.kind === 'plan'
         || row.kind === 'question'
         || row.kind === 'goal'
-        || row.kind === 'compaction')
+        || row.kind === 'compaction'
+        || row.kind === 'prompt')
     if (this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
@@ -3436,7 +3746,7 @@ export class SshTui {
     const summary = title ?? (counts === '' ? '还没有任务' : counts)
     const marker = plan.expanded ? '▾' : '▸'
     const focused = this.focusedRow === plan ? '▶ ' : '  '
-    const header = `${focused}${marker} ${mode}${spinner} · ${summary}${plan.expanded || yieldBottom ? '' : ' · Enter 展开'}`
+    const header = `${focused}${marker} ${mode}${spinner} · ${summary}${plan.expanded || yieldBottom ? '' : t('card.expand')}`
     const lines = [this.styleLine('plan-dock', padToWidth(header, width))]
     if (yieldBottom || !plan.expanded) return lines
 
@@ -3466,6 +3776,111 @@ export class SshTui {
       }
     }
     return lines
+  }
+
+  private paintToolBodyLine(
+    addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
+    row: Row | CollapsibleBlock | undefined,
+    line: DiffDisplayLine,
+    width: number,
+  ): void {
+    const inner = Math.max(1, width - 2)
+    const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
+    for (const wrapped of wrap(line.text, inner)) {
+      const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
+      const kind = line.kind
+      const style = kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
+        ? this.styleLine(kind, body)
+        : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
+          ? this.styleLine(kind, body)
+          : kind === 'error'
+            ? this.styleLine('error', body)
+            : kind === 'assistant'
+              ? this.styleLine('assistant', body)
+              : this.styleLine('tool-result', body)
+      addDisplay(style, row)
+    }
+  }
+
+  private workspaceRowsFor(_width: number, height: number): number {
+    const header = 2
+    const chrome = RESERVED_BOTTOM_LINES + 1
+    return Math.max(1, height - header - chrome)
+  }
+
+  private paintInspectOverlay(width: number, height: number): void {
+    const dialog = this.dialog
+    if (dialog === undefined || dialog.kind !== 'inspect') return
+    const header = this.styleLine('system', truncateToWidth(`工具全文 · ${dialog.title}`, width))
+    const hint = this.styleLine('system', truncateToWidth('PgUp/PgDn/滚轮滚动 · Esc 返回会话', width))
+    const divider = this.styleLine('system', repeatToWidth('─', width))
+    const bodyBudget = Math.max(1, height - 4)
+    const rendered: string[] = []
+    for (const line of dialog.lines) {
+      const inner = Math.max(1, width - 2)
+      const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
+      for (const wrapped of wrap(line.text, inner)) {
+        const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
+        const kind = line.kind
+        rendered.push(
+          kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
+            ? this.styleLine(kind, body)
+            : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
+              ? this.styleLine(kind, body)
+              : kind === 'error'
+                ? this.styleLine('error', body)
+                : kind === 'assistant'
+                  ? this.styleLine('assistant', body)
+                  : this.styleLine('tool-result', body),
+        )
+      }
+    }
+    const maxOffset = Math.max(0, rendered.length - bodyBudget)
+    if (dialog.offset > maxOffset) dialog.offset = maxOffset
+    if (dialog.offset < 0) dialog.offset = 0
+    const slice = rendered.slice(dialog.offset, dialog.offset + bodyBudget)
+    while (slice.length < bodyBudget) slice.push('')
+    const pos = rendered.length === 0
+      ? '0/0'
+      : `${dialog.offset + 1}–${Math.min(rendered.length, dialog.offset + bodyBudget)}/${rendered.length}`
+    const footer = this.styleLine('system', truncateToWidth(`全文 ${pos} · Esc 返回`, width))
+    const paintRows = [header, divider, ...slice, hint, footer]
+    this.write(composePaintOutput({
+      width,
+      height,
+      paintRows,
+      previousRows: this.lastPaintRows,
+      sizeChanged: true,
+      chromeChanged: true,
+      chromeStart: 0,
+      previousChromeStart: 0,
+      cursorRow: height,
+      cursorColumn: 1,
+    }))
+    this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
+    this.lastChromeKey = `inspect:${dialog.offset}:${width}x${height}`
+    this.lastPaintWidth = width
+    this.lastPaintHeight = height
+    this.lastChromeStart = 0
+    this.lastTranscriptStart = -1
+  }
+
+  private openToolInspect(row: Extract<Row, { kind: 'tool' }>): void {
+    const lines = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
+    this.openDialog({
+      kind: 'inspect',
+      title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}`,
+      lines,
+      offset: 0,
+    })
+  }
+
+  closeInspect(): void {
+    if (this.dialog?.kind !== 'inspect') return
+    this.dialog = undefined
+    this.forceFullPaint = true
+    this.markDirty()
+    this.showNextDialog()
   }
 
   private paintCollapsibleHeader(
@@ -3517,8 +3932,24 @@ export class SshTui {
       : undefined
     const target = focused ?? rows[rows.length - 1]
     if (target === undefined) return
+    this.toggleCard(target)
+  }
+
+  toggleCard(target: CollapsibleBlock): void {
+    if (target.kind === 'tool' && !target.expanded) {
+      const width = Math.max(10, process.stdout.columns || 80)
+      const height = Math.max(6, process.stdout.rows || 24)
+      const body = toolBodyLines(target, Number.MAX_SAFE_INTEGER)
+      const bodyRows = wrappedToolBodyLineCount(body, width)
+      if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
+        this.focusedRow = target
+        this.openToolInspect(target)
+        return
+      }
+    }
     target.expanded = !target.expanded
     this.focusedRow = target
+    this.forceFullPaint = true
     this.markDirty()
   }
 
@@ -3527,8 +3958,23 @@ export class SshTui {
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
     const allExpanded = rows.every(row => row.expanded)
-    for (const row of rows) row.expanded = !allExpanded
-    this.focusedRow = allExpanded ? null : rows[rows.length - 1] ?? null
+    if (allExpanded) {
+      for (const row of rows) row.expanded = false
+      this.focusedRow = null
+    } else {
+      const width = Math.max(10, process.stdout.columns || 80)
+      const height = Math.max(6, process.stdout.rows || 24)
+      const workspace = this.workspaceRowsFor(width, height)
+      for (const row of rows) {
+        if (row.kind === 'tool') {
+          const bodyRows = wrappedToolBodyLineCount(toolBodyLines(row, Number.MAX_SAFE_INTEGER), width)
+          if (!toolBodyFitsWorkspace(bodyRows, workspace)) continue
+        }
+        row.expanded = true
+      }
+      this.focusedRow = rows[rows.length - 1] ?? null
+    }
+    this.forceFullPaint = true
     this.markDirty()
   }
 
@@ -3539,9 +3985,21 @@ export class SshTui {
 
   private revealRow(row: Row | CollapsibleBlock | undefined): void {
     if (row === undefined) return
+    if (row.kind === 'tool') {
+      const width = Math.max(10, process.stdout.columns || 80)
+      const height = Math.max(6, process.stdout.rows || 24)
+      const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
+      const bodyRows = wrappedToolBodyLineCount(body, width)
+      if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
+        this.focusedRow = row
+        this.openToolInspect(row)
+        return
+      }
+    }
     if (row.kind !== 'assistant' && 'expanded' in row) {
       row.expanded = true
       this.focusedRow = row as CollapsibleBlock
+      this.forceFullPaint = true
     } else {
       this.focusedRow = null
     }
@@ -3559,18 +4017,18 @@ export class SshTui {
       const live = this.findLivePlanRow()
       if (live !== undefined) {
         this.focusCard(live)
-        this.pushRow({ kind: 'system', text: `已跳到${CARD_CATEGORY_LABEL[category]}（底栏计划条）。` })
+        this.pushRow({ kind: 'system', text: t('jump.planDock', { category: cardCategoryLabel(category) }) })
         this.revealRow(live)
         return
       }
     }
     const target = this.rows.findLast(row => cardCategoryOf(row) === category)
     if (target === undefined) {
-      this.pushRow({ kind: 'system', text: `当前没有${CARD_CATEGORY_LABEL[category]}卡片。` })
+      this.pushRow({ kind: 'system', text: t('jump.missing', { category: cardCategoryLabel(category) }) })
       this.markDirty()
       return
     }
-    this.pushRow({ kind: 'system', text: `已跳到最新${CARD_CATEGORY_LABEL[category]}。` })
+    this.pushRow({ kind: 'system', text: t('jump.latest', { category: cardCategoryLabel(category) }) })
     this.revealRow(target)
   }
 
@@ -3585,7 +4043,7 @@ export class SshTui {
     }
     this.searchIndex = hits.length - 1
     const hit = hits[this.searchIndex]
-    const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
+    const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
     this.pushRow({
       kind: 'system',
       text: `找到 ${hits.length} 条${query === '' ? '' : `「${query}」`} · 第 ${hits.length}/${hits.length} 条（${where}）。Ctrl+G / Alt+N 下一条，Alt+P 上一条。`,
@@ -3595,7 +4053,7 @@ export class SshTui {
 
   private runFindCommand(arg: string): void {
     const parsed = parseFindQuery(arg)
-    const label = parsed.category === undefined ? '' : `${CARD_CATEGORY_LABEL[parsed.category]} `
+    const label = parsed.category === undefined ? '' : `${cardCategoryLabel(parsed.category)} `
     const hits = matchTranscriptRows(this.rows, arg)
     this.applySearchHits(`${label}${parsed.query}`.trim(), hits)
   }
@@ -3609,7 +4067,7 @@ export class SshTui {
     const count = this.searchHits.length
     this.searchIndex = (this.searchIndex + delta + count) % count
     const hit = this.searchHits[this.searchIndex]
-    const where = hit === undefined ? '' : CARD_CATEGORY_LABEL[cardCategoryOf(hit) ?? 'reply']
+    const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
     this.pushRow({
       kind: 'system',
       text: `搜索「${this.searchQuery}」· 第 ${this.searchIndex + 1}/${count} 条（${where}）。`,
@@ -3621,6 +4079,10 @@ export class SshTui {
     if (this.exiting) return
     const width = Math.max(10, process.stdout.columns || 80)
     const height = Math.max(6, process.stdout.rows || 24)
+    if (this.dialog?.kind === 'inspect') {
+      this.paintInspectOverlay(width, height)
+      return
+    }
 
     const display: string[] = []
     const displayRefs: (Row | CollapsibleBlock | undefined)[] = []
@@ -3663,7 +4125,7 @@ export class SshTui {
         const focused = this.focusedRow === row
         const marker = row.expanded ? '▾' : '▸'
         const lines = row.text.split('\n').length
-        const header = `${marker} 已思考 · ${lines} 行${row.expanded ? '' : ' · Enter 展开'}`
+        const header = `${marker} 已思考 · ${lines} 行${row.expanded ? '' : t('card.expand')}`
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
@@ -3676,96 +4138,67 @@ export class SshTui {
       }
       if (row.kind === 'tool') {
         const running = row.status === undefined || row.status === 'running'
-        const ok = row.status === 'ok'
-        // Header text follows the execution state; the shell command itself
-        // stays dim so it reads like a command, not a status.
-        const stateCode = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
-        const spinner = running ? ` ${this.spinnerFrame()}` : ''
-        const state = running ? 'running…' : ok ? 'ok' : 'error'
-        const exit = !running && row.command !== undefined
-          ? row.signal !== undefined
-            ? `  [信号 ${row.signal}]`
-            : (row.exitCode ?? 0) !== 0
-              ? `  [退出码 ${row.exitCode}]`
-              : ''
-          : ''
         const focused = this.focusedRow === row
-        const marker = row.expanded ? '▾' : '▸'
-        const lead = `${focused ? '▶ ' : '  '}${marker} ● ${row.title}`
-        // Summary carries the operand (command / path / pattern), not a status:
-        // keep it dim so the title stays the colored, readable part.
-        const summaryText = row.summary === '' ? '' : `  ${row.summary}`
-        const tail = `  [${state}]${exit}${spinner}`
-        const plainHeader = `${lead}${summaryText}${tail}`
-        const headerSegments: TextSegment[] = stateCode === undefined
-          ? []
-          : [
-              { start: 0, end: lead.length, sgr: stateCode },
-              { start: lead.length, end: lead.length + summaryText.length, sgr: '90' },
-              { start: lead.length + summaryText.length, end: plainHeader.length, sgr: stateCode },
-            ]
+        const header = buildToolHeader({
+          focused,
+          expanded: row.expanded,
+          title: row.title,
+          summary: row.summary,
+          status: row.status,
+          command: row.command,
+          signal: row.signal,
+          exitCode: row.exitCode,
+          spinner: running ? ` ${this.spinnerFrame()}` : '',
+        })
+        const headerSegments = this.color ? header.segments : []
         if (!row.expanded) {
-          const collapsed = truncateToWidth(plainHeader, Math.max(1, width - 2))
-          const styled = stateCode === undefined
+          const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
+          const styled = headerSegments.length === 0
             ? collapsed
             : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
           addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
           continue
         }
         const expandedHeaderLines = headerSegments.length === 0
-          ? wrap(plainHeader, width)
-          : wrapSegmented(plainHeader, Math.max(1, width), headerSegments)
+          ? wrap(header.plain, width)
+          : wrapSegmented(header.plain, Math.max(1, width), headerSegments)
         for (const wrapped of expandedHeaderLines) {
           addDisplay(wrapped, row)
         }
-        const bodyCode = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
-        for (const line of toolBodyLines(row, this.maxToolOutputLines)) {
-          const inner = Math.max(1, width - 2)
-          const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
-          for (const wrapped of wrap(line.text, inner)) {
-            const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
-            // Diffs and todo marks keep their dedicated colors; ordinary
-            // results follow the tool's execution state (yellow running /
-            // green ok / red error).
-            const kind = line.kind
-            const style = kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
-              ? this.styleLine(kind, body)
-              : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
-                ? this.styleLine(kind, body)
-                : this.styleStatusText(bodyCode ?? (kind === 'error' ? '31' : '37'), body)
-            addDisplay(style, row)
-          }
+        for (const line of toolBodyLines(row, Number.MAX_SAFE_INTEGER)) {
+          this.paintToolBodyLine(addDisplay, row, line, width)
         }
         continue
       }
       if (row.kind === 'subagent') {
         const running = row.status === 'running'
         const ok = row.status === 'ok'
-        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : '31'
+        const aborted = row.status === 'aborted'
+        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : aborted ? '33' : '31'
         const styleHeader = (line: string): string => {
           const safe = sanitizeTerminalText(line)
           if (!this.color) return safe
           const dotIndex = safe.indexOf('●')
-          if (dotColor === undefined || dotIndex === -1) return this.styleLine('tool', safe)
-          return `\x1b[33m${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[33m${safe.slice(dotIndex + 1)}\x1b[0m`
+          if (dotColor === undefined || dotIndex === -1) return safe
+          return `${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[0m${safe.slice(dotIndex + 1)}`
         }
         const spinner = running ? ` ${this.spinnerFrame()}` : ''
-        const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : ' · Enter 展开'}`
-        this.paintCollapsibleHeader(addDisplay, row, 'tool', header, width, styleHeader)
+        const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : t('card.expand')}`
+        this.paintCollapsibleHeader(addDisplay, row, 'system', header, width, styleHeader)
         if (row.expanded) {
-          addDisplay(this.styleLine('tool-result', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`), row)
+          addDisplay(this.styleLine('system', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`), row)
           if (row.stopReason !== undefined) {
-            addDisplay(this.styleLine('tool-result', `  结束原因：${row.stopReason}`), row)
+            addDisplay(this.styleLine('system', `  结束原因：${row.stopReason}`), row)
           }
           if (row.logs.length === 0) {
-            addDisplay(this.styleLine('tool-result', running ? '  等待子代理输出…' : '  没有可见输出'), row)
+            addDisplay(this.styleLine('system', running ? '  等待子代理输出…' : '  没有可见输出'), row)
           } else {
             for (const entry of row.logs) {
               const kind: DisplayKind = entry.kind === 'assistant'
                 ? 'assistant'
                 : entry.kind === 'result' && row.status === 'error'
                   ? 'error'
-                  : 'tool-result'
+                  : 'system'
               for (const wrapped of wrap(entry.text, Math.max(1, width - 2))) {
                 addDisplay(this.styleLine(kind, `  ${wrapped}`), row)
               }
@@ -3779,7 +4212,7 @@ export class SshTui {
         const counts = todoProgressLabel(row.todos)
         const title = planTitleFromMarkdown(row.planMarkdown ?? '')
         const summary = title ?? (counts === '' ? '已归档' : counts)
-        const header = `计划 · ${summary}${row.expanded ? '' : ' · Enter 展开'}`
+        const header = `计划 · ${summary}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, 'plan-dock', header, width)
         if (row.expanded) {
           addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`), row)
@@ -3797,12 +4230,22 @@ export class SshTui {
         }
         continue
       }
+      if (row.kind === 'prompt') {
+        const header = `● ${promptInjectionTitle(row.sources)}${row.expanded ? '' : t('card.expand')}`
+        this.paintCollapsibleHeader(addDisplay, row, 'system', header, width)
+        if (row.expanded) {
+          for (const wrapped of wrap(row.text, Math.max(1, width - 2))) {
+            addDisplay(this.styleLine('system', `  ${wrapped}`), row)
+          }
+        }
+        continue
+      }
       if (row.kind === 'question') {
         const waiting = row.status === 'waiting'
         const spinner = waiting ? ` ${this.spinnerFrame()}` : ''
         const state = waiting ? '等待回答' : row.status === 'answered' ? '已回答' : '已取消'
         const title = row.intent === 'plan-review' ? '计划待审' : '提问用户'
-        const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : ' · Enter 展开'}`
+        const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, waiting ? 'tool' : 'system', header, width)
         if (row.expanded) {
           if (row.header !== undefined) addDisplay(this.styleLine('system', `  ${row.header}`), row)
@@ -3834,7 +4277,7 @@ export class SshTui {
           : row.phase === 'blocked' ? '受阻'
           : row.phase === 'complete' ? '已完成'
           : '已清除'
-        const header = `● 目标${spinner} · ${phase} · ${row.objective}${row.expanded ? '' : ' · Enter 展开'}`
+        const header = `● 目标${spinner} · ${phase} · ${row.objective}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, live ? 'tool' : 'system', header, width)
         if (row.expanded) {
           addDisplay(this.styleLine('system', '  用 /goal 查看、暂停、恢复或清除当前目标。'), row)
@@ -3850,7 +4293,7 @@ export class SshTui {
         const running = row.status === 'running'
         const spinner = running ? ` ${this.spinnerFrame()}` : ''
         const elapsed = Math.max(0, Math.floor(((row.endedAt ?? Date.now()) - row.startedAt) / 1000))
-        const header = `● ${compactionHeaderText(row)}${spinner} · ${elapsed}s${row.expanded ? '' : ' · Enter 展开'}`
+        const header = `● ${compactionHeaderText(row)}${spinner} · ${elapsed}s${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, running ? 'tool' : row.status === 'error' ? 'error' : 'system', header, width)
         if (row.expanded) {
           addDisplay(this.styleLine('system', running
@@ -3915,52 +4358,56 @@ export class SshTui {
       } else if (this.dialog.kind === 'onboarding') {
         const ob = this.onboarding
         if (ob !== undefined) {
-          const template = PROVIDER_TEMPLATES[ob.providerType]
+          const template = providerTemplates()[ob.providerType]
           const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
           switch (ob.step) {
             case 'provider':
-              addDialog('首次配置向导 — 选择提供商（与官方 Models 页一致）')
-              addDialog('  1  DeepSeek 官方（api.deepseek.com）')
-              addDialog('  2  OpenCode Go（opencode.ai/zen/go，Responses 协议）')
-              addDialog('  3  自定义 OpenAI 兼容网关（Completions）')
-              addDialog('  4  自定义 OpenAI Responses 网关')
-              addDialog('  5  Anthropic Messages 兼容网关')
-              addDialog('  按 1-5 选择，Esc 取消')
+              addDialog(t('onboard.title'))
+              addDialog(t('onboard.opt1'))
+              addDialog(t('onboard.opt2'))
+              addDialog(t('onboard.opt3'))
+              addDialog(t('onboard.opt4'))
+              addDialog(t('onboard.opt5'))
+              addDialog(t('onboard.pickHint'))
               break
             case 'id':
-              addDialog(`提供商：${providerLabel}`)
-              addDialog('Provider ID（小写字母/数字/连字符，永久标识）：')
-              addDialog(`  默认：${template.defaultId}`)
-              addDialog('  Enter 确认，Esc 取消')
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.idPrompt'))
+              addDialog(t('onboard.default', { value: template.defaultId }))
+              addDialog(t('onboard.enterEsc'))
               break
             case 'key':
-              addDialog(`提供商：${providerLabel}`)
-              addDialog('请输入 API Key（输入时以 • 显示）：')
-              addDialog('  Enter 确认，Esc 取消')
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.keyPrompt'))
+              addDialog(t('onboard.enterEsc'))
               break
             case 'base-url':
-              addDialog(`提供商：${providerLabel}`)
-              addDialog(`请输入 Base URL（留空使用 ${template.defaultBaseUrl || '官方/模板默认'}）：`)
-              addDialog('  Enter 确认，Esc 取消')
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.basePrompt', { fallback: template.defaultBaseUrl || t('onboard.baseFallback') }))
+              addDialog(t('onboard.enterEsc'))
               break
             case 'models':
-              addDialog(`提供商：${providerLabel}`)
-              addDialog('模型 ID（多个用逗号或空格分隔）：')
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.modelsPrompt'))
               addDialog(ob.models.length > 0
-                ? `  已获取（${ob.models.length}）：${formatModelList(ob.models, 6)}`
-                : `  默认：${template.defaultModels.join(', ')}`)
-              if (template.api !== undefined) addDialog('  Ctrl+F = 从端点获取模型列表')
-              addDialog('  Enter 确认，Esc 取消')
+                ? t('onboard.modelsFetched', { count: ob.models.length, list: formatModelList(ob.models, 6) })
+                : t('onboard.default', { value: template.defaultModels.join(', ') }))
+              if (template.api !== undefined) addDialog(t('onboard.ctrlF'))
+              addDialog(t('onboard.enterEsc'))
               break
             case 'confirm':
-              addDialog('确认保存以下配置？')
-              addDialog(`  提供商:  ${providerLabel}`)
+              addDialog(t('onboard.confirmTitle'))
+              addDialog(t('onboard.confirmProvider', { label: providerLabel }))
               addDialog(`  Provider ID: ${ob.providerId}`)
-              addDialog(`  Base URL: ${ob.baseUrl === '' ? (template.defaultBaseUrl || '(默认)') : ob.baseUrl}`)
-              addDialog(`  API 协议: ${template.api ?? 'deepseek-official'}`)
-              addDialog(`  模型: ${formatModelList(ob.models, 8)}`)
-              addDialog(`  API Key:  ${sliceCodePoints(ob.key, 6)}…${lastCodePoints(ob.key, 4)}（长度 ${ob.key.length}）`)
-              addDialog('  y = 保存, n = 重填, Esc = 取消')
+              addDialog(t('onboard.confirmBase', { url: ob.baseUrl === '' ? (template.defaultBaseUrl || t('onboard.defaultParen')) : ob.baseUrl }))
+              addDialog(t('onboard.confirmApi', { api: template.api ?? 'deepseek-official' }))
+              addDialog(t('onboard.confirmModels', { list: formatModelList(ob.models, 8) }))
+              addDialog(t('onboard.confirmKey', {
+                head: sliceCodePoints(ob.key, 6),
+                tail: lastCodePoints(ob.key, 4),
+                length: ob.key.length,
+              }))
+              addDialog(t('onboard.confirmHint'))
               break
           }
         }
@@ -4183,6 +4630,7 @@ export class SshTui {
       foldedInput: inputView.folded,
       multiLineInput: inputRows > 1,
       queued: this.pendingMessages.size,
+      cwdLabel: formatFooterCwd(this.workspaceCwd()),
     } satisfies FooterStatusInput
     const activity = footerActivity(footer)
     const activityText = activity.kind === 'compacting'
@@ -4190,7 +4638,8 @@ export class SshTui {
       : activity.kind === 'subagents'
         ? `${this.spinnerFrame(160)} ${activity.text}`
         : activity.text
-    const statusText = fitFooterStatusLine(activityText, footerIdentityParts(footer), Math.max(1, width))
+    const identity = footerIdentityParts(footer)
+    const statusText = fitFooterStatusLine(activityText, identity, Math.max(1, width))
     const statusLine = this.styleLine('system', statusText)
 
     const paintRows: string[] = [
@@ -4231,7 +4680,11 @@ export class SshTui {
     ].join('\x1f')
     const chromeChanged = chromeKey !== this.lastChromeKey || chromeStart !== this.lastChromeStart
     const transcriptScrolled = start !== this.lastTranscriptStart
-    const sizeChanged = width !== this.lastPaintWidth || height !== this.lastPaintHeight || transcriptScrolled
+    const sizeChanged = this.forceFullPaint
+      || width !== this.lastPaintWidth
+      || height !== this.lastPaintHeight
+      || transcriptScrolled
+    this.forceFullPaint = false
 
     // One stdout write per frame: dirty rows only, so jump-host SSH sees a
     // single packet instead of one write per line. Clip/pad so leftover
@@ -4256,6 +4709,20 @@ export class SshTui {
     this.lastPaintHeight = height
     this.lastChromeStart = chromeStart
     this.lastTranscriptStart = start
+    const cwdChip = formatFooterCwd(this.workspaceCwd())
+    this.cwdChipRow = cwdChip !== '' && statusText.includes(cwdChip)
+      ? Math.min(height, paintRows.length)
+      : undefined
+  }
+
+  private workspaceCwd(): string {
+    return this.agent.session.header?.cwd ?? process.cwd()
+  }
+
+  private announceWorkspaceCwd(): void {
+    const cwd = this.workspaceCwd()
+    this.pushRow({ kind: 'system', text: t('cwd.full', { cwd }) })
+    this.markDirty()
   }
 
   private buildSuggestions(): { name: string; description: string; local: boolean }[] {
@@ -4268,7 +4735,7 @@ export class SshTui {
       local: false,
     }))
     const all = [
-      ...LOCAL_COMMANDS.map(command => ({ name: command.name, description: command.description, local: true })),
+      ...localizedCommands().map(command => ({ name: command.name, description: command.description, local: true })),
       ...dsh,
     ]
     const filtered = prefix === ''
@@ -4395,13 +4862,6 @@ export class SshTui {
     this.paint()
   }
 
-  /** Color one line with an explicit SGR code (tool state colors, etc.). */
-  private styleStatusText(code: string, text: string): string {
-    const safe = sanitizeTerminalText(text)
-    if (!this.color) return safe
-    return `\x1b[${code}m${safe}\x1b[0m`
-  }
-
   private styleLine(kind: DisplayKind, text: string): string {
     const safe = sanitizeTerminalText(text)
     if (!this.color) return safe
@@ -4410,7 +4870,7 @@ export class SshTui {
       kind === 'assistant' ? '1;37' :
       kind === 'reasoning' ? '2;3' :
       kind === 'brand' ? '1;38;2;77;107;253' :
-      kind === 'tool' || kind === 'tool-result' ? '33' :
+      kind === 'tool' || kind === 'tool-result' ? '37' :
       // Codex-like: muted add/del that blend into the terminal background.
       kind === 'diff-add' ? '38;2;122;168;116;48;2;18;42;24' :
       kind === 'diff-del' ? '38;2;196;122;122;48;2;48;20;20' :
@@ -4465,10 +4925,13 @@ export class SshTui {
           .map(block => block.text)
           .join('')
         if (text !== '') {
-          const sourceKind = event.data.source.kind
+          const source = event.data.source as { kind?: string; plugin?: string; form?: string }
+          const sourceKind = source.kind ?? ''
           if (sourceKind === 'user') {
             this.pushRow({ kind: 'user', text: `❯ ${text}` })
-          } else if (sourceKind === 'plugin' && event.data.source.form === 'snapshot') {
+          } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
+            this.pushPromptInjection(text, source.plugin)
+          } else if (sourceKind === 'plugin' && source.form === 'snapshot') {
             this.pushRow({ kind: 'system', text: text })
           } else {
             this.pushRow({ kind: 'system', text: `(context) ${text}` })
@@ -4554,22 +5017,24 @@ export class SshTui {
       case 'tool/call': {
         this.openToolCalls.set(String(event.data.callId), event.data.name)
         this.pendingToolTimes.set(String(event.data.callId), event.time)
-        const present = presentToolCall(event.data.name, event.data.arguments)
-        const row: Row = {
-          kind: 'tool',
-          callId: event.data.callId,
-          name: event.data.name,
-          args: event.data.arguments,
-          status: 'running',
-          output: '',
-          title: present.title,
-          summary: present.summary,
-          ...present.command === undefined ? {} : { command: present.command },
-          ...present.cwd === undefined ? {} : { cwd: present.cwd },
-          ...present.diff === undefined ? {} : { diff: present.diff },
-          expanded: DIFF_TOOL_NAMES.has(event.data.name) && !SUBAGENT_TOOL_NAMES.has(event.data.name),
+        if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
+          const present = presentToolCall(event.data.name, event.data.arguments)
+          const row: Row = {
+            kind: 'tool',
+            callId: event.data.callId,
+            name: event.data.name,
+            args: event.data.arguments,
+            status: 'running',
+            output: '',
+            title: present.title,
+            summary: present.summary,
+            ...present.command === undefined ? {} : { command: present.command },
+            ...present.cwd === undefined ? {} : { cwd: present.cwd },
+            ...present.diff === undefined ? {} : { diff: present.diff },
+            expanded: false,
+          }
+          this.pushRow(row)
         }
-        this.pushRow(row)
         if (event.data.name === 'exit_plan_mode') {
           const markdown = planMarkdownFromArgs(event.data.arguments)
           if (markdown !== undefined) this.upsertPlanRow({ planMarkdown: markdown, expanded: false })
@@ -4593,7 +5058,6 @@ export class SshTui {
           const metaDiffs = diffMetaDiffs(event.data.meta)
           if (metaDiffs !== null) {
             row.diff = metaDiffs
-            if (DIFF_TOOL_NAMES.has(row.name)) row.expanded = true
           }
           const isShell = SHELL_TOOL_NAMES.has(row.name)
           if (isShell) {
@@ -4984,6 +5448,17 @@ export class SshTui {
     this.markDirty()
   }
 
+  private pushPromptInjection(text: string, plugin?: string): void {
+    const sources = promptInjectionSources(text, plugin)
+    this.pushRow({
+      kind: 'prompt',
+      sources,
+      text,
+      ...(plugin === undefined ? {} : { plugin }),
+      expanded: false,
+    })
+  }
+
   private handleSubagentExtensionEvent(row: Extract<Row, { kind: 'subagent' }>, event: SessionEvent): void {
     const type = String(event.type)
     const data = (event as SessionEvent & { data?: unknown }).data as { active?: unknown } | undefined
@@ -5017,6 +5492,7 @@ export class SshTui {
         break
       }
       case 'tool/call': {
+        if (HIDDEN_TOOL_NAMES.has(event.data.name)) break
         const present = presentToolCall(event.data.name, event.data.arguments)
         appendSubagentLog(row, { kind: 'tool', text: `▶ ${present.title} ${present.summary}` })
         break
@@ -5332,7 +5808,7 @@ export class SshTui {
 
   /** Default listing endpoint for a built-in OpenCode route with no stored base URL. */
   private openCodeListingBaseURL(provider: string): string | undefined {
-    if (provider === 'opencode-go') return PROVIDER_TEMPLATES['opencode-go'].defaultBaseUrl
+    if (provider === 'opencode-go') return providerTemplates()['opencode-go'].defaultBaseUrl
     if (provider === 'opencode') return OPENCODE_ZEN_BASE_URL
     return undefined
   }
@@ -5891,7 +6367,7 @@ export class SshTui {
     }
 
     const choices: { id: string | undefined; label: string }[] = [
-      { id: undefined, label: SUBAGENT_DEFAULT_EFFORT_LABEL },
+      { id: undefined, label: SUBAGENT_DEFAULT_EFFORT_LABEL() },
       ...effortOptions.map(option => ({ id: option.id, label: option.label })),
     ]
     const answer = await this.askQuestion({
@@ -5922,6 +6398,41 @@ export class SshTui {
         ? '子代理思考强度已恢复为提供商默认。'
         : `子代理思考强度已切换：${picked.id}。`}${persisted ? '' : '（仅当前会话）'}`,
     })
+    this.markDirty()
+  }
+
+  /** /language or /lang: persist zh/en and repaint chrome immediately. */
+  private async runLanguageCommand(arg: string): Promise<void> {
+    const direct = localeFromTag(arg)
+    let next: Locale | undefined = direct
+    if (next === undefined && arg.trim() !== '') {
+      this.pushRow({ kind: 'error', text: t('lang.unknown', { id: arg.trim() }) })
+      this.markDirty()
+      return
+    }
+    if (next === undefined) {
+      const current = getLocale()
+      const answer = await this.askQuestion({
+        id: 'language-pick',
+        question: t('lang.pick'),
+        options: [
+          { label: t('lang.zh'), description: current === 'zh' ? t('lang.current') : t('lang.zhDesc') },
+          { label: t('lang.en'), description: current === 'en' ? t('lang.current') : t('lang.enDesc') },
+        ],
+      }, 0, 1, current === 'en' ? 1 : 0)
+      const picked = answer.selected[0]
+      next = picked === t('lang.en') ? 'en' : 'zh'
+    }
+    setLocale(next)
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) {
+      this.pushRow({ kind: 'error', text: t('lang.settingsMissing') })
+    } else {
+      await settings.replace(UI_LOCALE_NAMESPACE, { language: next })
+      applySavedLocale({ language: next })
+    }
+    this.forceFullPaint = true
+    this.pushRow({ kind: 'system', text: t('lang.switched', { name: localeDisplayName(next) }) })
     this.markDirty()
   }
 
@@ -6277,7 +6788,9 @@ export class SshTui {
     if (match !== null) {
       switch (match[1]) {
         case 'A':
-          if (this.suggestionsVisible()) {
+          if (this.dialog?.kind === 'inspect') {
+            this.scrollInspectOrTranscript(-1)
+          } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
           } else if (this.input === '' && this.collapsibleRows().length > 0) {
@@ -6287,7 +6800,9 @@ export class SshTui {
           }
           return
         case 'B':
-          if (this.suggestionsVisible()) {
+          if (this.dialog?.kind === 'inspect') {
+            this.scrollInspectOrTranscript(1)
+          } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
             this.markDirty()
           } else if (this.input === '' && this.collapsibleRows().length > 0) {
@@ -6306,13 +6821,11 @@ export class SshTui {
       const y = Number(sgrMouse[3])
       if (sgrMouse[4] === 'M') {
         if (button === 64) {
-          this.scrollOffset += 3
-          this.markDirty()
+          this.scrollInspectOrTranscript(3)
           return
         }
         if (button === 65) {
-          this.scrollOffset = Math.max(0, this.scrollOffset - 3)
-          this.markDirty()
+          this.scrollInspectOrTranscript(-3)
           return
         }
         if (button === 0) {
@@ -6323,13 +6836,11 @@ export class SshTui {
       return
     }
     if (combined === '\x1b[5~') {
-      this.scrollOffset += Math.max(3, Math.floor((process.stdout.rows || 24) / 2))
-      this.markDirty()
+      this.scrollInspectOrTranscript(Math.max(3, Math.floor((process.stdout.rows || 24) / 2)))
       return
     }
     if (combined === '\x1b[6~') {
-      this.scrollOffset = Math.max(0, this.scrollOffset - Math.max(3, Math.floor((process.stdout.rows || 24) / 2)))
-      this.markDirty()
+      this.scrollInspectOrTranscript(-Math.max(3, Math.floor((process.stdout.rows || 24) / 2)))
       return
     }
     if (parseCursorPositionReply(combined) !== undefined) return
@@ -6526,6 +7037,12 @@ export class SshTui {
   private handleDialogChar(text: string): void {
     const dialog = this.dialog
     if (dialog === undefined) return
+    if (dialog.kind === 'inspect') {
+      if (text === '\x1b' || text === '\x03' || text === 'q' || text === 'Q' || text === '\r' || text === '\n') {
+        this.closeInspect()
+      }
+      return
+    }
     if (dialog.kind === 'onboarding') {
       this.handleOnboardingChar(text)
       return
@@ -6615,7 +7132,7 @@ export class SshTui {
         if (text === '\r' || text === '\n') {
           const value = this.input.trim()
           if (state.step === 'id') {
-            const template = PROVIDER_TEMPLATES[state.providerType]
+            const template = providerTemplates()[state.providerType]
             const id = value === '' ? template.defaultId : value
             if (!/^[a-z0-9][a-z0-9-]*$/u.test(id)) {
               this.pushRow({ kind: 'error', text: 'Provider ID 只能包含小写字母、数字和连字符，且不能以连字符开头。' })
@@ -6631,7 +7148,7 @@ export class SshTui {
             }
             state.key = value
           } else if (state.step === 'models') {
-            const template = PROVIDER_TEMPLATES[state.providerType]
+            const template = providerTemplates()[state.providerType]
             const parsed = value === ''
               ? template.defaultModels
               : value.split(/[\s,，]+/u).filter(Boolean)
@@ -6703,7 +7220,7 @@ export class SshTui {
   private async fetchOnboardingModels(): Promise<void> {
     const state = this.onboarding
     if (state === undefined || state.step !== 'models') return
-    const template = PROVIDER_TEMPLATES[state.providerType]
+    const template = providerTemplates()[state.providerType]
     const providerType = state.providerType
     const baseUrl = state.baseUrl
     const key = state.key
@@ -6756,7 +7273,7 @@ export class SshTui {
     try {
       const credentials = this.ctx.get('credentials')
       const settings = this.ctx.get('settings')
-      const template = PROVIDER_TEMPLATES[state.providerType]
+      const template = providerTemplates()[state.providerType]
 
       if (state.providerType === 'official') {
         const envRef = 'DEEPSEEK_API_KEY'
@@ -6986,6 +7503,10 @@ export class SshTui {
 
   private handleEscape(): void {
     if (this.dialog !== undefined) {
+      if (this.dialog.kind === 'inspect') {
+        this.closeInspect()
+        return
+      }
       if (this.dialog.kind === 'confirm') this.closeConfirm('cancel')
       else if (this.dialog.kind === 'onboarding') this.cancelOnboarding()
       else this.dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
@@ -7016,12 +7537,24 @@ export class SshTui {
   }
 
   /** Toggle the collapsible row under a click on the transcript area. */
-  private handleMouseClick(y: number): void {
+  handleMouseClick(y: number): void {
     if (this.dialog !== undefined) return
+    if (this.cwdChipRow !== undefined && y === this.cwdChipRow) {
+      this.announceWorkspaceCwd()
+      return
+    }
     const row = this.clickableRows.get(y)
     if (row === undefined) return
-    this.focusedRow = row
-    row.expanded = !row.expanded
+    this.toggleCard(row)
+  }
+
+  private scrollInspectOrTranscript(delta: number): void {
+    if (this.dialog?.kind === 'inspect') {
+      this.dialog.offset = Math.max(0, this.dialog.offset + delta)
+      this.markDirty()
+      return
+    }
+    this.scrollOffset = Math.max(0, this.scrollOffset + delta)
     this.markDirty()
   }
 
@@ -7088,7 +7621,7 @@ export class SshTui {
     const arg = rest.join(' ')
     switch (command) {
       case 'help': {
-        const local = LOCAL_COMMANDS
+        const local = localizedCommands()
           .filter(item => item.name !== 'help' && item.name !== 'exit')
           .map(item => `/${item.name.padEnd(12)} ${item.description}`)
         const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
@@ -7099,13 +7632,13 @@ export class SshTui {
             ...local,
             ...dsh,
             '',
-            '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲 Ctrl+C 退出。',
-            '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开；Ctrl+R 全部展开/收起；Ctrl+T 折叠输入。',
-            'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
-            '/find [思考|计划|子代理|回复] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',
-            '/model 只换当前提供商的模型和思考强度。/provider 换提供商（并选模型），下一步请求生效，无需重启。',
-            '/setup 只新增或更新某一条 API Key 提供商，不会删掉其它已保存的路由。SuperGrok 走本机 OAuth，不需要填 Key。',
-            '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，还是其它已注册提供商。',
+            t('help.intro1'),
+            t('help.intro2'),
+            t('help.intro3'),
+            t('help.intro4'),
+            t('help.intro5'),
+            t('help.intro6'),
+            t('help.intro7'),
           ].join('\n'),
         })
         break
@@ -7117,7 +7650,7 @@ export class SshTui {
       case 'model':
         void this.runModelCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '模型选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('help.modelCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/model failed: ${errorChain(error)}` })
           }
@@ -7127,7 +7660,7 @@ export class SshTui {
       case 'provider':
         void this.runProviderCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '提供商选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('help.providerCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/provider failed: ${errorChain(error)}` })
           }
@@ -7137,7 +7670,7 @@ export class SshTui {
       case 'submodel':
         void this.runSubmodelCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '子代理模型选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('help.submodelCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/submodel failed: ${errorChain(error)}` })
           }
@@ -7147,7 +7680,7 @@ export class SshTui {
       case 'subeffort':
         void this.runSubeffortCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '子代理思考强度选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('help.subeffortCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/subeffort failed: ${errorChain(error)}` })
           }
@@ -7157,9 +7690,20 @@ export class SshTui {
       case 'mode':
         void this.runModeCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '模式选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/mode failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
+      case 'language':
+      case 'lang':
+        void this.runLanguageCommand(arg).catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+          } else {
+            this.pushRow({ kind: 'error', text: `/language failed: ${errorChain(error)}` })
           }
           this.markDirty()
         })
@@ -7178,28 +7722,37 @@ export class SshTui {
         this.searchQuery = ''
         this.planNudgePending = false
         this.pendingReveal = undefined
-        this.pushRow({ kind: 'system', text: '转录已清空。子代理、计划与提问卡片会在新事件到达时重新出现。' })
+        this.pushRow({ kind: 'system', text: t('clear.transcript') })
         break
       case 'status':
         {
           const plan = this.findLivePlanRow()
           const waiting = this.rows.filter(row => row.kind === 'question' && row.status === 'waiting').length
           const provider = this.currentProviderId()
-          const route = describeProviderRoute(provider)
           const model = this.selectionRef?.current?.model ?? this.agent.options.model ?? 'default'
           const effort = this.selectionRef?.current?.reasoningEffort
-          const lines = [
-            `session: ${this.agent.id}`,
-            `plugin: dsh-ssh-tui ${PLUGIN_VERSION}`,
-            `route: ${provider}/${model}${effort === undefined ? '' : ` (${effort})`}`,
-            `provider: ${route.kind}`,
-            `status: ${this.agent.status}`,
-            `preset: ${this.presetName}`,
-            `subagents: ${this.activeSubagents.size}`,
-            `plan: ${plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off'}`,
-            `paint: ${formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed)}`,
-            waiting > 0 ? `questions: waiting ${waiting}` : 'questions: none',
-          ]
+          const sub = this.subagentSelection.current
+          const quota = this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider
+            ? this.quotaSnapshot
+            : undefined
+          const lines = formatStatusReport({
+            sessionId: this.agent.id,
+            pluginVersion: PLUGIN_VERSION,
+            provider,
+            model,
+            ...(effort === undefined ? {} : { effort }),
+            agentStatus: this.agent.status,
+            preset: this.presetName,
+            activeSubagents: this.activeSubagents.size,
+            plan: plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off',
+            paint: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed),
+            waitingQuestions: waiting,
+            ...(quota === undefined ? {} : { quota }),
+            parentModel: model,
+            ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+            subModel: sub.model,
+            cwd: this.workspaceCwd(),
+          })
           this.pushRow({ kind: 'system', text: lines.join('\n') })
         }
         break
@@ -7247,7 +7800,7 @@ export class SshTui {
             const activity = card?.lastActivity ? ` · ${card.lastActivity}` : ''
             return `▶ ${label}  ${sub.id}（${sub.provider}）运行 ${Math.floor((Date.now() - sub.startedAt) / 1000)}s  [${runId.slice(0, 8)}]${activity}`
           })
-          this.pushRow({ kind: 'system', text: `${lines.join('\n')}\n空输入时 ↑/↓ 选卡片，Enter 展开；Alt+3 跳到最新子代理。` })
+          this.pushRow({ kind: 'system', text: t('sub.listHint', { lines: lines.join('\n') }) })
         }
         break
       }

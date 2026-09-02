@@ -110,13 +110,17 @@ approvals) and prints `tmux attach`. Locks live under `$DSH_HOME/tui-locks/`;
 a leftover file from a crash is stolen if the pid is dead.
 `DSH_TUI_NO_SESSION_LOCK=1` skips this.
 
+New sessions inherit the directory you launched from. Resuming a session
+`chdir`s into that session's recorded working directory. The footer shows
+`目录:srv` (last path segment); click it to print the full path.
+
 On start the TUI checks npm for a newer `dsh-ssh-tui` and **notifies only**:
 
 ```text
 发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
 ```
 
-Set `DSH_TUI_NO_UPDATE_CHECK=1` to skip. `/status` also shows the plugin version.
+Set `DSH_TUI_NO_UPDATE_CHECK=1` to skip. `/status` also shows the plugin version, the link chip, the quota window, and whether the subagent model is in the same family as the parent route.
 
 From git:
 
@@ -222,7 +226,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 
 | Key | Action |
 | --- | --- |
-| `Enter` | send; while running, steer; with empty input, toggle the selected card |
+| `Enter` | send; while running, steer; with empty input, toggle the selected card. Oversized tool bodies open a dedicated inspect view; `Esc` returns |
 | `Tab` | complete the highlighted slash command |
 | `↑` / `↓` | empty input: move among cards; otherwise history. Same as `Ctrl+N` / `Ctrl+P` |
 | `Ctrl+R` | expand or collapse all cards |
@@ -238,11 +242,14 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/provider`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/provider`, `/language`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/compact` shows a spinning 「压缩上下文」 card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
-`/help` lists everything.
+`/help` lists everything. `/language` (alias `/lang`) opens a picker, or
+`/language zh` / `/language en` switches immediately. `DSH_TUI_LANG` wins,
+then `ssh-tui.language` in `$DSH_HOME/settings.yaml`, then `LANG` /
+`LC_MESSAGES`. Unknown and `C` locales stay Chinese.
 
 `/model` lists models for the **current** provider only. On SuperGrok that
 is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). `/provider`
@@ -300,10 +307,12 @@ labelled `(images ok)` in the command list and completion hints.
 - **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
 
 OpenCode Go / SuperGrok quota is fetched silently at start and on a
-window-based cadence; the footer shows remaining %. A ⚠ transcript line
-appears only when remaining crosses 50% / 25% / 10% / 5%. `/usage` or
-`/balance` still prints the full snapshot. Cadence: every 10 turns for a
-5-hour cap (every 4 when near), every 50 for weekly (every 10 when near),
+window-based cadence; the footer shows plan name + remaining bar + percent,
+and on a narrow row drops the plan name first so the bar and percent stay.
+DeepSeek official balance stays on `/balance` and never occupies the footer.
+A ⚠ transcript line appears only when remaining crosses 50% / 25% / 10% / 5%.
+`/usage` or `/balance` still prints the full snapshot. Cadence: every 10 turns
+for a 5-hour cap (every 4 when near), every 50 for weekly (every 10 when near),
 every 80 for monthly (every 20 when near).
 
 The startup screen shows the official DeepSeek whale logo (rendered from the
@@ -321,7 +330,9 @@ the raw reasoning as it arrives. Assistant replies render in bold white with
 terminal markdown support: heading levels (H1 enlarged/underlined, H2
 underlined, H3 colored), bold, italic, inline code, fenced code blocks,
 lists, quotes, and links all get ANSI styling while remaining
-width-wrapped for the terminal. Reasoning, tool, subagent, plan, and question cards are
+width-wrapped for the terminal. System-prompt / `<system-reminder>` / `AGENTS.md` injections collapse to a
+`提示词注入:系统预设 AGENTS.MD` card (sources joined when several match).
+Reasoning, tool, subagent, plan, question, and prompt cards are
 each expandable/collapsible independently. Empty input: `↑`/`↓` (same as
 `Ctrl+N`/`Ctrl+P`) move the highlight, `Enter` toggles, `Ctrl+R` toggles all,
 `Esc` drops the selection. Click a card header to toggle it. Subagent cards
@@ -338,19 +349,17 @@ animated spinner plus `运行中 · 工具 N` while working, `✓ 已完成` for
 seconds after completion, and `待命` when idle. A terminal bell rings on
 completion (`DSH_TUI_NO_BELL=1` disables it).
 
-Tool calls render as compact cards instead of raw argument JSON. The card
-header and result text follow the execution state — yellow while running,
-green on success, red on failure (a shell command with a non-zero exit or
-signal also turns red, with a `[退出码 N]` / `[信号 X]` suffix). Shell tools
-show the command as dim-grey `$ command`, file mutations (`edit` / `write` /
-`str_replace_editor`) render the applied change git-style: a path header,
-`-` lines on a dark-red background, `+` lines on a dark-green background,
-and a `└ +N -M · K file(s)` footer. File-mutation diffs are shown in full
-(never collapsed to a `… more` line) and their cards start expanded. Other
-tools show a short argument summary and start collapsed to a single line
-(the command, truncated with
-`…` when long); expand to reveal output or the result body. Expanded generic
-calls convert their JSON arguments and JSON results into readable indented
+Tool calls render as compact cards instead of raw argument JSON. The title
+stays the default foreground; only the status dot and `[ok]` / `[error]` /
+`[running…]` (plus `[退出码 N]` / `[信号 X]`) are yellow / green / red.
+Shell tools show the command as dim-grey `$ command`. File mutations
+(`edit` / `write` / `str_replace_editor`) render the applied change
+git-style: a path header, `-` lines on a dark-red background, `+` lines on
+a dark-green background, and a `└ +N -M · K file(s)` footer. Expanding a
+card whose body fits the workspace shows it in place; if it would overflow,
+a dedicated inspect view opens (`Esc` returns to the session). Other tools
+show a short argument summary and start collapsed. Expanded generic calls
+convert their JSON arguments and JSON results into readable indented
 content — key/value fields, bullet lists, and multiline blocks for
 code/content — instead of raw JSON text.
 

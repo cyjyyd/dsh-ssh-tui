@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { setLocale } from '../lib/i18n/index.js'
+setLocale('zh')
 
 import {
   askSummary,
@@ -12,6 +14,8 @@ import {
   formatOpenCodeGoUsage,
   formatAccountBalance,
   formatQuotaSnapshot,
+  formatQuotaStatusLine,
+  formatStatusReport,
   joinUrl,
   parseDeepSeekBalance,
   parseOpenAiCompatibleBalance,
@@ -36,6 +40,9 @@ import {
   planTitleFromMarkdown,
   matchTranscriptRows,
   presentToolCall,
+  promptInjectionSources,
+  promptInjectionTitle,
+  isPromptInjectionMessage,
   providerUsesLocalOAuth,
   detectSshSession,
   formatLinkQualityChip,
@@ -45,6 +52,12 @@ import {
   footerStatsGroups,
   fitFooterStatsLine,
   fitFooterStatusLine,
+  dropFooterQuotaPlanName,
+  formatFooterQuota,
+  buildToolHeader,
+  toolBodyFitsWorkspace,
+  toolStateColor,
+  wrappedToolBodyLineCount,
   linkQualityOf,
   providerShortCode,
   paintIntervalForRtt,
@@ -64,6 +77,8 @@ import {
 } from '../lib/tui.js'
 import {
   defaultSubagentModelForProvider,
+  describeSubagentFit,
+  subagentCostClass,
   subagentModelMatchesProvider,
 } from '../lib/subagent-model.js'
 
@@ -231,12 +246,42 @@ test('footer status keeps one activity and drops identity from the right', () =>
     idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
     parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
     quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 1,
+    cwdLabel: '目录:srv',
   })
-  assert.deepEqual(identity, ['[标准模式]', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, '排队 1'])
+  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, '排队 1'])
   const line = fitFooterStatusLine('子代理 2', identity, 28)
   assert.match(line, /^子代理 2/)
   assert.equal(line.includes('排队'), false)
   assert.ok(displayWidth(line) <= 28)
+})
+
+test('narrow footer drops the quota plan name before the remaining bar', () => {
+  const identity = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.equal(identity.includes(formatFooterQuota(82, 'SuperGrok')), true)
+  const rewritten = [...identity]
+  assert.equal(dropFooterQuotaPlanName(rewritten), true)
+  assert.equal(rewritten.includes(formatFooterQuota(82)), true)
+  assert.equal(rewritten.some(part => part.startsWith('SuperGrok ')), false)
+
+  const wide = fitFooterStatusLine('空闲', identity, 80)
+  assert.match(wide, /SuperGrok/)
+  assert.match(wide, /82%/)
+  // Full identity is 72 cells with the plan name, 62 without it — 64 is
+  // the window where shrinking the quota widget is enough.
+  const mid = fitFooterStatusLine('空闲', identity, 64)
+  assert.equal(mid.includes('SuperGrok'), false)
+  assert.match(mid, /82%/)
+  assert.match(mid, /[█░]{8}/)
+  assert.ok(displayWidth(mid) <= 64)
+  const tight = fitFooterStatusLine('空闲', identity, 18)
+  assert.equal(tight.includes('SuperGrok'), false)
+  assert.ok(displayWidth(tight) <= 18)
 })
 
 test('formatQuotaBar is an 8-pip remaining bar', () => {
@@ -555,6 +600,42 @@ test('presentToolCall localizes mutation and common file tool names', () => {
   assert.equal(presentToolCall('delete', JSON.stringify({ path: 'a.ts' })).title, '删除文件')
   assert.equal(presentToolCall('skills', '{}').title, '技能')
   assert.equal(presentToolCall('bash', JSON.stringify({ command: 'ls' })).title, 'bash')
+  assert.equal(presentToolCall('update_goal', JSON.stringify({ action: 'edit', objective: '收口工具卡' })).title, '更新目标')
+  assert.equal(presentToolCall('create_goal', JSON.stringify({ objective: '做完 A' })).title, '创建目标')
+  assert.equal(presentToolCall('get_goal', '{}').title, '查看目标')
+})
+
+test('get_goal tool cards stay hidden; update_goal is labelled 更新目标', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 1,
+    data: { callId: 'g1', name: 'get_goal', arguments: '{}' },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 3,
+    data: { callId: 'u1', name: 'update_goal', arguments: JSON.stringify({ objective: '收口工具卡' }) },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'goal/change',
+    time: 4,
+    data: { goal: { objective: '收口工具卡', phase: 'active' } },
+  })
+  const tools = tui.rows.filter(row => row.kind === 'tool')
+  assert.equal(tools.some(row => row.name === 'get_goal'), false)
+  const update = tools.find(row => row.name === 'update_goal')
+  assert.equal(update?.title, '更新目标')
+  assert.equal(update?.summary, '收口工具卡')
+  assert.ok(tui.rows.some(row => row.kind === 'goal' && row.objective === '收口工具卡'))
 })
 
 test('subagent cards stay collapsed, isolated, and animate while running', () => {
@@ -679,17 +760,21 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
     return tui.captureFrame(72, 18).join('\n')
   }
     const okFrame = build('ok', 'bash', '$ npm test', 'bash', '3 passing')
-    assert.match(okFrame, /\x1b\[32m/)
+    assert.match(okFrame, /\x1b\[32m●/)
+    assert.match(okFrame, /\x1b\[32m\[ok\]/)
     assert.match(okFrame, /\x1b\[90m\s*\$\s?npm test/)
+    assert.match(okFrame, /3 passing/)
     const errFrame = build('error', 'bash', '$ npm test', 'bash', '1 failing')
-    assert.match(errFrame, /\x1b\[31m/)
+    assert.match(errFrame, /\x1b\[31m●/)
+    assert.match(errFrame, /\x1b\[31m\[error\]/)
     const readFrame = build('ok', 'read', 'src/tui.ts', '读取', 'export const x = 1')
-    assert.match(readFrame, /\x1b\[32m/)
-    // The path operand is dim (metadata), while the title stays state-colored.
+    assert.match(readFrame, /\x1b\[32m●/)
     assert.match(readFrame, /\x1b\[90m\s+src\/tui\.ts/)
+    // Title and body stay default; only the status dot/word are green.
+    assert.equal(/\x1b\[32m读取/.test(readFrame), false)
     assert.equal(readFrame.includes('\x1b[33m'), false)
     const editFrame = build('ok', 'edit', 'src/tui.ts', '编辑', '')
-    assert.match(editFrame, /\x1b\[32m/)
+    assert.match(editFrame, /\x1b\[32m●/)
     assert.match(editFrame, /\x1b\[90m\s+src\/tui\.ts/)
   } finally {
     if (prevTerm === undefined) delete process.env.TERM
@@ -697,6 +782,70 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
     if (prevNoColor === undefined) delete process.env.NO_COLOR
     else process.env.NO_COLOR = prevNoColor
   }
+})
+
+test('buildToolHeader colors only the status dot and [ok]/[error] word', () => {
+  const header = buildToolHeader({
+    focused: false, expanded: false, title: '读取', summary: 'src/tui.ts', status: 'ok',
+  })
+  assert.match(header.plain, /● 读取  src\/tui\.ts  \[ok\]/)
+  const dot = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '●')
+  const state = header.segments.find(segment => header.plain.slice(segment.start, segment.end).includes('[ok]'))
+  const summary = header.segments.find(segment => header.plain.slice(segment.start, segment.end).includes('src/tui.ts'))
+  assert.equal(dot?.sgr, '32')
+  assert.equal(state?.sgr, '32')
+  assert.equal(summary?.sgr, '90')
+  assert.equal(toolStateColor('running'), '33')
+  assert.equal(toolStateColor('error'), '31')
+})
+
+test('oversized tool bodies open a dedicated inspect overlay', () => {
+  assert.equal(toolBodyFitsWorkspace(10, 12), true)
+  assert.equal(toolBodyFitsWorkspace(11, 12), true)
+  assert.equal(toolBodyFitsWorkspace(12, 12), false)
+  const lines = Array.from({ length: 40 }, (_, index) => ({ text: `LINE_${index}` }))
+  assert.ok(wrappedToolBodyLineCount(lines, 40) >= 40)
+
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  const output = Array.from({ length: 80 }, (_, index) => `BODY_LINE_${index}`).join('\n')
+  tui.rows.push({
+    kind: 'tool', callId: 'call-big', name: 'read', title: '读取', summary: 'big.ts',
+    args: JSON.stringify({ path: 'big.ts' }), output, status: 'ok', expanded: false,
+  })
+  const tool = tui.rows.find(row => row.kind === 'tool')
+  process.stdout.columns = 48
+  process.stdout.rows = 16
+  tui.toggleCard(tool)
+  assert.equal(tool.expanded, false)
+  assert.equal(tui.dialog?.kind, 'inspect')
+  const overlay = tui.captureFrame(48, 16)
+  assert.ok(overlay.some(line => line.includes('工具全文')))
+  assert.ok(overlay.some(line => line.includes('BODY_LINE_0')))
+  assert.ok(overlay.some(line => line.includes('Esc 返回')))
+  tui.closeInspect()
+  assert.equal(tui.dialog, undefined)
+  const back = tui.captureFrame(48, 16)
+  assert.ok(back.some(line => line.startsWith('> ') || line.startsWith('❯ ')))
+  assert.equal(back.some(line => line.includes('工具全文')), false)
+
+  tui.rows.push({
+    kind: 'tool', callId: 'call-small', name: 'read', title: '读取', summary: 'tiny.ts',
+    args: JSON.stringify({ path: 'tiny.ts' }), output: 'one line', status: 'ok', expanded: false,
+  })
+  const small = tui.rows.find(row => row.kind === 'tool' && row.callId === 'call-small')
+  tui.toggleCard(small)
+  assert.equal(small.expanded, true)
+  assert.equal(tui.dialog, undefined)
+  const inPlace = tui.captureFrame(48, 16)
+  assert.ok(inPlace.some(line => line.includes('one line')))
 })
 
 test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
@@ -947,6 +1096,50 @@ test('plan mode and ask-user questions get their own collapsed cards', () => {
   void pending.catch(() => {})
 })
 
+test('promptInjectionSources joins system preset and instruction files', () => {
+  assert.deepEqual(
+    promptInjectionSources('You are an AI agent powered by DeepSeek Harness.'),
+    ['系统预设'],
+  )
+  assert.deepEqual(
+    promptInjectionSources('<system-reminder>Additional instructions from: pkg/AGENTS.md</system-reminder>'),
+    ['AGENTS.MD'],
+  )
+  const both = promptInjectionSources(
+    'You are an AI agent powered by DeepSeek Harness.\n<system-reminder>Additional instructions from: ./CLAUDE.md and AGENTS.md</system-reminder>',
+  )
+  assert.ok(both.includes('系统预设'))
+  assert.ok(both.includes('AGENTS.MD'))
+  assert.ok(both.includes('CLAUDE.MD'))
+  assert.equal(promptInjectionTitle(['系统预设', 'AGENTS.MD']), '提示词注入:系统预设 AGENTS.MD')
+  assert.equal(isPromptInjectionMessage('plugin', 'hello', 'agent-instructions'), true)
+  assert.equal(isPromptInjectionMessage('user', 'hello'), false)
+})
+
+test('injected system reminders become a collapsed 提示词注入 card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'user/message',
+    data: {
+      content: [{
+        type: 'text',
+        text: 'You are an AI agent powered by DeepSeek Harness.\n<system-reminder>Additional instructions from: /proj/AGENTS.md</system-reminder>',
+      }],
+      source: { kind: 'plugin', plugin: 'agent-instructions' },
+    },
+  })
+  const card = tui.rows.find(row => row.kind === 'prompt')
+  assert.equal(card?.expanded, false)
+  assert.ok(card?.sources.includes('系统预设'))
+  assert.ok(card?.sources.includes('AGENTS.MD'))
+  const frame = tui.captureFrame(80, 16)
+  assert.ok(frame.some(line => line.includes('提示词注入:系统预设 AGENTS.MD')))
+  assert.equal(frame.some(line => line.includes('(context)')), false)
+  assert.equal(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('powered by DeepSeek')), false)
+})
+
 test('goal cards stay collapsed and report the current phase', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
@@ -1088,6 +1281,102 @@ test('default subagent model follows the parent provider family', () => {
   )
   assert.equal(subagentModelMatchesProvider('xai', 'deepseek-v4-flash'), false)
   assert.equal(subagentModelMatchesProvider('deepseek-official', 'deepseek-v4-flash'), true)
+  // A dirty catalog that still lists the leftover DeepSeek id must not keep it on xAI.
+  assert.equal(
+    subagentModelMatchesProvider('xai', 'deepseek-v4-flash', ['grok-4.6', 'deepseek-v4-flash']),
+    false,
+  )
+  assert.equal(
+    subagentModelMatchesProvider('xai', 'grok-4.5', ['grok-4.6', 'grok-4.5']),
+    true,
+  )
+  assert.equal(subagentCostClass('deepseek-v4-flash'), 'light')
+  assert.equal(subagentCostClass('grok-4.5'), 'light')
+  assert.equal(subagentCostClass('grok-4.6'), 'heavy')
+  assert.equal(subagentCostClass('deepseek-v4-pro'), 'heavy')
+  const cheap = describeSubagentFit({
+    parentProvider: 'xai', parentModel: 'grok-4.6', subModel: 'grok-4.5',
+  })
+  assert.equal(cheap.sameFamily, true)
+  assert.equal(cheap.expensive, false)
+  assert.match(cheap.line, /跟随父/)
+  assert.match(cheap.line, /同族/)
+  const leftover = describeSubagentFit({
+    parentProvider: 'xai', parentModel: 'grok-4.6', subModel: 'deepseek-v4-flash',
+  })
+  assert.equal(leftover.sameFamily, false)
+  const expensive = describeSubagentFit({
+    parentProvider: 'deepseek-official', parentModel: 'deepseek-v4-pro', subModel: 'deepseek-v4-pro',
+  })
+  assert.equal(expensive.expensive, true)
+  assert.match(expensive.line, /较贵（目录无轻量）/)
+})
+
+test('/status lists the link chip, quota window, and subagent family fit', () => {
+  const quota = parseOpenCodeGoQuota({
+    usage: {
+      rolling: { status: 'ok', percent: 40 },
+      weekly: { status: 'ok', percent: 10 },
+      monthly: { status: 'ok', percent: 70 },
+    },
+  }, 'opencode-go')
+  assert.match(formatQuotaStatusLine(quota), /quota: OpenCode Go/)
+  assert.match(formatQuotaStatusLine(quota), /本月 30%/)
+  assert.equal(formatQuotaStatusLine(undefined), 'quota: none')
+  const lines = formatStatusReport({
+    sessionId: 'sess-1',
+    pluginVersion: '0.3.8',
+    provider: 'opencode-go',
+    model: 'deepseek-v4-pro',
+    effort: 'max',
+    agentStatus: 'idle',
+    preset: '标准模式',
+    activeSubagents: 0,
+    plan: 'off',
+    paint: 'SSH ●●●○ 90ms',
+    waitingQuestions: 0,
+    quota,
+    parentModel: 'deepseek-v4-pro',
+    subModel: 'deepseek-v4-flash',
+    cwd: '/root/genshin/srv',
+  })
+  assert.ok(lines.some(line => line === 'cwd: /root/genshin/srv'))
+  assert.ok(lines.some(line => line.startsWith('paint: SSH ●●●○ 90ms')))
+  assert.ok(lines.some(line => line.startsWith('quota: OpenCode Go')))
+  assert.ok(lines.some(line => line.includes('subagent: deepseek-v4-flash') && line.includes('同族')))
+  const heavy = formatStatusReport({
+    sessionId: 'sess-1',
+    pluginVersion: '0.3.8',
+    provider: 'xai',
+    model: 'grok-4.6',
+    agentStatus: 'idle',
+    preset: '标准模式',
+    activeSubagents: 0,
+    plan: 'off',
+    paint: '本机 ●●●●',
+    waitingQuestions: 0,
+    parentModel: 'grok-4.6',
+    subModel: 'grok-4.6',
+  })
+  assert.ok(heavy.some(line => line.includes('较贵（目录无轻量）')))
+})
+
+test('clicking the footer directory chip prints the full workspace path', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/root/genshin/srv' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  const frame = tui.captureFrame(80, 16)
+  assert.ok(frame.some(line => line.includes('目录:srv')))
+  const chipRow = frame.findIndex(line => line.includes('目录:srv'))
+  assert.ok(chipRow >= 0)
+  tui.handleMouseClick(chipRow + 1)
+  assert.ok(tui.rows.some(row => row.kind === 'system' && row.text === '工作目录 /root/genshin/srv'))
 })
 
 test('describeProviderRoute labels DeepSeek, SuperGrok, and OpenCode routes', () => {

@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { setLocale } from '../lib/i18n/index.js'
+setLocale('zh')
 
 import {
   checkForPluginUpdate,

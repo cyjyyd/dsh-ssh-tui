@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessions } from './session-list.js'
 import { isEscapePrefix, truncateToWidth } from './tui.js'
+import { t } from './i18n/index.js'
 
 /** What the launch picker decided. */
 export type SessionPickerResult =
@@ -50,17 +51,17 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
   const render = (): void => {
     const width = Math.max(20, process.stdout.columns || 80)
     const lines: string[] = [
-      style(truncateToWidth('DeepSeek Harness — 选择要恢复的历史会话', width), '1'),
+      style(truncateToWidth(t('picker.title'), width), '1'),
       '─'.repeat(width),
     ]
     sessions.forEach((session, index) => {
       lines.push(style(truncateToWidth(`${index + 1}  ${session.label}`, width), '1'))
-      const meta = `${session.unreadable === true ? '⚠ 无法读取 · ' : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
+      const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
       lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), '90')}`)
     })
     lines.push('')
-    lines.push(`${style('0', '36')} / ${style('Enter', '36')}  新建会话`)
-    lines.push(`${style('Esc', '36')}  取消`)
+    lines.push(`${style('0', '36')} / ${style('Enter', '36')}  ${t('picker.new')}`)
+    lines.push(`${style('Esc', '36')}  ${t('picker.cancel')}`)
     process.stdout.write('\x1b[2J\x1b[H')
     for (const line of lines) {
       process.stdout.write(`${line}\x1b[0m\x1b[K\n`)

@@ -1,7 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { setLocale } from '../lib/i18n/index.js'
+setLocale('zh')
 
-import { listResumableSessions } from '../lib/session-list.js'
+import {
+  enterSessionCwd,
+  formatFooterCwd,
+  listResumableSessions,
+  sessionCwdLabel,
+} from '../lib/session-list.js'
 
 function header(id, createdAt, overrides = {}) {
   return {
@@ -104,4 +111,38 @@ test('the current session is excluded and the result is capped at nine', async (
   assert.equal(listed.length, 9)
   assert.equal(listed.some(item => item.id === 'session-0'), false)
   assert.deepEqual(listed.map(item => item.id), ids.slice(1, 10))
+})
+
+test('sessionCwdLabel keeps the last folder name', () => {
+  assert.equal(sessionCwdLabel('/root/genshin/srv'), 'srv')
+  assert.equal(sessionCwdLabel('\\root\\genshin\\srv\\'), 'srv')
+  assert.equal(sessionCwdLabel('/'), '/')
+  assert.equal(formatFooterCwd('/root/genshin/srv'), '目录:srv')
+  assert.equal(formatFooterCwd(''), '')
+})
+
+test('enterSessionCwd switches into an absolute existing directory', () => {
+  const calls = []
+  const ok = enterSessionCwd('/root/genshin/srv', {
+    current: '/tmp',
+    exists: () => true,
+    chdir: (path) => { calls.push(path) },
+  })
+  assert.deepEqual(ok, { cwd: '/root/genshin/srv', changed: true })
+  assert.deepEqual(calls, ['/root/genshin/srv'])
+  const missing = enterSessionCwd('/gone', {
+    current: '/tmp',
+    exists: () => false,
+    chdir: () => { throw new Error('should not chdir') },
+  })
+  assert.equal(missing.changed, false)
+  assert.equal(missing.cwd, '/tmp')
+  assert.match(missing.error ?? '', /不存在/)
+  const relative = enterSessionCwd('relative/path', {
+    current: '/tmp',
+    exists: () => true,
+    chdir: () => { throw new Error('should not chdir') },
+  })
+  assert.equal(relative.changed, false)
+  assert.match(relative.error ?? '', /不是绝对路径/)
 })

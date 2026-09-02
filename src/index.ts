@@ -37,6 +37,8 @@ import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
 import { acquireSessionLock, releaseSessionLock, sessionLockDisabled } from './session-lock.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
+import { enterSessionCwd } from './session-list.js'
+import { installUiLocale, t } from './i18n/index.js'
 
 
 export const name = 'ssh-tui'
@@ -75,6 +77,7 @@ export function apply(ctx: Context, config: Config): void {
   }
   const subagentSelection = createSubagentSelection(ctx)
   installRouteMemory(ctx)
+  installUiLocale(ctx)
   ctx.effect(() => {
     let disposed = false
     let switching = false
@@ -211,10 +214,19 @@ export function apply(ctx: Context, config: Config): void {
         await agentPresets?.mount(agentCtx)
       }
       await takeSessionLock(String(sessionId))
+      let resumeCwdNotice: string | undefined
       try {
         handle = resume
           ? await agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
           : await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+        if (resume) {
+          const entered = enterSessionCwd(handle.agent.session.header?.cwd)
+          resumeCwdNotice = entered.error !== undefined
+            ? entered.error
+            : entered.changed
+              ? t('cwd.entered', { cwd: entered.cwd })
+              : undefined
+        }
       } catch (error: unknown) {
         await dropSessionLock()
         throw error
@@ -239,6 +251,7 @@ export function apply(ctx: Context, config: Config): void {
         resumePicker: false,
         sessionId: String(sessionId),
         resume,
+        ...(resumeCwdNotice === undefined ? {} : { cwdNotice: resumeCwdNotice }),
         provider,
         model,
         selectionRef,

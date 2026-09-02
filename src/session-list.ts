@@ -4,7 +4,58 @@
  * both surfaces offer the same sessions.
  */
 
+import { existsSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import { t } from './i18n/index.js'
+
+/** Last path segment for the footer chip (`\root\genshin\srv` → `srv`). */
+export function sessionCwdLabel(cwd: string): string {
+  const raw = cwd.trim()
+  if (raw === '') return ''
+  const parts = raw.split(/[\\/]/u).filter(part => part !== '')
+  const last = parts[parts.length - 1]
+  if (last !== undefined && last !== '') return last
+  return raw.startsWith('/') || raw.startsWith('\\') ? '/' : raw
+}
+
+export function formatFooterCwd(cwd: string): string {
+  const label = sessionCwdLabel(cwd)
+  return label === '' ? '' : t('footer.cwdChip', { name: label })
+}
+
+/**
+ * Switch the process into a persisted session working directory. Returns the
+ * directory actually used; missing/invalid paths stay put and are reported.
+ */
+export function enterSessionCwd(
+  cwd: string | undefined,
+  options: {
+    current?: string
+    exists?: (path: string) => boolean
+    chdir?: (path: string) => void
+  } = {},
+): { cwd: string; changed: boolean; error?: string } {
+  const current = options.current ?? process.cwd()
+  const exists = options.exists ?? existsSync
+  const chdir = options.chdir ?? ((path: string) => process.chdir(path))
+  if (cwd === undefined || cwd.trim() === '') return { cwd: current, changed: false }
+  const target = cwd.trim()
+  if (!isAbsolute(target)) {
+    return { cwd: current, changed: false, error: t('cwd.notAbsolute', { path: target }) }
+  }
+  if (!exists(target)) {
+    return { cwd: current, changed: false, error: t('cwd.missing', { path: target }) }
+  }
+  if (target === current) return { cwd: current, changed: false }
+  try {
+    chdir(target)
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { cwd: current, changed: false, error: t('cwd.failed', { path: target, error: message }) }
+  }
+  return { cwd: target, changed: true }
+}
 
 /** One selectable history session. */
 export interface ResumableSession {
