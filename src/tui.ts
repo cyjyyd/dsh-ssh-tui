@@ -3885,19 +3885,32 @@ export class SshTui {
   /** The transcript rows that support per-row expand/collapse. */
   private collapsibleRows(): CollapsibleBlock[] {
     const compact = this.isCompactView()
-    const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> => {
-        if (compact && (row.kind === 'reasoning' || row.kind === 'prompt')) return false
-        return row.kind === 'reasoning'
-          || row.kind === 'tool'
-          || row.kind === 'subagent'
+    if (compact) {
+      const groups = compactToolGroups(this.rows.filter((row): row is Extract<Row, { kind: 'tool' }> => row.kind === 'tool'))
+      const rows: CollapsibleBlock[] = this.rows.filter(
+        (row): row is Extract<Row, { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }> =>
+          row.kind === 'subagent'
           || row.kind === 'plan'
           || row.kind === 'question'
           || row.kind === 'goal'
-          || row.kind === 'compaction'
-          || row.kind === 'prompt'
-      })
-    if (!compact && this.streaming !== undefined && this.streaming.reasoning !== '') {
+          || row.kind === 'compaction')
+      const callAnchor = groups.calls.at(-1)
+      const editAnchor = groups.edits.at(-1)
+      if (callAnchor !== undefined) rows.push(callAnchor)
+      if (editAnchor !== undefined) rows.push(editAnchor)
+      return rows
+    }
+    const rows: CollapsibleBlock[] = this.rows.filter(
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> =>
+        row.kind === 'reasoning'
+        || row.kind === 'tool'
+        || row.kind === 'subagent'
+        || row.kind === 'plan'
+        || row.kind === 'question'
+        || row.kind === 'goal'
+        || row.kind === 'compaction'
+        || row.kind === 'prompt')
+    if (this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
     }
@@ -4437,22 +4450,9 @@ export class SshTui {
     const compactGroups = compact
       ? compactToolGroups(this.rows.filter((row): row is Extract<Row, { kind: 'tool' }> => row.kind === 'tool'))
       : undefined
-    const compactEditCard = compactGroups?.edits[0]
-    const compactCallCard = compactGroups?.calls[0]
 
     for (const row of this.rows) {
-      if (compact && (row.kind === 'reasoning' || row.kind === 'prompt')) continue
-      if (compact && compactGroups !== undefined && row.kind === 'tool') {
-        if (row === compactEditCard) {
-          this.paintCompactSummary(addDisplay, row, 'edits', compactGroups, width)
-          continue
-        }
-        if (row === compactCallCard) {
-          this.paintCompactSummary(addDisplay, row, 'calls', compactGroups, width)
-          continue
-        }
-        continue
-      }
+      if (compact && (row.kind === 'reasoning' || row.kind === 'prompt' || row.kind === 'tool')) continue
       if (row.kind === 'brand-logo') {
         const variant = DEEPSEEK_LOGO_VARIANTS.find(candidate => candidate.width <= width - 2)
           ?? DEEPSEEK_LOGO_VARIANTS[DEEPSEEK_LOGO_VARIANTS.length - 1]
@@ -4686,6 +4686,16 @@ export class SshTui {
         for (const line of wrap(this.streaming.text, width)) {
           addDisplay(this.styleLine('assistant', line))
         }
+      }
+    }
+    if (compact && compactGroups !== undefined) {
+      const editAnchor = compactGroups.edits.at(-1)
+      const callAnchor = compactGroups.calls.at(-1)
+      if (callAnchor !== undefined) {
+        this.paintCompactSummary(addDisplay, callAnchor, 'calls', compactGroups, width)
+      }
+      if (editAnchor !== undefined) {
+        this.paintCompactSummary(addDisplay, editAnchor, 'edits', compactGroups, width)
       }
     }
     if (this.waitCardVisible()) {

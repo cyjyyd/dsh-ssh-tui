@@ -795,7 +795,7 @@ test('compactToolGroups splits edits from other calls and counts lines', () => {
   assert.equal(countDiffLines(groups.edits[0].diff) > 0, true)
 })
 
-test('compact view hides thinking and merges tool cards', () => {
+test('compact view hides thinking and pins merged tools after the reply', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
@@ -808,18 +808,21 @@ test('compact view hides thinking and merges tool cards', () => {
   tui.setWorkspaceView('compact')
   tui.rows.push(
     { kind: 'reasoning', text: 'SECRET_THOUGHT', expanded: false },
-    { kind: 'assistant', text: 'visible reply' },
     { kind: 'tool', callId: 'r1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: 'ok', status: 'ok', expanded: false },
     { kind: 'tool', callId: 'g1', name: 'grep', title: '搜索', summary: 'x', args: '{}', output: 'miss', status: 'ok', expanded: false },
     { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false, diff: [{ path: 'a.ts', oldText: 'a', newText: 'b\nc' }] },
+    { kind: 'assistant', text: 'visible reply that would scroll early tool cards away' },
   )
-  const frame = tui.captureFrame(72, 18).join('\n')
-  assert.equal(frame.includes('SECRET_THOUGHT'), false)
-  assert.equal(frame.includes('已思考'), false)
-  assert.ok(frame.includes('visible reply'))
-  assert.ok(frame.includes('已调用 2 个工具'))
-  assert.ok(frame.includes('已编辑'))
-  assert.ok(frame.includes('[极简]') || frame.includes('极简'))
+  const frame = tui.captureFrame(72, 16)
+  const text = frame.join('\n')
+  assert.equal(text.includes('SECRET_THOUGHT'), false)
+  assert.equal(text.includes('已思考'), false)
+  assert.ok(text.includes('visible reply'))
+  assert.ok(text.includes('已调用 2 个工具'))
+  assert.ok(text.includes('已编辑'))
+  const replyAt = frame.findIndex(line => line.includes('visible reply'))
+  const toolsAt = frame.findIndex(line => line.includes('已调用'))
+  assert.ok(replyAt >= 0 && toolsAt >= 0 && toolsAt > replyAt)
 })
 
 test('Ctrl+R without a selection expands the latest card', () => {

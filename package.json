@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
