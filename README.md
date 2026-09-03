@@ -17,11 +17,13 @@ SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.c
 安装（官方 CLI，无需 clone）：
 
 ```bash
-dsh plugin --profile tui add dsh-ssh-tui
+dsh plugin --profile tui add dsh-ssh-tui@latest
 dsh --profile tui
 ```
 
-当前 `dsh` 必须带 `--profile`（`dsh plugin add …` 会报缺选项）。装进别的 profile 把 `tui` 换成那个名字即可。更新同一条命令。卸载：`dsh plugin --profile tui remove dsh-ssh-tui`。
+当前 `dsh` 必须带 `--profile`（`dsh plugin add …` 会报缺选项）。装进别的 profile 把 `tui` 换成那个名字即可。
+
+**更新必须带 `@latest`。** `dsh plugin` 只是把后面的参数转给 profile 目录里的 pnpm。写成 `add dsh-ssh-tui`（没有版本）时，pnpm 会沿用 `pnpm-lock.yaml` 里已经钉死的版本（常见就是一直停在 0.3.7）。也不要把 `--profile` 写到 `add` 后面：`dsh plugin add --profile tui add dsh-ssh-tui` 不是合法用法。卸载：`dsh plugin --profile tui remove dsh-ssh-tui`。
 
 ## 官方 headless 和这个 TUI
 
@@ -77,7 +79,7 @@ dsh --profile tui
 
 ## 部署指南
 
-推荐安装就是文首那条 `dsh plugin --profile tui add dsh-ssh-tui`。CLI 会从 npm 拉包、写入 profile 依赖，并把本插件加入 `dsh.profile.bundles`（因为包内声明了 `dsh.bundle`）。
+推荐安装就是文首那条 `dsh plugin --profile tui add dsh-ssh-tui@latest`。CLI 会从 npm 拉包、写入 profile 依赖，并把本插件加入 `dsh.profile.bundles`（因为包内声明了 `dsh.bundle`）。
 
 可选：本机已有 SuperGrok / grok-bridge token 时再装配套 OAuth：
 
@@ -116,13 +118,7 @@ tmux attach -t dsh
 `tmux attach`。锁在 `$DSH_HOME/tui-locks/`；进程异常退出后残留锁会在下次启动时
 核对 pid，已死则自动接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
 
-启动时会查一次 npm 上的 `dsh-ssh-tui` 最新版，有更新只提示、不自动升级：
-
-```text
-发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
-```
-
-`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
+启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
 仓库内也可：`bash scripts/smoke-headless.sh`（记录出口摘要，不打印 token）。
 
@@ -197,7 +193,7 @@ dsh --profile tui --no-color
 | --- | --- |
 | `Enter` | 发送；运行中则插入指示；空输入且已选卡片时展开/收起。工具正文超出窗口则单独全览，`Esc` 返回 |
 | `↑` / `↓` | 空输入：在卡片间移动；有输入：历史。与 `Ctrl+N` / `Ctrl+P` 相同 |
-| `Ctrl+R` | 全部展开或全部收起 |
+| `Ctrl+R` | 展开最新一条卡片；已用 ↑/↓ 选中时全部展开或全部收起 |
 | `Ctrl+T` | 折叠输入框（只影响显示） |
 | `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复 |
 | `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮）。类：`思考` `计划` `子代理` `回复` `提示词`。`Ctrl+/` 或 `Alt+/` 打开 |
@@ -211,9 +207,10 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/view`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
+工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简**（藏思考、合并工具/编辑）之间切换，写入 `ssh-tui.view`。这和 `/mode`（agent preset）不是一回事。
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
 「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
 进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
@@ -240,7 +237,7 @@ API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 O
 
 子代理不再把子会话内容平铺进主转录：每个子代理一张卡片，默认折叠，只显示
 `子代理 spawn [id] 运行中 · Ns · 最近活动`。`Enter` / 鼠标点击展开该子代理自己的
-用户消息、工具调用和结果；`Ctrl+R` 可一次展开或收起全部卡片。运行中的卡片带旋转
+用户消息、工具调用和结果；没有选中卡片时 `Ctrl+R` 展开最新一条，选中后才全部展开/收起。运行中的卡片带旋转
 动画，状态栏和窗口标题显示 `⠋ 子代理 N`。
 
 计划条只钉**最新一条未完成的计划**。同一轮次里模型再开新计划时，旧计划归档进
@@ -279,6 +276,7 @@ ssh-tui-subagent:
   # reasoningEffort 可省略：省略时跟随提供商/模型默认
 ssh-tui:
   language: zh   # 或 en；/language 写入这里。DSH_TUI_LANG 优先
+  view: detailed # 或 compact；/view 写入这里
 ```
 
 `/model`、`/mode`、`/submodel` 与 `/subeffort` 的修改会写回这里，

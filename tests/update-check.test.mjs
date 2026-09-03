@@ -8,6 +8,8 @@ import {
   compareSemver,
   formatUpdateNotice,
   fetchLatestNpmVersion,
+  pluginUpgradeCommand,
+  resolvePluginProfileName,
 } from '../lib/update-check.js'
 
 test('compareSemver orders dotted versions', () => {
@@ -17,11 +19,16 @@ test('compareSemver orders dotted versions', () => {
   assert.equal(compareSemver('0.4.0', '0.3.9') > 0, true)
 })
 
-test('formatUpdateNotice is a copy-paste upgrade line', () => {
-  const text = formatUpdateNotice('0.3.4', '0.3.5')
-  assert.match(text, /0\.3\.5/)
-  assert.match(text, /当前 0\.3\.4/)
-  assert.match(text, /dsh plugin --profile tui add dsh-ssh-tui/)
+test('pluginUpgradeCommand pins @latest so pnpm does not keep a lockfile version', () => {
+  assert.equal(pluginUpgradeCommand('tui'), 'dsh plugin --profile tui add dsh-ssh-tui@latest')
+  assert.equal(resolvePluginProfileName({ DSH_TUI_PROFILE: 'jump' }), 'jump')
+})
+
+test('formatUpdateNotice includes the @latest upgrade command', () => {
+  const text = formatUpdateNotice('0.3.7', '0.3.10', 'tui')
+  assert.match(text, /0\.3\.10/)
+  assert.match(text, /当前 0\.3\.7/)
+  assert.match(text, /dsh plugin --profile tui add dsh-ssh-tui@latest/)
 })
 
 test('fetchLatestNpmVersion returns undefined on HTTP failure', async () => {

@@ -16,13 +16,18 @@ Listed on the [dshfind plugin directory](https://dshfind.com/en/plugins/cyjyyd/d
 Install with the official CLI (no clone):
 
 ```sh
-dsh plugin --profile tui add dsh-ssh-tui
+dsh plugin --profile tui add dsh-ssh-tui@latest
 dsh --profile tui
 ```
 
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
-Swap `tui` for another profile name. The same command updates. Remove with
-`dsh plugin --profile tui remove dsh-ssh-tui`.
+Swap `tui` for another profile name.
+
+**Updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
+pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
+already pinned in `pnpm-lock.yaml` (often 0.3.7). Do not put `--profile`
+after `add`: `dsh plugin add --profile tui add dsh-ssh-tui` is not valid.
+Remove with `dsh plugin --profile tui remove dsh-ssh-tui`.
 
 ## Official headless vs this TUI
 
@@ -65,7 +70,7 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 ## Install
 
 The recommended install is the command at the top of this README:
-`dsh plugin --profile tui add dsh-ssh-tui`. The CLI pulls npm, writes the
+`dsh plugin --profile tui add dsh-ssh-tui@latest`. The CLI pulls npm, writes the
 profile dependency, and appends this package to `dsh.profile.bundles`
 because the manifest declares `dsh.bundle`.
 
@@ -114,12 +119,9 @@ New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows
 `目录:srv` (last path segment); click it to print the full path.
 
-On start the TUI checks npm for a newer `dsh-ssh-tui` and **notifies only**:
-
-```text
-发现新版本 dsh-ssh-tui 0.3.5（当前 0.3.4）。更新：dsh plugin --profile tui add dsh-ssh-tui
-```
-
+On start, if npm has a newer `dsh-ssh-tui`, a first-launch picker offers
+**Update now / Later / Skip this version**. Update now runs
+`dsh plugin --profile tui add dsh-ssh-tui@latest` and asks you to restart.
 Set `DSH_TUI_NO_UPDATE_CHECK=1` to skip. `/status` also shows the plugin version, the link chip, the quota window, and whether the subagent model is in the same family as the parent route.
 
 From git:
@@ -229,7 +231,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Enter` | send; while running, steer; with empty input, toggle the selected card. Oversized tool bodies open a dedicated inspect view; `Esc` returns |
 | `Tab` | complete the highlighted slash command |
 | `↑` / `↓` | empty input: move among cards; otherwise history. Same as `Ctrl+N` / `Ctrl+P` |
-| `Ctrl+R` | expand or collapse all cards |
+| `Ctrl+R` | expand the latest card; once a card is selected, expand or collapse all |
 | `Ctrl+T` | fold the input box (display-only) |
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
 | `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
@@ -242,7 +244,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/provider`, `/language`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/provider`, `/language`, `/view`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/compact` shows a spinning 「压缩上下文」 card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
@@ -250,6 +252,9 @@ finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
 `/language zh` / `/language en` switches immediately. `DSH_TUI_LANG` wins,
 then `ssh-tui.language` in `$DSH_HOME/settings.yaml`, then `LANG` /
 `LC_MESSAGES`. Unknown and `C` locales stay Chinese.
+`/view` switches the workspace between **detailed** (default: thinking and
+per-tool cards) and **compact** (hide thinking, merge tools/edits). This is
+not `/mode` (agent presets). The choice is stored as `ssh-tui.view`.
 
 `/model` lists models for the **current** provider only. On SuperGrok that
 is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). `/provider`
@@ -340,7 +345,7 @@ width-wrapped for the terminal. System-prompt / `<system-reminder>` / `AGENTS.md
 `提示词注入:系统预设 AGENTS.MD` card (sources joined when several match).
 Reasoning, tool, subagent, plan, question, and prompt cards are
 each expandable/collapsible independently. Empty input: `↑`/`↓` (same as
-`Ctrl+N`/`Ctrl+P`) move the highlight, `Enter` toggles, `Ctrl+R` toggles all,
+`Ctrl+N`/`Ctrl+P`) move the highlight, `Enter` toggles, `Ctrl+R` expands the latest card (or all once selected),
 `Esc` drops the selection. Click a card header to toggle it. Subagent cards
 start collapsed even when several run at once. `Alt+1..4` jumps to the latest
 thinking / plan / subagent / reply.

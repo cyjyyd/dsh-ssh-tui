@@ -15,7 +15,7 @@ if ! command -v dsh >/dev/null 2>&1; then
 fi
 
 echo "==> adding dsh-ssh-tui from npm into dsh profile '$PROFILE'"
-dsh plugin --profile "$PROFILE" add dsh-ssh-tui
+dsh plugin --profile "$PROFILE" add dsh-ssh-tui@latest
 
 echo "==> done"
 echo "start with:     dsh --profile $PROFILE"

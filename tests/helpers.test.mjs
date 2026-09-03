@@ -69,6 +69,10 @@ import {
   SshTui,
   fmtElapsedCompact,
   waitCardCopy,
+  waitSummaryFromReasoning,
+  parseWorkspaceView,
+  compactToolGroups,
+  countDiffLines,
   compactionHeaderText,
   subagentHeaderText,
   todoProgressLabel,
@@ -382,17 +386,28 @@ test('fmtElapsedCompact matches Codex compact elapsed', () => {
   assert.equal(fmtElapsedCompact(3661), '1h 01m 01s')
 })
 
-test('waitCardCopy prefers a live tool then the user prompt', () => {
+test('waitCardCopy prefers a live tool then a model summary, not the user prompt', () => {
   assert.equal(waitCardCopy({}).header, '处理中')
-  assert.equal(waitCardCopy({ prompt: '  fix the footer  ' }).detail, 'fix the footer')
+  assert.equal(waitCardCopy({ prompt: '  fix the footer  ' }).detail, undefined)
   assert.equal(waitCardCopy({
     toolTitle: '读取',
     toolSummary: 'src/tui.ts',
     prompt: 'ignored once a tool is live',
   }).detail, '读取  src/tui.ts')
+  assert.equal(waitCardCopy({
+    reasoning: '**Inspecting paint** then a long explanation of leftover glyphs.',
+    prompt: 'please fix leftover paint',
+  }).header, 'Inspecting paint')
 })
 
-test('wait card appears while the model is silent and yields to thinking', () => {
+test('waitSummaryFromReasoning keeps a short Codex-style clause', () => {
+  assert.equal(waitSummaryFromReasoning('**Reading files**\nmore'), 'Reading files')
+  assert.equal(waitSummaryFromReasoning('# 核对光标\n后面很长'), '核对光标')
+  const long = waitSummaryFromReasoning('这是一段没有加粗的很长说明文字用来测试截断')
+  assert.ok(long !== undefined && long.length <= 18)
+})
+
+test('wait card tracks model work and stays while thinking', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
@@ -406,13 +421,13 @@ test('wait card appears while the model is silent and yields to thinking', () =>
   tui.waitPrompt = '请修绘制残留'
   const waiting = tui.captureFrame(48, 16)
   assert.ok(waiting.some(line => line.includes('处理中')))
-  assert.ok(waiting.some(line => line.includes('请修绘制残留')))
+  assert.equal(waiting.some(line => line.includes('请修绘制残留')), false)
   assert.ok(waiting.some(line => /Esc/.test(line)))
-  tui.streaming = { text: '', reasoning: '正在想下一步' }
+  tui.streaming = { text: '', reasoning: '**Inspecting paint** leftover glyphs on the title' }
   tui.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
-  const thinking = tui.captureFrame(48, 16)
-  assert.equal(thinking.some(line => line.includes('处理中')), false)
-  assert.ok(thinking.some(line => line.includes('思考中') || line.includes('正在想')))
+  const thinking = tui.captureFrame(56, 16)
+  assert.ok(thinking.some(line => line.includes('Inspecting paint')))
+  assert.ok(thinking.some(line => /Esc/.test(line)))
 })
 
 test('foldInputView keeps wide characters intact around the cursor', () => {
@@ -758,6 +773,69 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   })
   assert.equal(cards[0].status, 'ok')
   assert.equal(cards[0].expanded, false)
+})
+
+test('parseWorkspaceView accepts compact aliases', () => {
+  assert.equal(parseWorkspaceView('compact'), 'compact')
+  assert.equal(parseWorkspaceView('minimal'), 'compact')
+  assert.equal(parseWorkspaceView('极简'), 'compact')
+  assert.equal(parseWorkspaceView('detailed'), 'detailed')
+  assert.equal(parseWorkspaceView('nope'), undefined)
+})
+
+test('compactToolGroups splits edits from other calls and counts lines', () => {
+  const groups = compactToolGroups([
+    { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false, diff: [{ path: 'a.ts', oldText: 'a\nb', newText: 'a\nc\nd' }] },
+    { kind: 'tool', callId: 'r1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false },
+    { kind: 'tool', callId: 'g1', name: 'grep', title: '搜索', summary: 'x', args: '{}', output: '', status: 'error', expanded: false },
+  ])
+  assert.equal(groups.edits.length, 1)
+  assert.equal(groups.calls.length, 2)
+  assert.equal(groups.failedCalls, 1)
+  assert.equal(countDiffLines(groups.edits[0].diff) > 0, true)
+})
+
+test('compact view hides thinking and merges tool cards', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.setWorkspaceView('compact')
+  tui.rows.push(
+    { kind: 'reasoning', text: 'SECRET_THOUGHT', expanded: false },
+    { kind: 'assistant', text: 'visible reply' },
+    { kind: 'tool', callId: 'r1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: 'ok', status: 'ok', expanded: false },
+    { kind: 'tool', callId: 'g1', name: 'grep', title: '搜索', summary: 'x', args: '{}', output: 'miss', status: 'ok', expanded: false },
+    { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false, diff: [{ path: 'a.ts', oldText: 'a', newText: 'b\nc' }] },
+  )
+  const frame = tui.captureFrame(72, 18).join('\n')
+  assert.equal(frame.includes('SECRET_THOUGHT'), false)
+  assert.equal(frame.includes('已思考'), false)
+  assert.ok(frame.includes('visible reply'))
+  assert.ok(frame.includes('已调用 2 个工具'))
+  assert.ok(frame.includes('已编辑'))
+  assert.ok(frame.includes('[极简]') || frame.includes('极简'))
+})
+
+test('Ctrl+R without a selection expands the latest card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.rows.push(
+    { kind: 'reasoning', text: 'old thought', expanded: false },
+    { kind: 'tool', callId: 'c1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: 'ok', status: 'ok', expanded: false },
+  )
+  tui.focusedRow = null
+  tui.toggleCollapsible()
+  const latest = tui.rows.findLast(row => row.kind === 'tool')
+  const older = tui.rows.find(row => row.kind === 'reasoning')
+  assert.equal(latest?.expanded, true)
+  assert.equal(older?.expanded, false)
 })
 
 test('streaming a collapsed thinking line does not keep a scrolled tool body on the title', () => {
@@ -1170,7 +1248,7 @@ test('plan mode and ask-user questions get their own collapsed cards', () => {
   })
   const plan = tui.rows.findLast(row => row.kind === 'plan')
   assert.equal(plan?.active, true)
-  assert.equal(plan?.expanded, false)
+  assert.equal(plan?.expanded, true)
   assert.equal(plan?.todos[0]?.content, 'outline the change')
 
   const pending = tui.handleUserQuestions({

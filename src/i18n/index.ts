@@ -22,6 +22,8 @@ export const UI_LOCALE_NAMESPACE = settingsNamespace('ssh-tui')
 
 export const UI_LOCALE_SCHEMA = z.object({
   language: z.string(),
+  skipUpdate: z.string(),
+  view: z.string(),
 })
 
 let current: Locale = resolveLocale()

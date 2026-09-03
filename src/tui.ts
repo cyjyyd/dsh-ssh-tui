@@ -43,7 +43,7 @@ import {
   type Locale,
 } from './i18n/index.js'
 import { defaultReasoningEffort } from './reasoning.js'
-import { checkForPluginUpdate } from './update-check.js'
+import { checkForPluginUpdate, installPluginLatest } from './update-check.js'
 import {
   ROUTE_MEMORY_NAMESPACE,
   parseRouteMemory,
@@ -638,6 +638,7 @@ export interface FooterStatusInput {
   multiLineInput: boolean
   queued: number
   cwdLabel?: string
+  compactView?: boolean
 }
 
 export function footerActivity(input: FooterStatusInput): { kind: FooterActivityKind; text: string } {
@@ -671,6 +672,7 @@ export function formatQuotaBar(remainingPercent: number, width = 8): string {
 
 export function footerIdentityParts(input: FooterStatusInput): string[] {
   const parts: string[] = []
+  if (input.compactView === true) parts.push(`[${t('view.footerCompact')}]`)
   if (input.preset !== undefined && input.preset !== '') parts.push(`[${input.preset}]`)
   if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
   const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
@@ -990,15 +992,18 @@ const LOCAL_COMMANDS = [
   { name: 'find', description: 'search thinking / plan / subagent / reply cards' },
   { name: 'language', description: 'switch UI language (zh / en); empty opens a picker' },
   { name: 'lang', description: 'alias of /language' },
+  { name: 'view', description: 'switch workspace view (detailed / compact); empty opens a picker' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
 
 function localizedCommands(): { name: string; description: string }[] {
-  return LOCAL_COMMANDS.map(command => (
-    command.name === 'language' || command.name === 'lang'
-      ? { name: command.name, description: t('lang.cmd') }
-      : command
-  ))
+  return LOCAL_COMMANDS.map(command => {
+    if (command.name === 'language' || command.name === 'lang') {
+      return { name: command.name, description: t('lang.cmd') }
+    }
+    if (command.name === 'view') return { name: command.name, description: t('view.cmd') }
+    return command
+  })
 }
 
 /**
@@ -1058,25 +1063,44 @@ export function shimmerText(text: string, nowMs: number, color: boolean): string
   return out
 }
 
-/** One-line wait copy: current tool, else the user's last prompt. */
+const WAIT_SUMMARY_MAX = 18
+
+/**
+ * Codex-style short status from reasoning: first `**bold**` / heading, else
+ * the first short clause. Keeps the wait card in sync with what the model is
+ * doing instead of repeating the user's prompt.
+ */
+export function waitSummaryFromReasoning(text: string, maxChars = WAIT_SUMMARY_MAX): string | undefined {
+  const raw = text.replace(/\r\n?/gu, '\n').trim()
+  if (raw === '') return undefined
+  const bold = /\*\*([^*]{2,80})\*\*/u.exec(raw)?.[1]
+    ?? /^#{1,6}\s+(.+)$/mu.exec(raw)?.[1]
+  const source = (bold ?? raw.split('\n').find(line => line.trim() !== '') ?? '').replace(/\s+/gu, ' ').trim()
+  if (source === '') return undefined
+  const clause = source.split(/[。！？!?\n]/u)[0]?.trim() ?? source
+  const chars = Array.from(clause)
+  if (chars.length <= maxChars) return clause
+  return `${chars.slice(0, Math.max(2, maxChars - 1)).join('')}…`
+}
+
+/** Wait-card header + optional detail. Header tracks model work when known. */
 export function waitCardCopy(input: {
   toolTitle?: string
   toolSummary?: string
+  reasoning?: string
+  reply?: string
   prompt?: string
 }): { header: string; detail?: string } {
   const toolTitle = input.toolTitle?.trim() ?? ''
   const toolSummary = input.toolSummary?.trim() ?? ''
+  const fromReasoning = waitSummaryFromReasoning(input.reasoning ?? '')
+  const fromReply = waitSummaryFromReasoning(input.reply ?? '')
+  const header = fromReasoning ?? fromReply ?? t('wait.working')
   if (toolTitle !== '') {
-    return {
-      header: t('wait.working'),
-      detail: toolSummary === '' ? toolTitle : `${toolTitle}  ${toolSummary}`,
-    }
+    const extra = toolSummary === '' ? '' : `  ${Array.from(toolSummary).slice(0, 40).join('')}`
+    return { header, detail: `${toolTitle}${extra}` }
   }
-  const prompt = (input.prompt ?? '').replace(/\s+/gu, ' ').trim()
-  if (prompt !== '') {
-    return { header: t('wait.working'), detail: prompt }
-  }
-  return { header: t('wait.working') }
+  return { header }
 }
 
 export function displayWidth(text: string): number {
@@ -2338,6 +2362,50 @@ function friendlyArgsSummary(name: string, args: string): string {
 
 const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
+
+export type WorkspaceView = 'detailed' | 'compact'
+
+export function parseWorkspaceView(raw: string): WorkspaceView | undefined {
+  const id = raw.trim().toLowerCase()
+  if (id === 'detailed' || id === 'detail' || id === 'full' || id === '详细') return 'detailed'
+  if (id === 'compact' || id === 'minimal' || id === 'min' || id === '极简') return 'compact'
+  return undefined
+}
+
+export function countDiffLines(hunks: readonly ToolDiffHunk[] | undefined): number {
+  if (hunks === undefined || hunks.length === 0) return 0
+  let total = 0
+  for (const hunk of hunks) {
+    const added = hunk.newText === '' ? 0 : hunk.newText.split('\n').length
+    if (hunk.oldText === null) {
+      total += added
+      continue
+    }
+    const removed = hunk.oldText === '' ? 0 : hunk.oldText.split('\n').length
+    total += added + removed
+  }
+  return total
+}
+
+export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>[]): {
+  edits: Extract<Row, { kind: 'tool' }>[]
+  calls: Extract<Row, { kind: 'tool' }>[]
+  editLines: number
+  failedCalls: number
+} {
+  const edits: Extract<Row, { kind: 'tool' }>[] = []
+  const calls: Extract<Row, { kind: 'tool' }>[] = []
+  for (const tool of tools) {
+    if (DIFF_TOOL_NAMES.has(tool.name) || (tool.diff !== undefined && tool.diff.length > 0)) edits.push(tool)
+    else calls.push(tool)
+  }
+  return {
+    edits,
+    calls,
+    editLines: edits.reduce((sum, tool) => sum + Math.max(1, countDiffLines(tool.diff)), 0),
+    failedCalls: calls.filter(tool => tool.status === 'error').length,
+  }
+}
 const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
 
 /**
@@ -3267,6 +3335,7 @@ export class SshTui {
   private readonly color: boolean
   private readonly maxToolOutputLines: number
   private readonly showReasoning: boolean
+  private workspaceView: WorkspaceView = 'detailed'
   private readonly goodbye: string
   private readonly resume: boolean
   private readonly providerName: string
@@ -3356,6 +3425,7 @@ export class SshTui {
     this.color = config.color !== false && !noColorEnv && process.env.TERM !== 'dumb'
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
     this.showReasoning = config.showReasoning !== false
+    this.workspaceView = this.readWorkspaceView()
     this.goodbye = config.goodbye
       ?? this.ctx.get('tuiGoodbyeMessage') as string | undefined
       ?? `To resume this session: dsh --profile tui --resume=${this.agent.id}`
@@ -3436,10 +3506,115 @@ export class SshTui {
   }
 
   private async notifyPluginUpdate(): Promise<void> {
-    const notice = await checkForPluginUpdate(PLUGIN_VERSION)
-    if (this.disposed || notice === undefined) return
-    this.pushRow({ kind: 'system', text: notice })
-    this.markDirty()
+    const info = await checkForPluginUpdate(PLUGIN_VERSION)
+    if (this.disposed || info === undefined) return
+    const skipped = this.readSkippedUpdate()
+    if (skipped !== undefined && skipped === info.latest) return
+    try {
+      const answer = await this.askQuestion({
+        id: 'plugin-update',
+        question: t('update.pick', { latest: info.latest, current: info.current }),
+        options: [
+          { label: t('update.now'), description: t('update.nowDesc', { command: info.command }) },
+          { label: t('update.later'), description: t('update.laterDesc') },
+          { label: t('update.skip'), description: t('update.skipDesc', { latest: info.latest }) },
+        ],
+      }, 0, 1, 0)
+      if (this.disposed) return
+      const picked = answer.selected[0]
+      if (picked === t('update.skip')) {
+        await this.persistSkippedUpdate(info.latest)
+        this.pushRow({ kind: 'system', text: t('update.skipDesc', { latest: info.latest }) })
+        this.markDirty()
+        return
+      }
+      if (picked !== t('update.now')) return
+      this.pushRow({ kind: 'system', text: t('update.installing', { latest: info.latest }) })
+      this.markDirty()
+      const result = await installPluginLatest(info.profile)
+      if (this.disposed) return
+      if (result.ok) {
+        this.pushRow({ kind: 'system', text: t('update.installed', { latest: info.latest, profile: info.profile }) })
+      } else {
+        this.pushRow({ kind: 'error', text: t('update.failed', { error: result.output === '' ? info.command : result.output }) })
+        this.pushRow({ kind: 'system', text: t('update.manual', { command: info.command }) })
+      }
+      this.markDirty()
+    } catch {
+      if (this.disposed) return
+      this.pushRow({ kind: 'system', text: info.notice })
+      this.markDirty()
+    }
+  }
+
+  private readSkippedUpdate(): string | undefined {
+    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const skip = (raw as { skipUpdate?: unknown }).skipUpdate
+    return typeof skip === 'string' && skip.trim() !== '' ? skip.trim() : undefined
+  }
+
+  private async persistSkippedUpdate(latest: string): Promise<void> {
+    await this.mergeUiSettings({ skipUpdate: latest })
+  }
+
+  private async mergeUiSettings(patch: { language?: string; skipUpdate?: string; view?: string }): Promise<void> {
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) return
+    const raw = settings.get(UI_LOCALE_NAMESPACE)
+    const previous = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as { language?: string; skipUpdate?: string; view?: string }
+      : {}
+    await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
+  }
+
+  private readWorkspaceView(): WorkspaceView {
+    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'detailed'
+    return parseWorkspaceView(String((raw as { view?: unknown }).view ?? '')) ?? 'detailed'
+  }
+
+  private isCompactView(): boolean {
+    return this.workspaceView === 'compact'
+  }
+
+  /** Test helper: switch the workspace view without going through /view. */
+  setWorkspaceView(view: WorkspaceView): void {
+    this.workspaceView = view
+  }
+
+  private paintCompactSummary(
+    addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
+    anchor: Extract<Row, { kind: 'tool' }>,
+    kind: 'edits' | 'calls',
+    groups: ReturnType<typeof compactToolGroups>,
+    width: number,
+  ): void {
+    const focused = this.focusedRow === anchor
+    const marker = anchor.expanded ? '▾' : '▸'
+    const running = kind === 'edits'
+      ? groups.edits.some(item => item.status === undefined || item.status === 'running')
+      : groups.calls.some(item => item.status === undefined || item.status === 'running')
+    const spinner = running ? ` ${this.spinnerFrame()}` : ''
+    const title = kind === 'edits'
+      ? (groups.edits.length > 1
+        ? t('compact.editsFiles', { lines: groups.editLines, files: groups.edits.length })
+        : t('compact.edits', { lines: groups.editLines }))
+      : (groups.failedCalls > 0
+        ? t('compact.toolsFailed', { count: groups.calls.length, failed: groups.failedCalls })
+        : t('compact.tools', { count: groups.calls.length }))
+    const header = `${focused ? '▶ ' : '  '}${marker} ● ${title}${spinner}${anchor.expanded ? '' : t('card.expand')}`
+    const styled = this.styleLine(groups.failedCalls > 0 && kind === 'calls' ? 'error' : 'tool', header)
+    addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
+    if (!anchor.expanded) return
+    const items = kind === 'edits' ? groups.edits : groups.calls
+    for (const item of items) {
+      const state = item.status === 'error' ? 'error' : item.status === 'ok' ? 'ok' : 'running…'
+      const extra = kind === 'edits'
+        ? `${countDiffLines(item.diff) || 1} ${getLocale() === 'en' ? 'lines' : '行'}`
+        : item.summary
+      addDisplay(this.styleLine('system', truncateToWidth(`    ${item.title}  ${extra}  [${state}]`, width)), item)
+    }
   }
 
   private startRenderTimer(): void {
@@ -3709,17 +3884,20 @@ export class SshTui {
 
   /** The transcript rows that support per-row expand/collapse. */
   private collapsibleRows(): CollapsibleBlock[] {
+    const compact = this.isCompactView()
     const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> =>
-        row.kind === 'reasoning'
-        || row.kind === 'tool'
-        || row.kind === 'subagent'
-        || row.kind === 'plan'
-        || row.kind === 'question'
-        || row.kind === 'goal'
-        || row.kind === 'compaction'
-        || row.kind === 'prompt')
-    if (this.streaming !== undefined && this.streaming.reasoning !== '') {
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> => {
+        if (compact && (row.kind === 'reasoning' || row.kind === 'prompt')) return false
+        return row.kind === 'reasoning'
+          || row.kind === 'tool'
+          || row.kind === 'subagent'
+          || row.kind === 'plan'
+          || row.kind === 'question'
+          || row.kind === 'goal'
+          || row.kind === 'compaction'
+          || row.kind === 'prompt'
+      })
+    if (!compact && this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
     }
@@ -3731,15 +3909,11 @@ export class SshTui {
   }
 
   /**
-   * Codex wait card: shown while the turn is running and there is no live
-   * thinking/reply stream. A live tool keeps the card so the detail line can
-   * name what is happening (Codex `update_details`).
+   * Codex wait card: shown while the turn is running. Thinking/reply streams
+   * feed the shimmer header; a live tool becomes the detail line.
    */
   private waitCardVisible(): boolean {
     if (this.agent.status !== 'running') return false
-    if (this.streaming !== undefined && (this.streaming.reasoning !== '' || this.streaming.text !== '')) {
-      return false
-    }
     if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
     if (this.dialog?.kind === 'questions' || this.dialog?.kind === 'confirm') return false
     return true
@@ -3756,18 +3930,32 @@ export class SshTui {
     this.waitPrompt = undefined
   }
 
-  private waitCardSource(): { toolTitle?: string; toolSummary?: string; prompt?: string } {
+  private waitCardSource(): {
+    toolTitle?: string
+    toolSummary?: string
+    reasoning?: string
+    reply?: string
+    prompt?: string
+  } {
     const liveTool = this.rows.findLast((row): row is Extract<Row, { kind: 'tool' }> =>
       row.kind === 'tool' && (row.status === undefined || row.status === 'running'))
-    if (liveTool !== undefined) {
-      return { toolTitle: liveTool.title, toolSummary: liveTool.summary, prompt: this.waitPrompt }
-    }
     const liveSub = this.rows.findLast((row): row is Extract<Row, { kind: 'subagent' }> =>
       row.kind === 'subagent' && row.status === 'running')
-    if (liveSub !== undefined) {
-      return { toolTitle: liveSub.label, toolSummary: liveSub.lastActivity, prompt: this.waitPrompt }
+    return {
+      ...(liveTool === undefined ? {} : { toolTitle: liveTool.title, toolSummary: liveTool.summary }),
+      ...(liveTool !== undefined || liveSub === undefined
+        ? {}
+        : { toolTitle: liveSub.label, toolSummary: liveSub.lastActivity }),
+      ...(this.streaming?.reasoning ? { reasoning: this.streaming.reasoning } : {}),
+      ...(this.streaming?.text ? { reply: this.streaming.text } : {}),
+      ...(this.waitPrompt === undefined ? {} : { prompt: this.waitPrompt }),
     }
-    return { prompt: this.waitPrompt }
+  }
+
+  private planShouldDefaultExpand(plan: Extract<Row, { kind: 'plan' }>): boolean {
+    return plan.active === true
+      || plan.pending === true
+      || plan.todos.some(item => item.status === 'in_progress')
   }
 
   private findSubagentRow(sessionId: string): Extract<Row, { kind: 'subagent' }> | undefined {
@@ -3807,6 +3995,8 @@ export class SshTui {
       if (!planIsLive(existing)) {
         existing.archived = true
         existing.expanded = false
+      } else if (patch.expanded === undefined && this.planShouldDefaultExpand(existing)) {
+        existing.expanded = true
       }
       this.archiveStalePlans(planIsLive(existing) ? existing : undefined)
       return existing
@@ -3823,7 +4013,13 @@ export class SshTui {
       pending: patch.pending ?? false,
       todos: patch.todos ?? [],
       ...(patch.planMarkdown === undefined ? {} : { planMarkdown: patch.planMarkdown }),
-      expanded: false,
+      expanded: this.planShouldDefaultExpand({
+        kind: 'plan',
+        active: patch.active ?? false,
+        pending: patch.pending ?? false,
+        todos: patch.todos ?? [],
+        expanded: false,
+      }),
       archived: false,
     }
     this.pushRow(row)
@@ -4053,7 +4249,7 @@ export class SshTui {
   }
 
   /** Toggle the focused block; without focus, toggle the most recent one. */
-  private toggleCollapsible(): void {
+  toggleCollapsible(): void {
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
     const focused = this.focusedRow !== null && rows.includes(this.focusedRow)
@@ -4083,7 +4279,7 @@ export class SshTui {
   }
 
   /** Expand all collapsible blocks, or collapse them again when all are open. */
-  private toggleAllCollapsible(): void {
+  toggleAllCollapsible(): void {
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
     const allExpanded = rows.every(row => row.expanded)
@@ -4237,7 +4433,26 @@ export class SshTui {
       }
     }
 
+    const compact = this.isCompactView()
+    const compactGroups = compact
+      ? compactToolGroups(this.rows.filter((row): row is Extract<Row, { kind: 'tool' }> => row.kind === 'tool'))
+      : undefined
+    const compactEditCard = compactGroups?.edits[0]
+    const compactCallCard = compactGroups?.calls[0]
+
     for (const row of this.rows) {
+      if (compact && (row.kind === 'reasoning' || row.kind === 'prompt')) continue
+      if (compact && compactGroups !== undefined && row.kind === 'tool') {
+        if (row === compactEditCard) {
+          this.paintCompactSummary(addDisplay, row, 'edits', compactGroups, width)
+          continue
+        }
+        if (row === compactCallCard) {
+          this.paintCompactSummary(addDisplay, row, 'calls', compactGroups, width)
+          continue
+        }
+        continue
+      }
       if (row.kind === 'brand-logo') {
         const variant = DEEPSEEK_LOGO_VARIANTS.find(candidate => candidate.width <= width - 2)
           ?? DEEPSEEK_LOGO_VARIANTS[DEEPSEEK_LOGO_VARIANTS.length - 1]
@@ -4442,7 +4657,7 @@ export class SshTui {
     }
 
     if (this.streaming !== undefined) {
-      if (this.showReasoning && this.streaming.reasoning !== '') {
+      if (!compact && this.showReasoning && this.streaming.reasoning !== '') {
         const block = this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
         const focused = this.focusedRow === block
         const marker = block.expanded ? '▾' : '▸'
@@ -4472,7 +4687,8 @@ export class SshTui {
           addDisplay(this.styleLine('assistant', line))
         }
       }
-    } else if (this.waitCardVisible()) {
+    }
+    if (this.waitCardVisible()) {
       const copy = waitCardCopy(this.waitCardSource())
       const started = this.waitStartedAt ?? Date.now()
       const elapsed = fmtElapsedCompact((Date.now() - started) / 1000)
@@ -4755,6 +4971,7 @@ export class SshTui {
       multiLineInput: inputRows > 1,
       queued: this.pendingMessages.size,
       cwdLabel: formatFooterCwd(this.workspaceCwd()),
+      compactView: this.isCompactView(),
     } satisfies FooterStatusInput
     const activity = footerActivity(footer)
     const activityText = activity.kind === 'compacting'
@@ -6557,11 +6774,40 @@ export class SshTui {
     if (settings === undefined) {
       this.pushRow({ kind: 'error', text: t('lang.settingsMissing') })
     } else {
-      await settings.replace(UI_LOCALE_NAMESPACE, { language: next })
+      await this.mergeUiSettings({ language: next })
       applySavedLocale({ language: next })
     }
     this.forceFullPaint = true
     this.pushRow({ kind: 'system', text: t('lang.switched', { name: localeDisplayName(next) }) })
+    this.markDirty()
+  }
+
+  /** /view: detailed (see the work) vs compact (Codex-like summary). */
+  private async runViewCommand(arg: string): Promise<void> {
+    const direct = parseWorkspaceView(arg)
+    let next: WorkspaceView | undefined = direct
+    if (next === undefined && arg.trim() !== '') {
+      this.pushRow({ kind: 'error', text: t('view.unknown', { id: arg.trim() }) })
+      this.markDirty()
+      return
+    }
+    if (next === undefined) {
+      const current = this.workspaceView
+      const answer = await this.askQuestion({
+        id: 'view-pick',
+        question: t('view.pick'),
+        options: [
+          { label: t('view.detailed'), description: current === 'detailed' ? t('view.current') : t('view.detailedDesc') },
+          { label: t('view.compact'), description: current === 'compact' ? t('view.current') : t('view.compactDesc') },
+        ],
+      }, 0, 1, current === 'compact' ? 1 : 0)
+      const picked = answer.selected[0]
+      next = picked === t('view.compact') ? 'compact' : 'detailed'
+    }
+    this.workspaceView = next
+    await this.mergeUiSettings({ view: next })
+    this.forceFullPaint = true
+    this.pushRow({ kind: 'system', text: t('view.switched', { name: next === 'compact' ? t('view.compact') : t('view.detailed') }) })
     this.markDirty()
   }
 
@@ -7125,7 +7371,10 @@ export class SshTui {
       case '\x0b': this.input = this.input.slice(0, this.cursor); this.markDirty(); return
       case '\x0e': this.moveCollapsibleFocus(1); return
       case '\x10': this.moveCollapsibleFocus(-1); return
-      case '\x12': this.toggleAllCollapsible(); return
+      case '\x12':
+        if (this.focusedRow === null) this.toggleCollapsible()
+        else this.toggleAllCollapsible()
+        return
       case '\x14': this.inputFolded = !this.inputFolded; this.markDirty(); return
     }
     if (this.dialog !== undefined) {
@@ -7847,6 +8096,16 @@ export class SshTui {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
             this.pushRow({ kind: 'error', text: `/language failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
+      case 'view':
+        void this.runViewCommand(arg).catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+          } else {
+            this.pushRow({ kind: 'error', text: `/view failed: ${errorChain(error)}` })
           }
           this.markDirty()
         })
