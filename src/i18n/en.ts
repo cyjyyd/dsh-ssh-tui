@@ -134,6 +134,9 @@ export const en: Record<string, string> = {
   'card.goal': 'goal',
   'card.prompt': 'prompt',
   'card.expand': ' · Enter to expand',
+  'wait.working': 'Working',
+  'wait.interrupt': '({elapsed} · Esc to interrupt)',
+  'wait.elapsed': '({elapsed})',
   'prompt.systemPreset': 'system preset',
   'prompt.context': 'context',
   'prompt.inject': 'prompt inject',
@@ -359,6 +362,7 @@ export const en: Record<string, string> = {
   'steer.queued': '⚡ {text} (queued while running; Esc/Ctrl+C cancels)',
   'cancel.esc': 'Requested cancel of the current turn…',
   'cancel.ctrlC': 'Requested cancel of the current turn… (Ctrl+C)',
+  'exit.ctrlCAgain': 'Press Ctrl+C again to exit.',
   'clear.transcript': 'Transcript cleared. Subagent, plan, and question cards reappear when new events arrive.',
 
   'model.added': 'Model {model} added to provider {provider}.',
@@ -420,7 +424,7 @@ export const en: Record<string, string> = {
   'usage.go403': 'This key is not subscribed to OpenCode Go, or quota is unavailable (403){detail}',
   'usage.goHttp': 'OpenCode Go quota API returned HTTP {status}{detail}',
 
-  'help.intro1': 'Enter steers while running; Esc drops selection or the turn; idle Ctrl+C exits.',
+  'help.intro1': 'Enter steers while running; Esc drops selection or the turn; idle Ctrl+C twice to exit.',
   'help.intro2': 'Empty ↑/↓ selects cards (same as Ctrl+N/P); Enter expands (oversized bodies open a full view, Esc returns); Ctrl+R expands/collapses all; Ctrl+T folds input.',
   'help.intro3': 'Alt+1 latest thinking · Alt+2 plan · Alt+3 subagent · Alt+4 latest reply.',
   'help.intro4': '/find [thinking|plan|subagent|reply|prompt] query; Ctrl+/ or Alt+/ opens search, Ctrl+G / Alt+N next.',

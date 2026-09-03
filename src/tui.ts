@@ -769,6 +769,7 @@ const PLUGIN_VERSION = ((): string => {
   }
 })()
 const STALL_WARNING_MS = 60000
+const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
@@ -1012,6 +1013,72 @@ function localizedCommands(): { name: string; description: string }[] {
  * Overflow into the input box is handled by clipping/padding painted rows to
  * the measured column count, not by inflating glyph width.
  */
+
+/**
+ * Codex-style compact elapsed: `0s`, `1m 05s`, `1h 01m 01s`.
+ * Used by the workspace wait card while the model has not streamed yet.
+ */
+export function fmtElapsedCompact(elapsedSecs: number): string {
+  const secs = Math.max(0, Math.floor(elapsedSecs))
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) {
+    const minutes = Math.floor(secs / 60)
+    const seconds = secs % 60
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  }
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.floor((secs % 3600) / 60)
+  const seconds = secs % 60
+  return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`
+}
+
+/**
+ * Sweep highlight across `text` (Codex `shimmer.rs`). Truecolor blends a
+ * highlight band; otherwise DIM / default / BOLD. Process-start based so
+ * every paint of the same frame stays in phase.
+ */
+export function shimmerText(text: string, nowMs: number, color: boolean): string {
+  const chars = Array.from(text)
+  if (chars.length === 0) return ''
+  if (!color) return text
+  const padding = 10
+  const period = chars.length + padding * 2
+  const sweepMs = 2000
+  const pos = Math.floor(((nowMs % sweepMs) / sweepMs) * period)
+  const bandHalf = 5
+  let out = ''
+  for (let index = 0; index < chars.length; index += 1) {
+    const dist = Math.abs(index + padding - pos)
+    const t = dist <= bandHalf
+      ? 0.5 * (1 + Math.cos(Math.PI * (dist / bandHalf)))
+      : 0
+    const style = t < 0.2 ? '2' : t < 0.6 ? '0' : '1'
+    out += `\x1b[${style}m${chars[index]}\x1b[0m`
+  }
+  return out
+}
+
+/** One-line wait copy: current tool, else the user's last prompt. */
+export function waitCardCopy(input: {
+  toolTitle?: string
+  toolSummary?: string
+  prompt?: string
+}): { header: string; detail?: string } {
+  const toolTitle = input.toolTitle?.trim() ?? ''
+  const toolSummary = input.toolSummary?.trim() ?? ''
+  if (toolTitle !== '') {
+    return {
+      header: t('wait.working'),
+      detail: toolSummary === '' ? toolTitle : `${toolTitle}  ${toolSummary}`,
+    }
+  }
+  const prompt = (input.prompt ?? '').replace(/\s+/gu, ' ').trim()
+  if (prompt !== '') {
+    return { header: t('wait.working'), detail: prompt }
+  }
+  return { header: t('wait.working') }
+}
+
 export function displayWidth(text: string): number {
   let width = 0
   for (const char of text) {
@@ -1226,14 +1293,19 @@ function paintSegmentedLine(
 ): string {
   if (segments.length === 0) return line
   let out = ''
+  let cursor = start
   for (const seg of segments) {
     if (seg.end <= start) continue
     if (seg.start >= end) break
     const from = Math.max(seg.start, start)
     const to = Math.min(seg.end, end)
     if (to <= from) continue
+    // Gaps (the tool title) stay default foreground — do not drop them.
+    if (from > cursor) out += line.slice(cursor - start, from - start)
     out += `\x1b[${seg.sgr}m${line.slice(from - start, to - start)}\x1b[0m`
+    cursor = to
   }
+  if (cursor < end) out += line.slice(cursor - start, end - start)
   return out === '' ? line : out
 }
 
@@ -1613,16 +1685,29 @@ function backwardSliceByWidth(text: string, end: number, maxWidth: number): { st
 }
 
 /**
- * Fold a long single-line input into one terminal row around the cursor.
- * Only the *display* is clipped; the caller keeps the original `input` intact
- * for editing and submission.
+ * Fold a long input into one terminal row around the cursor.
+ *
+ * Newlines from a paste are display-only: they do not occupy cells, so a
+ * naive `displayWidth(input)` under-counts a multi-line paste and parks the
+ * caret in the middle of later text. Fold the *current line* (between the
+ * surrounding newlines) and keep `\n` out of the visible slice.
  */
 export function foldInputView(input: string, cursor: number, maxWidth: number): InputView {
   const width = Math.max(1, maxWidth)
-  const totalWidth = displayWidth(input)
-  const cursorOffset = displayWidth(input.slice(0, cursor))
+  const safeCursor = Math.max(0, Math.min(cursor, input.length))
+  const lineStart = input.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1
+  const lineEndRaw = input.indexOf('\n', safeCursor)
+  const lineEnd = lineEndRaw === -1 ? input.length : lineEndRaw
+  const line = input.slice(lineStart, lineEnd)
+  const lineCursor = safeCursor - lineStart
+  const totalWidth = displayWidth(line)
+  const cursorOffset = displayWidth(line.slice(0, lineCursor))
+  const hasMoreLines = lineStart > 0 || lineEnd < input.length
+  if (totalWidth <= width && !hasMoreLines) {
+    return { text: line, cursorOffset, folded: false }
+  }
   if (totalWidth <= width) {
-    return { text: input, cursorOffset, folded: false }
+    return { text: line, cursorOffset, folded: true }
   }
   const before = cursorOffset
   const after = totalWidth - cursorOffset
@@ -1635,9 +1720,9 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
   // If the tail is shorter than its budget, spend the spare columns on the
   // side before the cursor so the cursor stays visible near its true offset.
   beforeBudget = Math.min(before, beforeBudget + (available - beforeBudget - afterBudget))
-  const beforeSlice = backwardSliceByWidth(input, cursor, beforeBudget)
-  const afterSlice = forwardSliceByWidth(input.slice(cursor), afterBudget)
-  const beforeText = input.slice(beforeSlice.start, cursor)
+  const beforeSlice = backwardSliceByWidth(line, lineCursor, beforeBudget)
+  const afterSlice = forwardSliceByWidth(line.slice(lineCursor), afterBudget)
+  const beforeText = line.slice(beforeSlice.start, lineCursor)
   return {
     text: `${leftFolded ? '…' : ''}${beforeText}${afterSlice.text}${rightFolded ? '…' : ''}`,
     cursorOffset: (leftFolded ? 1 : 0) + displayWidth(beforeText),
@@ -3202,6 +3287,7 @@ export class SshTui {
   private focusedRow: CollapsibleBlock | null = null
   private pendingMessages = new Map<string, string>()
   private lastActivity = Date.now()
+  private lastIdleCtrlCAt = 0
   private stalledWarningShown = false
   private lastPaintAt = 0
   private commandAbort: AbortController | undefined
@@ -3229,6 +3315,8 @@ export class SshTui {
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
   private thinkingStartedAt: number | undefined
+  private waitStartedAt: number | undefined
+  private waitPrompt: string | undefined
   private completionSignaled = false
   private replaying = false
   private completedAt = 0
@@ -3364,6 +3452,7 @@ export class SshTui {
       if (this.agent.status === 'running') this.updateTerminalTitle()
       const animating = (this.streaming !== undefined && this.streaming.reasoning !== '')
         || this.activeSubagents.size > 0
+        || this.waitCardVisible()
         || this.rows.some(row =>
           (row.kind === 'question' && row.status === 'waiting')
           || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
@@ -3639,6 +3728,46 @@ export class SshTui {
 
   private spinnerFrame(periodMs = 120): string {
     return SPINNER[Math.floor(Date.now() / periodMs) % SPINNER.length] ?? '⠋'
+  }
+
+  /**
+   * Codex wait card: shown while the turn is running and there is no live
+   * thinking/reply stream. A live tool keeps the card so the detail line can
+   * name what is happening (Codex `update_details`).
+   */
+  private waitCardVisible(): boolean {
+    if (this.agent.status !== 'running') return false
+    if (this.streaming !== undefined && (this.streaming.reasoning !== '' || this.streaming.text !== '')) {
+      return false
+    }
+    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
+    if (this.dialog?.kind === 'questions' || this.dialog?.kind === 'confirm') return false
+    return true
+  }
+
+  private beginWait(prompt?: string): void {
+    this.waitStartedAt = Date.now()
+    const trimmed = prompt?.replace(/\s+/gu, ' ').trim()
+    this.waitPrompt = trimmed === undefined || trimmed === '' ? this.waitPrompt : trimmed
+  }
+
+  private endWait(): void {
+    this.waitStartedAt = undefined
+    this.waitPrompt = undefined
+  }
+
+  private waitCardSource(): { toolTitle?: string; toolSummary?: string; prompt?: string } {
+    const liveTool = this.rows.findLast((row): row is Extract<Row, { kind: 'tool' }> =>
+      row.kind === 'tool' && (row.status === undefined || row.status === 'running'))
+    if (liveTool !== undefined) {
+      return { toolTitle: liveTool.title, toolSummary: liveTool.summary, prompt: this.waitPrompt }
+    }
+    const liveSub = this.rows.findLast((row): row is Extract<Row, { kind: 'subagent' }> =>
+      row.kind === 'subagent' && row.status === 'running')
+    if (liveSub !== undefined) {
+      return { toolTitle: liveSub.label, toolSummary: liveSub.lastActivity, prompt: this.waitPrompt }
+    }
+    return { prompt: this.waitPrompt }
   }
 
   private findSubagentRow(sessionId: string): Extract<Row, { kind: 'subagent' }> | undefined {
@@ -4142,7 +4271,7 @@ export class SshTui {
         const header = buildToolHeader({
           focused,
           expanded: row.expanded,
-          title: row.title,
+          title: toolTitle(row.name) || row.title,
           summary: row.summary,
           status: row.status,
           command: row.command,
@@ -4343,6 +4472,19 @@ export class SshTui {
           addDisplay(this.styleLine('assistant', line))
         }
       }
+    } else if (this.waitCardVisible()) {
+      const copy = waitCardCopy(this.waitCardSource())
+      const started = this.waitStartedAt ?? Date.now()
+      const elapsed = fmtElapsedCompact((Date.now() - started) / 1000)
+      const hint = t('wait.interrupt', { elapsed })
+      const spinner = this.spinnerFrame()
+      const header = this.color
+        ? `${spinner} ${shimmerText(copy.header, Date.now(), true)}  ${this.styleLine('system', hint)}`
+        : `${spinner} ${copy.header}  ${hint}`
+      addDisplay(header)
+      if (copy.detail !== undefined && copy.detail !== '') {
+        addDisplay(this.styleLine('system', `  └ ${copy.detail}`))
+      }
     }
 
     const dialogLines: string[] = []
@@ -4470,44 +4612,26 @@ export class SshTui {
     const prompt = this.color ? `\x1b[36m${promptPlain.trimEnd()}\x1b[0m ` : promptPlain
     const promptWidth = displayWidth(promptPlain)
     const masked = this.dialog?.kind === 'onboarding' && this.onboarding?.step === 'key'
+    const inputTextWidth = Math.max(1, width - promptWidth)
     const inputView: InputView = masked
       ? { text: '•'.repeat(this.input.length), cursorOffset: displayWidth('•'.repeat(this.cursor)), folded: false }
       : this.inputFolded
-        ? foldInputView(this.input, this.cursor, Math.max(1, width - promptWidth))
+        ? foldInputView(this.input, this.cursor, inputTextWidth)
         : { text: this.input, cursorOffset: displayWidth(this.input.slice(0, this.cursor)), folded: false }
-    const inputTextWidth = Math.max(1, width - promptWidth)
     const inputTextLines = wrap(inputView.text, inputTextWidth)
     const inputDisplayLines = inputTextLines.map((line, index) =>
       index === 0 ? `${prompt}${line}` : line)
 
-    // Cursor visual position. Folded/masked views are single-line and use
-    // the existing flat offset model; normal multi-line input maps the cursor
-    // index through the same wrap() layout so it stays on the right line.
+    // Folded/masked views are one logical row around the caret. Place the
+    // cursor with the prompt width of that row — never wrap the offset
+    // across the full terminal grid, which parked the caret on a later
+    // chrome line after a long paste. Un-folded multi-line input still
+    // maps through wrap() so newlines stay on the right visual row.
     let cursorRowOffset: number
     let column: number
     if (inputView.folded || masked) {
-      const grid = Math.max(1, width)
-      const cursorPlainOffset = promptWidth + inputView.cursorOffset
-      if (
-        !inputView.folded
-        && cursorPlainOffset > 0
-        && cursorPlainOffset % grid === 0
-        && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
-      ) {
-        inputDisplayLines.push('')
-      }
-      cursorRowOffset = Math.min(
-        Math.floor(cursorPlainOffset / grid),
-        Math.max(0, inputDisplayLines.length - 1),
-      )
-      column = cursorPlainOffset % grid + 1
-      if (
-        cursorPlainOffset > 0
-        && cursorPlainOffset % grid === 0
-        && Math.floor(cursorPlainOffset / grid) >= inputDisplayLines.length
-      ) {
-        column = grid
-      }
+      cursorRowOffset = 0
+      column = Math.min(width, promptWidth + inputView.cursorOffset + 1)
     } else {
       const pos = cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)
       // A cursor exactly at the end of a full-width row sits at the start of
@@ -4929,6 +5053,7 @@ export class SshTui {
           const sourceKind = source.kind ?? ''
           if (sourceKind === 'user') {
             this.pushRow({ kind: 'user', text: `❯ ${text}` })
+            if (!this.replaying) this.beginWait(text)
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
           } else if (sourceKind === 'plugin' && source.form === 'snapshot') {
@@ -5139,6 +5264,7 @@ export class SshTui {
         this.streaming = undefined
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
+        this.endWait()
         if (reason.kind === 'completed' && !this.replaying && !this.completionSignaled) {
           this.completionSignaled = true
           this.completedAt = Date.now()
@@ -5179,12 +5305,15 @@ export class SshTui {
     if (status === 'running') {
       this.completionSignaled = false
       this.completedAt = 0
+      if (this.waitStartedAt === undefined) this.beginWait()
     } else if (!this.completionSignaled && this.status === 'running') {
       this.completionSignaled = true
       this.completedAt = Date.now()
       this.updateTerminalTitle()
       this.playCompletionSignal()
+      this.endWait()
     }
+    if (status !== 'running') this.endWait()
     this.status = status === 'running' ? 'running' : 'idle'
     this.markDirty()
   }
@@ -6937,6 +7066,9 @@ export class SshTui {
     if (normalized === '') return
     this.input = `${this.input.slice(0, this.cursor)}${normalized}${this.input.slice(this.cursor)}`
     this.cursor += normalized.length
+    const cols = Math.max(10, process.stdout.columns || 80)
+    const lineWidth = Math.max(1, cols - 2)
+    if (normalized.includes('\n') || displayWidth(this.input) > lineWidth) this.inputFolded = true
     this.markDirty()
   }
 
@@ -7561,16 +7693,26 @@ export class SshTui {
   private handleCtrlC(): void {
     if (this.dialog !== undefined) {
       this.handleEscape()
+      this.lastIdleCtrlCAt = 0
       return
     }
     if (this.agent.status === 'running') {
-      this.pushRow({ kind: 'system', text: '已请求取消当前轮次…（Ctrl+C）' })
+      this.lastIdleCtrlCAt = 0
+      this.pushRow({ kind: 'system', text: t('cancel.ctrlC') })
       this.agent.cancel({ kind: 'user' })
       this.status = 'cancelling…'
       this.markDirty()
       return
     }
-    void this.requestExit(130)
+    const now = Date.now()
+    if (now - this.lastIdleCtrlCAt <= CTRL_C_EXIT_WINDOW_MS) {
+      this.lastIdleCtrlCAt = 0
+      void this.requestExit(130)
+      return
+    }
+    this.lastIdleCtrlCAt = now
+    this.pushRow({ kind: 'system', text: t('exit.ctrlCAgain') })
+    this.markDirty()
   }
 
   private submit(): void {
@@ -7608,9 +7750,10 @@ export class SshTui {
     })
     if (this.agent.status === 'running') {
       this.pendingMessages.set(message.id, text)
-      this.pushRow({ kind: 'system', text: `⚡ ${text}（运行中已提交，将在下个步骤生效；Esc/Ctrl+C 可中断）` })
+      this.pushRow({ kind: 'system', text: t('steer.queued', { text }) })
       this.agent.steer(message)
     } else {
+      this.beginWait(text)
       this.agent.followup(message)
     }
     this.markDirty()
@@ -7716,6 +7859,8 @@ export class SshTui {
         this.streaming = undefined
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
+        this.waitStartedAt = undefined
+        this.waitPrompt = undefined
         this.focusedRow = null
         this.searchHits = []
         this.searchIndex = -1

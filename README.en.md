@@ -235,7 +235,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
-| `Ctrl+C` | cancel the running turn; exit when idle |
+| `Ctrl+C` | cancel the running turn; press twice when idle to exit |
 | `Ctrl+D` | exit |
 | `Ctrl+L` | redraw |
 | `y` / `n` / `Esc` | answer an approval prompt |
@@ -321,6 +321,12 @@ logo scales to the terminal width — a 52-column variant on wide terminals,
 down to a compact variant on narrow ones — so it never looks squeezed. A
 horizontal rule separates the workspace (transcript, reasoning, tool cards)
 from the input area.
+
+While the model has not streamed thinking or a reply yet, a Codex-style
+`⠋ Working  (1s · Esc to interrupt)` card sits at the bottom of the
+workspace. The detail line is the current user prompt, or the live tool
+name once a tool is running. It yields as soon as thinking or a reply
+starts.
 
 Model reasoning blocks are collapsed by default: while thinking a compact
 `▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and

@@ -134,6 +134,9 @@ export const zh: Record<string, string> = {
   'card.goal': '目标',
   'card.prompt': '提示词',
   'card.expand': ' · Enter 展开',
+  'wait.working': '处理中',
+  'wait.interrupt': '({elapsed} · Esc 中断)',
+  'wait.elapsed': '({elapsed})',
   'prompt.systemPreset': '系统预设',
   'prompt.context': '上下文',
   'prompt.inject': '提示词注入',
@@ -359,6 +362,7 @@ export const zh: Record<string, string> = {
   'steer.queued': '⚡ {text}（运行中已提交，将在下个步骤生效；Esc/Ctrl+C 可中断）',
   'cancel.esc': '已请求取消当前轮次…',
   'cancel.ctrlC': '已请求取消当前轮次…（Ctrl+C）',
+  'exit.ctrlCAgain': '再按一次 Ctrl+C 退出。',
   'clear.transcript': '转录已清空。子代理、计划与提问卡片会在新事件到达时重新出现。',
 
   'model.added': '模型 {model} 已加入提供商 {provider} 的配置。',
@@ -420,7 +424,7 @@ export const zh: Record<string, string> = {
   'usage.go403': '当前 Key 未订阅 OpenCode Go，或额度服务不可用（403）{detail}',
   'usage.goHttp': 'OpenCode Go 额度接口返回 HTTP {status}{detail}',
 
-  'help.intro1': '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲 Ctrl+C 退出。',
+  'help.intro1': '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲连按两次 Ctrl+C 退出。',
   'help.intro2': '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开（正文超出窗口则单独全览，Esc 返回）；Ctrl+R 全部展开/收起；Ctrl+T 折叠输入。',
   'help.intro3': 'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
   'help.intro4': '/find [思考|计划|子代理|回复|提示词] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',

@@ -67,6 +67,8 @@ import {
   renderToolDiff,
   repeatToWidth,
   SshTui,
+  fmtElapsedCompact,
+  waitCardCopy,
   compactionHeaderText,
   subagentHeaderText,
   todoProgressLabel,
@@ -373,10 +375,101 @@ test('isEscapePrefix keeps multi-digit CSI / paste / SGR prefixes buffered', () 
   assert.equal(isEscapePrefix('a'), false)
 })
 
+test('fmtElapsedCompact matches Codex compact elapsed', () => {
+  assert.equal(fmtElapsedCompact(0), '0s')
+  assert.equal(fmtElapsedCompact(59), '59s')
+  assert.equal(fmtElapsedCompact(61), '1m 01s')
+  assert.equal(fmtElapsedCompact(3661), '1h 01m 01s')
+})
+
+test('waitCardCopy prefers a live tool then the user prompt', () => {
+  assert.equal(waitCardCopy({}).header, '处理中')
+  assert.equal(waitCardCopy({ prompt: '  fix the footer  ' }).detail, 'fix the footer')
+  assert.equal(waitCardCopy({
+    toolTitle: '读取',
+    toolSummary: 'src/tui.ts',
+    prompt: 'ignored once a tool is live',
+  }).detail, '读取  src/tui.ts')
+})
+
+test('wait card appears while the model is silent and yields to thinking', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'running',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.waitStartedAt = Date.now() - 1500
+  tui.waitPrompt = '请修绘制残留'
+  const waiting = tui.captureFrame(48, 16)
+  assert.ok(waiting.some(line => line.includes('处理中')))
+  assert.ok(waiting.some(line => line.includes('请修绘制残留')))
+  assert.ok(waiting.some(line => /Esc/.test(line)))
+  tui.streaming = { text: '', reasoning: '正在想下一步' }
+  tui.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
+  const thinking = tui.captureFrame(48, 16)
+  assert.equal(thinking.some(line => line.includes('处理中')), false)
+  assert.ok(thinking.some(line => line.includes('思考中') || line.includes('正在想')))
+})
+
 test('foldInputView keeps wide characters intact around the cursor', () => {
   const view = foldInputView('🙂🙂🙂🙂🙂', 6, 10)
   assert.equal(view.cursorOffset, 6)
   assert.equal(view.folded, false)
+})
+
+test('foldInputView clips a long line around the caret and keeps the caret on that row', () => {
+  const line = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const cursor = 20
+  const view = foldInputView(line, cursor, 16)
+  assert.equal(view.folded, true)
+  assert.ok(view.text.startsWith('…') || view.text.endsWith('…'))
+  assert.equal(view.text.includes('\n'), false)
+  assert.ok(view.cursorOffset >= 0)
+  assert.ok(view.cursorOffset <= displayWidth(view.text))
+  assert.ok(displayWidth(view.text) <= 16)
+  const promptWidth = 2
+  const column = promptWidth + view.cursorOffset + 1
+  assert.ok(column <= 18)
+})
+
+test('foldInputView of a multi-line paste uses the current line only', () => {
+  const input = `${'alpha '.repeat(20)}\nMIDDLE_LINE_XXXX\n${'omega '.repeat(20)}`
+  const cursor = input.indexOf('MIDDLE') + 'MIDDLE'.length
+  const view = foldInputView(input, cursor, 24)
+  assert.equal(view.text.includes('\n'), false)
+  assert.ok(view.text.includes('MIDDLE'))
+  assert.equal(view.text.includes('alpha'), false)
+  assert.equal(view.text.includes('omega'), false)
+  assert.ok(view.cursorOffset <= displayWidth(view.text))
+})
+
+test('folded long paste does not park the caret on the stats/status chrome', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.input = `${'paste-line\n'.repeat(40)}CARET_HERE`
+  tui.cursor = tui.input.indexOf('CARET_HERE') + 'CARET'.length
+  tui.inputFolded = true
+  const frame = tui.captureFrame(48, 16)
+  assert.equal(frame.length, 16)
+  const inputIndex = frame.findIndex(line => line.startsWith('> ') || line.startsWith('❯ '))
+  assert.ok(inputIndex >= 0)
+  assert.ok(frame[inputIndex]?.includes('CARET'))
+  assert.equal(frame[inputIndex]?.includes('\n'), false)
+  const statsIndex = frame.findIndex(line => line.includes('本机') || line.includes('SSH') || line.includes('Local'))
+  if (statsIndex >= 0) {
+    assert.equal(frame[statsIndex]?.includes('CARET_HERE'), false)
+  }
 })
 
 test('renderMarkdownLines strips terminal control sequences', () => {
@@ -776,6 +869,8 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
     const editFrame = build('ok', 'edit', 'src/tui.ts', '编辑', '')
     assert.match(editFrame, /\x1b\[32m●/)
     assert.match(editFrame, /\x1b\[90m\s+src\/tui\.ts/)
+    assert.match(readFrame, /●\x1b\[0m 读取/)
+    assert.match(editFrame, /●\x1b\[0m 编辑/)
   } finally {
     if (prevTerm === undefined) delete process.env.TERM
     else process.env.TERM = prevTerm
