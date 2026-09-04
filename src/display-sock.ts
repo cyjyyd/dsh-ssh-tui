@@ -114,51 +114,69 @@ export class DisplayHost {
   }
 
   private accept(socket: Socket): void {
-    if (this.socket !== undefined) {
-      try {
-        this.socket.destroy()
-      } catch {
-        // ignore
-      }
-      this.socket = undefined
-      this.attached = false
-      this.handlers.onDetach()
+    const reader = new FrameReader()
+    let claimed = false
+    const dropProbe = (): void => {
+      if (claimed) return
+      socket.destroy()
     }
-    this.reader = new FrameReader()
-    this.socket = socket
-    this.attached = true
-    this.handlers.onAttach()
-    socket.on('data', chunk => {
-      let frames: Array<{ type: number; payload: Buffer }>
-      try {
-        frames = this.reader.push(chunk)
-      } catch {
-        socket.destroy()
-        return
-      }
-      for (const frame of frames) {
-        if (frame.type === FRAME_STDIN) this.handlers.onStdin(frame.payload)
-        else if (frame.type === FRAME_RESIZE) {
-          const size = decodeResize(frame.payload)
-          if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
-        } else if (frame.type === FRAME_HELLO) {
-          // Display is ready; host already treats attached=true.
+    const claim = (): void => {
+      if (claimed) return
+      claimed = true
+      if (this.socket !== undefined && this.socket !== socket) {
+        try {
+          this.socket.destroy()
+        } catch {
+          // ignore
         }
+        this.socket = undefined
+        this.attached = false
+        this.handlers.onDetach()
       }
-    })
+      this.reader = reader
+      this.socket = socket
+      this.attached = true
+      this.handlers.onAttach()
+      try {
+        socket.write(encodeFrame(FRAME_HELLO))
+      } catch {
+        drop()
+      }
+    }
     const drop = (): void => {
+      if (!claimed) return
       if (this.socket !== socket) return
       this.socket = undefined
       this.attached = false
       this.handlers.onDetach()
     }
-    socket.on('close', drop)
-    socket.on('error', drop)
-    try {
-      socket.write(encodeFrame(FRAME_HELLO))
-    } catch {
-      drop()
-    }
+    socket.on('data', chunk => {
+      let frames: Array<{ type: number; payload: Buffer }>
+      try {
+        frames = reader.push(chunk)
+      } catch {
+        socket.destroy()
+        return
+      }
+      for (const frame of frames) {
+        if (frame.type === FRAME_HELLO) claim()
+        else if (!claimed) continue
+        else if (frame.type === FRAME_STDIN) this.handlers.onStdin(frame.payload)
+        else if (frame.type === FRAME_RESIZE) {
+          const size = decodeResize(frame.payload)
+          if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
+        }
+      }
+    })
+    socket.on('close', () => {
+      if (claimed) drop()
+    })
+    socket.on('error', () => {
+      if (claimed) drop()
+      else dropProbe()
+    })
+    // A connect() with no HELLO is a liveness probe; do not steal the display.
+    setTimeout(dropProbe, 400)
   }
 
   sendStdout(bytes: Buffer | string): boolean {

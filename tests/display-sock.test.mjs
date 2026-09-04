@@ -64,7 +64,34 @@ test('parseSessionLock keeps sock and paused state', () => {
   assert.equal(parsed?.disconnectPolicy, 'pause')
 })
 
-test('DisplayHost accepts one relay and kicks the previous', async () => {
+test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = join(home, 'tui-socks', 's.sock')
+  const attaches = []
+  const detaches = []
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => { detaches.push(1) },
+    onAttach: () => { attaches.push(1) },
+  })
+  await host.listen()
+  const probe = createConnection(path)
+  await new Promise((resolve, reject) => {
+    probe.once('connect', resolve)
+    probe.once('error', reject)
+  })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(attaches.length, 0)
+  assert.equal(host.attached, false)
+  probe.destroy()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(detaches.length, 0)
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+test('DisplayHost claims HELLO and kicks the previous relay', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
   const path = join(home, 'tui-socks', 's.sock')
   const stdin = []
@@ -82,18 +109,20 @@ test('DisplayHost accepts one relay and kicks the previous', async () => {
     first.once('connect', resolve)
     first.once('error', reject)
   })
-  await new Promise(resolve => setTimeout(resolve, 30))
+  first.write(encodeFrame(FRAME_HELLO))
+  await new Promise(resolve => setTimeout(resolve, 40))
   assert.equal(attaches.length, 1)
   assert.equal(host.attached, true)
   first.write(encodeFrame(FRAME_STDIN, Buffer.from('k')))
-  await new Promise(resolve => setTimeout(resolve, 30))
+  await new Promise(resolve => setTimeout(resolve, 40))
   assert.deepEqual(stdin, ['k'])
   const second = createConnection(path)
   await new Promise((resolve, reject) => {
     second.once('connect', resolve)
     second.once('error', reject)
   })
-  await new Promise(resolve => setTimeout(resolve, 30))
+  second.write(encodeFrame(FRAME_HELLO))
+  await new Promise(resolve => setTimeout(resolve, 40))
   assert.ok(detaches.length >= 1)
   assert.equal(attaches.length, 2)
   second.destroy()

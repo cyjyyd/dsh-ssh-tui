@@ -3,11 +3,13 @@
  * Stale locks (dead pid) are stolen. A live lock with a reachable display
  * socket is an attach target, not a hard failure.
  */
+import { access } from 'node:fs/promises'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
-import { probeDisplaySock, sessionSockPath } from './display-sock.js'
+import { sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
 export type DisconnectPolicy = 'pause' | 'continue'
@@ -181,7 +183,13 @@ export async function inspectLiveHost(
   if (held === undefined) return undefined
   if (!processIsAlive(held.info.pid)) return undefined
   const sock = held.info.sock ?? sessionSockPath(sessionId, dshHome)
-  const reachable = await probeDisplaySock(sock)
+  let reachable = false
+  try {
+    await access(sock, fsConstants.F_OK)
+    reachable = true
+  } catch {
+    reachable = false
+  }
   return {
     kind: reachable ? 'attachable' : 'zombie',
     lock: held.info,
