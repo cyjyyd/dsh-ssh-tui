@@ -438,7 +438,7 @@ export const en: Record<string, string> = {
   'help.modeCancel': 'Mode picker cancelled.',
   'models.ellipsis': '{text}… ({count} total)',
 
-  'lock.held': 'Session {session} is already running as pid {pid}{tty}.\nDo not open a second TUI. If SSH dropped: tmux attach -t dsh\nIf that process is dead, delete the matching file in $DSH_HOME/tui-locks/ and start again.',
+  'lock.held': 'Session {session} is already running as pid {pid}{tty}.\nDo not open a second TUI (it would steal input and approvals). If SSH just dropped, wait for that process to exit, then: dsh --profile tui --resume={session}\nIf the pid is dead, delete the matching file in $DSH_HOME/tui-locks/ and start again.',
   'lock.busy': 'Could not take session lock {path}',
   'update.notice': 'New dsh-ssh-tui {latest} (current {current}). Update: {command}',
   'update.pick': 'New dsh-ssh-tui {latest} (current {current})',

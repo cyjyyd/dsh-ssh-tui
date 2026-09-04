@@ -108,20 +108,23 @@ dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
 dsh --profile tui          # 必须在真实终端 / SSH 会话里
 ```
 
-### SSH 断线后续跑（tmux）
+### SSH 断了之后
 
-弱网友好不等于断线后还能跑。合盖、跳板 idle、换网会杀掉当前 TTY 上的进程。
-把 TUI 放进 tmux，断 SSH 只丢显示器，不丢 Agent：
+合盖、跳板 idle、换网会拆掉当前 TTY。TUI 把 SIGHUP / stdin 关闭 / 写 TTY 失败
+当成挂断：若这一轮还在跑，先取消再把会话日志 flush 完再退出，避免 jsonl 撕成
+`corrupt session log`。重新 SSH 后从日志接上，不要再开第二份同一会话：
 
 ```bash
-tmux new -s dsh -- dsh --profile tui
-# 断线后重新 SSH 进来
-tmux attach -t dsh
+dsh --profile tui --resume                 # 选择器
+dsh --profile tui --resume <session-id>    # 直接恢复
 ```
 
-同一 `sessionId` 不能开第二份 TUI（会抢 stdin 和审批）。第二份启动会退出并提示
-`tmux attach`。锁在 `$DSH_HOME/tui-locks/`；进程异常退出后残留锁会在下次启动时
-核对 pid，已死则自动接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
+同一 `sessionId` 不能同时开第二份 TUI（会抢 stdin 和审批）。第二份启动会退出并
+提示已有 pid。锁在 `$DSH_HOME/tui-locks/`；进程退出后残留锁会在下次启动时核对
+pid，已死则自动接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
+
+断线时进程仍会退出（还没有「后台接着跑、再 attach」）。任务是暂停的，resume
+之后再发一句才会继续。可选：用 tmux 包一层，断 SSH 只丢显示器。
 
 启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
@@ -364,8 +367,8 @@ npm run build
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
 - **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。统计行最左是 `SSH ●●●○ 90ms`（一格红、两格黄、三格及以上绿）。探测不写进转录。
-- **SSH 断了任务也没了**：用 tmux 开 TUI（见上文）。不要在另一个 SSH 窗口再开同一会话。
-- **提示会话已在 pid 运行**：那份 TUI 还活着。`tmux attach -t dsh`；确认进程已死再删 `$DSH_HOME/tui-locks/` 对应文件。
+- **SSH 断了**：挂断会取消当前轮次并 flush 日志，然后进程退出。回来用 `--resume` 接上（见上文）。不要在另一个 SSH 窗口再开同一会话。
+- **提示会话已在 pid 运行**：那份 TUI 还活着。等它退出（SSH 挂断后会自己退）再 `--resume`；确认 pid 已死再删 `$DSH_HOME/tui-locks/` 对应文件。
 
 ## License
 

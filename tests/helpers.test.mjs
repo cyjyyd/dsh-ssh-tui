@@ -63,6 +63,8 @@ import {
   paintIntervalForRtt,
   parseCursorPositionReply,
   resolvePaintIntervalMs,
+  isHangupErrno,
+  waitUntilIdleOrTimeout,
   renderMarkdownLines,
   renderToolDiff,
   repeatToWidth,
@@ -207,6 +209,106 @@ test('composePaintOutput never writes past the terminal height', () => {
   assert.equal(frame.includes('\x1b[3;1H'), false)
   assert.equal(frame.includes('\x1b[9;1H'), false)
   assert.ok(frame.includes('\x1b[2;1H'))
+})
+
+test('isHangupErrno matches dead-TTY write failures', () => {
+  assert.equal(isHangupErrno({ code: 'EIO' }), true)
+  assert.equal(isHangupErrno({ code: 'EPIPE' }), true)
+  assert.equal(isHangupErrno({ code: 'ENXIO' }), true)
+  assert.equal(isHangupErrno({ code: 'ECONNRESET' }), true)
+  assert.equal(isHangupErrno({ code: 'EAGAIN' }), false)
+  assert.equal(isHangupErrno(new Error('boom')), false)
+  assert.equal(isHangupErrno(undefined), false)
+})
+
+test('waitUntilIdleOrTimeout resolves idle before the deadline', async () => {
+  let idle = false
+  let now = 0
+  const waits = []
+  const result = waitUntilIdleOrTimeout(
+    () => idle,
+    1000,
+    () => now,
+    async (ms) => {
+      waits.push(ms)
+      now += ms
+      idle = true
+    },
+  )
+  assert.equal(await result, 'idle')
+  assert.deepEqual(waits, [50])
+})
+
+test('waitUntilIdleOrTimeout times out when still running', async () => {
+  let now = 0
+  const result = await waitUntilIdleOrTimeout(
+    () => false,
+    80,
+    () => now,
+    async (ms) => {
+      now += ms
+    },
+  )
+  assert.equal(result, 'timeout')
+  assert.ok(now >= 80)
+})
+
+test('hangup cancels a running turn, flushes, and exits without writing goodbye', async () => {
+  const flushed = []
+  const cancelled = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return { flush: async (session) => { flushed.push(session.id) } }
+      }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel(reason) { cancelled.push(reason); this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.handleHangup()
+  assert.deepEqual(cancelled, [{ kind: 'user' }])
+  assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(exits, [129])
+  await tui.handleHangup()
+  assert.equal(exits.length, 1)
+})
+
+test('hangup on an idle agent flushes without cancel', async () => {
+  const cancelled = []
+  const flushed = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return { flush: async (session) => { flushed.push(session.id) } }
+      }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel(reason) { cancelled.push(reason) },
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.handleHangup()
+  assert.deepEqual(cancelled, [])
+  assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(exits, [129])
 })
 
 test('resolvePaintIntervalMs clamps jump-host cadence', () => {

@@ -433,6 +433,8 @@ const WAIT_INDICATOR_MS = 8000
 const MIN_PAINT_INTERVAL_MS = 40
 const MAX_PAINT_INTERVAL_MS = 1000
 const DSR_PROBE_TIMEOUT_MS = 800
+/** Give a running turn this long to settle after cancel before we flush anyway. */
+const HANGUP_CANCEL_TIMEOUT_MS = 10_000
 
 export type PaintLinkKind = 'local' | 'ssh'
 
@@ -478,6 +480,32 @@ export function resolvePaintIntervalMs(
 /** True when this process is attached to an SSH session (jump host / proxy). */
 export function detectSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)
+}
+
+/** Node errno on a write/close that means the TTY is gone (SSH drop, HUP). */
+export function isHangupErrno(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EIO' || code === 'EPIPE' || code === 'ENXIO' || code === 'ECONNRESET'
+}
+
+/**
+ * Wait until `isIdle` is true or `timeoutMs` elapses. Used after cancel so a
+ * hangup can flush a settled session log instead of tearing a live write.
+ */
+export async function waitUntilIdleOrTimeout(
+  isIdle: () => boolean,
+  timeoutMs: number,
+  now: () => number = Date.now,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise(resolve => {
+    setTimeout(resolve, ms)
+  }),
+): Promise<'idle' | 'timeout'> {
+  const deadline = now() + Math.max(0, timeoutMs)
+  while (!isIdle()) {
+    if (now() >= deadline) return 'timeout'
+    await wait(Math.min(50, Math.max(0, deadline - now())))
+  }
+  return 'idle'
 }
 
 /** Map a CSI-6n round-trip to a paint cadence. Unknown RTT uses the SSH default. */
@@ -3330,6 +3358,8 @@ export class SshTui {
   private dirty = true
   private disposed = false
   private exiting = false
+  private hangingUp = false
+  private displayDetached = false
   private renderTimer: ReturnType<typeof setInterval> | undefined
   private readonly decoder = new StringDecoder('utf8')
   private readonly color: boolean
@@ -3457,6 +3487,12 @@ export class SshTui {
     process.stdin.resume()
     process.stdout.on('resize', this.markDirty)
     process.on('SIGWINCH', this.markDirty)
+    process.on('SIGHUP', this.handleHangupSignal)
+    process.on('SIGTERM', this.handleHangupSignal)
+    process.stdin.on('end', this.handleHangupStream)
+    process.stdin.on('close', this.handleHangupStream)
+    process.stdout.on('error', this.handleIoError)
+    process.stdin.on('error', this.handleIoError)
 
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
@@ -3776,7 +3812,52 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** Restore the terminal, flush the session, and request process exit. */
+  /**
+   * Drop the TTY without disposing the agent. Safe to call when the fd is
+   * already dead: DECSET restore is best-effort and never throws.
+   */
+  detachDisplay(): void {
+    if (this.displayDetached) return
+    if (this.renderTimer !== undefined) clearInterval(this.renderTimer)
+    this.renderTimer = undefined
+    if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
+    this.escapeTimer = undefined
+    process.stdin.removeListener('data', this.handleData)
+    process.stdout.removeListener('resize', this.markDirty)
+    process.stdout.removeListener('error', this.handleIoError)
+    process.stdin.removeListener('error', this.handleIoError)
+    process.stdin.removeListener('end', this.handleHangupStream)
+    process.stdin.removeListener('close', this.handleHangupStream)
+    process.removeListener('SIGWINCH', this.markDirty)
+    process.removeListener('SIGHUP', this.handleHangupSignal)
+    process.removeListener('SIGTERM', this.handleHangupSignal)
+    try {
+      process.stdin.setRawMode(false)
+    } catch {
+      // stdin may already be closed after SIGHUP.
+    }
+    try {
+      process.stdin.pause()
+    } catch {
+      // ignore
+    }
+    try {
+      process.stdout.write('\x1b]0;\x07')
+      process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
+      process.stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+    } catch (error) {
+      if (!isHangupErrno(error)) {
+        try {
+          process.stderr.write(`dsh-ssh-tui: failed to restore terminal: ${errorChain(error)}\n`)
+        } catch {
+          // both pipes gone
+        }
+      }
+    }
+    this.displayDetached = true
+  }
+
+  /** Restore the terminal and drop event wiring. Does not flush or exit. */
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
@@ -3800,10 +3881,6 @@ export class SshTui {
         pending.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
       }
     }
-    if (this.renderTimer !== undefined) clearInterval(this.renderTimer)
-    this.renderTimer = undefined
-    if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
-    this.escapeTimer = undefined
     this.commandAbort?.abort()
     this.commandAbort = undefined
     for (const dispose of this.disposers.splice(0)) {
@@ -3811,30 +3888,85 @@ export class SshTui {
     }
     this.userQuestionDisposer?.()
     this.userQuestionDisposer = undefined
-    process.stdin.removeListener('data', this.handleData)
-    process.stdout.removeListener('resize', this.markDirty)
-    process.removeListener('SIGWINCH', this.markDirty)
-    process.stdin.setRawMode(false)
-    process.stdin.pause()
-    this.write('\x1b]0;\x07')
-    // Clear every screen (regular + scrollback) before restoring the terminal.
-    // In no-alternate-screen mode this removes the last painted frame that
-    // would otherwise stay behind the shell prompt after exit.
-    this.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-    this.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+    this.detachDisplay()
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
   async requestExit(code: number): Promise<void> {
-    if (this.exiting) return
+    if (this.hangingUp) return
+    if (this.disposed) return
     this.exiting = true
     await this.dispose()
-    process.stdout.write(`\n${sanitizeTerminalText(this.goodbye)}\n`)
+    this.writeGoodbye()
+    await this.flushSession()
+    this.exitProcess(code)
+  }
+
+  /**
+   * SSH / TTY hangup: cancel a running turn, flush, restore the terminal,
+   * then exit. Stage A has no host-stay socket — the process always exits.
+   * Ctrl+C is not a hangup.
+   */
+  async handleHangup(): Promise<void> {
+    if (this.hangingUp || this.disposed) return
+    this.hangingUp = true
+    this.exiting = true
+    this.detachDisplay()
+    if (this.agent.status === 'running') {
+      try {
+        this.agent.cancel({ kind: 'user' })
+      } catch {
+        // cancel is best-effort; we still flush below.
+      }
+      await waitUntilIdleOrTimeout(
+        () => this.agent.status !== 'running',
+        HANGUP_CANCEL_TIMEOUT_MS,
+      )
+    }
+    await this.dispose()
+    await this.flushSession()
+    this.exitProcess(129)
+  }
+
+  private readonly handleHangupSignal = (): void => {
+    void this.handleHangup()
+  }
+
+  private readonly handleHangupStream = (): void => {
+    void this.handleHangup()
+  }
+
+  private readonly handleIoError = (error: unknown): void => {
+    if (isHangupErrno(error)) void this.handleHangup()
+  }
+
+  private writeGoodbye(): void {
+    try {
+      process.stdout.write(`\n${sanitizeTerminalText(this.goodbye)}\n`)
+    } catch (error) {
+      if (!isHangupErrno(error)) {
+        try {
+          process.stderr.write(`dsh-ssh-tui: failed to write goodbye: ${errorChain(error)}\n`)
+        } catch {
+          // both pipes gone
+        }
+      }
+    }
+  }
+
+  private async flushSession(): Promise<void> {
     try {
       await this.ctx.get('sessions')?.flush(this.agent.session)
     } catch (error) {
-      process.stdout.write(`dsh-ssh-tui: failed to flush session: ${errorChain(error)}\n`)
+      try {
+        process.stderr.write(`dsh-ssh-tui: failed to flush session: ${errorChain(error)}\n`)
+      } catch {
+        // stderr may be gone after hangup
+      }
     }
+  }
+
+  private exitProcess(code: number): void {
     const exit = this.ctx.get('appExit')
     if (exit !== undefined) exit(code)
     else process.exit(code)
@@ -3861,7 +3993,16 @@ export class SshTui {
   }
 
   private write(chunk: string): void {
-    process.stdout.write(chunk)
+    if (this.displayDetached) return
+    try {
+      process.stdout.write(chunk)
+    } catch (error) {
+      if (isHangupErrno(error)) {
+        void this.handleHangup()
+        return
+      }
+      throw error
+    }
   }
 
   private markDirty = (): void => {

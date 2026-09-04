@@ -438,7 +438,7 @@ export const zh: Record<string, string> = {
   'help.modeCancel': '模式选择已取消。',
   'models.ellipsis': '{text}…（共 {count} 个）',
 
-  'lock.held': '会话 {session} 已在 pid {pid}{tty} 运行。\n不要再开第二份 TUI。若 SSH 断过：tmux attach -t dsh\n确认进程已死后，删除 $DSH_HOME/tui-locks/ 里对应的锁再启动。',
+  'lock.held': '会话 {session} 已在 pid {pid}{tty} 运行。\n不要再开第二份 TUI（会抢输入和审批）。若 SSH 刚断，等进程退出后用 dsh --profile tui --resume={session} 从日志接上。\n确认该 pid 已死再删 $DSH_HOME/tui-locks/ 里对应的锁。',
   'lock.busy': '无法占用会话锁 {path}',
   'update.notice': '发现新版本 dsh-ssh-tui {latest}（当前 {current}）。更新：{command}',
   'update.pick': '发现新版本 dsh-ssh-tui {latest}（当前 {current}）',
