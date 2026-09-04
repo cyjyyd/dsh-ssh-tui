@@ -70,7 +70,7 @@ dsh --profile tui
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
 - 审批、`ask_user_question`、计划模式、子代理进度、`/mode` 模式切换、`/model` 模型切换、
-  `/resume` 会话切换等完整支持；
+  `/resume` 会话切换、`/disconnect` 断线策略等完整支持；
 - 每个子代理都是独立可折叠卡片，默认收起，运行中带旋转动画；多个子代理互不混排；
 - 进入计划模式、待审计划、提问用户都会显示对应卡片和底部提示，而不是只塞进系统消息。
 - 模型尚未吐思考/回复时，工作区底部有 Codex 式「处理中」动画卡：当前用户提示或正在跑的工具名 + 计时 + Esc 中断。
@@ -123,7 +123,10 @@ dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从�
 `$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在
 下次启动时核对 pid，已死则自动从日志接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
 
-当前轮次在断线时是暂停的（取消），接上后再发一句才会继续。断线后不暂停、后台跑完是下一阶段。可选：用 tmux 包一层。
+默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
+`ssh-tui.disconnect: continue`（也可用 `DSH_TUI_DISCONNECT=continue`）则不取消，
+Host 在后台跑完这一轮；审批和提问等接上后再弹。无显示器且空闲超过 6 小时
+（`DSH_TUI_DETACHED_IDLE_MS`）Host 自行退出。可选：用 tmux 包一层。
 
 启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
@@ -214,7 +217,7 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/view`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简**（藏思考、合并工具/编辑）之间切换，写入 `ssh-tui.view`。这和 `/mode`（agent preset）不是一回事。
@@ -366,7 +369,7 @@ npm run build
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
 - **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。统计行最左是 `SSH ●●●○ 90ms`（一格红、两格黄、三格及以上绿）。探测不写进转录。
-- **SSH 断了**：挂断会取消当前轮次、flush 日志，Host 留下。回来 `--resume` 会接入那个进程（见上文）。不要再开第二份 Host。
+- **SSH 断了**：默认取消当前轮次、flush 日志，Host 留下。`/disconnect continue` 则不取消，后台跑完。回来 `--resume` 会接入那个进程（见上文）。不要再开第二份 Host。
 - **提示会话已在 pid 运行 / 可接入**：那份 Host 还活着。用 `--resume` 接入；只有 pid 已死、显示通道也连不上时才删 `$DSH_HOME/tui-locks/` 再从日志恢复。
 
 ## License

@@ -121,9 +121,12 @@ and approvals). Locks live under `$DSH_HOME/tui-locks/`; the display socket
 under `$DSH_HOME/tui-socks/`. A leftover lock from a crash is stolen if the
 pid is dead. `DSH_TUI_NO_SESSION_LOCK=1` skips this.
 
-The turn is paused on hangup (cancelled). After attach, send another message
-to continue. Leaving the turn running in the background is the next stage.
-Optional: wrap the TUI in tmux.
+Hangup pauses the turn by default (cancelled). After attach, send another
+message to continue. `/disconnect continue`, `ssh-tui.disconnect: continue`,
+or `DSH_TUI_DISCONNECT=continue` leaves the turn running in the background;
+approvals and questions wait until a Display attaches. With no display and
+6h idle (`DSH_TUI_DETACHED_IDLE_MS`) the Host exits itself. Optional: wrap
+the TUI in tmux.
 
 New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows
@@ -254,7 +257,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/provider`, `/language`, `/view`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/provider`, `/language`, `/view`, `/disconnect`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/compact` shows a spinning 「压缩上下文」 card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.

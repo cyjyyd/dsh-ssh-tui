@@ -75,6 +75,7 @@ import {
   waitCardCopy,
   waitSummaryFromReasoning,
   parseWorkspaceView,
+  parseDisconnectPolicy,
   compactToolGroups,
   countDiffLines,
   compactionHeaderText,
@@ -345,6 +346,49 @@ test('captureHangupSignals drops the launcher SIGTERM handler', () => {
     for (const fn of previousHup) process.on('SIGHUP', fn)
     for (const fn of previousInt) process.on('SIGINT', fn)
   }
+})
+
+test('parseDisconnectPolicy accepts pause/continue aliases', () => {
+  assert.equal(parseDisconnectPolicy('pause'), 'pause')
+  assert.equal(parseDisconnectPolicy('继续'), 'continue')
+  assert.equal(parseDisconnectPolicy('nope'), undefined)
+})
+
+test('hangup with disconnect continue does not cancel a running turn', async () => {
+  const cancelled = []
+  const flushed = []
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return { flush: async (session) => { flushed.push(session.id) } }
+      }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel(reason) { cancelled.push(reason); this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    disconnectPolicy: 'continue',
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
+  assert.deepEqual(cancelled, [])
+  assert.equal(agent.status, 'running')
+  assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(hangups, ['hung'])
+  assert.deepEqual(exits, [])
 })
 
 test('hangup keeps the host when a display socket is listening', async () => {
@@ -1682,6 +1726,7 @@ test('/status lists the link chip, quota window, and subagent family fit', () =>
     activeSubagents: 0,
     plan: 'off',
     paint: 'SSH ●●●○ 90ms',
+    disconnect: 'continue',
     waitingQuestions: 0,
     quota,
     parentModel: 'deepseek-v4-pro',
@@ -1690,6 +1735,7 @@ test('/status lists the link chip, quota window, and subagent family fit', () =>
   })
   assert.ok(lines.some(line => line === 'cwd: /root/genshin/srv'))
   assert.ok(lines.some(line => line.startsWith('paint: SSH ●●●○ 90ms')))
+  assert.ok(lines.some(line => line === 'disconnect: continue'))
   assert.ok(lines.some(line => line.startsWith('quota: OpenCode Go')))
   assert.ok(lines.some(line => line.includes('subagent: deepseek-v4-flash') && line.includes('同族')))
   const heavy = formatStatusReport({

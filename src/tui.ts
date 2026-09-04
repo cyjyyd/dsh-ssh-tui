@@ -138,6 +138,9 @@ function installUserQuestionAnswerer(
 }
 
 const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
+
+export type DisconnectPolicyName = 'pause' | 'continue'
+
 /** Presentation configuration for the terminal channel. */
 export interface TuiConfig {
   /** Exact shared agent/session identity driven by this terminal. */
@@ -186,6 +189,8 @@ export interface TuiConfig {
   onReattach?: () => void | Promise<void>
   /** Host process: no local TTY; paint only through the display socket. */
   headlessDisplay?: boolean
+  /** Hangup policy: pause cancels the turn; continue lets it finish detached. */
+  disconnectPolicy?: DisconnectPolicyName
 }
 
 type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
@@ -433,6 +438,7 @@ interface DialogAnswer {
 export interface TuiController {
   dispose(): Promise<void>
   handleHangup(): Promise<void>
+  disconnectPolicy(): DisconnectPolicyName
 }
 
 const RENDER_INTERVAL_MS = 160
@@ -835,6 +841,7 @@ const PLUGIN_VERSION = ((): string => {
   }
 })()
 const STALL_WARNING_MS = 60000
+const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -982,6 +989,7 @@ export interface StatusReportInput {
   activeSubagents: number
   plan: 'off' | 'pending' | 'on'
   paint: string
+  disconnect?: DisconnectPolicyName
   waitingQuestions: number
   quota?: QuotaSnapshot
   parentModel?: string
@@ -1013,6 +1021,7 @@ export function formatStatusReport(input: StatusReportInput): string[] {
     `plan: ${input.plan}`,
     formatQuotaStatusLine(input.quota),
     `paint: ${input.paint}`,
+    `disconnect: ${input.disconnect ?? 'pause'}`,
     input.waitingQuestions > 0 ? `questions: waiting ${input.waitingQuestions}` : 'questions: none',
   ]
 }
@@ -1057,6 +1066,7 @@ const LOCAL_COMMANDS = [
   { name: 'language', description: 'switch UI language (zh / en); empty opens a picker' },
   { name: 'lang', description: 'alias of /language' },
   { name: 'view', description: 'switch workspace view (detailed / compact); empty opens a picker' },
+  { name: 'disconnect', description: 'SSH-drop policy (pause / continue); empty opens a picker' },
   { name: 'dialog-test', description: 'verify the question dialog' },
 ] as const
 
@@ -1066,6 +1076,7 @@ function localizedCommands(): { name: string; description: string }[] {
       return { name: command.name, description: t('lang.cmd') }
     }
     if (command.name === 'view') return { name: command.name, description: t('view.cmd') }
+    if (command.name === 'disconnect') return { name: command.name, description: t('disconnect.cmd') }
     return command
   })
 }
@@ -2429,6 +2440,13 @@ const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
 
 export type WorkspaceView = 'detailed' | 'compact'
 
+export function parseDisconnectPolicy(raw: string): DisconnectPolicyName | undefined {
+  const id = raw.trim().toLowerCase()
+  if (id === 'pause' || id === 'cancel' || id === '暂停') return 'pause'
+  if (id === 'continue' || id === 'keep' || id === '继续') return 'continue'
+  return undefined
+}
+
 export function parseWorkspaceView(raw: string): WorkspaceView | undefined {
   const id = raw.trim().toLowerCase()
   if (id === 'detailed' || id === 'detail' || id === 'full' || id === '详细') return 'detailed'
@@ -3396,6 +3414,8 @@ export class SshTui {
   private exiting = false
   private hangingUp = false
   private readonly headlessDisplay: boolean
+  private disconnectPolicy: DisconnectPolicyName
+  private detachedIdleTimer: ReturnType<typeof setTimeout> | undefined
   private displayDetached = false
   private displayHost: DisplayHost | undefined
   private relayColumns: number | undefined
@@ -3510,6 +3530,7 @@ export class SshTui {
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
     this.headlessDisplay = config.headlessDisplay === true
+    this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.resumePicker = config.resumePicker === true
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
@@ -3656,12 +3677,17 @@ export class SshTui {
     await this.mergeUiSettings({ skipUpdate: latest })
   }
 
-  private async mergeUiSettings(patch: { language?: string; skipUpdate?: string; view?: string }): Promise<void> {
+  private async mergeUiSettings(patch: {
+    language?: string
+    skipUpdate?: string
+    view?: string
+    disconnect?: DisconnectPolicyName
+  }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
     const raw = settings.get(UI_LOCALE_NAMESPACE)
     const previous = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-      ? raw as { language?: string; skipUpdate?: string; view?: string }
+      ? raw as { language?: string; skipUpdate?: string; view?: string; disconnect?: string }
       : {}
     await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
   }
@@ -3670,6 +3696,40 @@ export class SshTui {
     const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'detailed'
     return parseWorkspaceView(String((raw as { view?: unknown }).view ?? '')) ?? 'detailed'
+  }
+
+  private readDisconnectPolicy(): DisconnectPolicyName {
+    const env = parseDisconnectPolicy(process.env.DSH_TUI_DISCONNECT ?? '')
+    if (env !== undefined) return env
+    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'pause'
+    return parseDisconnectPolicy(String((raw as { disconnect?: unknown }).disconnect ?? '')) ?? 'pause'
+  }
+
+  private detachedIdleMs(): number {
+    const raw = Number.parseInt(process.env.DSH_TUI_DETACHED_IDLE_MS ?? '', 10)
+    if (Number.isFinite(raw) && raw > 0) return raw
+    return DEFAULT_DETACHED_IDLE_MS
+  }
+
+  private clearDetachedIdleTimer(): void {
+    if (this.detachedIdleTimer !== undefined) clearTimeout(this.detachedIdleTimer)
+    this.detachedIdleTimer = undefined
+  }
+
+  private armDetachedIdleTimer(): void {
+    this.clearDetachedIdleTimer()
+    const idleMs = this.detachedIdleMs()
+    this.detachedIdleTimer = setTimeout(() => {
+      if (this.disposed || this.exiting) return
+      if (this.displayHost?.attached === true) return
+      if (this.agent.status === 'running') {
+        this.armDetachedIdleTimer()
+        return
+      }
+      void this.requestExit(0)
+    }, idleMs)
+    this.detachedIdleTimer.unref?.()
   }
 
   private isCompactView(): boolean {
@@ -3923,6 +3983,7 @@ export class SshTui {
     if (this.disposed) return
     this.disposed = true
     this.exiting = true
+    this.clearDetachedIdleTimer()
     const dialog = this.dialog
     const queued = this.dialogQueue.splice(0)
     this.dialog = undefined
@@ -3960,6 +4021,7 @@ export class SshTui {
     if (this.hangingUp) return
     if (this.disposed) return
     this.exiting = true
+    this.clearDetachedIdleTimer()
     this.displayHost?.sendGoodbye()
     await this.dispose()
     if (!this.headlessDisplay) this.writeGoodbye()
@@ -3977,7 +4039,8 @@ export class SshTui {
     this.hangingUp = true
     ignoreFurtherHangupSignals()
     this.detachDisplay()
-    if (this.agent.status === 'running') {
+    const pauseTurn = this.disconnectPolicy !== 'continue'
+    if (pauseTurn && this.agent.status === 'running') {
       try {
         this.agent.cancel({ kind: 'user' })
       } catch {
@@ -3991,6 +4054,7 @@ export class SshTui {
     await this.flushSession()
     if (this.displayHost !== undefined) {
       this.hangingUp = false
+      this.armDetachedIdleTimer()
       await this.onHangup?.()
       return
     }
@@ -4143,6 +4207,7 @@ export class SshTui {
   attachRelayDisplay(): void {
     if (!this.headlessDisplay) this.displayDetached = false
     this.hangingUp = false
+    this.clearDetachedIdleTimer()
     this.lastActivity = Date.now()
     this.stalledWarningShown = false
     this.lastPaintRows = []
@@ -4154,6 +4219,10 @@ export class SshTui {
     this.paint()
     this.startRenderTimer()
     void this.onReattach?.()
+  }
+
+  currentDisconnectPolicy(): DisconnectPolicyName {
+    return this.disconnectPolicy
   }
 
   applyProbedRtt(rttMs: number | undefined): void {
@@ -6260,10 +6329,48 @@ export class SshTui {
 
   // ── approval and questions ──────────────────────────────────────────────
 
+  private hasLiveDisplay(): boolean {
+    if (this.disposed || this.exiting) return false
+    if (this.headlessDisplay || this.displayDetached) return this.displayHost?.attached === true
+    return true
+  }
+
+  private waitForLiveDisplay(signal?: AbortSignal): Promise<void> {
+    if (this.hasLiveDisplay()) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (ok: boolean): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        clearInterval(timer)
+        if (ok) resolve()
+        else reject(new UserQuestionError('ask_user_question was interrupted before the user answered', 'ASK_ABORTED'))
+      }
+      const onAbort = (): void => { finish(false) }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const timer = setInterval(() => {
+        if (this.disposed || this.exiting) {
+          finish(false)
+          return
+        }
+        if (this.hasLiveDisplay()) finish(true)
+      }, 200)
+      timer.unref?.()
+    })
+  }
+
   private readonly handleApproval = async (
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> => {
+    if (!this.hasLiveDisplay()) {
+      try {
+        await this.waitForLiveDisplay(request.signal)
+      } catch {
+        return 'cancelled'
+      }
+    }
     const agentLabel = request.agent.id === this.agent.id
       ? '当前会话'
       : `子代理 ${request.agent.id}`
@@ -6290,6 +6397,7 @@ export class SshTui {
   }
 
   readonly handleUserQuestions = async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
+    if (!this.hasLiveDisplay()) await this.waitForLiveDisplay(request.signal)
     const answers: AskUserQuestionAnswer['answers'] = []
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined
@@ -7123,6 +7231,38 @@ export class SshTui {
     await this.mergeUiSettings({ view: next })
     this.forceFullPaint = true
     this.pushRow({ kind: 'system', text: t('view.switched', { name: next === 'compact' ? t('view.compact') : t('view.detailed') }) })
+    this.markDirty()
+  }
+
+  /** /disconnect: pause (default) or continue the turn after SSH drop. */
+  private async runDisconnectCommand(arg: string): Promise<void> {
+    const direct = parseDisconnectPolicy(arg)
+    let next: DisconnectPolicyName | undefined = direct
+    if (next === undefined && arg.trim() !== '') {
+      this.pushRow({ kind: 'error', text: t('disconnect.unknown', { id: arg.trim() }) })
+      this.markDirty()
+      return
+    }
+    if (next === undefined) {
+      const current = this.disconnectPolicy
+      const answer = await this.askQuestion({
+        id: 'disconnect-pick',
+        question: t('disconnect.pick'),
+        options: [
+          { label: t('disconnect.pause'), description: current === 'pause' ? t('disconnect.current') : t('disconnect.pauseDesc') },
+          { label: t('disconnect.continue'), description: current === 'continue' ? t('disconnect.current') : t('disconnect.continueDesc') },
+        ],
+      }, 0, 1, current === 'continue' ? 1 : 0)
+      const picked = answer.selected[0]
+      next = picked === t('disconnect.continue') ? 'continue' : 'pause'
+    }
+    this.disconnectPolicy = next
+    await this.mergeUiSettings({ disconnect: next })
+    this.forceFullPaint = true
+    this.pushRow({
+      kind: 'system',
+      text: t('disconnect.switched', { name: next === 'continue' ? t('disconnect.continue') : t('disconnect.pause') }),
+    })
     this.markDirty()
   }
 
@@ -8425,6 +8565,16 @@ export class SshTui {
           this.markDirty()
         })
         break
+      case 'disconnect':
+        void this.runDisconnectCommand(arg).catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+          } else {
+            this.pushRow({ kind: 'error', text: `/disconnect failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
       case 'find':
         this.runFindCommand(arg)
         break
@@ -8465,6 +8615,7 @@ export class SshTui {
             activeSubagents: this.activeSubagents.size,
             plan: plan === undefined ? 'off' : plan.pending ? 'pending' : plan.active ? 'on' : 'off',
             paint: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed),
+            disconnect: this.disconnectPolicy,
             waitingQuestions: waiting,
             ...(quota === undefined ? {} : { quota }),
             parentModel: model,
@@ -8763,6 +8914,9 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     },
     async handleHangup(): Promise<void> {
       await controller?.handleHangup()
+    },
+    disconnectPolicy(): DisconnectPolicyName {
+      return controller?.currentDisconnectPolicy() ?? 'pause'
     },
   }
 }

@@ -115,6 +115,7 @@ export function apply(ctx: Context, config: Config): void {
         tty: process.env.SSH_TTY ?? process.env.TTY,
         state: 'attached',
         agentStatus: 'idle',
+        disconnectPolicy: 'pause',
       })
       sessionLockPathHeld = path
       sessionLockInfoHeld = info
@@ -326,10 +327,12 @@ export function apply(ctx: Context, config: Config): void {
         },
         onHangup: async () => {
           hostOrphaned = true
+          const policy = controller?.disconnectPolicy() ?? 'pause'
           await patchLock({
             state: handle?.agent.status === 'running' ? 'running-detached' : 'paused',
             agentStatus: handle?.agent.status === 'running' ? 'running' : 'idle',
             tty: undefined,
+            disconnectPolicy: policy,
           })
         },
         onReattach: async () => {
