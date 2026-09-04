@@ -494,6 +494,34 @@ export function isHangupErrno(error: unknown): boolean {
   return code === 'EIO' || code === 'EPIPE' || code === 'ENXIO' || code === 'ECONNRESET'
 }
 
+const HANGUP_SIGNAL_NAMES = ['SIGHUP', 'SIGTERM', 'SIGINT'] as const
+
+/**
+ * Replace launcher SIGTERM/SIGINT/SIGHUP handlers with `handler`. SSH drop
+ * otherwise lets `dsh` dispose the whole tree before this plugin can detach.
+ */
+export function captureHangupSignals(handler: () => void): void {
+  for (const name of HANGUP_SIGNAL_NAMES) {
+    process.removeAllListeners(name)
+    process.prependListener(name, handler)
+  }
+}
+
+export function releaseHangupSignals(handler: () => void): void {
+  for (const name of HANGUP_SIGNAL_NAMES) {
+    process.removeListener(name, handler)
+  }
+}
+
+/** After detach, extra HUP/TERM from sshd must not kill the leftover Host. */
+export function ignoreFurtherHangupSignals(): void {
+  const ignore = (): void => {}
+  for (const name of ['SIGHUP', 'SIGTERM'] as const) {
+    process.removeAllListeners(name)
+    process.on(name, ignore)
+  }
+}
+
 /**
  * Wait until `isIdle` is true or `timeoutMs` elapses. Used after cancel so a
  * hangup can flush a settled session log instead of tearing a live write.
@@ -3500,10 +3528,9 @@ export class SshTui {
     process.stdin.resume()
     process.stdout.on('resize', this.markDirty)
     process.on('SIGWINCH', this.markDirty)
-    process.on('SIGHUP', this.handleHangupSignal)
-    process.on('SIGTERM', this.handleHangupSignal)
-    process.stdin.on('end', this.handleHangupStream)
-    process.stdin.on('close', this.handleHangupStream)
+    captureHangupSignals(this.handleHangupSignal)
+    process.stdin.prependListener('end', this.handleHangupStream)
+    process.stdin.prependListener('close', this.handleHangupStream)
     process.stdout.on('error', this.handleIoError)
     process.stdin.on('error', this.handleIoError)
     void this.ensureDisplayHost().catch((error: unknown) => {
@@ -3847,8 +3874,7 @@ export class SshTui {
     process.stdin.removeListener('end', this.handleHangupStream)
     process.stdin.removeListener('close', this.handleHangupStream)
     process.removeListener('SIGWINCH', this.markDirty)
-    process.removeListener('SIGHUP', this.handleHangupSignal)
-    process.removeListener('SIGTERM', this.handleHangupSignal)
+    releaseHangupSignals(this.handleHangupSignal)
     try {
       process.stdin.setRawMode(false)
     } catch {
@@ -3933,11 +3959,7 @@ export class SshTui {
     if (this.hangingUp || this.disposed) return
     this.hangingUp = true
     this.detachDisplay()
-    try {
-      process.on('SIGHUP', () => { /* Host stays; extra HUP from sshd is ignored */ })
-    } catch {
-      // ignore
-    }
+    ignoreFurtherHangupSignals()
     if (this.agent.status === 'running') {
       try {
         this.agent.cancel({ kind: 'user' })

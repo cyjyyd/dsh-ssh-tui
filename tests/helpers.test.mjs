@@ -65,6 +65,8 @@ import {
   resolvePaintIntervalMs,
   isHangupErrno,
   waitUntilIdleOrTimeout,
+  captureHangupSignals,
+  ignoreFurtherHangupSignals,
   renderMarkdownLines,
   renderToolDiff,
   repeatToWidth,
@@ -309,6 +311,39 @@ test('hangup on an idle agent flushes without cancel', async () => {
   assert.deepEqual(cancelled, [])
   assert.deepEqual(flushed, ['main-session'])
   assert.deepEqual(exits, [129])
+})
+
+test('captureHangupSignals drops the launcher SIGTERM handler', () => {
+  const launcher = []
+  const ours = []
+  const previousTerm = process.listeners('SIGTERM').slice()
+  const previousHup = process.listeners('SIGHUP').slice()
+  const previousInt = process.listeners('SIGINT').slice()
+  const launcherFn = () => { launcher.push('launcher') }
+  const oursFn = () => { ours.push('ours') }
+  process.removeAllListeners('SIGTERM')
+  process.removeAllListeners('SIGHUP')
+  process.removeAllListeners('SIGINT')
+  process.on('SIGTERM', launcherFn)
+  try {
+    captureHangupSignals(oursFn)
+    assert.equal(process.listeners('SIGTERM').includes(launcherFn), false)
+    assert.equal(process.listeners('SIGTERM').includes(oursFn), true)
+    process.emit('SIGTERM')
+    assert.deepEqual(ours, ['ours'])
+    assert.deepEqual(launcher, [])
+    ignoreFurtherHangupSignals()
+    ours.length = 0
+    process.emit('SIGTERM')
+    assert.deepEqual(ours, [])
+  } finally {
+    process.removeAllListeners('SIGTERM')
+    process.removeAllListeners('SIGHUP')
+    process.removeAllListeners('SIGINT')
+    for (const fn of previousTerm) process.on('SIGTERM', fn)
+    for (const fn of previousHup) process.on('SIGHUP', fn)
+    for (const fn of previousInt) process.on('SIGINT', fn)
+  }
 })
 
 test('hangup keeps the host when a display socket is listening', async () => {
