@@ -30,7 +30,7 @@ test('sessionLockPath sanitizes session ids', () => {
   assert.equal(path, join('/tmp/dsh-home', 'tui-locks', 'main-session_.._evil_id.json'))
 })
 
-test('formatLockHeldMessage tells the user to resume after the live pid exits', () => {
+test('formatLockHeldMessage tells the user to attach the live pid', () => {
   const text = formatLockHeldMessage({ pid: 9, sessionId: 's1', startedAt: '', tty: '/dev/pts/2' })
   assert.match(text, /pid 9/)
   assert.match(text, /--resume=s1/)

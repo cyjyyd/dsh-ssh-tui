@@ -311,6 +311,40 @@ test('hangup on an idle agent flushes without cancel', async () => {
   assert.deepEqual(exits, [129])
 })
 
+test('hangup keeps the host when a display socket is listening', async () => {
+  const flushed = []
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return { flush: async (session) => { flushed.push(session.id) } }
+      }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() { this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
+  assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(hangups, ['hung'])
+  assert.deepEqual(exits, [])
+  assert.equal(tui.disposed, false)
+})
+
 test('resolvePaintIntervalMs clamps jump-host cadence', () => {
   assert.equal(resolvePaintIntervalMs(undefined, {}), 80)
   assert.equal(resolvePaintIntervalMs(undefined, {}, { ssh: true }), 160)

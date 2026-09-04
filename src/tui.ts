@@ -32,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
+import { DisplayHost, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
   getLocale,
@@ -179,6 +180,10 @@ export interface TuiConfig {
    * link. Defaults from `DSH_TUI_PAINT_MS` (160).
    */
   paintIntervalMs?: number
+  /** Called after hangup so the launcher can keep the Host and update the lock. */
+  onHangup?: () => void | Promise<void>
+  /** Called when a Display relay attaches after hangup. */
+  onReattach?: () => void | Promise<void>
 }
 
 type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
@@ -425,6 +430,7 @@ interface DialogAnswer {
 /** Lifecycle handle for a mounted interactive terminal channel. */
 export interface TuiController {
   dispose(): Promise<void>
+  handleHangup(): Promise<void>
 }
 
 const RENDER_INTERVAL_MS = 160
@@ -3360,6 +3366,11 @@ export class SshTui {
   private exiting = false
   private hangingUp = false
   private displayDetached = false
+  private displayHost: DisplayHost | undefined
+  private relayColumns: number | undefined
+  private relayRows: number | undefined
+  private readonly onHangup: (() => void | Promise<void>) | undefined
+  private readonly onReattach: (() => void | Promise<void>) | undefined
   private renderTimer: ReturnType<typeof setInterval> | undefined
   private readonly decoder = new StringDecoder('utf8')
   private readonly color: boolean
@@ -3465,6 +3476,8 @@ export class SshTui {
     this.subagentSelection = config.subagentSelection ?? { current: { model: DEFAULT_SUBAGENT_MODEL } }
     this.onSwitchSession = config.onSwitchSession
     this.onSelectionChanged = config.onSelectionChanged
+    this.onHangup = config.onHangup
+    this.onReattach = config.onReattach
     this.resumePicker = config.resumePicker === true
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
@@ -3493,6 +3506,11 @@ export class SshTui {
     process.stdin.on('close', this.handleHangupStream)
     process.stdout.on('error', this.handleIoError)
     process.stdin.on('error', this.handleIoError)
+    void this.ensureDisplayHost().catch((error: unknown) => {
+      if (this.disposed) return
+      this.pushRow({ kind: 'error', text: `显示通道启动失败: ${errorChain(error)}` })
+      this.markDirty()
+    })
 
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
@@ -3889,6 +3907,9 @@ export class SshTui {
     this.userQuestionDisposer?.()
     this.userQuestionDisposer = undefined
     this.detachDisplay()
+    const host = this.displayHost
+    this.displayHost = undefined
+    if (host !== undefined) await host.close()
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
@@ -3896,6 +3917,7 @@ export class SshTui {
     if (this.hangingUp) return
     if (this.disposed) return
     this.exiting = true
+    this.displayHost?.sendGoodbye()
     await this.dispose()
     this.writeGoodbye()
     await this.flushSession()
@@ -3903,15 +3925,19 @@ export class SshTui {
   }
 
   /**
-   * SSH / TTY hangup: cancel a running turn, flush, restore the terminal,
-   * then exit. Stage A has no host-stay socket — the process always exits.
+   * SSH / TTY hangup: drop the local display, cancel a running turn, flush.
+   * The Host stays if the display socket is listening so a later SSH can attach.
    * Ctrl+C is not a hangup.
    */
   async handleHangup(): Promise<void> {
     if (this.hangingUp || this.disposed) return
     this.hangingUp = true
-    this.exiting = true
     this.detachDisplay()
+    try {
+      process.on('SIGHUP', () => { /* Host stays; extra HUP from sshd is ignored */ })
+    } catch {
+      // ignore
+    }
     if (this.agent.status === 'running') {
       try {
         this.agent.cancel({ kind: 'user' })
@@ -3923,8 +3949,14 @@ export class SshTui {
         HANGUP_CANCEL_TIMEOUT_MS,
       )
     }
-    await this.dispose()
     await this.flushSession()
+    if (this.displayHost !== undefined) {
+      this.hangingUp = false
+      await this.onHangup?.()
+      return
+    }
+    this.exiting = true
+    await this.dispose()
     this.exitProcess(129)
   }
 
@@ -3992,8 +4024,26 @@ export class SshTui {
     }
   }
 
+  private screenColumns(): number {
+    return this.displayDetached
+      ? (this.relayColumns ?? process.stdout.columns ?? 80)
+      : (process.stdout.columns ?? 80)
+  }
+
+  private screenRows(): number {
+    return this.displayDetached
+      ? (this.relayRows ?? process.stdout.rows ?? 24)
+      : (process.stdout.rows ?? 24)
+  }
+
   private write(chunk: string): void {
-    if (this.displayDetached) return
+    const host = this.displayHost
+    if (host?.attached === true) {
+      host.sendStdout(chunk)
+      if (this.displayDetached) return
+    } else if (this.displayDetached) {
+      return
+    }
     try {
       process.stdout.write(chunk)
     } catch (error) {
@@ -4003,6 +4053,49 @@ export class SshTui {
       }
       throw error
     }
+  }
+
+  private async ensureDisplayHost(): Promise<void> {
+    if (this.displayHost !== undefined || this.disposed) return
+    const host = new DisplayHost(sessionSockPath(String(this.agent.id)), {
+      onStdin: (bytes) => {
+        if (this.disposed) return
+        this.handleData(bytes)
+      },
+      onResize: (columns, rows) => {
+        this.relayColumns = columns
+        this.relayRows = rows
+        this.forceFullPaint = true
+        this.markDirty()
+      },
+      onDetach: () => {
+        if (this.disposed || this.hangingUp) return
+        if (this.displayDetached) void this.onHangup?.()
+        else void this.handleHangup()
+      },
+      onAttach: () => {
+        if (this.disposed) return
+        this.attachRelayDisplay()
+      },
+    })
+    await host.listen()
+    if (this.disposed) {
+      await host.close()
+      return
+    }
+    this.displayHost = host
+  }
+
+  /** Re-open DECSET and start painting to an attached Display relay. */
+  attachRelayDisplay(): void {
+    this.displayDetached = false
+    this.hangingUp = false
+    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.forceFullPaint = true
+    this.dirty = true
+    this.paint()
+    this.startRenderTimer()
+    void this.onReattach?.()
   }
 
   private markDirty = (): void => {
@@ -4416,8 +4509,8 @@ export class SshTui {
 
   toggleCard(target: CollapsibleBlock): void {
     if (target.kind === 'tool' && !target.expanded) {
-      const width = Math.max(10, process.stdout.columns || 80)
-      const height = Math.max(6, process.stdout.rows || 24)
+      const width = Math.max(10, this.screenColumns())
+      const height = Math.max(6, this.screenRows())
       const body = toolBodyLines(target, Number.MAX_SAFE_INTEGER)
       const bodyRows = wrappedToolBodyLineCount(body, width)
       if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
@@ -4441,8 +4534,8 @@ export class SshTui {
       for (const row of rows) row.expanded = false
       this.focusedRow = null
     } else {
-      const width = Math.max(10, process.stdout.columns || 80)
-      const height = Math.max(6, process.stdout.rows || 24)
+      const width = Math.max(10, this.screenColumns())
+      const height = Math.max(6, this.screenRows())
       const workspace = this.workspaceRowsFor(width, height)
       for (const row of rows) {
         if (row.kind === 'tool') {
@@ -4465,8 +4558,8 @@ export class SshTui {
   private revealRow(row: Row | CollapsibleBlock | undefined): void {
     if (row === undefined) return
     if (row.kind === 'tool') {
-      const width = Math.max(10, process.stdout.columns || 80)
-      const height = Math.max(6, process.stdout.rows || 24)
+      const width = Math.max(10, this.screenColumns())
+      const height = Math.max(6, this.screenRows())
       const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
       const bodyRows = wrappedToolBodyLineCount(body, width)
       if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
@@ -4556,8 +4649,8 @@ export class SshTui {
 
   private paint = (): void => {
     if (this.exiting) return
-    const width = Math.max(10, process.stdout.columns || 80)
-    const height = Math.max(6, process.stdout.rows || 24)
+    const width = Math.max(10, this.screenColumns())
+    const height = Math.max(6, this.screenRows())
     if (this.dialog?.kind === 'inspect') {
       this.paintInspectOverlay(width, height)
       return
@@ -5333,11 +5426,12 @@ export class SshTui {
   private playCompletionSignal(): void {
     const disabled = process.env.DSH_TUI_NO_BELL === '1' || process.env.DSH_TUI_NO_BELL === 'true'
     if (disabled) return
-    process.stdout.write('\x07')
+    this.write('\x07')
   }
 
   private render = (): void => {
     if (!this.dirty || this.exiting) return
+    if (this.displayDetached && this.displayHost?.attached !== true) return
     if (
       this.agent.status === 'running'
       && Date.now() - this.lastActivity > STALL_WARNING_MS
@@ -7362,11 +7456,11 @@ export class SshTui {
       return
     }
     if (combined === '\x1b[5~') {
-      this.scrollInspectOrTranscript(Math.max(3, Math.floor((process.stdout.rows || 24) / 2)))
+      this.scrollInspectOrTranscript(Math.max(3, Math.floor(this.screenRows() / 2)))
       return
     }
     if (combined === '\x1b[6~') {
-      this.scrollInspectOrTranscript(-Math.max(3, Math.floor((process.stdout.rows || 24) / 2)))
+      this.scrollInspectOrTranscript(-Math.max(3, Math.floor(this.screenRows() / 2)))
       return
     }
     if (parseCursorPositionReply(combined) !== undefined) return
@@ -7463,7 +7557,7 @@ export class SshTui {
     if (normalized === '') return
     this.input = `${this.input.slice(0, this.cursor)}${normalized}${this.input.slice(this.cursor)}`
     this.cursor += normalized.length
-    const cols = Math.max(10, process.stdout.columns || 80)
+    const cols = Math.max(10, this.screenColumns())
     const lineWidth = Math.max(1, cols - 2)
     if (normalized.includes('\n') || displayWidth(this.input) > lineWidth) this.inputFolded = true
     this.markDirty()
@@ -8596,6 +8690,9 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     async dispose(): Promise<void> {
       stopWaiting()
       await controller?.dispose()
+    },
+    async handleHangup(): Promise<void> {
+      await controller?.handleHangup()
     },
   }
 }

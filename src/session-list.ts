@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { t } from './i18n/index.js'
+import { inspectLiveHost } from './session-lock.js'
 
 /** Last path segment for the footer chip (`\root\genshin\srv` → `srv`). */
 export function sessionCwdLabel(cwd: string): string {
@@ -65,6 +66,8 @@ export interface ResumableSession {
   cwd: string
   /** Whether the full event log could not be inspected (corrupt/unsupported). */
   unreadable?: boolean
+  /** Live Host that a new SSH can attach to. */
+  attach?: { pid: number; sock: string; state?: string }
 }
 
 /** `MM-DD HH:mm` local-time label for session lists. */
@@ -170,13 +173,20 @@ export async function listResumableSessions(
   }
 
   const resumable = inspected.filter(item => item.hasUserInput || item.unreadable === true)
-  // Readable sessions with user input first, unreadable sessions after them;
-  // within each group the inspected activity time puts the most recently
-  // touched session first.
-  resumable.sort((a, b) =>
-    (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
+  const withHost = await Promise.all(resumable.map(async (item) => {
+    const live = await inspectLiveHost(item.id)
+    if (live?.kind !== 'attachable') return item
+    return {
+      ...item,
+      attach: { pid: live.lock.pid, sock: live.sock, state: live.lock.state },
+    }
+  }))
+  // Attachable live hosts first, then readable logs, then unreadable.
+  withHost.sort((a, b) =>
+    (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
+    || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
     || b.updatedAt - a.updatedAt)
-  return resumable
+  return withHost
     .slice(0, 9)
     .map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
 }

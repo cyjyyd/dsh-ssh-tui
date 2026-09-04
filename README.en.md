@@ -106,24 +106,24 @@ From a checkout: `bash scripts/smoke-headless.sh` (prints an outcome summary, ne
 ### After an SSH drop
 
 Closing the laptop or an idle jump host tears down the TTY. The TUI treats
-SIGHUP, stdin close, and a failed TTY write as hangup: if a turn is running
-it cancels, flushes the session log, then exits, so the jsonl is not left
-as `corrupt session log`. Reconnect and resume — do not start a second copy
-of the same session:
+SIGHUP, stdin close, and a failed TTY write as hangup: it drops the display,
+cancels a running turn, flushes the session log, and **keeps the Host**.
+Reconnect with the same command — the picker prefers a live process
+(labelled attachable). Do not start a second Host:
 
 ```sh
-dsh --profile tui --resume                 # picker
-dsh --profile tui --resume <session-id>    # resume that id
+dsh --profile tui --resume                 # picker (live hosts first)
+dsh --profile tui --resume <session-id>    # attach if live, else resume the log
 ```
 
-A second TUI on the same `sessionId` is refused (it would steal stdin and
-approvals) and names the live pid. Locks live under `$DSH_HOME/tui-locks/`;
-a leftover file from a crash is stolen if the pid is dead.
-`DSH_TUI_NO_SESSION_LOCK=1` skips this.
+A second Host on the same `sessionId` is refused (it would steal the jsonl
+and approvals). Locks live under `$DSH_HOME/tui-locks/`; the display socket
+under `$DSH_HOME/tui-socks/`. A leftover lock from a crash is stolen if the
+pid is dead. `DSH_TUI_NO_SESSION_LOCK=1` skips this.
 
-The process still exits on hangup (no background host yet). The turn is
-paused; after `--resume`, send another message to continue. Optional: wrap
-the TUI in tmux so SSH is only the display.
+The turn is paused on hangup (cancelled). After attach, send another message
+to continue. Leaving the turn running in the background is the next stage.
+Optional: wrap the TUI in tmux.
 
 New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows
@@ -437,8 +437,8 @@ the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
 starts with `SSH ●●●○ 90ms` (1 pip red, 2 yellow, 3+ green). The probe
 does not write into the transcript.
 
-Hangup cancels a running turn, flushes the session log, and exits. Resume
-with `--resume`; do not start a second copy of the same session.
+Hangup cancels a running turn, flushes the session log, and keeps the Host.
+`--resume` attaches to that process; do not start a second Host.
 
 ## Development
 

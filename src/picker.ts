@@ -14,6 +14,7 @@ import { t } from './i18n/index.js'
 /** What the launch picker decided. */
 export type SessionPickerResult =
   | { kind: 'resume'; id: string }
+  | { kind: 'attach'; id: string; sock: string }
   | { kind: 'new' }
   | null
 
@@ -56,7 +57,10 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
     ]
     sessions.forEach((session, index) => {
       lines.push(style(truncateToWidth(`${index + 1}  ${session.label}`, width), '1'))
-      const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
+      const attachNote = session.attach === undefined
+        ? ''
+        : t('picker.attachable', { pid: session.attach.pid })
+      const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${attachNote}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
       lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), '90')}`)
     })
     lines.push('')
@@ -135,7 +139,9 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
         if (char >= '1' && char <= '9') {
           const session = sessions[Number(char) - 1]
           if (session !== undefined) {
-            cleanup({ kind: 'resume', id: session.id })
+            cleanup(session.attach === undefined
+              ? { kind: 'resume', id: session.id }
+              : { kind: 'attach', id: session.id, sock: session.attach.sock })
             return
           }
         }

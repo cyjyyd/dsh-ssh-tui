@@ -404,6 +404,9 @@ export const en: Record<string, string> = {
   'picker.cancel': 'cancel',
   'picker.noPersistence': 'dsh-ssh-tui: sessionPersistence service is unavailable\n',
   'picker.none': 'dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n',
+  'picker.attachable': 'attach pid {pid} · ',
+  'attach.connecting': 'Attaching to session {session}…',
+  'attach.zombie': 'Session {session} pid {pid} is alive but the display socket is unreachable. If that process is dead, --resume from the log; do not start a second Host.',
 
   'usage.querying': 'checking quota…',
   'usage.none': 'Provider {provider} has no balance/quota API. DeepSeek official uses /user/balance; OpenAI-compatible gateways probe credit_grants; OpenCode Go and SuperGrok use subscription quota.',
@@ -438,7 +441,7 @@ export const en: Record<string, string> = {
   'help.modeCancel': 'Mode picker cancelled.',
   'models.ellipsis': '{text}… ({count} total)',
 
-  'lock.held': 'Session {session} is already running as pid {pid}{tty}.\nDo not open a second TUI (it would steal input and approvals). If SSH just dropped, wait for that process to exit, then: dsh --profile tui --resume={session}\nIf the pid is dead, delete the matching file in $DSH_HOME/tui-locks/ and start again.',
+  'lock.held': 'Session {session} is already running as pid {pid}{tty}.\nDo not start a second Host. If SSH dropped: dsh --profile tui --resume={session} attaches to that process.\nOnly if the pid is dead and the display socket is gone, delete the matching file in $DSH_HOME/tui-locks/ and resume from the log.',
   'lock.busy': 'Could not take session lock {path}',
   'update.notice': 'New dsh-ssh-tui {latest} (current {current}). Update: {command}',
   'update.pick': 'New dsh-ssh-tui {latest} (current {current})',

@@ -35,7 +35,15 @@ import { showSessionPicker } from './picker.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
-import { acquireSessionLock, releaseSessionLock, sessionLockDisabled } from './session-lock.js'
+import {
+  acquireSessionLock,
+  inspectLiveHost,
+  releaseSessionLock,
+  sessionLockDisabled,
+  writeSessionLock,
+  type SessionLockInfo,
+} from './session-lock.js'
+import { runDisplayRelay } from './display-sock.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
 import { installUiLocale, t } from './i18n/index.js'
@@ -84,19 +92,51 @@ export function apply(ctx: Context, config: Config): void {
     let handle: AgentHandle | undefined
     let controller: TuiController | undefined
     let sessionLockPathHeld: string | undefined
+    let sessionLockInfoHeld: SessionLockInfo | undefined
+    let hostOrphaned = false
 
     const dropSessionLock = async (): Promise<void> => {
       const path = sessionLockPathHeld
       sessionLockPathHeld = undefined
+      sessionLockInfoHeld = undefined
       if (path !== undefined) await releaseSessionLock(path)
     }
 
     const takeSessionLock = async (sessionId: string): Promise<void> => {
       if (sessionLockDisabled()) return
-      const { path } = await acquireSessionLock(sessionId, {
+      const { path, info } = await acquireSessionLock(sessionId, {
         tty: process.env.SSH_TTY ?? process.env.TTY,
+        state: 'attached',
+        agentStatus: 'idle',
       })
       sessionLockPathHeld = path
+      sessionLockInfoHeld = info
+    }
+
+    const patchLock = async (patch: Partial<SessionLockInfo>): Promise<void> => {
+      const path = sessionLockPathHeld
+      const current = sessionLockInfoHeld
+      if (path === undefined || current === undefined) return
+      const next = { ...current, ...patch }
+      sessionLockInfoHeld = next
+      try {
+        await writeSessionLock(path, next)
+      } catch {
+        // lock file is best-effort while detached
+      }
+    }
+
+    const attachExisting = async (sessionId: string, sock: string): Promise<void> => {
+      process.stderr.write(`${t('attach.connecting', { session: sessionId })}\n`)
+      const result = await runDisplayRelay(sock)
+      const exit = ctx.get('appExit')
+      if (result.reason === 'goodbye') {
+        if (exit !== undefined) exit(0)
+        else process.exit(0)
+        return
+      }
+      if (exit !== undefined) exit(0)
+      else process.exit(0)
     }
     // An explicit in-process change (/setup or /model) wins over launch-time
     // CLI overrides for every session created or resumed later in this process.
@@ -213,6 +253,16 @@ export function apply(ctx: Context, config: Config): void {
         installModelSelection(agentCtx, selectionRef)
         await agentPresets?.mount(agentCtx)
       }
+      if (!sessionLockDisabled()) {
+        const live = await inspectLiveHost(String(sessionId))
+        if (live?.kind === 'attachable') {
+          await attachExisting(String(sessionId), live.sock)
+          return
+        }
+        if (live?.kind === 'zombie') {
+          throw new Error(t('attach.zombie', { session: String(sessionId), pid: live.lock.pid }))
+        }
+      }
       await takeSessionLock(String(sessionId))
       let resumeCwdNotice: string | undefined
       try {
@@ -263,6 +313,22 @@ export function apply(ctx: Context, config: Config): void {
         onSelectionChanged: (next) => {
           liveSelection = next
         },
+        onHangup: async () => {
+          hostOrphaned = true
+          await patchLock({
+            state: handle?.agent.status === 'running' ? 'running-detached' : 'paused',
+            agentStatus: handle?.agent.status === 'running' ? 'running' : 'idle',
+            tty: undefined,
+          })
+        },
+        onReattach: async () => {
+          hostOrphaned = false
+          await patchLock({
+            state: 'attached',
+            tty: process.env.SSH_TTY ?? process.env.TTY,
+            agentStatus: handle?.agent.status === 'running' ? 'running' : 'idle',
+          })
+        },
       })
     }
 
@@ -304,6 +370,11 @@ export function apply(ctx: Context, config: Config): void {
           else process.exit(0)
           return
         }
+        if (picked.kind === 'attach') {
+          bootingSessionId = picked.id
+          await attachExisting(picked.id, picked.sock)
+          return
+        }
         if (picked.kind === 'resume') {
           bootingSessionId = picked.id
           await start(SessionId(picked.id), true)
@@ -333,6 +404,7 @@ export function apply(ctx: Context, config: Config): void {
     })
 
     return async (): Promise<void> => {
+      if (hostOrphaned) return
       disposed = true
       pickerAbort.abort()
       await controller?.dispose()
