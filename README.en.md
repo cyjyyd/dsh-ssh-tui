@@ -1,5 +1,10 @@
 # dsh-ssh-tui
 
+[![npm](https://img.shields.io/npm/v/dsh-ssh-tui?style=flat-square&color=4b6fff)](https://www.npmjs.com/package/dsh-ssh-tui)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-ssh-tui?style=flat-square)](https://www.npmjs.com/package/dsh-ssh-tui)
+[![CI](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml)
+[![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
+
 A DeepSeek Harness terminal for jump hosts, headless servers, and high-latency
 SSH. Plain ANSI and incremental redraws. No browser required.
 
