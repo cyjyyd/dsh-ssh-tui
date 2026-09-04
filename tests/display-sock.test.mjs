@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
 import {
+  detachFromSshSession,
   DisplayHost,
   FRAME_HELLO,
   FRAME_STDIN,
@@ -14,6 +15,10 @@ import {
   decodeResize,
   encodeFrame,
   encodeResize,
+  encodeRtt,
+  decodeRtt,
+  FRAME_RTT,
+  hostArgvForSession,
   sessionSockPath,
 } from '../lib/display-sock.js'
 import { parseSessionLock } from '../lib/session-lock.js'
@@ -34,6 +39,17 @@ test('encode/decode frames round-trip stdin and resize', () => {
   assert.equal(frames[2].type, FRAME_HELLO)
 })
 
+test('encode/decode rtt frames', () => {
+  const reader = new FrameReader()
+  const frames = reader.push(Buffer.concat([
+    encodeRtt(90),
+    encodeRtt(undefined),
+  ]))
+  assert.equal(frames[0].type, FRAME_RTT)
+  assert.equal(decodeRtt(frames[0].payload), 90)
+  assert.equal(decodeRtt(frames[1].payload), undefined)
+})
+
 test('FrameReader buffers a split header', () => {
   const reader = new FrameReader()
   const full = encodeFrame(FRAME_STDOUT, Buffer.from('hi'))
@@ -41,6 +57,33 @@ test('FrameReader buffers a split header', () => {
   const rest = reader.push(full.subarray(3))
   assert.equal(rest.length, 1)
   assert.equal(rest[0].payload.toString(), 'hi')
+})
+
+test('detachFromSshSession replaces launcher SIGTERM with an ignore handler', () => {
+  const launcher = []
+  const previous = process.listeners('SIGTERM').slice()
+  const launcherFn = () => { launcher.push('launcher') }
+  process.removeAllListeners('SIGTERM')
+  process.on('SIGTERM', launcherFn)
+  try {
+    detachFromSshSession()
+    assert.equal(process.listeners('SIGTERM').includes(launcherFn), false)
+    process.emit('SIGTERM')
+    assert.deepEqual(launcher, [])
+  } finally {
+    process.removeAllListeners('SIGTERM')
+    for (const fn of previous) process.on('SIGTERM', fn)
+  }
+})
+
+test('hostArgvForSession pins --resume=id and drops picker flags', () => {
+  const argv = hostArgvForSession('sid-1', ['/usr/lib/node/dsh', '--profile', 'tui', '--resume'], [])
+  assert.equal(argv.includes('--resume'), false)
+  assert.ok(argv.includes('--resume=sid-1'))
+  const withId = hostArgvForSession('sid-2', ['dsh', '--profile', 'tui', 'resume', 'old'], [])
+  assert.equal(withId.includes('resume'), false)
+  assert.equal(withId.includes('old'), false)
+  assert.ok(withId.includes('--resume=sid-2'))
 })
 
 test('sessionSockPath sanitizes ids next to the lock dir', () => {
@@ -87,6 +130,35 @@ test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () =>
   probe.destroy()
   await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(detaches.length, 0)
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+test('DisplayHost delivers HELLO then RESIZE from one chunk', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = join(home, 'tui-socks', 's.sock')
+  const resizes = []
+  const attaches = []
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: (columns, rows) => { resizes.push([columns, rows]) },
+    onDetach: () => {},
+    onAttach: () => { attaches.push(1) },
+  })
+  await host.listen()
+  const client = createConnection(path)
+  await new Promise((resolve, reject) => {
+    client.once('connect', resolve)
+    client.once('error', reject)
+  })
+  client.write(Buffer.concat([
+    encodeFrame(FRAME_HELLO),
+    encodeResize(140, 42),
+  ]))
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(attaches.length, 1)
+  assert.deepEqual(resizes, [[140, 42]])
+  client.destroy()
   await host.close()
   await rm(home, { recursive: true, force: true })
 })

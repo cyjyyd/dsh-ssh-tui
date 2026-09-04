@@ -12,6 +12,7 @@ import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 import { CONFIGURED_AGENT_IDENTITIES_KEY } from '@deepseek-ai/dsh-agent-loop'
 import type { LauncherAgentIdentity } from '@deepseek-ai/dsh-agent-loop'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { detachFromSshSession } from './display-sock.js'
 
 /** Service key under which the parsed TUI launch options are provided. */
 export const SSH_TUI_STARTUP_SERVICE = 'sshTuiStartup'
@@ -113,6 +114,7 @@ export function apply(ctx: Context): void {
       'tuiGoodbyeMessage',
       `To resume this session: dsh --profile tui --resume=${identity.id}`,
     )
+    detachFromSshSession()
   })
 
   parseCmdline(ctx, program)

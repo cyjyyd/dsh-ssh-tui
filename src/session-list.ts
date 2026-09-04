@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { t } from './i18n/index.js'
-import { inspectLiveHost } from './session-lock.js'
+import { listAttachableHosts } from './session-lock.js'
 
 /** Last path segment for the footer chip (`\root\genshin\srv` → `srv`). */
 export function sessionCwdLabel(cwd: string): string {
@@ -98,6 +98,7 @@ type InspectedSession = ResumableSession & { hasUserInput: boolean }
 export async function listResumableSessions(
   persistence: SessionPersistence,
   currentId: string,
+  listHosts: typeof listAttachableHosts = listAttachableHosts,
 ): Promise<ResumableSession[]> {
   const headers = await persistence.list()
   const candidates = headers
@@ -173,20 +174,32 @@ export async function listResumableSessions(
   }
 
   const resumable = inspected.filter(item => item.hasUserInput || item.unreadable === true)
-  const withHost = await Promise.all(resumable.map(async (item) => {
-    const live = await inspectLiveHost(item.id)
-    if (live?.kind !== 'attachable') return item
-    return {
-      ...item,
-      attach: { pid: live.lock.pid, sock: live.sock, state: live.lock.state },
+  const hosts = await listHosts()
+  const byId = new Map(resumable.map(item => [item.id, item]))
+  for (const host of hosts) {
+    const existing = byId.get(host.sessionId)
+    const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
+    if (existing !== undefined) {
+      existing.attach = attach
+      continue
     }
-  }))
+    const injected: InspectedSession = {
+      id: host.sessionId,
+      label: host.sessionId,
+      updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
+      cwd: '',
+      hasUserInput: true,
+      attach,
+    }
+    resumable.push(injected)
+    byId.set(host.sessionId, injected)
+  }
   // Attachable live hosts first, then readable logs, then unreadable.
-  withHost.sort((a, b) =>
+  resumable.sort((a, b) =>
     (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
     || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
     || b.updatedAt - a.updatedAt)
-  return withHost
+  return resumable
     .slice(0, 9)
     .map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
 }

@@ -68,7 +68,7 @@ test('sessions that fail inspect stay visible and are marked unreadable', async 
     },
   }
 
-  const listed = await listResumableSessions(persistence, '')
+  const listed = await listResumableSessions(persistence, '', async () => [])
   assert.equal(listed.length, 3)
   assert.deepEqual(listed.map(item => item.id), ['old-readable', 'new-readable', 'broken-recent'])
   assert.equal(listed[2].unreadable, true)
@@ -95,7 +95,7 @@ test('recent empty boot sessions do not hide older readable sessions beyond the 
     },
   }
 
-  const listed = await listResumableSessions(persistence, '')
+  const listed = await listResumableSessions(persistence, '', async () => [])
   assert.deepEqual(listed.map(item => item.id), realIds)
   assert.equal(listed.every(item => item.unreadable !== true), true)
 })
@@ -107,10 +107,26 @@ test('the current session is excluded and the result is capped at nine', async (
     inspect: async (id) => readableSession(id, 1000 - ids.indexOf(id), `task ${id}`),
   }
 
-  const listed = await listResumableSessions(persistence, 'session-0')
+  const listed = await listResumableSessions(persistence, 'session-0', async () => [])
   assert.equal(listed.length, 9)
   assert.equal(listed.some(item => item.id === 'session-0'), false)
   assert.deepEqual(listed.map(item => item.id), ids.slice(1, 10))
+})
+
+test('attachable hosts are injected at the front of the picker list', async () => {
+  const persistence = {
+    list: async () => [header('logged', 100)],
+    inspect: async (id) => readableSession(id, 100, 'logged task'),
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [{
+    sessionId: 'live-host',
+    lock: { pid: 42, sessionId: 'live-host', startedAt: '2026-09-04T00:00:00.000Z', state: 'paused' },
+    sock: '/tmp/live-host.sock',
+  }])
+  assert.equal(listed[0].id, 'live-host')
+  assert.equal(listed[0].attach?.pid, 42)
+  assert.equal(listed[1].id, 'logged')
+  assert.equal(listed[1].attach, undefined)
 })
 
 test('sessionCwdLabel keeps the last folder name', () => {

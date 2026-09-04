@@ -404,7 +404,7 @@ export const en: Record<string, string> = {
   'picker.cancel': 'cancel',
   'picker.noPersistence': 'dsh-ssh-tui: sessionPersistence service is unavailable\n',
   'picker.none': 'dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n',
-  'picker.attachable': 'attach pid {pid} · ',
+  'picker.attachable': 'attachable · pid {pid} (live host after SSH drop)',
   'attach.connecting': 'Attaching to session {session}…',
   'attach.zombie': 'Session {session} pid {pid} is alive but the display socket is unreachable. If that process is dead, --resume from the log; do not start a second Host.',
 

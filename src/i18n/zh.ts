@@ -404,7 +404,7 @@ export const zh: Record<string, string> = {
   'picker.cancel': '取消',
   'picker.noPersistence': 'dsh-ssh-tui: sessionPersistence service is unavailable\n',
   'picker.none': 'dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n',
-  'picker.attachable': '可接入 pid {pid} · ',
+  'picker.attachable': '可接入 · pid {pid}（断线后的原会话）',
   'attach.connecting': '正在接入会话 {session}…',
   'attach.zombie': '会话 {session} 的进程 pid {pid} 还在，但显示通道连不上。确认该进程已死再 --resume；不要再开第二份 Host。',
 

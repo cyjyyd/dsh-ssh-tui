@@ -32,7 +32,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
-import { DisplayHost, sessionSockPath } from './display-sock.js'
+import { detachFromSshSession, DisplayHost, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
   getLocale,
@@ -184,6 +184,8 @@ export interface TuiConfig {
   onHangup?: () => void | Promise<void>
   /** Called when a Display relay attaches after hangup. */
   onReattach?: () => void | Promise<void>
+  /** Host process: no local TTY; paint only through the display socket. */
+  headlessDisplay?: boolean
 }
 
 type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
@@ -516,7 +518,7 @@ export function releaseHangupSignals(handler: () => void): void {
 /** After detach, extra HUP/TERM from sshd must not kill the leftover Host. */
 export function ignoreFurtherHangupSignals(): void {
   const ignore = (): void => {}
-  for (const name of ['SIGHUP', 'SIGTERM'] as const) {
+  for (const name of HANGUP_SIGNAL_NAMES) {
     process.removeAllListeners(name)
     process.on(name, ignore)
   }
@@ -3393,6 +3395,7 @@ export class SshTui {
   private disposed = false
   private exiting = false
   private hangingUp = false
+  private readonly headlessDisplay: boolean
   private displayDetached = false
   private displayHost: DisplayHost | undefined
   private relayColumns: number | undefined
@@ -3506,6 +3509,7 @@ export class SshTui {
     this.onSelectionChanged = config.onSelectionChanged
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
+    this.headlessDisplay = config.headlessDisplay === true
     this.resumePicker = config.resumePicker === true
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
@@ -3524,21 +3528,44 @@ export class SshTui {
 
   /** Enter raw mode, switch to the alternate screen, and start listening. */
   start(): void {
-    process.stdin.setRawMode(true)
-    process.stdin.resume()
-    process.stdout.on('resize', this.markDirty)
-    process.on('SIGWINCH', this.markDirty)
+    detachFromSshSession()
     captureHangupSignals(this.handleHangupSignal)
-    process.stdin.prependListener('end', this.handleHangupStream)
-    process.stdin.prependListener('close', this.handleHangupStream)
-    process.stdout.on('error', this.handleIoError)
-    process.stdin.on('error', this.handleIoError)
+    this.bindAgentEvents()
     void this.ensureDisplayHost().catch((error: unknown) => {
       if (this.disposed) return
       this.pushRow({ kind: 'error', text: `显示通道启动失败: ${errorChain(error)}` })
       this.markDirty()
     })
+    if (this.headlessDisplay) {
+      this.displayDetached = true
+      this.startRenderTimer()
+      this.bootBackgroundTasks()
+      return
+    }
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdout.on('resize', this.markDirty)
+    process.on('SIGWINCH', this.markDirty)
+    process.stdin.prependListener('end', this.handleHangupStream)
+    process.stdin.prependListener('close', this.handleHangupStream)
+    process.stdout.on('error', this.handleIoError)
+    process.stdin.on('error', this.handleIoError)
 
+    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.render()
+    this.updateTerminalTitle()
+    if (this.resumePicker) {
+      void this.runResumeCommand('', true)
+    }
+    void this.calibratePaintInterval().finally(() => {
+      if (this.disposed) return
+      process.stdin.on('data', this.handleData)
+      this.startRenderTimer()
+    })
+    this.bootBackgroundTasks()
+  }
+
+  private bindAgentEvents(): void {
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
       this.ctx.on('agent/status', this.handleStatus),
@@ -3555,19 +3582,9 @@ export class SshTui {
     if (questions !== undefined) {
       this.userQuestionDisposer = installUserQuestionAnswerer(this.ctx, questions, this.handleUserQuestions)
     }
+  }
 
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
-    this.render()
-    this.updateTerminalTitle()
-    if (this.resumePicker) {
-      void this.runResumeCommand('', true)
-    }
-    void this.calibratePaintInterval().finally(() => {
-      if (this.disposed) return
-      process.stdin.on('data', this.handleData)
-      this.startRenderTimer()
-    })
-
+  private bootBackgroundTasks(): void {
     void this.maybeRunOnboarding().catch((error: unknown) => {
       if (this.disposed) return
       this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
@@ -3874,7 +3891,7 @@ export class SshTui {
     process.stdin.removeListener('end', this.handleHangupStream)
     process.stdin.removeListener('close', this.handleHangupStream)
     process.removeListener('SIGWINCH', this.markDirty)
-    releaseHangupSignals(this.handleHangupSignal)
+    if (!this.hangingUp) releaseHangupSignals(this.handleHangupSignal)
     try {
       process.stdin.setRawMode(false)
     } catch {
@@ -3945,7 +3962,7 @@ export class SshTui {
     this.exiting = true
     this.displayHost?.sendGoodbye()
     await this.dispose()
-    this.writeGoodbye()
+    if (!this.headlessDisplay) this.writeGoodbye()
     await this.flushSession()
     this.exitProcess(code)
   }
@@ -3958,8 +3975,8 @@ export class SshTui {
   async handleHangup(): Promise<void> {
     if (this.hangingUp || this.disposed) return
     this.hangingUp = true
-    this.detachDisplay()
     ignoreFurtherHangupSignals()
+    this.detachDisplay()
     if (this.agent.status === 'running') {
       try {
         this.agent.cancel({ kind: 'user' })
@@ -4047,15 +4064,17 @@ export class SshTui {
   }
 
   private screenColumns(): number {
-    return this.displayDetached
-      ? (this.relayColumns ?? process.stdout.columns ?? 80)
-      : (process.stdout.columns ?? 80)
+    if (this.headlessDisplay || this.displayDetached) {
+      return this.relayColumns ?? process.stdout.columns ?? 80
+    }
+    return process.stdout.columns ?? 80
   }
 
   private screenRows(): number {
-    return this.displayDetached
-      ? (this.relayRows ?? process.stdout.rows ?? 24)
-      : (process.stdout.rows ?? 24)
+    if (this.headlessDisplay || this.displayDetached) {
+      return this.relayRows ?? process.stdout.rows ?? 24
+    }
+    return process.stdout.rows ?? 24
   }
 
   private write(chunk: string): void {
@@ -4085,10 +4104,20 @@ export class SshTui {
         this.handleData(bytes)
       },
       onResize: (columns, rows) => {
+        const changed = this.relayColumns !== columns || this.relayRows !== rows
         this.relayColumns = columns
         this.relayRows = rows
-        this.forceFullPaint = true
-        this.markDirty()
+        if (this.displayHost?.attached === true && (this.headlessDisplay || this.displayDetached)) {
+          this.attachRelayDisplay()
+          return
+        }
+        if (changed) {
+          this.forceFullPaint = true
+          this.markDirty()
+        }
+      },
+      onRtt: (rttMs) => {
+        this.applyProbedRtt(rttMs)
       },
       onDetach: () => {
         if (this.disposed || this.hangingUp) return
@@ -4097,7 +4126,9 @@ export class SshTui {
       },
       onAttach: () => {
         if (this.disposed) return
-        this.attachRelayDisplay()
+        if (this.relayColumns !== undefined && this.relayRows !== undefined) {
+          this.attachRelayDisplay()
+        }
       },
     })
     await host.listen()
@@ -4110,14 +4141,31 @@ export class SshTui {
 
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
-    this.displayDetached = false
+    if (!this.headlessDisplay) this.displayDetached = false
     this.hangingUp = false
+    this.lastActivity = Date.now()
+    this.stalledWarningShown = false
+    this.lastPaintRows = []
+    this.lastChromeKey = ''
+    this.lastTranscriptStart = -1
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.forceFullPaint = true
     this.dirty = true
     this.paint()
     this.startRenderTimer()
     void this.onReattach?.()
+  }
+
+  applyProbedRtt(rttMs: number | undefined): void {
+    const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
+    this.paintLink = 'ssh'
+    this.paintProbed = rttMs !== undefined
+    this.paintRttMs = rttMs
+    if (!(Number.isFinite(envOverride) && envOverride > 0)) {
+      this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs })
+      this.startRenderTimer()
+    }
+    this.markDirty()
   }
 
   private markDirty = (): void => {
@@ -5453,7 +5501,7 @@ export class SshTui {
 
   private render = (): void => {
     if (!this.dirty || this.exiting) return
-    if (this.displayDetached && this.displayHost?.attached !== true) return
+    if ((this.displayDetached || this.headlessDisplay) && this.displayHost?.attached !== true) return
     if (
       this.agent.status === 'running'
       && Date.now() - this.lastActivity > STALL_WARNING_MS

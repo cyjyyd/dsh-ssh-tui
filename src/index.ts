@@ -43,7 +43,13 @@ import {
   writeSessionLock,
   type SessionLockInfo,
 } from './session-lock.js'
-import { runDisplayRelay } from './display-sock.js'
+import {
+  isTuiHostProcess,
+  runDisplayRelay,
+  sessionSockPath,
+  spawnDetachedHost,
+  waitForDisplaySock,
+} from './display-sock.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
 import { installUiLocale, t } from './i18n/index.js'
@@ -80,7 +86,8 @@ export interface Config {
  * uses). Launch flags still win when supplied.
  */
 export function apply(ctx: Context, config: Config): void {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  const hostProcess = isTuiHostProcess()
+  if (!hostProcess && (!process.stdin.isTTY || !process.stdout.isTTY)) {
     throw new Error('dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session')
   }
   const subagentSelection = createSubagentSelection(ctx)
@@ -130,13 +137,22 @@ export function apply(ctx: Context, config: Config): void {
       process.stderr.write(`${t('attach.connecting', { session: sessionId })}\n`)
       const result = await runDisplayRelay(sock)
       const exit = ctx.get('appExit')
-      if (result.reason === 'goodbye') {
-        if (exit !== undefined) exit(0)
-        else process.exit(0)
+      if (exit !== undefined) exit(result.reason === 'goodbye' ? 0 : 0)
+      else process.exit(0)
+    }
+
+    const spawnHostAndRelay = async (sessionId: string): Promise<void> => {
+      const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
+      if (live?.kind === 'attachable') {
+        await attachExisting(sessionId, live.sock)
         return
       }
-      if (exit !== undefined) exit(0)
-      else process.exit(0)
+      if (live?.kind === 'zombie') {
+        throw new Error(t('attach.zombie', { session: sessionId, pid: live.lock.pid }))
+      }
+      const spawned = spawnDetachedHost(sessionId)
+      await waitForDisplaySock(spawned.sock)
+      await attachExisting(sessionId, spawned.sock)
     }
     // An explicit in-process change (/setup or /model) wins over launch-time
     // CLI overrides for every session created or resumed later in this process.
@@ -253,15 +269,9 @@ export function apply(ctx: Context, config: Config): void {
         installModelSelection(agentCtx, selectionRef)
         await agentPresets?.mount(agentCtx)
       }
-      if (!sessionLockDisabled()) {
-        const live = await inspectLiveHost(String(sessionId))
-        if (live?.kind === 'attachable') {
-          await attachExisting(String(sessionId), live.sock)
-          return
-        }
-        if (live?.kind === 'zombie') {
-          throw new Error(t('attach.zombie', { session: String(sessionId), pid: live.lock.pid }))
-        }
+      if (!hostProcess) {
+        await spawnHostAndRelay(String(sessionId))
+        return
       }
       await takeSessionLock(String(sessionId))
       let resumeCwdNotice: string | undefined
@@ -299,6 +309,7 @@ export function apply(ctx: Context, config: Config): void {
       controller = mountTui(ctx, {
         ...config,
         resumePicker: false,
+        headlessDisplay: true,
         sessionId: String(sessionId),
         resume,
         ...(resumeCwdNotice === undefined ? {} : { cwdNotice: resumeCwdNotice }),
@@ -404,7 +415,11 @@ export function apply(ctx: Context, config: Config): void {
     })
 
     return async (): Promise<void> => {
-      if (hostOrphaned) return
+      if (hostOrphaned) {
+        // SSH drop: keep agent + display socket. Launcher fiber dispose must
+        // not release the lock or cancel the leftover Host.
+        return
+      }
       disposed = true
       pickerAbort.abort()
       await controller?.dispose()

@@ -3,7 +3,7 @@
  * Stale locks (dead pid) are stolen. A live lock with a reachable display
  * socket is an attach target, not a hard failure.
  */
-import { access } from 'node:fs/promises'
+import { access, readdir } from 'node:fs/promises'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { homedir } from 'node:os'
@@ -181,19 +181,68 @@ export async function inspectLiveHost(
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
   const held = await readSessionLock(sessionId, dshHome)
   if (held === undefined) return undefined
-  if (!processIsAlive(held.info.pid)) return undefined
-  const sock = held.info.sock ?? sessionSockPath(sessionId, dshHome)
-  let reachable = false
+  return inspectHeldLock(held.path, held.info, dshHome)
+}
+
+async function inspectHeldLock(
+  path: string,
+  info: SessionLockInfo,
+  dshHome: string,
+): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
+  const sock = info.sock ?? sessionSockPath(info.sessionId, dshHome)
+  const alive = processIsAlive(info.pid)
+  let sockExists = false
   try {
     await access(sock, fsConstants.F_OK)
-    reachable = true
+    sockExists = true
   } catch {
-    reachable = false
+    sockExists = false
   }
-  return {
-    kind: reachable ? 'attachable' : 'zombie',
-    lock: held.info,
-    path: held.path,
-    sock,
+  if (!alive) {
+    // Host is gone. A leftover unix socket is not attachable — steal the
+    // lock so --resume can reopen from the session log.
+    if (sockExists) {
+      try {
+        await unlink(sock)
+      } catch {
+        // Stale socket; resume-from-log still works without it.
+      }
+    }
+    try {
+      await unlink(path)
+    } catch {
+      // Missing lock is fine.
+    }
+    return undefined
   }
+  if (!sockExists) return { kind: 'zombie', lock: info, path, sock }
+  return { kind: 'attachable', lock: info, path, sock }
+}
+
+/** Every lock file under `$DSH_HOME/tui-locks` whose Host pid is still alive. */
+export async function listAttachableHosts(
+  dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+): Promise<Array<{ sessionId: string; lock: SessionLockInfo; sock: string }>> {
+  let names: string[] = []
+  try {
+    names = await readdir(join(dshHome, 'tui-locks'))
+  } catch {
+    return []
+  }
+  const found: Array<{ sessionId: string; lock: SessionLockInfo; sock: string }> = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const path = join(dshHome, 'tui-locks', name)
+    let info: SessionLockInfo | undefined
+    try {
+      info = parseSessionLock(await readFile(path, 'utf8'))
+    } catch {
+      continue
+    }
+    if (info === undefined) continue
+    const live = await inspectHeldLock(path, info, dshHome)
+    if (live?.kind !== 'attachable') continue
+    found.push({ sessionId: live.lock.sessionId, lock: live.lock, sock: live.sock })
+  }
+  return found
 }

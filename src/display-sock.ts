@@ -8,9 +8,12 @@
  *   3 resize  — relay → host (u16be cols | u16be rows)
  *   4 hello   — either side, payload ignored
  *   5 goodbye — host → relay, then close (user /exit)
+ *   6 rtt     — relay → host (u32be milliseconds; 0xffffffff = unknown)
  */
+import { spawn } from 'node:child_process'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
-import { mkdir, unlink } from 'node:fs/promises'
+import { access, mkdir, unlink } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -19,8 +22,75 @@ export const FRAME_STDOUT = 2
 export const FRAME_RESIZE = 3
 export const FRAME_HELLO = 4
 export const FRAME_GOODBYE = 5
+export const FRAME_RTT = 6
 
 const MAX_FRAME = 1024 * 1024
+const DSR_PROBE_TIMEOUT_MS = 800
+
+function parseCursorPositionReply(text: string): boolean {
+  return /^\x1b\[\d+;\d+R$/u.test(text)
+}
+
+/** CSI 6n round-trip on this TTY. Must run before stdin is forwarded to the Host. */
+async function probeLocalRttMs(
+  stdin: NodeJS.ReadStream = process.stdin,
+  stdout: NodeJS.WriteStream = process.stdout,
+  timeoutMs = DSR_PROBE_TIMEOUT_MS,
+): Promise<number | undefined> {
+  if (!stdin.isTTY || !stdout.isTTY) return undefined
+  return await new Promise(resolve => {
+    let buffer = ''
+    let settled = false
+    const started = Date.now()
+    const finish = (value: number | undefined): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      stdin.removeListener('data', onData)
+      resolve(value)
+    }
+    const onData = (chunk: Buffer): void => {
+      buffer += chunk.toString('utf8')
+      if (parseCursorPositionReply(buffer)) {
+        finish(Math.max(0, Date.now() - started))
+        return
+      }
+      if (buffer.length > 32 && !buffer.includes('\x1b[')) finish(undefined)
+    }
+    const timer = setTimeout(() => finish(undefined), timeoutMs)
+    stdin.on('data', onData)
+    try {
+      stdout.write('\x1b[6n')
+    } catch {
+      finish(undefined)
+    }
+  })
+}
+
+/**
+ * Drop launcher SIGTERM/SIGINT/SIGHUP so closing SSH cannot dispose the tree
+ * before hangup handling. Leaving the session with setsid() is best-effort:
+ * a TTY session leader gets EPERM and stays in the SSH process group.
+ */
+export function detachFromSshSession(): void {
+  try {
+    const setsid = (process as NodeJS.Process & { setsid?: () => number }).setsid
+    setsid?.()
+  } catch {
+    // EPERM when already the session leader (typical under SSH).
+  }
+  const ignore = (): void => {}
+  for (const name of ['SIGHUP', 'SIGTERM', 'SIGINT'] as const) {
+    process.removeAllListeners(name)
+    process.on(name, ignore)
+  }
+}
+
+export const TUI_HOST_ENV = 'DSH_TUI_HOST'
+
+export function isTuiHostProcess(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[TUI_HOST_ENV] === '1' || env[TUI_HOST_ENV] === 'true'
+}
 
 export function sessionSockPath(
   sessionId: string,
@@ -51,6 +121,21 @@ export function decodeResize(payload: Buffer): { columns: number; rows: number }
   return { columns: payload.readUInt16BE(0), rows: payload.readUInt16BE(2) }
 }
 
+export function encodeRtt(rttMs: number | undefined): Buffer {
+  const payload = Buffer.alloc(4)
+  payload.writeUInt32BE(
+    rttMs === undefined || !Number.isFinite(rttMs) || rttMs < 0 ? 0xffffffff : Math.min(0xfffffffe, Math.round(rttMs)),
+    0,
+  )
+  return encodeFrame(FRAME_RTT, payload)
+}
+
+export function decodeRtt(payload: Buffer): number | undefined {
+  if (payload.length < 4) return undefined
+  const value = payload.readUInt32BE(0)
+  return value === 0xffffffff ? undefined : value
+}
+
 /** Incremental decoder for one socket. */
 export class FrameReader {
   private buffer = Buffer.alloc(0)
@@ -76,6 +161,7 @@ export class FrameReader {
 export interface DisplayHostHandlers {
   onStdin(bytes: Buffer): void
   onResize(columns: number, rows: number): void
+  onRtt?(rttMs: number | undefined): void
   onDetach(): void
   onAttach(): void
 }
@@ -165,6 +251,8 @@ export class DisplayHost {
         else if (frame.type === FRAME_RESIZE) {
           const size = decodeResize(frame.payload)
           if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
+        } else if (frame.type === FRAME_RTT) {
+          this.handlers.onRtt?.(decodeRtt(frame.payload))
         }
       }
     })
@@ -222,6 +310,50 @@ export class DisplayHost {
       // ignore
     }
   }
+}
+
+export async function waitForDisplaySock(path: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      await access(path, fsConstants.F_OK)
+      return
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  throw new Error(`dsh-ssh-tui: host display socket did not appear: ${path}`)
+}
+
+export function hostArgvForSession(sessionId: string, argv = process.argv.slice(1), execArgv = process.execArgv): string[] {
+  const args = [...execArgv, ...argv]
+  const filtered: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? ''
+    if (arg === 'resume' || arg === '--resume') {
+      const next = args[index + 1]
+      if (next !== undefined && !next.startsWith('-')) index += 1
+      continue
+    }
+    if (arg.startsWith('--resume=')) continue
+    if (arg === '--new') continue
+    filtered.push(arg)
+  }
+  filtered.push(`--resume=${sessionId}`)
+  return filtered
+}
+
+/** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
+export function spawnDetachedHost(sessionId: string): { pid: number; sock: string } {
+  const sock = sessionSockPath(sessionId)
+  const child = spawn(process.execPath, hostArgvForSession(sessionId), {
+    env: { ...process.env, [TUI_HOST_ENV]: '1' },
+    detached: true,
+    stdio: 'ignore',
+  })
+  if (child.pid === undefined) throw new Error('dsh-ssh-tui: failed to spawn host process')
+  child.unref()
+  return { pid: child.pid, sock }
 }
 
 export async function probeDisplaySock(path: string, timeoutMs = 400): Promise<boolean> {
@@ -315,20 +447,34 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       if (!settled) reject(error)
     })
     socket.on('connect', () => {
-      try {
-        process.stdin.setRawMode(true)
-        process.stdin.resume()
-        process.stdin.on('data', onStdin)
-        process.stdin.on('end', onLocalHangup)
-        process.stdin.on('close', onLocalHangup)
-        process.stdout.on('resize', onResize)
-        process.on('SIGHUP', onLocalHangup)
-        process.on('SIGTERM', onLocalHangup)
-        socket.write(encodeFrame(FRAME_HELLO))
-        socket.write(encodeResize(process.stdout.columns || 80, process.stdout.rows || 24))
-      } catch (error) {
-        reject(error)
-      }
+      void (async () => {
+        try {
+          process.stdin.setRawMode(true)
+          process.stdin.resume()
+          const columns = process.stdout.columns || 80
+          const rows = process.stdout.rows || 24
+          socket.write(Buffer.concat([
+            encodeFrame(FRAME_HELLO),
+            encodeResize(columns, rows),
+          ]))
+          const rtt = await probeLocalRttMs()
+          if (settled) return
+          try {
+            socket.write(encodeRtt(rtt))
+          } catch {
+            finish('host-closed')
+            return
+          }
+          process.stdin.on('data', onStdin)
+          process.stdin.on('end', onLocalHangup)
+          process.stdin.on('close', onLocalHangup)
+          process.stdout.on('resize', onResize)
+          process.on('SIGHUP', onLocalHangup)
+          process.on('SIGTERM', onLocalHangup)
+        } catch (error) {
+          reject(error)
+        }
+      })()
     })
     socket.on('data', chunk => {
       let frames: Array<{ type: number; payload: Buffer }>

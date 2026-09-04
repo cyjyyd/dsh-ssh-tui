@@ -10,6 +10,8 @@ import {
   SessionLockHeldError,
   acquireSessionLock,
   formatLockHeldMessage,
+  inspectLiveHost,
+  listAttachableHosts,
   parseSessionLock,
   processIsAlive,
   releaseSessionLock,
@@ -52,6 +54,50 @@ test('acquireSessionLock steals a stale lock and blocks a live one', async () =>
   await releaseSessionLock(first.path, process.pid)
   const stalePath = sessionLockPath(sessionId, home)
   await writeFile(stalePath, `${JSON.stringify({ pid: 1_000_000 + process.pid, sessionId, startedAt: new Date().toISOString() }, null, 2)}\n`)
+  const stolen = await acquireSessionLock(sessionId, { pid: process.pid, dshHome: home })
+  assert.equal(stolen.info.pid, process.pid)
+  await releaseSessionLock(stolen.path)
+})
+
+test('inspectLiveHost is attachable only while the host pid is alive', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
+  const sessionId = 'main-session-attach'
+  const sock = join(home, 'tui-socks', `${sessionId}.sock`)
+  const { mkdir } = await import('node:fs/promises')
+  await mkdir(join(home, 'tui-locks'), { recursive: true })
+  await mkdir(join(home, 'tui-socks'), { recursive: true })
+  await writeFile(join(home, 'tui-locks', `${sessionId}.json`), `${JSON.stringify({
+    pid: process.pid,
+    sessionId,
+    startedAt: new Date().toISOString(),
+    sock,
+    state: 'paused',
+  }, null, 2)}\n`)
+  await writeFile(sock, '')
+  const live = await inspectLiveHost(sessionId, home)
+  assert.equal(live?.kind, 'attachable')
+  assert.equal(live?.sock, sock)
+})
+
+test('a dead pid with a leftover sock is not attachable and the lock is stolen', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
+  const sessionId = 'main-session/dead host'
+  const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
+  const sock = join(home, 'tui-socks', `${safe}.sock`)
+  const { mkdir, access } = await import('node:fs/promises')
+  await mkdir(join(home, 'tui-locks'), { recursive: true })
+  await mkdir(join(home, 'tui-socks'), { recursive: true })
+  await writeFile(join(home, 'tui-locks', `${safe}.json`), `${JSON.stringify({
+    pid: 1_000_000_000,
+    sessionId,
+    startedAt: new Date().toISOString(),
+    sock,
+    state: 'paused',
+  }, null, 2)}\n`)
+  await writeFile(sock, '')
+  assert.equal(await inspectLiveHost(sessionId, home), undefined)
+  assert.deepEqual(await listAttachableHosts(home), [])
+  await assert.rejects(() => access(join(home, 'tui-locks', `${safe}.json`)))
   const stolen = await acquireSessionLock(sessionId, { pid: process.pid, dshHome: home })
   assert.equal(stolen.info.pid, process.pid)
   await releaseSessionLock(stolen.path)

@@ -335,6 +335,7 @@ test('captureHangupSignals drops the launcher SIGTERM handler', () => {
     ignoreFurtherHangupSignals()
     ours.length = 0
     process.emit('SIGTERM')
+    process.emit('SIGINT')
     assert.deepEqual(ours, [])
   } finally {
     process.removeAllListeners('SIGTERM')

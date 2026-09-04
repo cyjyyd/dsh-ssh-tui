@@ -60,7 +60,10 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       const attachNote = session.attach === undefined
         ? ''
         : t('picker.attachable', { pid: session.attach.pid })
-      const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${attachNote}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
+      const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
+      if (attachNote !== '') {
+        lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), '32')}`)
+      }
       lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), '90')}`)
     })
     lines.push('')
