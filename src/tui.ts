@@ -24,10 +24,11 @@ import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
 import { classifyApproval, commandFromArgs, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
+import { buildReviewUserMessage, parseReviewOutput, REVIEW_SYSTEM_PROMPT, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
@@ -3584,6 +3585,7 @@ export class SshTui {
   private autoApprovalMode: AutoApprovalMode = 'off'
   private autoAllowedCount = 0
   private autoDeniedCount = 0
+  private aiReviewCount = 0
   /** Host knobs folded from the session log: auto mode needs approval=ask to see requests. */
   private hostSandboxMode: string | undefined
   private hostApprovalPolicy: string | undefined
@@ -6713,6 +6715,79 @@ export class SshTui {
     this.markDirty()
   }
 
+  /**
+   * AI review for rule-table `ask` outcomes: one shot at the subagent
+   * model route with a compact, injection-fenced context. Returns
+   * 'allow' | 'deny', or undefined when the reviewer is unavailable or its
+   * output was unusable (caller falls back to prompt/reject).
+   */
+  private async reviewUnknownWithModel(
+    request: ApprovalRequest,
+    command: string | undefined,
+  ): Promise<'allow' | 'deny' | undefined> {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return undefined
+    const selection = this.subagentSelection.current
+    const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
+    const provider = selection.provider ?? parentProvider
+    const model = subagentModelMatchesProvider(provider, selection.model)
+      ? selection.model
+      : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
+    // 最近模型输出/思考（≤2 段）与最新用户消息（≤400 字）
+    const segments: string[] = []
+    for (let i = this.rows.length - 1; i >= 0 && segments.length < 2; i -= 1) {
+      const row = this.rows[i]
+      if (row !== undefined && (row.kind === 'assistant' || row.kind === 'reasoning') && row.text.trim() !== '') {
+        segments.unshift(row.text)
+      }
+    }
+    let userText = ''
+    for (let i = this.rows.length - 1; i >= 0; i -= 1) {
+      const row = this.rows[i]
+      if (row !== undefined && row.kind === 'user') {
+        userText = row.text.replace(/^❯\s*/u, '')
+        break
+      }
+    }
+    const signals = [request.signal, AbortSignal.timeout(15_000)].filter(s => s !== undefined)
+    const signal = signals.length > 0 ? AbortSignal.any(signals) : undefined
+    const options: GenerateOptions = {
+      provider,
+      model,
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: buildReviewUserMessage({
+          userText,
+          segments,
+          toolName: request.toolName,
+          command: command ?? `(无命令参数，工具：${request.toolName})`,
+        }) }],
+        source: { kind: 'plugin', plugin: 'dsh-ssh-tui' },
+      })],
+      system: REVIEW_SYSTEM_PROMPT,
+      maxTokens: 200,
+      sessionId: this.agent.session.id,
+      signal,
+    }
+    this.aiReviewCount += 1
+    let text = ''
+    for await (const chunk of llm.stream(options)) {
+      if (chunk.type === 'text-delta') text += chunk.text
+    }
+    const verdict = parseReviewOutput(text)
+    if (verdict === undefined) return undefined
+    this.pushRow({
+      kind: 'system',
+      text: t('approval.reviewRow', {
+        verdict: verdict.approved ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+        risk: verdict.risk,
+        authorization: verdict.authorization,
+        reason: verdict.reason,
+      }),
+    })
+    this.markDirty()
+    return verdict.approved ? 'allow' : 'deny'
+  }
+
   private readonly handleApproval = async (
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
@@ -6733,7 +6808,20 @@ export class SshTui {
         this.autoAllowedCount += 1
         return 'allowed-once'
       }
-      if (decision === 'deny' || !this.hasLiveDisplay()) {
+      if (decision === 'deny') {
+        this.autoDeniedCount += 1
+        return 'rejected'
+      }
+      // Unknown shape: the rule table cannot judge it — hand it to the
+      // subagent-configured model with compact context (AI review). Without
+      // a display there is nobody to fall back on, so unreviewable asks
+      // reject and the turn completes instead of stalling.
+      const reviewed = await this.reviewUnknownWithModel(request, command)
+      if (reviewed === 'allow') {
+        this.autoAllowedCount += 1
+        return 'allowed-once'
+      }
+      if (reviewed === 'deny' || !this.hasLiveDisplay()) {
         this.autoDeniedCount += 1
         return 'rejected'
       }
