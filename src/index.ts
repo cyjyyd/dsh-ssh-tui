@@ -277,9 +277,29 @@ export function apply(ctx: Context, config: Config): void {
       await takeSessionLock(String(sessionId))
       let resumeCwdNotice: string | undefined
       try {
-        handle = resume
-          ? await agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
-          : await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+        // The frontend always spawns the Host with `--resume=<id>` — including
+        // for a brand-new session id it just generated. A missing session must
+        // therefore fall back to create (dsh 0.1.1-rc.2 and 0.1.2-rc.1 both
+        // throw `session … not found` instead of creating).
+        const missingSession = (error: unknown): boolean => {
+          const chain: unknown[] = [error]
+          let current = error
+          while (current instanceof Error && current.cause !== undefined) {
+            current = current.cause
+            chain.push(current)
+          }
+          return chain.some(item => item instanceof Error && /not found/u.test(item.message))
+        }
+        if (resume) {
+          try {
+            handle = await agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+          } catch (error: unknown) {
+            if (!missingSession(error)) throw error
+            handle = await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+          }
+        } else {
+          handle = await agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+        }
         if (resume) {
           const entered = enterSessionCwd(handle.agent.session.header?.cwd)
           resumeCwdNotice = entered.error !== undefined

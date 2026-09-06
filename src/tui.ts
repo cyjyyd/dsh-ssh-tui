@@ -25,7 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { sessionEvents, settingsNamespace } from './dsh-compat.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -73,7 +73,7 @@ import {
 } from '@deepseek-ai/dsh-user-questions'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 
-/** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-alpha.1.
+/** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-rc.1.
  *  0.1.1 reads `request.signal`; 0.1.2 reads the third argument and dropped
  *  `signal` from the request type. Passing both keeps cancellation on either. */
 type ModelDiscoveryHost = {
@@ -4030,7 +4030,7 @@ export class SshTui {
   replayHistory(): void {
     this.replaying = true
     try {
-      for (const event of this.agent.session.events) {
+      for (const event of sessionEvents(this.agent.session)) {
         this.handleSessionEvent(this.agent.session, event)
       }
     } finally {
@@ -7524,7 +7524,7 @@ export class SshTui {
     const selected = presets.find(preset => (preset.name ?? preset.id) === answer.selected[0])
     if (selected === undefined) return
     const selectedName = selected.name ?? selected.id
-    const hasWork = this.agent.session.events.some(event => event.type === 'turn/start')
+    const hasWork = sessionEvents(this.agent.session).some(event => event.type === 'turn/start')
     if (!hasWork) {
       await agentPresets.recompose(this.agent.ctx, selected.id)
       this.presetId = selected.id

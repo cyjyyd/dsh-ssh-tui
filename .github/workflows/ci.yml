@@ -6,11 +6,28 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0.1.2 is not frozen yet: keep both supported hosts green. The
+        # devDependencies pin 0.1.2-rc.1; the rc.2 leg overrides every
+        # @deepseek-ai/dsh-* package to 0.1.1-rc.2 (all published there).
+        dsh: ["0.1.1-rc.2", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
+      - name: Pin @deepseek-ai packages to dsh ${{ matrix.dsh }}
+        if: matrix.dsh != '0.1.2-rc.1'
+        run: |
+          PKGS=$(node -e "
+            const deps = Object.keys(require('./package.json').devDependencies)
+              .filter(name => name.startsWith('@deepseek-ai/dsh-'))
+              .map(name => name + '@${{ matrix.dsh }}');
+            console.log(deps.join(' '));
+          ")
+          npm install --no-save --legacy-peer-deps $PKGS
       - run: npx tsc -p tsconfig.json --noEmit
       - run: node --test tests/*.test.mjs

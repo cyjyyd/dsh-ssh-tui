@@ -4,7 +4,7 @@
  */
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, settingsNamespace } from './dsh-compat.js'
 
 export const ROUTE_MEMORY_NAMESPACE = settingsNamespace('ssh-tui-routes')
 

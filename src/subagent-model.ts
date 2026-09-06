@@ -12,7 +12,7 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId, type ReasoningEffortId as ReasoningEffort } from '@deepseek-ai/dsh-llm'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, settingsNamespace } from './dsh-compat.js'
 import { t } from './i18n/index.js'
 
 /** Settings namespace carrying the TUI's subagent model selection. */

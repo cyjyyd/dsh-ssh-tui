@@ -8,7 +8,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, settingsNamespace } from '../dsh-compat.js'
 import { en } from './en.js'
 import { zh } from './zh.js'
 
