@@ -212,6 +212,7 @@ export const en: Record<string, string> = {
   'approval.statusOff': 'Auto-approval off: every approval asks',
   'approval.autoOn': 'Auto-approval ON: reads/builds/tests auto-approve; dangerous shapes (rm -rf, sudo, curl|sh, git push --force) still ask.',
   'approval.autoOff': 'Auto-approval OFF: back to per-request prompts.',
+  'approval.mismatchNever': 'Note: the host approval policy is never (no approval requests are produced), so auto mode has no effect. Run /permission workspace-write (or restore the approval policy to ask) first.',
   'approval.unknown': 'Unknown argument "{arg}" — use auto / off / status',
   'onboard.pickHint': '  ↑/↓ select · type to filter · Enter to confirm · Esc to cancel',
   'onboard.catalogEmpty': '  No matching providers',

@@ -212,6 +212,7 @@ export const zh: Record<string, string> = {
   'approval.statusOff': '自动审批关闭：每次审批都会询问',
   'approval.autoOn': '自动审批已开启：读类/构建/测试等低风险命令自动放行；rm -rf、sudo、curl|sh、git push --force 等危险操作仍会询问。',
   'approval.autoOff': '自动审批已关闭：恢复逐次询问。',
+  'approval.mismatchNever': '注意：宿主审批策略为 never（不会产生审批请求），auto 模式暂不生效。请先执行 /permission workspace-write（或恢复审批策略为 ask）后再开启。',
   'approval.unknown': '未知参数“{arg}”，可用：auto / off / status',
   'onboard.pickHint': '  ↑/↓ 选择 · 输入文字过滤 · Enter 确认 · Esc 取消',
   'onboard.catalogEmpty': '  没有匹配的提供商',

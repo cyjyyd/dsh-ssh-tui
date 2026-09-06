@@ -20,6 +20,7 @@ import { createRequire } from 'node:module'
 import { StringDecoder } from 'node:string_decoder'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -3582,6 +3583,10 @@ export class SshTui {
   private streaming: { text: string; reasoning: string } | undefined
   private autoApprovalMode: AutoApprovalMode = 'off'
   private autoAllowedCount = 0
+  /** Host knobs folded from the session log: auto mode needs approval=ask to see requests. */
+  private hostSandboxMode: string | undefined
+  private hostApprovalPolicy: string | undefined
+  private approvalMismatchWarned = false
   /** Web-aligned provider presets from the host's pi-ai catalog (undefined until loaded / when unreachable). */
   private catalogPresets: CatalogPreset[] | undefined
   private catalogLoad: Promise<CatalogPreset[] | undefined> | undefined
@@ -6175,6 +6180,13 @@ export class SshTui {
         this.markDirty()
         break
       }
+      case 'sandbox/mode':
+        this.hostSandboxMode = String((event.data as { mode?: unknown }).mode ?? '')
+        break
+      case 'approval/policy':
+        this.hostApprovalPolicy = String((event.data as { policy?: unknown }).policy ?? '')
+        if (this.hostApprovalPolicy === 'never') this.warnApprovalMismatch()
+        break
       case 'turn/start':
         this.stalledWarningShown = false
         this.llmRetry = undefined
@@ -6685,6 +6697,19 @@ export class SshTui {
       }, 200)
       timer.unref?.()
     })
+  }
+
+  /**
+   * Auto mode rides the approval waterfall: when the host approval policy is
+   * `never` no request is ever produced, so the classifier silently does
+   * nothing. Say so instead of letting the user believe a guard is active.
+   */
+  private warnApprovalMismatch(): void {
+    if (this.autoApprovalMode !== 'auto' || this.approvalMismatchWarned) return
+    if (this.hostApprovalPolicy !== 'never') return
+    this.approvalMismatchWarned = true
+    this.pushRow({ kind: 'system', text: t('approval.mismatchNever') })
+    this.markDirty()
   }
 
   private readonly handleApproval = async (
@@ -9146,6 +9171,7 @@ export class SshTui {
           kind: 'system',
           text: next === 'auto' ? t('approval.autoOn') : t('approval.autoOff'),
         })
+        if (next === 'auto') this.warnApprovalMismatch()
         this.markDirty()
         break
       }
