@@ -26,7 +26,7 @@ import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credent
 import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
-import { loadProviderCatalog, filterCatalogPresets, type CatalogPreset } from './provider-catalog.js'
+import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -436,7 +436,7 @@ function onboardTemplate(state: OnboardingState): ProviderTemplate {
 }
 
 interface OnboardingState {
-  step: 'provider' | 'catalog' | 'id' | 'base-url' | 'key' | 'models' | 'confirm'
+  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'confirm'
   providerType: OnboardingProviderType
   providerId: string
   baseUrl: string
@@ -447,6 +447,8 @@ interface OnboardingState {
   catalogPresets: CatalogPreset[] | undefined
   /** The catalog preset this run configures (providerType 'catalog'). */
   catalog: CatalogPreset | undefined
+  /** Cursor into the merged provider list of the first step. */
+  providerCursor: number
   /** True while the wizard's async save is in flight; input is ignored. */
   saving: boolean
   resolve(saved: boolean): void
@@ -4143,6 +4145,7 @@ export class SshTui {
         models: [],
         catalogPresets: undefined,
         catalog: undefined,
+        providerCursor: 0,
         saving: false,
         resolve: (saved) => {
           this.onboardingCompletion = undefined
@@ -5363,43 +5366,31 @@ export class SshTui {
           const template = onboardTemplate(ob)
           const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
           switch (ob.step) {
-            case 'provider':
+            case 'provider': {
+              const options = this.mergedProviderEntries(ob)
               addDialog(t('onboard.title'))
-              addDialog(t('onboard.opt1'))
-              addDialog(t('onboard.opt2'))
-              addDialog(t('onboard.opt3'))
-              addDialog(t('onboard.opt4'))
-              addDialog(t('onboard.opt5'))
-              if (ob.catalogPresets !== undefined) addDialog(t('onboard.optCatalog'))
-              addDialog(ob.catalogPresets !== undefined ? t('onboard.pickHintCatalog') : t('onboard.pickHint'))
-              break
-            case 'catalog': {
-              addDialog(t('onboard.catalogTitle'))
-              const matches = filterCatalogPresets(ob.catalogPresets ?? [], this.input)
-              const shown = matches.slice(0, 9)
-              if (shown.length === 0) {
+              if (options.length === 0) {
                 addDialog(t('onboard.catalogEmpty'))
-              } else {
-                for (const preset of shown) {
-                  const modelsNote = preset.modelIds.length > 0
-                    ? ` · ${preset.modelIds[0]}${preset.modelIds.length > 1 ? ` +${preset.modelIds.length - 1}` : ''}`
-                    : ''
-                  addDialog(`  ${preset.id}  ${preset.name}${preset.baseUrl === '' ? '' : ` · ${preset.baseUrl}`}${modelsNote}`)
-                }
+                break
               }
-              addDialog(t('onboard.catalogHint', { count: matches.length }))
+              const start = pickerWindowStart(ob.providerCursor, options.length)
+              const end = Math.min(options.length, start + PICKER_WINDOW)
+              if (start > 0) addDialog(`  ↑ 还有 ${start} 项`)
+              for (let index = start; index < end; index += 1) {
+                const option = options[index]
+                if (option === undefined) continue
+                const focused = index === ob.providerCursor ? '›' : ' '
+                addDialog(` ${focused} ○ ${option.label}${option.detail === '' ? '' : ` — ${option.detail}`}`)
+              }
+              if (end < options.length) addDialog(`  ↓ 还有 ${options.length - end} 项`)
+              if (this.input.trim() !== '') addDialog(t('onboard.catalogHint', { count: options.length }))
+              addDialog(t('onboard.pickHint'))
               break
             }
             case 'id':
               addDialog(t('onboard.providerLine', { label: providerLabel }))
               addDialog(t('onboard.idPrompt'))
               addDialog(t('onboard.default', { value: template.defaultId }))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'key':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.keyPrompt'))
-              if (ob.providerType === 'catalog') addDialog(t('onboard.keyCatalogHint'))
               addDialog(t('onboard.enterEsc'))
               break
             case 'base-url':
@@ -7945,6 +7936,8 @@ export class SshTui {
             this.scrollInspectOrTranscript(-1)
           } else if (this.moveQuestionCursor(-1)) {
             return
+          } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(-1)) {
+            return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
@@ -7958,6 +7951,8 @@ export class SshTui {
           if (this.dialog?.kind === 'inspect') {
             this.scrollInspectOrTranscript(1)
           } else if (this.moveQuestionCursor(1)) {
+            return
+          } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(1)) {
             return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
@@ -8275,66 +8270,82 @@ export class SshTui {
     }
   }
 
+  /**
+   * The wizard's first-step list: the pinned templates plus the web-catalog
+   * presets (deduped), filtered by the search box text.
+   */
+  private mergedProviderEntries(state: OnboardingState): ProviderListEntry[] {
+    const templates = providerTemplates()
+    const templateEntries: ProviderListEntry[] = [
+      { key: 'template:official', label: templates.official.label, detail: 'api.deepseek.com' },
+      { key: 'template:opencode-go', label: templates['opencode-go'].label, detail: 'opencode.ai/zen/go · Responses' },
+      { key: 'template:openai-completions', label: templates['openai-completions'].label, detail: 'openai-completions' },
+      { key: 'template:openai-responses', label: templates['openai-responses'].label, detail: 'openai-responses' },
+      { key: 'template:anthropic-messages', label: templates['anthropic-messages'].label, detail: 'anthropic-messages' },
+    ]
+    return mergeProviderEntries(templateEntries, state.catalogPresets ?? [], ['deepseek', 'opencode-go'], this.input)
+  }
+
+  private moveProviderCursor(delta: number): boolean {
+    const state = this.onboarding
+    if (state === undefined || state.step !== 'provider') return false
+    const total = this.mergedProviderEntries(state).length
+    if (total === 0) return false
+    state.providerCursor = Math.max(0, Math.min(total - 1, state.providerCursor + delta))
+    this.markDirty()
+    return true
+  }
+
   private handleOnboardingChar(text: string): void {
     const state = this.onboarding
     if (state === undefined) return
     switch (state.step) {
-      case 'provider':
-        {
-          const selected = text === '1' ? 'official'
-            : text === '2' ? 'opencode-go'
-            : text === '3' ? 'openai-completions'
-            : text === '4' ? 'openai-responses'
-            : text === '5' ? 'anthropic-messages'
-            : text === '6' && (state.catalogPresets?.length ?? 0) > 0 ? 'catalog'
-            : undefined
-          if (selected !== undefined) {
-            state.providerType = selected
-            state.providerId = ''
-            state.baseUrl = ''
-            state.key = ''
-            state.models = []
-            state.catalog = undefined
-            this.input = ''
-            this.cursor = 0
-            if (selected === 'catalog') {
-              state.step = 'catalog'
-            } else {
-              this.advanceOnboarding()
-            }
-            this.markDirty()
-          }
-        }
-        return
-      case 'catalog': {
+      case 'provider': {
+        const options = this.mergedProviderEntries(state)
         if (text === '\r' || text === '\n') {
-          const matches = filterCatalogPresets(state.catalogPresets ?? [], this.input)
-          const query = this.input.trim().toLowerCase()
-          const picked = matches.find(preset => preset.id.toLowerCase() === query) ?? matches[0]
-          if (picked === undefined) {
+          const index = Math.min(state.providerCursor, options.length - 1)
+          const entry = options[index]
+          if (entry === undefined) {
             this.markDirty()
             return
           }
-          state.catalog = picked
-          state.providerType = 'catalog'
           state.providerId = ''
           state.baseUrl = ''
           state.key = ''
           state.models = []
           this.input = ''
           this.cursor = 0
-          state.step = 'id'
+          if (entry.catalog !== undefined) {
+            state.providerType = 'catalog'
+            state.catalog = entry.catalog
+            state.step = 'id'
+          } else {
+            state.providerType = entry.key.slice('template:'.length) as OnboardingProviderType
+            this.advanceOnboarding()
+          }
           this.markDirty()
           return
         }
-        // filter text: append printable characters, drop everything else
+        if (text === '\x7f') {
+          if (this.input !== '') {
+            this.input = this.input.slice(0, -1)
+            state.providerCursor = 0
+          }
+          this.markDirty()
+          return
+        }
+        let changed = false
         for (const char of text) {
           if (char >= ' ' && char !== '\x7f') {
             this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
             this.cursor += char.length
+            changed = true
           }
         }
-        this.markDirty()
+        if (changed) {
+          state.providerCursor = 0
+          this.markDirty()
+        }
         return
       }
       case 'id':

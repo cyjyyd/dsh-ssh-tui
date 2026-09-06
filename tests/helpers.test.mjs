@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
-import { filterCatalogPresets } from '../lib/provider-catalog.js'
+import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 setLocale('zh')
 
 import {
@@ -1145,6 +1145,28 @@ test('diffStatToken orders deletions first and omits zero parts', () => {
   assert.equal(diffStatToken(24, 0), '+24')
   assert.equal(diffStatToken(0, 13), '-13')
   assert.equal(diffStatToken(0, 0), '')
+})
+
+test('mergeProviderEntries dedupes catalog ids and filters the merged list', () => {
+  const templates = [
+    { key: 'template:official', label: 'DeepSeek 官方', detail: 'api.deepseek.com' },
+    { key: 'template:opencode-go', label: 'OpenCode Go', detail: 'opencode.ai/zen/go' },
+  ]
+  const presets = [
+    { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', modelIds: ['m'] },
+    { id: 'opencode-go', name: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go/v1', modelIds: ['m'] },
+    { id: 'minimax-cn', name: 'MiniMax CN', baseUrl: 'https://api.minimaxi.com/anthropic', modelIds: ['m1'] },
+  ]
+  const merged = mergeProviderEntries(templates, presets, ['deepseek', 'opencode-go'], '')
+  // 模板在前且保留，目录里重复的 deepseek / opencode-go 被合并掉
+  assert.deepEqual(merged.map(entry => entry.key), [
+    'template:official',
+    'template:opencode-go',
+    'catalog:minimax-cn',
+  ])
+  const filtered = mergeProviderEntries(templates, presets, ['deepseek', 'opencode-go'], 'minimax')
+  assert.deepEqual(filtered.map(entry => entry.key), ['catalog:minimax-cn'])
+  assert.equal(filtered[0]?.catalog?.id, 'minimax-cn')
 })
 
 test('filterCatalogPresets matches id or name case-insensitively', () => {

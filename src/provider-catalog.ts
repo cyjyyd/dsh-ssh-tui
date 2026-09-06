@@ -14,7 +14,7 @@
  * catalog option and leaves the pinned templates.
  */
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -33,8 +33,54 @@ export function filterCatalogPresets(presets: readonly CatalogPreset[], query: s
     preset.id.toLowerCase().includes(needle) || preset.name.toLowerCase().includes(needle))
 }
 
+/** One selectable provider row in the /setup wizard's first step. */
+export interface ProviderListEntry {
+  /** Unique key: `template:<type>` for the pinned rows, `catalog:<id>` otherwise. */
+  key: string
+  label: string
+  detail: string
+  catalog?: CatalogPreset
+}
+
+/**
+ * Merge the pinned templates with the web-catalog presets into one list:
+ * catalog ids in `dedupeIds` drop out (the template already covers them),
+ * and `query` filters by case-insensitive substring on label/key/detail.
+ */
+export function mergeProviderEntries(
+  templates: readonly ProviderListEntry[],
+  presets: readonly CatalogPreset[],
+  dedupeIds: readonly string[],
+  query: string,
+): ProviderListEntry[] {
+  const dedupe = new Set(dedupeIds.map(id => id.toLowerCase()))
+  const entries: ProviderListEntry[] = [...templates]
+  for (const preset of presets) {
+    if (dedupe.has(preset.id.toLowerCase())) continue
+    // Compact detail: the endpoint when known, else a first-model + count
+    // glance — never the full model list, which would flood the list row.
+    const detail = preset.baseUrl !== ''
+      ? preset.baseUrl
+      : preset.modelIds.length > 0
+        ? `${preset.modelIds[0]}${preset.modelIds.length > 1 ? ` +${preset.modelIds.length - 1}` : ''}`
+        : ''
+    entries.push({
+      key: `catalog:${preset.id}`,
+      label: preset.name,
+      detail,
+      catalog: preset,
+    })
+  }
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return entries
+  return entries.filter(entry =>
+    entry.label.toLowerCase().includes(needle)
+    || entry.key.toLowerCase().includes(needle)
+    || entry.detail.toLowerCase().includes(needle))
+}
+
 const CHILD_SCRIPT = `
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 const anchors = JSON.parse(process.env.DSH_CATALOG_ANCHORS ?? '[]')
@@ -87,6 +133,7 @@ process.exit(1)
  * the child does not answer within 10 seconds.
  */
 export function readProviderCatalog(anchors: Array<string | undefined>): Promise<CatalogPreset[] | undefined> {
+  try { appendFileSync('/tmp/catalog-debug.log', `entry anchors=${JSON.stringify(anchors)}\n`) } catch {}
   return new Promise(resolve => {
     try {
       const child = spawn(
@@ -114,6 +161,7 @@ export function readProviderCatalog(anchors: Array<string | undefined>): Promise
         stdout += String(chunk)
       })
       child.on('exit', code => {
+        try { appendFileSync('/tmp/catalog-debug.log', `exit ${code} len=${stdout.length}\n`) } catch {}
         if (settled) return
         clearTimeout(timer)
         settled = true
