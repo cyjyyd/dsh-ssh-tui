@@ -24,7 +24,7 @@ export const DANGER_PATTERNS: RegExp[] = [
   /\bdd\b[^|;&]*of=\/dev\//,
   /\b(?:shutdown|reboot)\b|\binit\s+[06]\b/,
   /:\(\)\s*\{.*\};\s*:/, // fork bomb
-  /\bgit\s+push\b[^|;&]*(?:--force|\s-f\b)/,
+  /\bgit\s+push\b[^|;&]*(?:--force|\s-f\b|\s\+\S)/,
   /\b(?:npm|pnpm|yarn)\s+publish\b/,
   /\bfind\b[^|;&]*\s(?:-exec\b|-delete\b)/,
   />>?\s*\/dev\/(?:sd|nvme|hd)/,
@@ -46,6 +46,8 @@ export const ALLOW_SEGMENT_PATTERNS: RegExp[] = [
   /^(?:pytest|python3?\s+-m\s+(?:pytest|unittest))\b/,
   /^(?:cargo|go)\s+(?:build|test|check|vet|clippy)\b/,
   /^(?:cd|pushd|popd)\s/,
+  /^(?:npm|pnpm|yarn|bun|node|python3?|git|cargo|go|rustc|java)\s+(?:-V|--version|-v)\s*$/,
+  /^(?:echo)\b/,
   /^(?:mkdir|touch)\b/,
   /^(?:tee)\b/,
 ]
@@ -60,7 +62,7 @@ function segments(command: string): string[] {
 
 /** True when the segment redirects into an absolute filesystem path. */
 function redirectsToRoot(segment: string): boolean {
-  return /(?:^|\s)>>?\s*\/(?!tmp\/|var\/tmp\/|home\/)/u.test(segment)
+  return /(?:^|\s)>>?\s*(?:\/(?!tmp\/|var\/tmp\/|home\/)|~)/u.test(segment)
 }
 
 /**

@@ -14,9 +14,8 @@
  * catalog option and leaves the pinned templates.
  */
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 export interface CatalogPreset {
   id: string
@@ -80,9 +79,8 @@ export function mergeProviderEntries(
 }
 
 const CHILD_SCRIPT = `
-import { appendFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 const anchors = JSON.parse(process.env.DSH_CATALOG_ANCHORS ?? '[]')
 const pkgCandidates = []
 for (const anchor of anchors) {
@@ -133,7 +131,6 @@ process.exit(1)
  * the child does not answer within 10 seconds.
  */
 export function readProviderCatalog(anchors: Array<string | undefined>): Promise<CatalogPreset[] | undefined> {
-  try { appendFileSync('/tmp/catalog-debug.log', `entry anchors=${JSON.stringify(anchors)}\n`) } catch {}
   return new Promise(resolve => {
     try {
       const child = spawn(
@@ -161,7 +158,6 @@ export function readProviderCatalog(anchors: Array<string | undefined>): Promise
         stdout += String(chunk)
       })
       child.on('exit', code => {
-        try { appendFileSync('/tmp/catalog-debug.log', `exit ${code} len=${stdout.length}\n`) } catch {}
         if (settled) return
         clearTimeout(timer)
         settled = true
