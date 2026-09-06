@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
+import { filterCatalogPresets } from '../lib/provider-catalog.js'
 setLocale('zh')
 
 import {
@@ -1144,6 +1145,22 @@ test('diffStatToken orders deletions first and omits zero parts', () => {
   assert.equal(diffStatToken(24, 0), '+24')
   assert.equal(diffStatToken(0, 13), '-13')
   assert.equal(diffStatToken(0, 0), '')
+})
+
+test('filterCatalogPresets matches id or name case-insensitively', () => {
+  const presets = [
+    { id: 'minimax', name: 'MiniMax', baseUrl: 'https://api.minimax.chat/v1', modelIds: ['m1'] },
+    { id: 'minimax-cn', name: 'MiniMax CN', baseUrl: '', modelIds: [] },
+    { id: 'moonshotai', name: 'MoonshotAI', baseUrl: '', modelIds: [] },
+  ]
+  assert.deepEqual(filterCatalogPresets(presets, 'minimax').map(p => p.id), ['minimax', 'minimax-cn'])
+  assert.deepEqual(filterCatalogPresets(presets, 'MOON').map(p => p.id), ['moonshotai'])
+  // matches on the display name too, with surrounding whitespace ignored
+  assert.deepEqual(filterCatalogPresets(presets, ' minimax-cn ').map(p => p.id), ['minimax-cn'])
+  assert.deepEqual(filterCatalogPresets(presets, 'MiniMax CN').map(p => p.id), ['minimax-cn'])
+  assert.equal(filterCatalogPresets(presets, 'nope').length, 0)
+  // empty query keeps the declaration order
+  assert.deepEqual(filterCatalogPresets(presets, '  ').map(p => p.id), ['minimax', 'minimax-cn', 'moonshotai'])
 })
 
 test('compactToolBursts keep tools with the preceding assistant reply', () => {

@@ -26,6 +26,7 @@ import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credent
 import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
+import { loadProviderCatalog, filterCatalogPresets, type CatalogPreset } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -92,7 +93,7 @@ type ModelDiscoveryHost = {
 
 function discoverProviderModels(
   llm: ModelDiscoveryHost,
-  request: { baseURL: string; api?: string; apiKey?: string },
+  request: { provider?: string; baseURL?: string; api?: string; apiKey?: string },
   signal: AbortSignal,
 ): Promise<Array<{ id: string; name?: string }>> {
   return llm.discoverModels(settingsNamespace('llm-pi-ai'), { ...request, signal }, signal)
@@ -369,6 +370,7 @@ type OnboardingProviderType =
   | 'openai-completions'
   | 'openai-responses'
   | 'anthropic-messages'
+  | 'catalog'
 
 interface ProviderTemplate {
   label: string
@@ -378,7 +380,7 @@ interface ProviderTemplate {
   defaultModels: string[]
 }
 
-function providerTemplates(): Record<OnboardingProviderType, ProviderTemplate> {
+function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>, ProviderTemplate> {
   return {
   official: {
     label: t('route.deepseek'),
@@ -417,13 +419,34 @@ function providerTemplates(): Record<OnboardingProviderType, ProviderTemplate> {
   }
 }
 
+/**
+ * The template the wizard's current step works against: the five pinned
+ * shapes, or the web-catalog preset chosen through option 6.
+ */
+function onboardTemplate(state: OnboardingState): ProviderTemplate {
+  if (state.providerType === 'catalog') {
+    return {
+      label: state.catalog?.name ?? state.catalog?.id ?? '',
+      defaultId: state.catalog?.id ?? '',
+      defaultBaseUrl: '',
+      defaultModels: state.catalog?.modelIds ?? [],
+    }
+  }
+  return providerTemplates()[state.providerType]
+}
+
 interface OnboardingState {
-  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'confirm'
+  step: 'provider' | 'catalog' | 'id' | 'base-url' | 'key' | 'models' | 'confirm'
   providerType: OnboardingProviderType
   providerId: string
   baseUrl: string
   key: string
   models: string[]
+  /** Web-aligned catalog presets; undefined while loading or when the host's
+   *  pi-ai catalog is unreachable (option 6 stays hidden). */
+  catalogPresets: CatalogPreset[] | undefined
+  /** The catalog preset this run configures (providerType 'catalog'). */
+  catalog: CatalogPreset | undefined
   /** True while the wizard's async save is in flight; input is ignored. */
   saving: boolean
   resolve(saved: boolean): void
@@ -3553,6 +3576,9 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'graphem
 export class SshTui {
   private readonly rows: Row[] = []
   private streaming: { text: string; reasoning: string } | undefined
+  /** Web-aligned provider presets from the host's pi-ai catalog (undefined until loaded / when unreachable). */
+  private catalogPresets: CatalogPreset[] | undefined
+  private catalogLoad: Promise<CatalogPreset[] | undefined> | undefined
   private input = ''
   private cursor = 0
   private inputFolded = false
@@ -3760,6 +3786,13 @@ export class SshTui {
   }
 
   private bootBackgroundTasks(): void {
+    // Warm the web-aligned provider catalog so /setup has it ready instantly
+    // (runs on both the interactive and the detached-display path).
+    this.catalogLoad = loadProviderCatalog([process.argv[1], (this.ctx as { baseUrl?: string }).baseUrl])
+    this.catalogLoad.then(presets => {
+      this.catalogPresets = presets
+      this.markDirty()
+    }).catch(() => {})
     void this.maybeRunOnboarding().catch((error: unknown) => {
       if (this.disposed) return
       this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
@@ -4108,12 +4141,24 @@ export class SshTui {
         baseUrl: '',
         key: '',
         models: [],
+        catalogPresets: undefined,
+        catalog: undefined,
         saving: false,
         resolve: (saved) => {
           this.onboardingCompletion = undefined
           resolve(saved)
         },
       }
+      // Web-aligned catalog presets warm at construction; adopt whatever is
+      // ready now and update the open wizard when the load settles.
+      const state = this.onboarding
+      state.catalogPresets = this.catalogPresets
+      void this.catalogLoad?.then(presets => {
+        if (this.onboarding === state && state.catalogPresets === undefined && presets !== undefined) {
+          state.catalogPresets = presets
+          this.markDirty()
+        }
+      })
       this.input = ''
       this.cursor = 0
       this.dialog = { kind: 'onboarding' }
@@ -5315,7 +5360,7 @@ export class SshTui {
       } else if (this.dialog.kind === 'onboarding') {
         const ob = this.onboarding
         if (ob !== undefined) {
-          const template = providerTemplates()[ob.providerType]
+          const template = onboardTemplate(ob)
           const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
           switch (ob.step) {
             case 'provider':
@@ -5325,8 +5370,26 @@ export class SshTui {
               addDialog(t('onboard.opt3'))
               addDialog(t('onboard.opt4'))
               addDialog(t('onboard.opt5'))
-              addDialog(t('onboard.pickHint'))
+              if (ob.catalogPresets !== undefined) addDialog(t('onboard.optCatalog'))
+              addDialog(ob.catalogPresets !== undefined ? t('onboard.pickHintCatalog') : t('onboard.pickHint'))
               break
+            case 'catalog': {
+              addDialog(t('onboard.catalogTitle'))
+              const matches = filterCatalogPresets(ob.catalogPresets ?? [], this.input)
+              const shown = matches.slice(0, 9)
+              if (shown.length === 0) {
+                addDialog(t('onboard.catalogEmpty'))
+              } else {
+                for (const preset of shown) {
+                  const modelsNote = preset.modelIds.length > 0
+                    ? ` · ${preset.modelIds[0]}${preset.modelIds.length > 1 ? ` +${preset.modelIds.length - 1}` : ''}`
+                    : ''
+                  addDialog(`  ${preset.id}  ${preset.name}${preset.baseUrl === '' ? '' : ` · ${preset.baseUrl}`}${modelsNote}`)
+                }
+              }
+              addDialog(t('onboard.catalogHint', { count: matches.length }))
+              break
+            }
             case 'id':
               addDialog(t('onboard.providerLine', { label: providerLabel }))
               addDialog(t('onboard.idPrompt'))
@@ -5336,11 +5399,16 @@ export class SshTui {
             case 'key':
               addDialog(t('onboard.providerLine', { label: providerLabel }))
               addDialog(t('onboard.keyPrompt'))
+              if (ob.providerType === 'catalog') addDialog(t('onboard.keyCatalogHint'))
               addDialog(t('onboard.enterEsc'))
               break
             case 'base-url':
               addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.basePrompt', { fallback: template.defaultBaseUrl || t('onboard.baseFallback') }))
+              addDialog(t('onboard.basePrompt', {
+                fallback: template.defaultBaseUrl !== ''
+                  ? template.defaultBaseUrl
+                  : ob.providerType === 'catalog' ? t('onboard.baseFallbackCatalog') : t('onboard.baseFallback'),
+              }))
               addDialog(t('onboard.enterEsc'))
               break
             case 'models':
@@ -5350,6 +5418,7 @@ export class SshTui {
                 ? t('onboard.modelsFetched', { count: ob.models.length, list: formatModelList(ob.models, 6) })
                 : t('onboard.default', { value: template.defaultModels.join(', ') }))
               if (template.api !== undefined) addDialog(t('onboard.ctrlF'))
+              if (ob.providerType === 'catalog') addDialog(t('onboard.modelsCatalogHint'))
               addDialog(t('onboard.enterEsc'))
               break
             case 'confirm':
@@ -5357,7 +5426,9 @@ export class SshTui {
               addDialog(t('onboard.confirmProvider', { label: providerLabel }))
               addDialog(`  Provider ID: ${ob.providerId}`)
               addDialog(t('onboard.confirmBase', { url: ob.baseUrl === '' ? (template.defaultBaseUrl || t('onboard.defaultParen')) : ob.baseUrl }))
-              addDialog(t('onboard.confirmApi', { api: template.api ?? 'deepseek-official' }))
+              addDialog(t('onboard.confirmApi', {
+                api: template.api ?? (ob.providerType === 'catalog' ? t('onboard.apiCatalog') : 'deepseek-official'),
+              }))
               addDialog(t('onboard.confirmModels', { list: formatModelList(ob.models, 8) }))
               addDialog(t('onboard.confirmKey', {
                 head: sliceCodePoints(ob.key, 6),
@@ -8215,6 +8286,7 @@ export class SshTui {
             : text === '3' ? 'openai-completions'
             : text === '4' ? 'openai-responses'
             : text === '5' ? 'anthropic-messages'
+            : text === '6' && (state.catalogPresets?.length ?? 0) > 0 ? 'catalog'
             : undefined
           if (selected !== undefined) {
             state.providerType = selected
@@ -8222,12 +8294,49 @@ export class SshTui {
             state.baseUrl = ''
             state.key = ''
             state.models = []
+            state.catalog = undefined
             this.input = ''
             this.cursor = 0
-            this.advanceOnboarding()
+            if (selected === 'catalog') {
+              state.step = 'catalog'
+            } else {
+              this.advanceOnboarding()
+            }
+            this.markDirty()
           }
         }
         return
+      case 'catalog': {
+        if (text === '\r' || text === '\n') {
+          const matches = filterCatalogPresets(state.catalogPresets ?? [], this.input)
+          const query = this.input.trim().toLowerCase()
+          const picked = matches.find(preset => preset.id.toLowerCase() === query) ?? matches[0]
+          if (picked === undefined) {
+            this.markDirty()
+            return
+          }
+          state.catalog = picked
+          state.providerType = 'catalog'
+          state.providerId = ''
+          state.baseUrl = ''
+          state.key = ''
+          state.models = []
+          this.input = ''
+          this.cursor = 0
+          state.step = 'id'
+          this.markDirty()
+          return
+        }
+        // filter text: append printable characters, drop everything else
+        for (const char of text) {
+          if (char >= ' ' && char !== '\x7f') {
+            this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
+            this.cursor += char.length
+          }
+        }
+        this.markDirty()
+        return
+      }
       case 'id':
       case 'base-url':
       case 'key':
@@ -8239,7 +8348,7 @@ export class SshTui {
         if (text === '\r' || text === '\n') {
           const value = this.input.trim()
           if (state.step === 'id') {
-            const template = providerTemplates()[state.providerType]
+            const template = onboardTemplate(state)
             const id = value === '' ? template.defaultId : value
             if (!/^[a-z0-9][a-z0-9-]*$/u.test(id)) {
               this.pushRow({ kind: 'error', text: 'Provider ID 只能包含小写字母、数字和连字符，且不能以连字符开头。' })
@@ -8248,14 +8357,14 @@ export class SshTui {
             }
             state.providerId = id
           } else if (state.step === 'key') {
-            if (value === '') {
+            if (value === '' && state.providerType !== 'catalog') {
               this.pushRow({ kind: 'error', text: 'API Key 不能为空，请重新输入。' })
               this.markDirty()
               return
             }
             state.key = value
           } else if (state.step === 'models') {
-            const template = providerTemplates()[state.providerType]
+            const template = onboardTemplate(state)
             const parsed = value === ''
               ? template.defaultModels
               : value.split(/[\s,，]+/u).filter(Boolean)
@@ -8327,12 +8436,12 @@ export class SshTui {
   private async fetchOnboardingModels(): Promise<void> {
     const state = this.onboarding
     if (state === undefined || state.step !== 'models') return
-    const template = providerTemplates()[state.providerType]
+    const template = onboardTemplate(state)
     const providerType = state.providerType
     const baseUrl = state.baseUrl
     const key = state.key
     const baseURL = baseUrl === '' ? template.defaultBaseUrl : baseUrl
-    if (baseURL === '') {
+    if (baseURL === '' && providerType !== 'catalog') {
       this.pushRow({ kind: 'error', text: '请先填写 Base URL 再获取模型列表。' })
       this.markDirty()
       return
@@ -8344,7 +8453,10 @@ export class SshTui {
       const llm = this.ctx.get('llm')
       if (llm === undefined) throw new Error('llm 服务不可用')
       const discovered = await discoverProviderModels(llm, {
-        baseURL,
+        ...(providerType === 'catalog' && state.catalog !== undefined && baseURL === ''
+          ? {}
+          : { baseURL }),
+        ...(providerType === 'catalog' && state.catalog !== undefined ? { provider: state.catalog.id } : {}),
         ...(template.api === undefined ? {} : { api: template.api }),
         ...(key === '' ? {} : { apiKey: key }),
       }, AbortSignal.timeout(15_000))
@@ -8380,7 +8492,7 @@ export class SshTui {
     try {
       const credentials = this.ctx.get('credentials')
       const settings = this.ctx.get('settings')
-      const template = providerTemplates()[state.providerType]
+      const template = onboardTemplate(state)
 
       if (state.providerType === 'official') {
         const envRef = 'DEEPSEEK_API_KEY'
@@ -8439,15 +8551,24 @@ export class SshTui {
             mergedIds.push(id)
           }
         }
+        // Catalog routes mirror the web's model settings: an empty profile is
+        // valid — the installed catalog serves endpoint, protocol, and models,
+        // and an absent key defers to the provider's own environment auth.
+        const catalogRoute = state.providerType === 'catalog' && state.catalog !== undefined
+        const keyless = catalogRoute && state.key === ''
         const profile = {
           displayName: typeof existing?.displayName === 'string' && existing.displayName.trim() !== ''
             ? existing.displayName
             : template.label,
-          apiKeyEnv: envRef,
+          ...(keyless ? {} : { apiKeyEnv: envRef }),
           api: template.api ?? existing?.api,
-          baseURL: state.baseUrl === ''
-            ? (typeof existing?.baseURL === 'string' && existing.baseURL !== '' ? existing.baseURL : template.defaultBaseUrl)
-            : state.baseUrl,
+          ...(catalogRoute && state.baseUrl === ''
+            ? {}
+            : {
+                baseURL: state.baseUrl === ''
+                  ? (typeof existing?.baseURL === 'string' && existing.baseURL !== '' ? existing.baseURL : template.defaultBaseUrl)
+                  : state.baseUrl,
+              }),
           models: mergedIds.map(id => ({
             id,
             ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
@@ -8465,7 +8586,7 @@ export class SshTui {
         }
         // Only store the key when its provider profile actually made it to
         // settings; otherwise the saved key points at an unusable route.
-        if (saved) await this.saveCredential(credentials, envRef, state.key)
+        if (saved && !keyless) await this.saveCredential(credentials, envRef, state.key)
         if (saved) {
           const selection: ModelSelection = {
             provider: state.providerId,
