@@ -26,6 +26,7 @@ import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credent
 import { createUserMessage, errorChain, ReasoningEffortId, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
+import { classifyApproval, commandFromArgs, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
@@ -1089,6 +1090,7 @@ const LOCAL_COMMANDS = [
   { name: 'clear', key: 'cmd.clear' },
   { name: 'status', key: 'cmd.status' },
   { name: 'disconnect', key: 'cmd.disconnect' },
+  { name: 'approval', key: 'cmd.approval' },
   { name: 'view', key: 'cmd.view' },
   { name: 'usage', key: 'cmd.usage' },
   { name: 'balance', key: 'cmd.usage', aliasOf: 'usage' },
@@ -3578,6 +3580,8 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'graphem
 export class SshTui {
   private readonly rows: Row[] = []
   private streaming: { text: string; reasoning: string } | undefined
+  private autoApprovalMode: AutoApprovalMode = 'off'
+  private autoAllowedCount = 0
   /** Web-aligned provider presets from the host's pi-ai catalog (undefined until loaded / when unreachable). */
   private catalogPresets: CatalogPreset[] | undefined
   private catalogLoad: Promise<CatalogPreset[] | undefined> | undefined
@@ -3700,6 +3704,7 @@ export class SshTui {
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
     this.showReasoning = config.showReasoning !== false
     this.workspaceView = this.readWorkspaceView()
+    this.autoApprovalMode = this.readAutoApprovalMode()
     this.goodbye = config.goodbye
       ?? this.ctx.get('tuiGoodbyeMessage') as string | undefined
       ?? `To resume this session: dsh --profile tui --resume=${this.agent.id}`
@@ -3871,12 +3876,13 @@ export class SshTui {
     skipUpdate?: string
     view?: string
     disconnect?: DisconnectPolicyName
+    autoApproval?: AutoApprovalMode
   }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
     const raw = settings.get(UI_LOCALE_NAMESPACE)
     const previous = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-      ? raw as { language?: string; skipUpdate?: string; view?: string; disconnect?: string }
+      ? raw as { language?: string; skipUpdate?: string; view?: string; disconnect?: string; autoApproval?: string }
       : {}
     await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
   }
@@ -3893,6 +3899,14 @@ export class SshTui {
     const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'pause'
     return parseDisconnectPolicy(String((raw as { disconnect?: unknown }).disconnect ?? '')) ?? 'pause'
+  }
+
+  private readAutoApprovalMode(): AutoApprovalMode {
+    const env = parseAutoApprovalMode(process.env.DSH_TUI_AUTO_APPROVAL ?? '')
+    if (env !== undefined) return env
+    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'off'
+    return parseAutoApprovalMode(String((raw as { autoApproval?: unknown }).autoApproval ?? '')) ?? 'off'
   }
 
   private detachedIdleMs(): number {
@@ -6677,6 +6691,20 @@ export class SshTui {
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> => {
+    // Auto mode classifies BEFORE waiting for a display: unattended turns
+    // keep moving on low-risk conventions, dangerous shapes stay with the
+    // human (and keep the detached wait semantics).
+    if (this.autoApprovalMode === 'auto') {
+      const row = request.callId === undefined
+        ? undefined
+        : this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
+            candidate.kind === 'tool' && candidate.callId === request.callId)
+      const command = row === undefined ? undefined : commandFromArgs(row.name, row.args)
+      if (classifyApproval(request.toolName, command) === 'allow') {
+        this.autoAllowedCount += 1
+        return 'allowed-once'
+      }
+    }
     if (!this.hasLiveDisplay()) {
       try {
         await this.waitForLiveDisplay(request.signal)
@@ -9089,6 +9117,38 @@ export class SshTui {
           this.markDirty()
         })
         break
+      case 'approval': {
+        const requested = arg === '' ? 'toggle' : arg
+        if (requested === 'status') {
+          this.pushRow({
+            kind: 'system',
+            text: this.autoApprovalMode === 'auto'
+              ? t('approval.statusAuto', { count: this.autoAllowedCount })
+              : t('approval.statusOff'),
+          })
+          this.markDirty()
+          break
+        }
+        const next = requested === 'toggle'
+          ? this.autoApprovalMode === 'auto' ? 'off' : 'auto'
+          : parseAutoApprovalMode(requested)
+        if (next === undefined) {
+          this.pushRow({ kind: 'error', text: t('approval.unknown', { arg }) })
+          this.markDirty()
+          break
+        }
+        this.autoApprovalMode = next
+        void this.mergeUiSettings({ autoApproval: next }).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: `/approval failed: ${errorChain(error)}` })
+          this.markDirty()
+        })
+        this.pushRow({
+          kind: 'system',
+          text: next === 'auto' ? t('approval.autoOn') : t('approval.autoOff'),
+        })
+        this.markDirty()
+        break
+      }
       case 'setup':
         void this.runOnboarding()
         break

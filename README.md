@@ -72,6 +72,9 @@ dsh --profile tui
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
 - 审批、`ask_user_question`、计划模式、子代理进度、`/mode` 模式切换、`/model` 模型切换、
   `/resume` 会话切换、`/disconnect` 断线策略等完整支持；
+- `/approval auto` 自动审批模式：读类/构建/测试等低风险命令自动放行（`rm -rf`、`sudo`、
+  `curl|sh`、`git push --force` 等危险操作仍逐次询问），配合 `/disconnect continue` 断线后
+  回合不停摆；
 - 每个子代理都是独立可折叠卡片，默认收起，运行中带旋转动画；多个子代理互不混排；
 - 进入计划模式、待审计划、提问用户都会显示对应卡片和底部提示，而不是只塞进系统消息。
 - 工作区底部有 Codex 式「处理中」动画卡：思考里第一个闭合的 `**加粗**` 作为 shimmer
