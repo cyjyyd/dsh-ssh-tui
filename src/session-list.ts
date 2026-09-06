@@ -138,10 +138,14 @@ export async function listResumableSessions(
       const updatedAt = inspection.events.at(-1)?.time ?? meta.createdAt
       return {
         id: meta.id,
-        label: firstUserText !== undefined && firstUserText !== ''
-          ? firstUserText
-          : title !== undefined && title !== ''
-            ? title
+        // The persisted generated title first: the web session list shows the
+        // same `session/title` value, so both surfaces name a session alike
+        // and switching between them stays findable. First user input is the
+        // fallback for sessions whose title has not been generated yet.
+        label: title !== undefined && title !== ''
+          ? title
+          : firstUserText !== undefined && firstUserText !== ''
+            ? firstUserText
             : meta.id,
         updatedAt,
         cwd: meta.cwd ?? '',

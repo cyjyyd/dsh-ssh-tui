@@ -76,6 +76,20 @@ test('sessions that fail inspect stay visible and are marked unreadable', async 
   assert.equal(listed[2].label, 'broken-recent')
 })
 
+test('picker label prefers the persisted title so web and TUI agree', async () => {
+  const withTitle = readableSession('titled', 400)
+  withTitle.events.splice(5, 0, { type: 'session/title', seq: 6, time: 400, data: { title: '生成标题：修复绘制残留' } })
+  const sessions = new Map([['titled', withTitle]])
+  const persistence = {
+    list: async () => [header('titled', 400)],
+    inspect: async (id) => sessions.get(id),
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  assert.equal(listed.length, 1)
+  // web 列表显示同一份 session/title 持久化标题——两端标签一致，切换模式可寻
+  assert.equal(listed[0].label, '生成标题：修复绘制残留')
+})
+
 test('recent empty boot sessions do not hide older readable sessions beyond the first batch', async () => {
   const emptyIds = Array.from({ length: 35 }, (_, index) => `empty-${index}`)
   const realIds = Array.from({ length: 9 }, (_, index) => `real-${index}`)
