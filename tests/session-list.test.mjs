@@ -76,6 +76,65 @@ test('sessions that fail inspect stay visible and are marked unreadable', async 
   assert.equal(listed[2].label, 'broken-recent')
 })
 
+test('blank sessions are deleted and never listed as resumable', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-blank-'))
+  for (const id of ['blank-boot', 'error-kept']) {
+    mkdirSync(join(dir, id), { recursive: true })
+    writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  }
+
+  const blank = readableSession('blank-boot', 500)
+  blank.events = blank.events.slice(0, 3) // 仅启动事件：无输入、无回复
+  const errorReply = readableSession('error-kept', 400)
+  errorReply.events = [
+    ...errorReply.events,
+    { type: 'turn/end', seq: 9, time: 400, data: { turn: 1, reason: { kind: 'error', error: { message: 'xAI 403' } } } },
+  ]
+  const sessions = new Map([
+    ['blank-boot', blank],
+    ['error-kept', errorReply],
+  ])
+  const persistence = {
+    list: async () => [header('blank-boot', 500), header('error-kept', 400)],
+    inspect: async (id) => sessions.get(id),
+    locate: (meta) => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  await new Promise(resolve => setTimeout(resolve, 60)) // 删除是 best-effort 异步
+  // 空白会话：删除且不列出；仅剩错误回复会话（错误算回复，保留）
+  assert.deepEqual(listed.map(item => item.id), ['error-kept'])
+  assert.equal(existsSync(join(dir, 'blank-boot')), false, 'blank artifacts deleted')
+  assert.equal(existsSync(join(dir, 'error-kept')), true, 'error-reply session kept')
+})
+
+test('blank attachable hosts are stopped and kept out of the picker', async () => {
+  const blank = readableSession('blank-live', 500)
+  blank.events = blank.events.slice(0, 3)
+  const sessions = new Map([['blank-live', blank]])
+  const persistence = {
+    list: async () => [header('blank-live', 500)],
+    inspect: async (id) => sessions.get(id),
+    locate: () => undefined,
+  }
+  const killed = []
+  const listHosts = async () => [
+    { sessionId: 'blank-live', lock: { pid: 999999, startedAt: new Date().toISOString(), state: 'idle' }, sock: '/tmp/nope.sock' },
+  ]
+  const originalKill = process.kill
+  process.kill = (pid, signal) => { killed.push(pid); return true }
+  try {
+    const listed = await listResumableSessions(persistence, '', listHosts)
+    assert.equal(listed.length, 0)
+    assert.deepEqual(killed, [999999])
+  } finally {
+    process.kill = originalKill
+  }
+})
+
 test('picker label prefers the persisted title so web and TUI agree', async () => {
   const withTitle = readableSession('titled', 400)
   withTitle.events.splice(5, 0, { type: 'session/title', seq: 6, time: 400, data: { title: '生成标题：修复绘制残留' } })

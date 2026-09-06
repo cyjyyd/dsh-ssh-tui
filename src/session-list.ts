@@ -5,7 +5,8 @@
  */
 
 import { existsSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { rm } from 'node:fs/promises'
+import { dirname, isAbsolute } from 'node:path'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { t } from './i18n/index.js'
 import { listAttachableHosts } from './session-lock.js'
@@ -89,11 +90,58 @@ export function formatSessionTime(timestamp: number): string {
  * @param currentId - the live session to exclude (empty at launch).
  * @returns up to nine candidates in display order.
  */
+/** Whether one durable event is a user-authored message. */
+function isUserMessageEvent(event: unknown): boolean {
+  const candidate = event as { type?: string; data?: { source?: { kind?: string } } }
+  return candidate.type === 'user/message' && candidate.data?.source?.kind === 'user'
+}
+
+/**
+ * Whether the session ever produced a model reply. A failed agent request
+ * counts: the error state is the reply, and the user may want to keep or
+ * inspect it.
+ */
+function sessionHasReply(events: readonly unknown[]): boolean {
+  return events.some(event => {
+    const candidate = event as {
+      type?: string
+      data?: { reason?: { kind?: string } }
+    }
+    if (candidate.type === 'assistant/message' || candidate.type === 'agent/error') return true
+    if (candidate.type === 'turn/end') return candidate.data?.reason?.kind === 'error'
+    return false
+  })
+}
+
+/**
+ * A blank session never saw user input nor a model reply — a boot that died
+ * before doing anything. Such sessions are deleted (never listed as
+ * resumable) so crashed launches stop littering the picker with raw ids.
+ */
+function isBlankSession(hasUserInput: boolean, hasReply: boolean): boolean {
+  return !hasUserInput && !hasReply
+}
+
+/** Delete one session's on-disk artifacts (log directory), best effort. */
+async function pruneSessionArtifacts(
+  persistence: SessionPersistence,
+  meta: Parameters<SessionPersistence['locate']>[0],
+): Promise<void> {
+  try {
+    const location = persistence.locate(meta)
+    if (location?.path !== undefined && location.path !== '') {
+      await rm(dirname(location.path), { recursive: true, force: true })
+    }
+  } catch {
+    // Best effort: a stuck artifact only means the row lingers once more.
+  }
+}
+
 /** Upper bound on one inspection batch, so the picker never fans out unbounded. */
 const INSPECT_BATCH_SIZE = 30
 
 /** Internal inspection result before display filtering. */
-type InspectedSession = ResumableSession & { hasUserInput: boolean }
+type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: boolean }
 
 export async function listResumableSessions(
   persistence: SessionPersistence,
@@ -150,6 +198,7 @@ export async function listResumableSessions(
         updatedAt,
         cwd: meta.cwd ?? '',
         hasUserInput: firstUserMessage !== undefined,
+        hasReply: sessionHasReply(inspection.events),
       }
     } catch {
       // A corrupt/unsupported log must not make the session vanish from the
@@ -161,6 +210,7 @@ export async function listResumableSessions(
         updatedAt: meta.createdAt,
         cwd: meta.cwd ?? '',
         hasUserInput: false,
+        hasReply: false,
         unreadable: true,
       }
     }
@@ -173,7 +223,17 @@ export async function listResumableSessions(
   const inspected: InspectedSession[] = []
   for (let offset = 0; offset < candidates.length; offset += INSPECT_BATCH_SIZE) {
     const batch = candidates.slice(offset, offset + INSPECT_BATCH_SIZE)
-    inspected.push(...await Promise.all(batch.map(inspectCandidate)))
+    const settled = await Promise.all(batch.map(async meta => ({ meta, item: await inspectCandidate(meta) })))
+    for (const { meta, item } of settled) {
+      // Unreadable logs stay visible regardless; a readable blank (a boot
+      // that died before any input or reply) gets deleted so the raw id
+      // never shows up as resumable again.
+      if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
+        void pruneSessionArtifacts(persistence, meta)
+        continue
+      }
+      inspected.push(item)
+    }
     if (inspected.filter(item => item.hasUserInput).length >= 9) break
   }
 
@@ -181,8 +241,29 @@ export async function listResumableSessions(
   const hosts = await listHosts()
   const byId = new Map(resumable.map(item => [item.id, item]))
   for (const host of hosts) {
-    const existing = byId.get(host.sessionId)
+    if (host.sessionId === currentId) continue
     const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
+    // A live Host whose session never saw input nor a reply is a crashed
+    // boot: stop it, remove its artifacts, and keep it out of the picker.
+    let blankLive = false
+    let liveHasUserInput = true
+    try {
+      const inspection = await persistence.inspect(host.sessionId as Parameters<SessionPersistence['inspect']>[0])
+      const hasInput = inspection.events.some(event => isUserMessageEvent(event))
+      blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
+      liveHasUserInput = hasInput
+    } catch {
+      // No durable log: the Host booted and never did anything.
+      blankLive = true
+      liveHasUserInput = false
+    }
+    if (blankLive) {
+      try { process.kill(attach.pid, 'SIGTERM') } catch { /* already gone */ }
+      const header = candidates.find(candidate => candidate.id === host.sessionId)
+      if (header !== undefined) void pruneSessionArtifacts(persistence, header)
+      continue
+    }
+    const existing = byId.get(host.sessionId)
     if (existing !== undefined) {
       existing.attach = attach
       continue
@@ -192,7 +273,8 @@ export async function listResumableSessions(
       label: host.sessionId,
       updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
       cwd: '',
-      hasUserInput: true,
+      hasUserInput: liveHasUserInput,
+      hasReply: true,
       attach,
     }
     resumable.push(injected)
