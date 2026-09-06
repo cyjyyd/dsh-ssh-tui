@@ -39,7 +39,7 @@ test('/language catalog switches chrome and tool titles', () => {
     foldedInput: false, multiLineInput: false, queued: 0,
   }).text, 'idle')
   assert.equal(presentToolCall('edit', JSON.stringify({ file_path: 'a.ts' })).title, 'edit')
-  assert.equal(t('lang.cmd').includes('zh'), true)
+  assert.equal(t('lang.cmd').includes('Chinese') || t('lang.cmd').includes('English'), true)
   assert.equal(t('boot.help').includes('/help'), true)
   setLocale('zh')
 })

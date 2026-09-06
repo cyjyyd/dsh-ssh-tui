@@ -345,6 +345,7 @@ interface QuestionDialog {
   index: number
   total: number
   selected: Set<number>
+  cursor: number
   resolve(selection: { selected: string[]; custom?: string }): void
   reject(error: unknown): void
 }
@@ -703,6 +704,7 @@ export interface FooterStatusInput {
   subDiffers: boolean
   quotaCode?: string
   quotaPercent?: number
+  balanceText?: string
   search?: { index: number; total: number }
   foldedInput: boolean
   multiLineInput: boolean
@@ -748,6 +750,9 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
   if (model !== '') parts.push(model)
   if (input.subDiffers) parts.push(`sub:${input.subModel}`)
+  if (input.balanceText !== undefined && input.balanceText !== '') {
+    parts.push(input.balanceText)
+  }
   if (input.quotaPercent !== undefined) {
     parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
   }
@@ -842,6 +847,7 @@ const PLUGIN_VERSION = ((): string => {
 })()
 const STALL_WARNING_MS = 60000
 const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
+const PICKER_WINDOW = 12
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -1047,38 +1053,40 @@ export function providerUsesLocalOAuth(provider: string): boolean {
 }
 
 const LOCAL_COMMANDS = [
-  { name: 'help', description: 'show all available commands' },
-  { name: 'model', description: 'select model and reasoning effort for the current provider' },
-  { name: 'provider', description: 'switch provider, then model and reasoning effort' },
-  { name: 'submodel', description: `select subagent model (default ${DEFAULT_SUBAGENT_MODEL}, same provider as parent)` },
-  { name: 'subeffort', description: 'select subagent reasoning effort (default follows provider)' },
-  { name: 'mode', description: 'switch agent mode / preset (standard, minimal, ptc, cordis, routing-suite, ...)' },
-  { name: 'quit', description: 'exit the TUI' },
-  { name: 'exit', description: 'exit the TUI' },
-  { name: 'clear', description: 'clear the transcript view' },
-  { name: 'status', description: 'show session, route, quota window, subagent fit, paint, and plugin version' },
-  { name: 'usage', description: 'show remaining quota or account balance for the current provider' },
-  { name: 'balance', description: 'alias of /usage: DeepSeek / OpenAI-compatible balance, or subscription quota' },
-  { name: 'subagents', description: 'list active subagents; kill <id> to stop one' },
-  { name: 'resume', description: 'resume a past session (empty = session picker)' },
-  { name: 'setup', description: 'add or update an API-key provider without wiping other saved routes' },
-  { name: 'find', description: 'search thinking / plan / subagent / reply cards' },
-  { name: 'language', description: 'switch UI language (zh / en); empty opens a picker' },
-  { name: 'lang', description: 'alias of /language' },
-  { name: 'view', description: 'switch workspace view (detailed / compact); empty opens a picker' },
-  { name: 'disconnect', description: 'SSH-drop policy (pause / continue); empty opens a picker' },
-  { name: 'dialog-test', description: 'verify the question dialog' },
+  { name: 'help', key: 'cmd.help' },
+  { name: 'model', key: 'cmd.model' },
+  { name: 'provider', key: 'cmd.provider' },
+  { name: 'submodel', key: 'cmd.submodel' },
+  { name: 'subeffort', key: 'cmd.subeffort' },
+  { name: 'mode', key: 'cmd.mode' },
+  { name: 'quit', key: 'cmd.quit' },
+  { name: 'exit', key: 'cmd.quit', aliasOf: 'quit' },
+  { name: 'clear', key: 'cmd.clear' },
+  { name: 'status', key: 'cmd.status' },
+  { name: 'disconnect', key: 'cmd.disconnect' },
+  { name: 'view', key: 'cmd.view' },
+  { name: 'usage', key: 'cmd.usage' },
+  { name: 'balance', key: 'cmd.usage', aliasOf: 'usage' },
+  { name: 'subagents', key: 'cmd.subagents' },
+  { name: 'resume', key: 'cmd.resume' },
+  { name: 'setup', key: 'cmd.setup' },
+  { name: 'find', key: 'cmd.find' },
+  { name: 'language', key: 'cmd.language' },
+  { name: 'lang', key: 'cmd.language', aliasOf: 'language' },
+  { name: 'dialog-test', key: 'cmd.dialog-test' },
 ] as const
 
-function localizedCommands(): { name: string; description: string }[] {
-  return LOCAL_COMMANDS.map(command => {
-    if (command.name === 'language' || command.name === 'lang') {
-      return { name: command.name, description: t('lang.cmd') }
-    }
-    if (command.name === 'view') return { name: command.name, description: t('view.cmd') }
-    if (command.name === 'disconnect') return { name: command.name, description: t('disconnect.cmd') }
-    return command
-  })
+function commandDescription(name: string, aliasOf?: string): string {
+  if (aliasOf !== undefined) return t('cmd.aliasOf', { name: aliasOf })
+  return t(`cmd.${name}`)
+}
+
+function localizedCommands(): { name: string; description: string; aliasOf?: string }[] {
+  return LOCAL_COMMANDS.map(command => ({
+    name: command.name,
+    description: commandDescription(command.name, 'aliasOf' in command ? command.aliasOf : undefined),
+    ...('aliasOf' in command ? { aliasOf: command.aliasOf } : {}),
+  }))
 }
 
 /**
@@ -1138,24 +1146,26 @@ export function shimmerText(text: string, nowMs: number, color: boolean): string
   return out
 }
 
-const WAIT_SUMMARY_MAX = 18
-
 /**
- * Codex-style short status from reasoning: first `**bold**` / heading, else
- * the first short clause. Keeps the wait card in sync with what the model is
- * doing instead of repeating the user's prompt.
+ * Codex `extract_first_bold`: the first **closed** `**bold**` in the thinking
+ * stream, else the first markdown heading. An unclosed `**` means the title
+ * has not arrived yet, so return undefined and keep the default header —
+ * never fall back to hard-truncated reasoning, reply, or prompt text.
  */
-export function waitSummaryFromReasoning(text: string, maxChars = WAIT_SUMMARY_MAX): string | undefined {
-  const raw = text.replace(/\r\n?/gu, '\n').trim()
-  if (raw === '') return undefined
-  const bold = /\*\*([^*]{2,80})\*\*/u.exec(raw)?.[1]
-    ?? /^#{1,6}\s+(.+)$/mu.exec(raw)?.[1]
-  const source = (bold ?? raw.split('\n').find(line => line.trim() !== '') ?? '').replace(/\s+/gu, ' ').trim()
-  if (source === '') return undefined
-  const clause = source.split(/[。！？!?\n]/u)[0]?.trim() ?? source
-  const chars = Array.from(clause)
-  if (chars.length <= maxChars) return clause
-  return `${chars.slice(0, Math.max(2, maxChars - 1)).join('')}…`
+export function waitSummaryFromReasoning(text: string): string | undefined {
+  const raw = text.replace(/\r\n?/gu, '\n')
+  const chars = Array.from(raw)
+  for (let i = 0; i + 1 < chars.length; i += 1) {
+    if (chars[i] !== '*' || chars[i + 1] !== '*') continue
+    let j = i + 2
+    while (j + 1 < chars.length && !(chars[j] === '*' && chars[j + 1] === '*')) j += 1
+    if (j + 1 >= chars.length) return undefined
+    const inner = chars.slice(i + 2, j).join('').replace(/\s+/gu, ' ').trim()
+    return inner === '' ? undefined : inner
+  }
+  const heading = /^#{1,6}\s+(.+)$/mu.exec(raw)?.[1]
+  const source = heading?.replace(/\s+/gu, ' ').trim() ?? ''
+  return source === '' ? undefined : source
 }
 
 /** Wait-card header + optional detail. Header tracks model work when known. */
@@ -1163,19 +1173,79 @@ export function waitCardCopy(input: {
   toolTitle?: string
   toolSummary?: string
   reasoning?: string
-  reply?: string
-  prompt?: string
 }): { header: string; detail?: string } {
   const toolTitle = input.toolTitle?.trim() ?? ''
   const toolSummary = input.toolSummary?.trim() ?? ''
-  const fromReasoning = waitSummaryFromReasoning(input.reasoning ?? '')
-  const fromReply = waitSummaryFromReasoning(input.reply ?? '')
-  const header = fromReasoning ?? fromReply ?? t('wait.working')
+  const header = waitSummaryFromReasoning(input.reasoning ?? '') ?? t('wait.working')
   if (toolTitle !== '') {
-    const extra = toolSummary === '' ? '' : `  ${Array.from(toolSummary).slice(0, 40).join('')}`
-    return { header, detail: `${toolTitle}${extra}` }
+    return { header, detail: toolSummary === '' ? toolTitle : `${toolTitle}  ${toolSummary}` }
   }
   return { header }
+}
+
+const WAIT_DETAIL_PREFIX = '  └ '
+const WAIT_DETAIL_MAX_LINES = 3
+
+/**
+ * Codex `wrapped_details_lines`: word-wrap the wait-card detail under the
+ * `  └ ` prefix, continue wrapped rows at the prefix width, cap at 3 rows and
+ * end the last one with an ellipsis when the text does not fit.
+ */
+export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_DETAIL_MAX_LINES): string[] {
+  const prefixWidth = displayWidth(WAIT_DETAIL_PREFIX)
+  const contentWidth = Math.max(1, width - prefixWidth)
+  const rows: string[] = []
+  let current = ''
+  const flush = (): void => {
+    if (current !== '') rows.push(current)
+    current = ''
+  }
+  for (const word of detail.split(/\s+/u)) {
+    if (word === '') continue
+    let rest = word
+    while (displayWidth(rest) > contentWidth) {
+      flush()
+      let cut = 0
+      let used = 0
+      for (const char of rest) {
+        const charWidth = displayWidth(char)
+        if (used + charWidth > contentWidth) break
+        used += charWidth
+        cut += char.length
+      }
+      if (cut === 0) cut = firstCodePointLength(rest)
+      rows.push(rest.slice(0, cut))
+      rest = rest.slice(cut)
+    }
+    if (rest === '') continue
+    if (current === '') current = rest
+    else if (displayWidth(current) + 1 + displayWidth(rest) <= contentWidth) current += ` ${rest}`
+    else {
+      flush()
+      current = rest
+    }
+  }
+  flush()
+  if (rows.length === 0) return []
+  const overflow = rows.length > maxLines
+  const kept = overflow ? rows.slice(0, maxLines) : rows
+  if (overflow) {
+    // Codex rewrites the last kept row with an explicit ellipsis so it reads
+    // as "more below", even when the row itself still has spare room.
+    const last = kept[maxLines - 1] ?? ''
+    const limit = Math.max(1, contentWidth - 1)
+    let cut = 0
+    let used = 0
+    for (const char of last) {
+      const charWidth = displayWidth(char)
+      if (used + charWidth > limit) break
+      used += charWidth
+      cut += char.length
+    }
+    kept[maxLines - 1] = `${last.slice(0, cut)}…`
+  }
+  return kept.map((line, index) =>
+    index === 0 ? `${WAIT_DETAIL_PREFIX}${line}` : `${' '.repeat(prefixWidth)}${line}`)
 }
 
 export function displayWidth(text: string): number {
@@ -2050,20 +2120,15 @@ export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): st
 }
 
 /**
- * How often to re-fetch quota, based on the tightest window.
- * Counted in model steps (not conversation turns): a turn with several
- * tool/LLM steps should refresh more often because it spends more quota.
- * Hourly/5h: every 10 steps, every 4 when near a threshold.
- * Weekly: every 50 steps, every 10 when near.
- * Monthly: every 80 steps, every 20 when near.
+ * How often to re-fetch quota or prepaid balance, counted in model steps.
+ * Default is every 10 steps. Near a remaining-percent threshold, hourly
+ * windows refresh every 4 steps.
  */
 export function quotaRefreshEverySteps(window: QuotaWindow | undefined): number {
   if (window === undefined) return 10
   const near = window.remainingPercent <= QUOTA_NEAR_THRESHOLD_PERCENT
-  if (window.period === 'hourly') return near ? 4 : 10
-  if (window.period === 'weekly') return near ? 10 : 50
-  if (window.period === 'monthly') return near ? 20 : 80
-  return near ? 10 : 50
+  if (window.period === 'hourly' && near) return 4
+  return 10
 }
 
 /** @deprecated Same cadence as {@link quotaRefreshEverySteps}; the name predates step accounting. */
@@ -2281,6 +2346,18 @@ export function parseOpenAiCompatibleBalance(payload: unknown, provider: string,
   return { provider, plan: provider, lines, sourcePath: path }
 }
 
+/** Compact footer chip: `余额 86.42 CNY`. Prefers remaining/available lines. */
+export function formatFooterBalance(snapshot: AccountBalanceSnapshot): string | undefined {
+  const preferred = snapshot.lines.find(line =>
+    /剩余|可用|余额|available|remaining|credit/iu.test(line.label))
+    ?? snapshot.lines[0]
+  if (preferred === undefined) return undefined
+  const amount = preferred.amount.trim()
+  if (amount === '') return undefined
+  const currency = preferred.currency === undefined || preferred.currency === '' ? '' : ` ${preferred.currency}`
+  return t('footer.balance', { amount: `${amount}${currency}` })
+}
+
 export function formatAccountBalance(snapshot: AccountBalanceSnapshot): string {
   const header = [`${snapshot.plan} 余额（${snapshot.provider}）`]
   if (snapshot.available === false) header.push('账号当前不可用')
@@ -2440,6 +2517,14 @@ const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
 
 export type WorkspaceView = 'detailed' | 'compact'
 
+/** Sliding window of `windowSize` items that keeps `cursor` visible. */
+export function pickerWindowStart(cursor: number, total: number, windowSize = PICKER_WINDOW): number {
+  if (total <= windowSize) return 0
+  const maxStart = Math.max(0, total - windowSize)
+  const start = cursor - Math.floor((windowSize - 1) / 2)
+  return Math.max(0, Math.min(maxStart, start))
+}
+
 export function parseDisconnectPolicy(raw: string): DisconnectPolicyName | undefined {
   const id = raw.trim().toLowerCase()
   if (id === 'pause' || id === 'cancel' || id === '暂停') return 'pause'
@@ -2469,10 +2554,33 @@ export function countDiffLines(hunks: readonly ToolDiffHunk[] | undefined): numb
   return total
 }
 
+/** Added / removed line counts for a diff (`oldText: null` means a new file). */
+export function countDiffAddDel(hunks: readonly ToolDiffHunk[] | undefined): { add: number; del: number } {
+  const stat = { add: 0, del: 0 }
+  if (hunks === undefined) return stat
+  for (const hunk of hunks) {
+    stat.add += hunk.newText === '' ? 0 : hunk.newText.split('\n').length
+    if (hunk.oldText !== null) {
+      stat.del += hunk.oldText === '' ? 0 : hunk.oldText.split('\n').length
+    }
+  }
+  return stat
+}
+
+/**
+ * Git diffstat token, deletions first like `-13 +24`. Zero parts drop out
+ * (a new file shows only `+24`); empty when the diff has no counted lines.
+ */
+export function diffStatToken(add: number, del: number): string {
+  const parts: string[] = []
+  if (del > 0) parts.push(`-${del}`)
+  if (add > 0) parts.push(`+${add}`)
+  return parts.join(' ')
+}
+
 export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>[]): {
   edits: Extract<Row, { kind: 'tool' }>[]
   calls: Extract<Row, { kind: 'tool' }>[]
-  editLines: number
   failedCalls: number
 } {
   const edits: Extract<Row, { kind: 'tool' }>[] = []
@@ -2484,9 +2592,35 @@ export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>
   return {
     edits,
     calls,
-    editLines: edits.reduce((sum, tool) => sum + Math.max(1, countDiffLines(tool.diff)), 0),
     failedCalls: calls.filter(tool => tool.status === 'error').length,
   }
+}
+
+/**
+ * Split compact-view tools into the bursts that belong with each assistant
+ * reply: tools after reply N sit with that reply, until the next reply.
+ */
+export function compactToolBursts(rows: readonly Row[]): Array<{
+  after: Extract<Row, { kind: 'assistant' }> | undefined
+  groups: ReturnType<typeof compactToolGroups>
+}> {
+  const bursts: Array<{
+    after: Extract<Row, { kind: 'assistant' }> | undefined
+    tools: Extract<Row, { kind: 'tool' }>[]
+  }> = []
+  let current: (typeof bursts)[number] = { after: undefined, tools: [] }
+  bursts.push(current)
+  for (const row of rows) {
+    if (row.kind === 'assistant') {
+      current = { after: row, tools: [] }
+      bursts.push(current)
+      continue
+    }
+    if (row.kind === 'tool') current.tools.push(row)
+  }
+  return bursts
+    .map(burst => ({ after: burst.after, groups: compactToolGroups(burst.tools) }))
+    .filter(burst => burst.groups.calls.length > 0 || burst.groups.edits.length > 0)
 }
 const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
 
@@ -3044,6 +3178,7 @@ export function buildToolHeader(input: {
   signal?: string
   exitCode?: number
   spinner?: string
+  diffStat?: { add: number; del: number }
 }): { plain: string; segments: TextSegment[] } {
   const running = input.status === undefined || input.status === 'running'
   const state = toolStateLabel(input.status)
@@ -3059,16 +3194,35 @@ export function buildToolHeader(input: {
   const marker = input.expanded ? '▾' : '▸'
   const lead = `${prefix}${marker} ● ${input.title}`
   const summaryText = input.summary === '' ? '' : `  ${input.summary}`
+  const statToken = input.diffStat === undefined ? '' : diffStatToken(input.diffStat.add, input.diffStat.del)
+  const statText = statToken === '' ? '' : `  ${statToken}`
   const stateToken = `[${state}]`
   const tail = `  ${stateToken}${exit}${spinner}`
-  const plain = `${lead}${summaryText}${tail}`
+  const plain = `${lead}${summaryText}${statText}${tail}`
   const stateCode = toolStateColor(input.status)
   const dotIndex = lead.indexOf('●')
-  const stateIndex = lead.length + summaryText.length + 2
+  const stateIndex = lead.length + summaryText.length + statText.length + 2
   const segments: TextSegment[] = []
   if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
   if (summaryText.length > 0) {
     segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: '90' })
+  }
+  if (statToken !== '') {
+    // Git diffstat colors: deletions red, additions green. The token sits
+    // two cells after the summary, deletions before the joining space.
+    const statStart = lead.length + summaryText.length + 2
+    const delEnd = statToken.indexOf(' +')
+    if (statToken.startsWith('-')) {
+      segments.push({
+        start: statStart,
+        end: statStart + (delEnd === -1 ? statToken.length : delEnd),
+        sgr: '31',
+      })
+    }
+    if (delEnd !== -1) {
+      const addStart = statStart + delEnd + 1
+      segments.push({ start: addStart, end: statStart + statToken.length, sgr: '32' })
+    }
   }
   segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
   if (spinner !== '') {
@@ -3477,7 +3631,6 @@ export class SshTui {
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
   private thinkingStartedAt: number | undefined
   private waitStartedAt: number | undefined
-  private waitPrompt: string | undefined
   private completionSignaled = false
   private replaying = false
   private completedAt = 0
@@ -3499,6 +3652,7 @@ export class SshTui {
   private sessionTitle = ''
   private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
   private quotaSnapshot: QuotaSnapshot | undefined
+  private balanceSnapshot: AccountBalanceSnapshot | undefined
   private quotaAlerted = new Set<string>()
   private quotaStepsSinceRefresh = 0
   private quotaRefreshInFlight = false
@@ -3741,6 +3895,17 @@ export class SshTui {
     this.workspaceView = view
   }
 
+  private paintCompactBurst(
+    addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
+    groups: ReturnType<typeof compactToolGroups>,
+    width: number,
+  ): void {
+    const callAnchor = groups.calls.at(-1)
+    const editAnchor = groups.edits.at(-1)
+    if (callAnchor !== undefined) this.paintCompactSummary(addDisplay, callAnchor, 'calls', groups, width)
+    if (editAnchor !== undefined) this.paintCompactSummary(addDisplay, editAnchor, 'edits', groups, width)
+  }
+
   private paintCompactSummary(
     addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
     anchor: Extract<Row, { kind: 'tool' }>,
@@ -3748,30 +3913,65 @@ export class SshTui {
     groups: ReturnType<typeof compactToolGroups>,
     width: number,
   ): void {
-    const focused = this.focusedRow === anchor
-    const marker = anchor.expanded ? '▾' : '▸'
-    const running = kind === 'edits'
-      ? groups.edits.some(item => item.status === undefined || item.status === 'running')
-      : groups.calls.some(item => item.status === undefined || item.status === 'running')
-    const spinner = running ? ` ${this.spinnerFrame()}` : ''
+    const items = kind === 'edits' ? groups.edits : groups.calls
+    const running = items.some(item => item.status === undefined || item.status === 'running')
+    const failed = items.length > 0 && items.every(item => item.status === 'error')
+    const status: 'running' | 'ok' | 'error' = running ? 'running' : failed ? 'error' : 'ok'
+    const addDel = { add: 0, del: 0 }
+    if (kind === 'edits') {
+      for (const item of groups.edits) {
+        const stat = countDiffAddDel(item.diff)
+        addDel.add += stat.add
+        addDel.del += stat.del
+      }
+    }
     const title = kind === 'edits'
       ? (groups.edits.length > 1
-        ? t('compact.editsFiles', { lines: groups.editLines, files: groups.edits.length })
-        : t('compact.edits', { lines: groups.editLines }))
+        ? t('compact.editsFiles', { files: groups.edits.length })
+        : t('compact.edits'))
       : (groups.failedCalls > 0
         ? t('compact.toolsFailed', { count: groups.calls.length, failed: groups.failedCalls })
         : t('compact.tools', { count: groups.calls.length }))
-    const header = `${focused ? '▶ ' : '  '}${marker} ● ${title}${spinner}${anchor.expanded ? '' : t('card.expand')}`
-    const styled = this.styleLine(groups.failedCalls > 0 && kind === 'calls' ? 'error' : 'tool', header)
-    addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
-    if (!anchor.expanded) return
-    const items = kind === 'edits' ? groups.edits : groups.calls
+    const header = buildToolHeader({
+      focused: this.focusedRow === anchor,
+      expanded: anchor.expanded,
+      title,
+      summary: '',
+      status,
+      spinner: running ? ` ${this.spinnerFrame()}` : '',
+      ...(kind === 'edits' && (addDel.add > 0 || addDel.del > 0) ? { diffStat: addDel } : {}),
+    })
+    const headerSegments = this.color ? header.segments : []
+    if (!anchor.expanded) {
+      const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
+      const styled = headerSegments.length === 0
+        ? this.styleLine('tool', collapsed)
+        : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
+      addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
+      return
+    }
+    const expandedHeaderLines = headerSegments.length === 0
+      ? wrap(header.plain, width).map(line => this.styleLine('tool', line))
+      : wrapSegmented(header.plain, Math.max(1, width), headerSegments)
+    for (const wrapped of expandedHeaderLines) {
+      addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${wrapped}\x1b[27m` : wrapped, anchor)
+    }
     for (const item of items) {
+      if (kind === 'edits') {
+        const stat = countDiffAddDel(item.diff)
+        const token = diffStatToken(stat.add, stat.del)
+        const extra = token === ''
+          ? `${countDiffLines(item.diff) || 1} ${getLocale() === 'en' ? 'lines' : '行'}`
+          : token
+        addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}`, width)), item)
+        for (const line of toolBodyLines(item, Number.MAX_SAFE_INTEGER)) {
+          this.paintToolBodyLine(addDisplay, item, line, width)
+        }
+        continue
+      }
+      const extra = item.summary
       const state = item.status === 'error' ? 'error' : item.status === 'ok' ? 'ok' : 'running…'
-      const extra = kind === 'edits'
-        ? `${countDiffLines(item.diff) || 1} ${getLocale() === 'en' ? 'lines' : '行'}`
-        : item.summary
-      addDisplay(this.styleLine('system', truncateToWidth(`    ${item.title}  ${extra}  [${state}]`, width)), item)
+      addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}  [${state}]`, width)), item)
     }
   }
 
@@ -4259,7 +4459,6 @@ export class SshTui {
   private collapsibleRows(): CollapsibleBlock[] {
     const compact = this.isCompactView()
     if (compact) {
-      const groups = compactToolGroups(this.rows.filter((row): row is Extract<Row, { kind: 'tool' }> => row.kind === 'tool'))
       const rows: CollapsibleBlock[] = this.rows.filter(
         (row): row is Extract<Row, { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }> =>
           row.kind === 'subagent'
@@ -4267,10 +4466,12 @@ export class SshTui {
           || row.kind === 'question'
           || row.kind === 'goal'
           || row.kind === 'compaction')
-      const callAnchor = groups.calls.at(-1)
-      const editAnchor = groups.edits.at(-1)
-      if (callAnchor !== undefined) rows.push(callAnchor)
-      if (editAnchor !== undefined) rows.push(editAnchor)
+      for (const burst of compactToolBursts(this.rows)) {
+        const callAnchor = burst.groups.calls.at(-1)
+        const editAnchor = burst.groups.edits.at(-1)
+        if (callAnchor !== undefined) rows.push(callAnchor)
+        if (editAnchor !== undefined) rows.push(editAnchor)
+      }
       return rows
     }
     const rows: CollapsibleBlock[] = this.rows.filter(
@@ -4295,33 +4496,31 @@ export class SshTui {
   }
 
   /**
-   * Codex wait card: shown while the turn is running. Thinking/reply streams
-   * feed the shimmer header; a live tool becomes the detail line.
+   * Codex wait card: shown while the turn is running. The live thinking
+   * stream feeds the shimmer header; a live tool becomes the detail rows.
+   * While the reply itself is streaming, the transcript paints those tokens
+   * and the card yields (Codex hides the status row once output commits).
    */
   private waitCardVisible(): boolean {
     if (this.agent.status !== 'running') return false
+    if (this.streaming?.text) return false
     if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
     if (this.dialog?.kind === 'questions' || this.dialog?.kind === 'confirm') return false
     return true
   }
 
-  private beginWait(prompt?: string): void {
+  private beginWait(): void {
     this.waitStartedAt = Date.now()
-    const trimmed = prompt?.replace(/\s+/gu, ' ').trim()
-    this.waitPrompt = trimmed === undefined || trimmed === '' ? this.waitPrompt : trimmed
   }
 
   private endWait(): void {
     this.waitStartedAt = undefined
-    this.waitPrompt = undefined
   }
 
   private waitCardSource(): {
     toolTitle?: string
     toolSummary?: string
     reasoning?: string
-    reply?: string
-    prompt?: string
   } {
     const liveTool = this.rows.findLast((row): row is Extract<Row, { kind: 'tool' }> =>
       row.kind === 'tool' && (row.status === undefined || row.status === 'running'))
@@ -4333,8 +4532,6 @@ export class SshTui {
         ? {}
         : { toolTitle: liveSub.label, toolSummary: liveSub.lastActivity }),
       ...(this.streaming?.reasoning ? { reasoning: this.streaming.reasoning } : {}),
-      ...(this.streaming?.text ? { reply: this.streaming.text } : {}),
-      ...(this.waitPrompt === undefined ? {} : { prompt: this.waitPrompt }),
     }
   }
 
@@ -4820,12 +5017,20 @@ export class SshTui {
     }
 
     const compact = this.isCompactView()
-    const compactGroups = compact
-      ? compactToolGroups(this.rows.filter((row): row is Extract<Row, { kind: 'tool' }> => row.kind === 'tool'))
-      : undefined
+    const compactBursts = compact ? compactToolBursts(this.rows) : []
+    const compactBurstByReply = new Map<Extract<Row, { kind: 'assistant' }>, (typeof compactBursts)[number]>()
+    for (const burst of compactBursts) {
+      if (burst.after !== undefined) compactBurstByReply.set(burst.after, burst)
+    }
 
+    let paintedLeadingCompact = false
     for (const row of this.rows) {
       if (compact && (row.kind === 'reasoning' || row.kind === 'prompt' || row.kind === 'tool')) continue
+      if (compact && !paintedLeadingCompact && (row.kind === 'assistant' || row.kind === 'user')) {
+        const leading = compactBursts.find(burst => burst.after === undefined)
+        if (leading !== undefined) this.paintCompactBurst(addDisplay, leading.groups, width)
+        paintedLeadingCompact = true
+      }
       if (row.kind === 'brand-logo') {
         const variant = DEEPSEEK_LOGO_VARIANTS.find(candidate => candidate.width <= width - 2)
           ?? DEEPSEEK_LOGO_VARIANTS[DEEPSEEK_LOGO_VARIANTS.length - 1]
@@ -4866,6 +5071,9 @@ export class SshTui {
           signal: row.signal,
           exitCode: row.exitCode,
           spinner: running ? ` ${this.spinnerFrame()}` : '',
+          ...(row.diff !== undefined && row.diff.length > 0
+            ? { diffStat: countDiffAddDel(row.diff) }
+            : {}),
         })
         const headerSegments = this.color ? header.segments : []
         if (!row.expanded) {
@@ -5027,6 +5235,13 @@ export class SshTui {
         continue
       }
       pushRow(row.kind, row.text, row)
+      if (compact && row.kind === 'assistant') {
+        const burst = compactBurstByReply.get(row)
+        const lastAssistant = this.rows.findLast((item): item is Extract<Row, { kind: 'assistant' }> => item.kind === 'assistant')
+        if (burst !== undefined && (row !== lastAssistant || this.streaming === undefined)) {
+          this.paintCompactBurst(addDisplay, burst.groups, width)
+        }
+      }
     }
 
     if (this.streaming !== undefined) {
@@ -5061,14 +5276,15 @@ export class SshTui {
         }
       }
     }
-    if (compact && compactGroups !== undefined) {
-      const editAnchor = compactGroups.edits.at(-1)
-      const callAnchor = compactGroups.calls.at(-1)
-      if (callAnchor !== undefined) {
-        this.paintCompactSummary(addDisplay, callAnchor, 'calls', compactGroups, width)
+    if (compact) {
+      const lastAssistant = this.rows.findLast((row): row is Extract<Row, { kind: 'assistant' }> => row.kind === 'assistant')
+      if (this.streaming !== undefined) {
+        const openBurst = compactBursts.find(burst => burst.after === lastAssistant)
+        if (openBurst !== undefined) this.paintCompactBurst(addDisplay, openBurst.groups, width)
       }
-      if (editAnchor !== undefined) {
-        this.paintCompactSummary(addDisplay, editAnchor, 'edits', compactGroups, width)
+      const leading = compactBursts.find(burst => burst.after === undefined)
+      if (leading !== undefined && !paintedLeadingCompact) {
+        this.paintCompactBurst(addDisplay, leading.groups, width)
       }
     }
     if (this.waitCardVisible()) {
@@ -5081,8 +5297,8 @@ export class SshTui {
         ? `${spinner} ${shimmerText(copy.header, Date.now(), true)}  ${this.styleLine('system', hint)}`
         : `${spinner} ${copy.header}  ${hint}`
       addDisplay(header)
-      if (copy.detail !== undefined && copy.detail !== '') {
-        addDisplay(this.styleLine('system', `  └ ${copy.detail}`))
+      for (const line of wrapWaitDetails(copy.detail ?? '', width)) {
+        addDisplay(this.styleLine('system', line))
       }
     }
 
@@ -5172,17 +5388,24 @@ export class SshTui {
         }
         const options = d.question.options ?? []
         const approve = d.question.intent?.approve
-        for (const [index, option] of options.entries()) {
+        const start = pickerWindowStart(d.cursor, options.length)
+        const end = Math.min(options.length, start + PICKER_WINDOW)
+        if (start > 0) addDialog(`  ↑ 还有 ${start} 项`)
+        for (let index = start; index < end; index += 1) {
+          const option = options[index]
+          if (option === undefined) continue
           const marker = d.selected.has(index) ? '●' : '○'
-          const key = QUESTION_OPTION_KEYS[index] ?? '?'
+          const key = QUESTION_OPTION_KEYS[index] ?? '↕'
+          const focused = index === d.cursor ? '›' : ' '
           const recommended = option.label === approve ? '（推荐）' : ''
           const extra = option.description === undefined ? '' : ` — ${option.description}`
-          addDialog(`  ${key} ${marker} ${option.label}${recommended}${extra}`)
+          addDialog(` ${focused}${key} ${marker} ${option.label}${recommended}${extra}`)
         }
+        if (end < options.length) addDialog(`  ↓ 还有 ${options.length - end} 项`)
         if (options.length === 0) {
           addDialog('  （自由输入：在下方输入后按 Enter）')
         }
-        addDialog(`  ${d.question.multiSelect === true ? '数字/字母切换，Enter 提交' : '数字/字母选择，Enter 提交'}，Esc 取消`)
+        addDialog(`  ${d.question.multiSelect === true ? '↑/↓ 或数字/字母切换，Enter 提交' : '↑/↓ 或数字/字母选择，Enter 提交'}，Esc 取消`)
       }
     }
 
@@ -5199,12 +5422,25 @@ export class SshTui {
       this.suggestionIndex = Math.max(0, this.commandSuggestions.length - 1)
     }
     const suggestionLines: string[] = []
-    for (const [index, command] of this.commandSuggestions.entries()) {
+    const suggestionStart = pickerWindowStart(this.suggestionIndex, this.commandSuggestions.length)
+    const suggestionEnd = Math.min(this.commandSuggestions.length, suggestionStart + PICKER_WINDOW)
+    if (suggestionStart > 0) {
+      suggestionLines.push(this.styleLine('system', fitLine(`  ${t('suggest.moreAbove', { count: suggestionStart })}`)))
+    }
+    for (let index = suggestionStart; index < suggestionEnd; index += 1) {
+      const command = this.commandSuggestions[index]
+      if (command === undefined) continue
       const marker = index === this.suggestionIndex ? '›' : ' '
       const line = `  ${marker} /${command.name.padEnd(14)} ${command.description}${command.local ? '' : '  (dsh)'}`
       suggestionLines.push(index === this.suggestionIndex && this.color
         ? `\x1b[7m${fitLine(line)}\x1b[27m`
         : this.styleLine('system', fitLine(line)))
+    }
+    if (suggestionEnd < this.commandSuggestions.length) {
+      suggestionLines.push(this.styleLine(
+        'system',
+        fitLine(`  ${t('suggest.moreBelow', { count: this.commandSuggestions.length - suggestionEnd })}`),
+      ))
     }
 
     const promptPlain = this.color ? '❯ ' : '> '
@@ -5315,11 +5551,14 @@ export class SshTui {
     const idleMs = Date.now() - this.lastActivity
     const livePlan = this.findLivePlanRow()
     const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
-    const quotaWindow = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
-    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
-    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
     const current = this.selectionRef?.current
     const provider = this.currentProviderId()
+    const quotaWindow = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
+    const balanceText = this.balanceSnapshot !== undefined && this.balanceSnapshot.provider === provider
+      ? formatFooterBalance(this.balanceSnapshot)
+      : undefined
+    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
+    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
     const parentModel = current?.model ?? this.agent.options.model ?? ''
     const sub = this.subagentSelection.current
     const footer = {
@@ -5347,6 +5586,7 @@ export class SshTui {
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
         ? {}
         : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
+      ...(balanceText === undefined ? {} : { balanceText }),
       ...(this.searchHits.length > 0 && this.searchIndex >= 0
         ? { search: { index: this.searchIndex, total: this.searchHits.length } }
         : {}),
@@ -5399,6 +5639,7 @@ export class SshTui {
       this.suggestionIndex,
       this.activeSubagents.size,
       this.dialog?.kind ?? '',
+      this.dialog?.kind === 'questions' ? String(this.dialog.cursor) : '',
       planDockLines.join('\n'),
       String(chromeStart),
     ].join('\x1f')
@@ -5453,19 +5694,29 @@ export class SshTui {
     const input = this.input
     if (!input.startsWith('/')) return []
     const prefix = input.slice(1).toLowerCase()
-    const dsh = (this.ctx.get('commands')?.list(this.agent) ?? []).map(command => ({
-      name: command.name,
-      description: command.input?.images === true ? `${command.description}（可附图）` : command.description,
-      local: false,
-    }))
-    const all = [
-      ...localizedCommands().map(command => ({ name: command.name, description: command.description, local: true })),
-      ...dsh,
-    ]
+    const local = localizedCommands()
+      .filter(command => command.name !== 'dialog-test' && (prefix !== '' || command.aliasOf === undefined))
+      .map(command => ({ name: command.name, description: command.description, local: true }))
+    const seen = new Set(local.map(command => command.name))
+    const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
+      .filter(command => !seen.has(command.name))
+      .map(command => ({
+        name: command.name,
+        description: command.input?.images === true
+          ? `${command.description}（${t('cmd.withImages')}）`
+          : command.description,
+        local: false,
+      }))
+    const all = [...local, ...dsh]
     const filtered = prefix === ''
       ? all
       : all.filter(command => command.name.startsWith(prefix) || command.name.includes(prefix))
-    return filtered.slice(0, 12)
+    if (prefix === '') return filtered
+    return filtered.sort((a, b) => {
+      const aStart = a.name.startsWith(prefix) ? 0 : 1
+      const bStart = b.name.startsWith(prefix) ? 0 : 1
+      return aStart - bStart
+    })
   }
 
   private suggestionsVisible(): boolean {
@@ -5654,7 +5905,7 @@ export class SshTui {
           const sourceKind = source.kind ?? ''
           if (sourceKind === 'user') {
             this.pushRow({ kind: 'user', text: `❯ ${text}` })
-            if (!this.replaying) this.beginWait(text)
+            if (!this.replaying) this.beginWait()
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
           } else if (sourceKind === 'plugin' && source.form === 'snapshot') {
@@ -6550,6 +6801,7 @@ export class SshTui {
       index,
       total,
       selected: new Set(preselected !== undefined && preselected >= 0 ? [preselected] : []),
+      cursor: preselected !== undefined && preselected >= 0 ? preselected : 0,
       resolve: (selection) => {
         this.settleQuestion(dialog, () => resolve(selection))
       },
@@ -6647,14 +6899,9 @@ export class SshTui {
     }
   }
 
-  /** How many endpoint-listed models fit on one picker page alongside navigation. */
-  private readonly MODEL_PAGE_SIZE = 7
-  private readonly MODEL_PAGE_PREV = '« 上一页'
-  private readonly MODEL_PAGE_NEXT = '» 下一页'
-
   /**
-   * One pick across a possibly long model list, paging through the digit
-   * dialog so an endpoint with dozens of models stays selectable.
+   * One pick across a possibly long model list. The question dialog keeps a
+   * 12-row sliding window so dozens of models stay selectable with ↑/↓.
    */
   private async pickModelOption(
     modelOptions: readonly { id: string; label: string }[],
@@ -6669,37 +6916,18 @@ export class SshTui {
       return true
     })
     if (unique.length === 0) return undefined
-    let offset = 0
-    for (;;) {
-      const page = unique.slice(offset, offset + this.MODEL_PAGE_SIZE)
-      const hasPrev = offset > 0
-      const hasNext = offset + this.MODEL_PAGE_SIZE < unique.length
-      const pageCount = Math.max(1, Math.ceil(unique.length / this.MODEL_PAGE_SIZE))
-      const currentPage = Math.floor(offset / this.MODEL_PAGE_SIZE) + 1
-      const options = page.map(option => ({
+    const currentIndex = unique.findIndex(option => option.id === currentModel && option.id !== '__switch_provider__')
+    const answer = await this.askQuestion({
+      id: 'model-pick',
+      question: `选择模型（提供商 ${provider} · ${sourceLabel}${unique.length > PICKER_WINDOW ? ` · ${unique.length} 个，↑/↓ 翻看` : ''}）`,
+      options: unique.map(option => ({
         label: option.label,
         description: option.id === currentModel ? '当前' : undefined,
-      }))
-      if (hasPrev) options.push({ label: this.MODEL_PAGE_PREV, description: undefined })
-      if (hasNext) options.push({ label: this.MODEL_PAGE_NEXT, description: undefined })
-      const currentIndex = page.findIndex(option => option.id === currentModel && option.id !== '__switch_provider__')
-      const answer = await this.askQuestion({
-        id: 'model-pick',
-        question: `选择模型（提供商 ${provider} · ${sourceLabel}${hasPrev || hasNext ? `，第 ${currentPage}/${pageCount} 页` : ''}）`,
-        options,
-      }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
-      const picked = options.find(option => option.label === answer.selected[0])
-      if (picked === undefined) return undefined
-      if (picked.label === this.MODEL_PAGE_NEXT) {
-        offset += this.MODEL_PAGE_SIZE
-        continue
-      }
-      if (picked.label === this.MODEL_PAGE_PREV) {
-        offset = Math.max(0, offset - this.MODEL_PAGE_SIZE)
-        continue
-      }
-      return page.find(option => option.label === picked.label)
-    }
+      })),
+    }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
+    const picked = answer.selected[0]
+    if (picked === undefined) return undefined
+    return unique.find(option => option.label === picked)
   }
 
   /** Live adapter routes the TUI can switch to, plus the current selection. */
@@ -7021,9 +7249,14 @@ export class SshTui {
   }
 
   private clearQuotaForProvider(provider: string): void {
-    if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) return
-    this.quotaSnapshot = undefined
-    this.quotaAlerted.clear()
+    const quotaSame = this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider
+    const balanceSame = this.balanceSnapshot !== undefined && this.balanceSnapshot.provider === provider
+    if (quotaSame && balanceSame) return
+    if (!quotaSame) {
+      this.quotaSnapshot = undefined
+      this.quotaAlerted.clear()
+    }
+    if (!balanceSame) this.balanceSnapshot = undefined
     this.quotaStepsSinceRefresh = 0
     this.markDirty()
   }
@@ -7435,9 +7668,8 @@ export class SshTui {
     try {
       const quota = await this.refreshQuota({ reason: 'command', announce: true })
       if (quota !== undefined) return
-      const balance = await this.fetchAccountBalance(this.currentProviderId())
-      if (balance !== undefined) {
-        this.pushRow({ kind: 'system', text: formatAccountBalance(balance) })
+      if (this.balanceSnapshot !== undefined) {
+        this.pushRow({ kind: 'system', text: formatAccountBalance(this.balanceSnapshot) })
         return
       }
       const provider = this.currentProviderId()
@@ -7482,12 +7714,32 @@ export class SshTui {
       const provider = this.currentProviderId()
       const snapshot = await this.fetchQuotaSnapshot(provider)
       if (snapshot !== undefined) {
+        this.balanceSnapshot = undefined
         this.applyQuotaSnapshot(snapshot, options.announce)
         return snapshot
+      }
+      try {
+        const balance = await this.fetchAccountBalance(provider)
+        if (balance !== undefined) {
+          this.balanceSnapshot = balance
+          this.quotaSnapshot = undefined
+          this.quotaAlerted.clear()
+          if (options.announce) this.pushRow({ kind: 'system', text: formatAccountBalance(balance) })
+          this.markDirty()
+          return undefined
+        }
+      } catch (error: unknown) {
+        if (options.reason === 'command') throw error
+        this.markDirty()
+        return this.quotaSnapshot
       }
       if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider !== provider) {
         this.quotaSnapshot = undefined
         this.quotaAlerted.clear()
+        this.markDirty()
+      }
+      if (this.balanceSnapshot !== undefined && this.balanceSnapshot.provider !== provider) {
+        this.balanceSnapshot = undefined
         this.markDirty()
       }
       return undefined
@@ -7620,6 +7872,8 @@ export class SshTui {
         case 'A':
           if (this.dialog?.kind === 'inspect') {
             this.scrollInspectOrTranscript(-1)
+          } else if (this.moveQuestionCursor(-1)) {
+            return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
@@ -7632,6 +7886,8 @@ export class SshTui {
         case 'B':
           if (this.dialog?.kind === 'inspect') {
             this.scrollInspectOrTranscript(1)
+          } else if (this.moveQuestionCursor(1)) {
+            return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
             this.markDirty()
@@ -7870,6 +8126,20 @@ export class SshTui {
     }
   }
 
+  private moveQuestionCursor(delta: number): boolean {
+    const dialog = this.dialog
+    if (dialog === undefined || dialog.kind !== 'questions') return false
+    const count = dialog.question.options?.length ?? 0
+    if (count === 0) return false
+    dialog.cursor = Math.max(0, Math.min(count - 1, dialog.cursor + delta))
+    if (dialog.question.multiSelect !== true) {
+      dialog.selected.clear()
+      dialog.selected.add(dialog.cursor)
+    }
+    this.markDirty()
+    return true
+  }
+
   private handleDialogChar(text: string): void {
     const dialog = this.dialog
     if (dialog === undefined) return
@@ -7892,6 +8162,7 @@ export class SshTui {
     const key = text.toLowerCase()
     const index = QUESTION_OPTION_KEYS.indexOf(key)
     if (index >= 0 && index < (dialog.question.options?.length ?? 0)) {
+      dialog.cursor = index
       if (dialog.question.multiSelect === true) {
         if (dialog.selected.has(index)) dialog.selected.delete(index)
         else dialog.selected.add(index)
@@ -8457,7 +8728,7 @@ export class SshTui {
       this.pushRow({ kind: 'system', text: t('steer.queued', { text }) })
       this.agent.steer(message)
     } else {
-      this.beginWait(text)
+      this.beginWait()
       this.agent.followup(message)
     }
     this.markDirty()
@@ -8469,10 +8740,12 @@ export class SshTui {
     switch (command) {
       case 'help': {
         const local = localizedCommands()
-          .filter(item => item.name !== 'help' && item.name !== 'exit')
+          .filter(item => item.name !== 'help' && item.aliasOf === undefined)
           .map(item => `/${item.name.padEnd(12)} ${item.description}`)
+        const seen = new Set(localizedCommands().map(item => item.name))
         const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
-          .map(item => `/${item.name.padEnd(12)} ${item.description}${item.input?.images === true ? '（可附图）' : ''}  (dsh)`)
+          .filter(item => !seen.has(item.name))
+          .map(item => `/${item.name.padEnd(12)} ${item.description}${item.input?.images === true ? `（${t('cmd.withImages')}）` : ''}  (dsh)`)
         this.pushRow({
           kind: 'system',
           text: [
@@ -8486,6 +8759,7 @@ export class SshTui {
             t('help.intro5'),
             t('help.intro6'),
             t('help.intro7'),
+            t('help.intro8'),
           ].join('\n'),
         })
         break
@@ -8584,7 +8858,6 @@ export class SshTui {
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
         this.waitStartedAt = undefined
-        this.waitPrompt = undefined
         this.focusedRow = null
         this.searchHits = []
         this.searchIndex = -1

@@ -49,7 +49,7 @@ dsh --profile tui
 
 ![2 kB/s SSH 上回放同一任务](docs/screenshots/slow-link.gif)
 
-协议（可复现，不靠模型估）：`npm run screenshots:slow` → `docs/screenshots/slow-link.json`。这次回放 14 次绘制、约 **15.5 KB**，在 2 kB/s 上大约 **7.6 s** 画完。数字是这条固定事件序的 stdout 字节账。
+协议（可复现，不靠模型估）：`npm run screenshots:slow` → `docs/screenshots/slow-link.json`。这次回放 14 次绘制、约 **18.0 KB**，在 2 kB/s 上大约 **8.8 s** 画完。数字是这条固定事件序的 stdout 字节账。
 
 ## 功能一览
 
@@ -61,7 +61,8 @@ dsh --profile tui
 - 系统提示词 / `system-reminder` / `AGENTS.md` 等注入折叠为「提示词注入:系统预设 AGENTS.MD」卡片，默认收起，Enter 展开看全文；
 - 工具调用卡片化：标题默认色，只把状态点与 `[ok]`/`[error]` 染成黄/绿/红；
   shell 命令浅灰、路径 cyan；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
-  文件统计）。正文超出窗口时单独全览（Esc 返回），放得下就在工作区展开；JSON 参数与结果自动转可读内容；
+  文件统计），头部带 git 红绿增删行数（如 ` -13 +24`），默认收起，Enter 展开；
+  正文超出窗口时单独全览（Esc 返回）；JSON 参数与结果自动转可读内容；
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
 - 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
   第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧（含 `目录:srv`；点击打印完整工作目录）；
@@ -73,7 +74,9 @@ dsh --profile tui
   `/resume` 会话切换、`/disconnect` 断线策略等完整支持；
 - 每个子代理都是独立可折叠卡片，默认收起，运行中带旋转动画；多个子代理互不混排；
 - 进入计划模式、待审计划、提问用户都会显示对应卡片和底部提示，而不是只塞进系统消息。
-- 模型尚未吐思考/回复时，工作区底部有 Codex 式「处理中」动画卡：当前用户提示或正在跑的工具名 + 计时 + Esc 中断。
+- 工作区底部有 Codex 式「处理中」动画卡：思考里第一个闭合的 `**加粗**` 作为 shimmer
+  标题（还没出现就保持「处理中」），运行中的工具摘要在 `└` 下自动折行（最多 3 行，末行
+  加省略号），带计时和 Esc 中断；回复开始流式输出时自动让位。
 
 ## 环境要求
 
@@ -220,7 +223,11 @@ dsh --profile tui --no-color
 斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
-工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简**（藏思考、合并工具/编辑）之间切换，写入 `ssh-tui.view`。这和 `/mode`（agent preset）不是一回事。
+工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
+`ssh-tui.view`。极简对齐 Codex：藏思考，按「回复 → 已调用 N 个工具 → 已编辑 N 个文件 →
+下一段回复」交错绘制；合并卡头部带 git 红绿增删行数（`-13 +24`），Enter 展开条目（编辑
+展开后画 diff），状态球只有全失败才红；进行中的计划仍钉在输入框上方。这和 `/mode`
+（agent preset）不是一回事。
 以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
 「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
 进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
@@ -267,7 +274,7 @@ API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 O
 - **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
 - **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
 
-OpenCode Go / SuperGrok 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方余额只出现在 `/balance`，不进底栏。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询节奏按最紧窗口：5 小时额度每 10 轮（接近改 4 轮），周额度每 50 轮（接近改 10 轮），月额度每 80 轮（接近改 20 轮）。
+OpenCode Go / SuperGrok 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方和可查询的 OpenAI 兼容网关把剩余余额画进底栏（`余额 86.42 CNY`）。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询默认每 **10 步**一次；小时窗口接近阈值时改 4 步。
 
 ## 配置
 

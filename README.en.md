@@ -64,7 +64,7 @@ diff, subagent cards, and the plan strip appear as the bytes arrive.
 
 Reproducible, no model in the loop: `npm run screenshots:slow` writes
 `docs/screenshots/slow-link.json`. This capture is 14 paints, about
-**15.5 KB**, **7.6 s** at 2 kB/s. Byte ledger for this event sequence.
+**18.0 KB**, **8.8 s** at 2 kB/s. Byte ledger for this event sequence.
 
 ## Requirements
 
@@ -266,8 +266,13 @@ finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
 then `ssh-tui.language` in `$DSH_HOME/settings.yaml`, then `LANG` /
 `LC_MESSAGES`. Unknown and `C` locales stay Chinese.
 `/view` switches the workspace between **detailed** (default: thinking and
-per-tool cards) and **compact** (hide thinking, merge tools/edits). This is
-not `/mode` (agent presets). The choice is stored as `ssh-tui.view`.
+per-tool cards) and **compact**. Compact follows Codex: thinking is hidden
+and the transcript interleaves as "reply → called N tools → edited N files →
+next reply"; merged cards carry a git-style red/green `-13 +24` line stat,
+expand with `Enter` (edits list files and paint the diff), the state dot
+goes red only when everything failed, and a live plan stays pinned above
+the composer. This is not `/mode` (agent presets). The choice is stored as
+`ssh-tui.view`.
 
 `/model` lists models for the **current** provider only. On SuperGrok that
 is `grok-4.6` / `grok-4.5` plus reasoning effort (`xhigh` on 4.6). `/provider`
@@ -324,14 +329,13 @@ labelled `(images ok)` in the command list and completion hints.
 - **OpenCode Go** reads the official `/v1/usage` windows (5-hour / week / month);
 - **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
 
-OpenCode Go / SuperGrok quota is fetched silently at start and on a
-window-based cadence; the footer shows plan name + remaining bar + percent,
-and on a narrow row drops the plan name first so the bar and percent stay.
-DeepSeek official balance stays on `/balance` and never occupies the footer.
-A ⚠ transcript line appears only when remaining crosses 50% / 25% / 10% / 5%.
-`/usage` or `/balance` still prints the full snapshot. Cadence: every 10 turns
-for a 5-hour cap (every 4 when near), every 50 for weekly (every 10 when near),
-every 80 for monthly (every 20 when near).
+OpenCode Go / SuperGrok quota is fetched silently at start and every 10
+model steps (every 4 when an hourly window is near a threshold). The footer
+shows plan name + remaining bar + percent; on a narrow row the plan name
+drops first. DeepSeek official and queryable OpenAI-compatible gateways put
+remaining prepaid balance on the footer (`bal 86.42 CNY`). A ⚠ transcript
+line appears only when remaining crosses 50% / 25% / 10% / 5%. `/usage` or
+`/balance` still prints the full snapshot.
 
 The startup screen shows the official DeepSeek whale logo (rendered from the
 harness favicon) in the DeepSeek brand color, with the wordmark below it. The
@@ -340,11 +344,12 @@ down to a compact variant on narrow ones — so it never looks squeezed. A
 horizontal rule separates the workspace (transcript, reasoning, tool cards)
 from the input area.
 
-While the model has not streamed thinking or a reply yet, a Codex-style
-`⠋ Working  (1s · Esc to interrupt)` card sits at the bottom of the
-workspace. The detail line is the current user prompt, or the live tool
-name once a tool is running. It yields as soon as thinking or a reply
-starts.
+While the turn runs, a Codex-style `⠋ Working  (1s · Esc to interrupt)`
+card sits at the bottom of the workspace. The shimmer header is the first
+closed `**bold**` line of the model's thinking — it stays `Working` until
+one arrives — and the live tool summary word-wraps under `  └ ` for up to
+three rows with an ellipsis on the last. The card yields as soon as the
+reply itself starts streaming.
 
 Model reasoning blocks are collapsed by default: while thinking a compact
 `▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and
@@ -377,11 +382,13 @@ Tool calls render as compact cards instead of raw argument JSON. The title
 stays the default foreground; only the status dot and `[ok]` / `[error]` /
 `[running…]` (plus `[退出码 N]` / `[信号 X]`) are yellow / green / red.
 Shell tools show the command as dim-grey `$ command`. File mutations
-(`edit` / `write` / `str_replace_editor`) render the applied change
-git-style: a path header, `-` lines on a dark-red background, `+` lines on
-a dark-green background, and a `└ +N -M · K file(s)` footer. Expanding a
-card whose body fits the workspace shows it in place; if it would overflow,
-a dedicated inspect view opens (`Esc` returns to the session). Other tools
+(`edit` / `write` / `str_replace_editor`) carry a git-style red/green
+deletions/additions stat in the header (` -13 +24`; zero parts drop out)
+and start collapsed like every other card. Expanding one paints the
+applied change git-style: a path header, `-` lines on a dark-red
+background, `+` lines on a dark-green background, and a
+`└ +N -M · K file(s)` footer. If the body would overflow the workspace, a
+dedicated inspect view opens (`Esc` returns to the session). Other tools
 show a short argument summary and start collapsed. Expanded generic calls
 convert their JSON arguments and JSON results into readable indented
 content — key/value fields, bullet lists, and multiline blocks for

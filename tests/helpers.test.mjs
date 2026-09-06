@@ -54,6 +54,7 @@ import {
   fitFooterStatusLine,
   dropFooterQuotaPlanName,
   formatFooterQuota,
+  formatFooterBalance,
   buildToolHeader,
   toolBodyFitsWorkspace,
   toolStateColor,
@@ -74,10 +75,15 @@ import {
   fmtElapsedCompact,
   waitCardCopy,
   waitSummaryFromReasoning,
+  wrapWaitDetails,
   parseWorkspaceView,
   parseDisconnectPolicy,
+  pickerWindowStart,
   compactToolGroups,
+  compactToolBursts,
   countDiffLines,
+  countDiffAddDel,
+  diffStatToken,
   compactionHeaderText,
   subagentHeaderText,
   todoProgressLabel,
@@ -348,6 +354,69 @@ test('captureHangupSignals drops the launcher SIGTERM handler', () => {
   }
 })
 
+test('pickerWindowStart keeps a 12-row window around the cursor', () => {
+  assert.equal(pickerWindowStart(0, 8), 0)
+  assert.equal(pickerWindowStart(0, 30), 0)
+  assert.equal(pickerWindowStart(20, 30), 15)
+  assert.equal(pickerWindowStart(29, 30), 18)
+})
+
+test('slash suggestions on a bare slash include /disconnect', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.input = '/'
+  tui.cursor = 1
+  const text = tui.captureFrame(88, 28).join('\n')
+  assert.ok(text.includes('/disconnect'))
+  assert.ok(text.includes('断线策略'))
+  assert.equal(/select model and reasoning/u.test(text), false)
+  assert.equal(text.includes('/dialog-test'), false)
+  assert.equal(text.includes('/exit'), false)
+  assert.equal(text.includes('/lang '), false)
+  assert.equal(text.includes('/balance'), false)
+})
+
+test('slash suggestions slide a 12-row window with the selected command', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.input = '/'
+  tui.cursor = 1
+  tui.captureFrame(88, 32)
+  tui.suggestionIndex = Math.max(0, tui.commandSuggestions.length - 1)
+  const frame = tui.captureFrame(88, 32)
+  const text = frame.join('\n')
+  if (tui.commandSuggestions.length > 12) assert.ok(text.includes('↑ 还有'))
+  const rows = frame.filter(line => /[› ] \/[-a-z]+\s/u.test(line))
+  assert.ok(rows.length <= 12)
+  assert.ok(rows.length >= 1)
+})
+
+test('question dialogs slide a 12-row window around the focused option', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const options = Array.from({ length: 30 }, (_, index) => ({
+    label: `model-${String(index).padStart(2, '0')}`,
+    description: index === 20 ? '当前' : undefined,
+  }))
+  tui.dialog = {
+    kind: 'questions',
+    question: { id: 'model-pick', question: '选择模型', options },
+    index: 0,
+    total: 1,
+    selected: new Set([20]),
+    cursor: 20,
+    resolve() {},
+    reject() {},
+  }
+  const text = tui.captureFrame(88, 32).join('\n')
+  assert.ok(text.includes('model-20'))
+  assert.equal(text.includes('model-00'), false)
+  assert.ok(text.includes('↑ 还有') && text.includes('↓ 还有'))
+})
+
 test('parseDisconnectPolicy accepts pause/continue aliases', () => {
   assert.equal(parseDisconnectPolicy('pause'), 'pause')
   assert.equal(parseDisconnectPolicy('继续'), 'continue')
@@ -471,6 +540,14 @@ test('footer status keeps one activity and drops identity from the right', () =>
     cwdLabel: '目录:srv',
   })
   assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, '排队 1'])
+  const withBalance = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'deepseek-v4-flash', provider: 'deepseek-official',
+    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash', subDiffers: false,
+    balanceText: '余额 86.42 CNY', foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.ok(withBalance.includes('余额 86.42 CNY'))
   const line = fitFooterStatusLine('子代理 2', identity, 28)
   assert.match(line, /^子代理 2/)
   assert.equal(line.includes('排队'), false)
@@ -602,25 +679,51 @@ test('fmtElapsedCompact matches Codex compact elapsed', () => {
   assert.equal(fmtElapsedCompact(3661), '1h 01m 01s')
 })
 
-test('waitCardCopy prefers a live tool then a model summary, not the user prompt', () => {
+test('waitCardCopy keeps the full tool detail and never echoes the prompt', () => {
   assert.equal(waitCardCopy({}).header, '处理中')
+  assert.equal(waitCardCopy({ prompt: '  fix the footer  ' }).header, '处理中')
   assert.equal(waitCardCopy({ prompt: '  fix the footer  ' }).detail, undefined)
   assert.equal(waitCardCopy({
     toolTitle: '读取',
     toolSummary: 'src/tui.ts',
     prompt: 'ignored once a tool is live',
   }).detail, '读取  src/tui.ts')
+  const longSummary = 'a'.repeat(120)
+  assert.equal(waitCardCopy({ toolTitle: '读取', toolSummary: longSummary }).detail, `读取  ${longSummary}`)
   assert.equal(waitCardCopy({
     reasoning: '**Inspecting paint** then a long explanation of leftover glyphs.',
     prompt: 'please fix leftover paint',
   }).header, 'Inspecting paint')
 })
 
-test('waitSummaryFromReasoning keeps a short Codex-style clause', () => {
+test('waitSummaryFromReasoning only accepts a closed bold or a heading', () => {
   assert.equal(waitSummaryFromReasoning('**Reading files**\nmore'), 'Reading files')
   assert.equal(waitSummaryFromReasoning('# 核对光标\n后面很长'), '核对光标')
-  const long = waitSummaryFromReasoning('这是一段没有加粗的很长说明文字用来测试截断')
-  assert.ok(long !== undefined && long.length <= 18)
+  // An unclosed ** means the title has not arrived yet: keep the default header.
+  assert.equal(waitSummaryFromReasoning('**正在读取'), undefined)
+  assert.equal(waitSummaryFromReasoning('正在读取 *一些* 文件'), undefined)
+  // No bold and no heading: no crude truncation fallback.
+  assert.equal(waitSummaryFromReasoning('这是一段没有加粗的很长说明文字用来测试截断'), undefined)
+  // A closed bold is shown in full instead of being sliced.
+  const long = '**这是一段很长的加粗标题不应当被截断掉**'
+  assert.equal(waitSummaryFromReasoning(`前言 ${long} 后记`), '这是一段很长的加粗标题不应当被截断掉')
+})
+
+test('wrapWaitDetails wraps under the └ prefix and ellipsizes past 3 rows', () => {
+  assert.deepEqual(wrapWaitDetails('src/tui.ts', 40), ['  └ src/tui.ts'])
+  const wrapped = wrapWaitDetails('one two three four five six seven', 12)
+  assert.equal(wrapped[0], '  └ one two')
+  assert.ok(wrapped.every(line => line.startsWith('  └ ') || line.startsWith('    ')))
+  assert.ok(wrapped.every(line => displayWidth(line) <= 12))
+  const long = 'alpha '.repeat(10) + 'omega'
+  const capped = wrapWaitDetails(long, 20)
+  assert.equal(capped.length, 3)
+  assert.ok(capped[2].endsWith('…'))
+  assert.ok(displayWidth(capped[2]) <= 20)
+  const wide = wrapWaitDetails('这是一条非常长的中文工具摘要需要折行显示', 14)
+  assert.equal(wide[0], '  └ 这是一条非')
+  assert.ok(wide.every(line => displayWidth(line) <= 14))
+  assert.deepEqual(wrapWaitDetails('   ', 20), [])
 })
 
 test('wait card tracks model work and stays while thinking', () => {
@@ -634,7 +737,6 @@ test('wait card tracks model work and stays while thinking', () => {
   }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
   tui.waitStartedAt = Date.now() - 1500
-  tui.waitPrompt = '请修绘制残留'
   const waiting = tui.captureFrame(48, 16)
   assert.ok(waiting.some(line => line.includes('处理中')))
   assert.equal(waiting.some(line => line.includes('请修绘制残留')), false)
@@ -644,6 +746,11 @@ test('wait card tracks model work and stays while thinking', () => {
   const thinking = tui.captureFrame(56, 16)
   assert.ok(thinking.some(line => line.includes('Inspecting paint')))
   assert.ok(thinking.some(line => /Esc/.test(line)))
+  // While the reply itself streams, the transcript paints the tokens and the
+  // wait card yields instead of duplicating a truncated echo of the reply.
+  tui.streaming = { text: '正在流式输出的回复正文', reasoning: '' }
+  const streaming = tui.captureFrame(56, 16)
+  assert.equal(streaming.some(line => line.includes('处理中')), false)
 })
 
 test('foldInputView keeps wide characters intact around the cursor', () => {
@@ -764,12 +871,12 @@ test('parseSuperGrokBilling maps creditUsagePercent to remaining quota', () => {
   assert.match(alert, /^⚠ /u)
   assert.match(alert, /SuperGrok/)
   assert.match(alert, /每周额度还剩余 82%/)
-  assert.equal(quotaRefreshEveryTurns(snap.windows[0]), 50)
+  assert.equal(quotaRefreshEveryTurns(snap.windows[0]), 10)
   assert.equal(quotaRefreshEveryTurns({ label: '本周', period: 'weekly', remainingPercent: 48 }), 10)
   assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 80 }), 10)
   assert.equal(quotaRefreshEveryTurns({ label: '5h', period: 'hourly', remainingPercent: 50 }), 4)
-  assert.equal(quotaRefreshEveryTurns({ label: '本月', period: 'monthly', remainingPercent: 90 }), 80)
-  assert.equal(quotaRefreshEverySteps(snap.windows[0]), 50)
+  assert.equal(quotaRefreshEveryTurns({ label: '本月', period: 'monthly', remainingPercent: 90 }), 10)
+  assert.equal(quotaRefreshEverySteps(snap.windows[0]), 10)
   assert.deepEqual(crossedQuotaThresholds(80, 4), [5])
 })
 
@@ -787,6 +894,7 @@ test('parseDeepSeekBalance reads official user/balance wire format', () => {
   assert.equal(snap.available, true)
   assert.equal(snap.lines[0]?.amount, '86.42')
   assert.match(formatAccountBalance(snap), /可用余额 · 86\.42 CNY/)
+  assert.equal(formatFooterBalance(snap), '余额 86.42 CNY')
 })
 
 test('parseOpenAiCompatibleBalance accepts credit_grants and DeepSeek-shaped gateways', () => {
@@ -801,6 +909,7 @@ test('parseOpenAiCompatibleBalance accepts credit_grants and DeepSeek-shaped gat
     balance_infos: [{ currency: 'USD', total_balance: '3.2' }],
   }, 'my-gateway', '/user/balance')
   assert.equal(shaped?.lines[0]?.amount, '3.2')
+  assert.equal(formatFooterBalance(grants), '余额 15 USD')
 })
 
 test('parseOpenCodeGoQuota keeps remaining percent for each window', () => {
@@ -1011,7 +1120,47 @@ test('compactToolGroups splits edits from other calls and counts lines', () => {
   assert.equal(countDiffLines(groups.edits[0].diff) > 0, true)
 })
 
-test('compact view hides thinking and pins merged tools after the reply', () => {
+test('countDiffAddDel separates additions from deletions', () => {
+  // Edit: 2 removed, 3 added.
+  assert.deepEqual(
+    countDiffAddDel([{ path: 'a.ts', oldText: 'a\nb', newText: 'x\ny\nz' }]),
+    { add: 3, del: 2 },
+  )
+  // New file (oldText null): everything is an addition.
+  assert.deepEqual(
+    countDiffAddDel([{ path: 'new.ts', oldText: null, newText: 'one\ntwo' }]),
+    { add: 2, del: 0 },
+  )
+  // Pure deletion keeps the del count and drops additions.
+  assert.deepEqual(
+    countDiffAddDel([{ path: 'a.ts', oldText: 'a\nb\nc', newText: '' }]),
+    { add: 0, del: 3 },
+  )
+  assert.deepEqual(countDiffAddDel(undefined), { add: 0, del: 0 })
+})
+
+test('diffStatToken orders deletions first and omits zero parts', () => {
+  assert.equal(diffStatToken(24, 13), '-13 +24')
+  assert.equal(diffStatToken(24, 0), '+24')
+  assert.equal(diffStatToken(0, 13), '-13')
+  assert.equal(diffStatToken(0, 0), '')
+})
+
+test('compactToolBursts keep tools with the preceding assistant reply', () => {
+  const bursts = compactToolBursts([
+    { kind: 'assistant', text: 'first' },
+    { kind: 'tool', callId: 'r1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: 'ok', status: 'ok', expanded: false },
+    { kind: 'assistant', text: 'second' },
+    { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false, diff: [{ path: 'a.ts', oldText: 'a', newText: 'b' }] },
+  ])
+  assert.equal(bursts.length, 2)
+  assert.equal(bursts[0]?.after?.text, 'first')
+  assert.equal(bursts[0]?.groups.calls.length, 1)
+  assert.equal(bursts[1]?.after?.text, 'second')
+  assert.equal(bursts[1]?.groups.edits.length, 1)
+})
+
+test('compact view hides thinking and interleaves merged tools after each reply', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
@@ -1024,21 +1173,83 @@ test('compact view hides thinking and pins merged tools after the reply', () => 
   tui.setWorkspaceView('compact')
   tui.rows.push(
     { kind: 'reasoning', text: 'SECRET_THOUGHT', expanded: false },
+    { kind: 'assistant', text: 'first reply' },
     { kind: 'tool', callId: 'r1', name: 'read', title: '读取', summary: 'a.ts', args: '{}', output: 'ok', status: 'ok', expanded: false },
     { kind: 'tool', callId: 'g1', name: 'grep', title: '搜索', summary: 'x', args: '{}', output: 'miss', status: 'ok', expanded: false },
+    { kind: 'assistant', text: 'second reply' },
     { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts', args: '{}', output: '', status: 'ok', expanded: false, diff: [{ path: 'a.ts', oldText: 'a', newText: 'b\nc' }] },
-    { kind: 'assistant', text: 'visible reply that would scroll early tool cards away' },
   )
-  const frame = tui.captureFrame(72, 16)
+  const frame = tui.captureFrame(72, 20)
   const text = frame.join('\n')
   assert.equal(text.includes('SECRET_THOUGHT'), false)
   assert.equal(text.includes('已思考'), false)
-  assert.ok(text.includes('visible reply'))
+  assert.ok(text.includes('first reply'))
+  assert.ok(text.includes('second reply'))
   assert.ok(text.includes('已调用 2 个工具'))
   assert.ok(text.includes('已编辑'))
-  const replyAt = frame.findIndex(line => line.includes('visible reply'))
+  // The merged edit card carries a git-style -deletions +additions stat.
+  assert.ok(text.includes('-1 +2'))
+  const firstAt = frame.findIndex(line => line.includes('first reply'))
   const toolsAt = frame.findIndex(line => line.includes('已调用'))
-  assert.ok(replyAt >= 0 && toolsAt >= 0 && toolsAt > replyAt)
+  const secondAt = frame.findIndex(line => line.includes('second reply'))
+  const editsAt = frame.findIndex(line => line.includes('已编辑'))
+  assert.ok(firstAt >= 0 && toolsAt > firstAt && secondAt > toolsAt && editsAt > secondAt)
+})
+
+test('compact edit summary expands to the merged diff body', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  tui.setWorkspaceView('compact')
+  const edit = {
+    kind: 'tool',
+    callId: 'e1',
+    name: 'edit',
+    title: '编辑',
+    summary: 'a.ts',
+    args: '{}',
+    output: '',
+    status: 'ok',
+    expanded: false,
+    diff: [{ path: 'a.ts', oldText: 'old-line', newText: 'new-line' }],
+  }
+  tui.rows.push(
+    { kind: 'assistant', text: 'changed a file' },
+    edit,
+  )
+  tui.focusedRow = edit
+  tui.toggleCollapsible()
+  assert.equal(edit.expanded, true)
+  const text = tui.captureFrame(72, 20).join('\n')
+  assert.ok(text.includes('已编辑'))
+  assert.ok(text.includes('old-line'))
+  assert.ok(text.includes('new-line'))
+  // The expanded per-file entry shows its own -/+ stat instead of a total.
+  assert.ok(text.includes('-1 +1'))
+})
+
+test('detailed edit cards stay collapsed and show the -/+ stat in the header', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  const oldText = 'line1\nline2\nline3'
+  const newText = 'line1\nchanged\nadded-a\nadded-b'
+  tui.rows.push(
+    { kind: 'assistant', text: 'reworked the file' },
+    { kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'src/tui.ts', args: '{}', output: 'ok', status: 'ok', expanded: false, diff: [{ path: 'src/tui.ts', oldText, newText }] },
+  )
+  const frame = tui.captureFrame(72, 20)
+  const text = frame.join('\n')
+  // Collapsed by default: the header carries the git stat, no diff body.
+  assert.ok(frame.some(line => line.includes('▸ ● 编辑') && line.includes('-3 +4')))
+  assert.equal(text.includes('-line2'), false)
+  assert.equal(text.includes('+changed'), false)
 })
 
 test('Ctrl+R without a selection expands the latest card', () => {
@@ -1189,6 +1400,27 @@ test('buildToolHeader colors only the status dot and [ok]/[error] word', () => {
   assert.equal(summary?.sgr, '90')
   assert.equal(toolStateColor('running'), '33')
   assert.equal(toolStateColor('error'), '31')
+})
+
+test('buildToolHeader paints the diff stat git red/green between summary and state', () => {
+  const header = buildToolHeader({
+    focused: false, expanded: false, title: '编辑', summary: 'src/tui.ts', status: 'ok',
+    diffStat: { add: 24, del: 13 },
+  })
+  assert.match(header.plain, /● 编辑  src\/tui\.ts  -13 \+24  \[ok\]/)
+  const red = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '-13')
+  const green = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '+24')
+  assert.equal(red?.sgr, '31')
+  assert.equal(green?.sgr, '32')
+  // New file: additions only; pure deletion: the minus part only.
+  assert.equal(
+    buildToolHeader({ focused: false, expanded: false, title: '编辑', summary: '', status: 'ok', diffStat: { add: 24, del: 0 } }).plain,
+    '  ▸ ● 编辑  +24  [ok]',
+  )
+  assert.equal(
+    buildToolHeader({ focused: false, expanded: false, title: '编辑', summary: '', status: 'ok', diffStat: { add: 0, del: 13 } }).plain,
+    '  ▸ ● 编辑  -13  [ok]',
+  )
 })
 
 test('oversized tool bodies open a dedicated inspect overlay', () => {
