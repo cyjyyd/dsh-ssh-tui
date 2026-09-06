@@ -3583,6 +3583,7 @@ export class SshTui {
   private streaming: { text: string; reasoning: string } | undefined
   private autoApprovalMode: AutoApprovalMode = 'off'
   private autoAllowedCount = 0
+  private autoDeniedCount = 0
   /** Host knobs folded from the session log: auto mode needs approval=ask to see requests. */
   private hostSandboxMode: string | undefined
   private hostApprovalPolicy: string | undefined
@@ -6716,18 +6717,25 @@ export class SshTui {
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> => {
-    // Auto mode classifies BEFORE waiting for a display: unattended turns
-    // keep moving on low-risk conventions, dangerous shapes stay with the
-    // human (and keep the detached wait semantics).
+    // Auto mode classifies BEFORE waiting for a display, Codex-style: allow
+    // shapes approve, danger shapes REJECT (the model reads the rejection and
+    // adapts instead of paging the human), unknown shapes ask only while a
+    // human is attached — detached turns reject so they complete instead of
+    // stalling toward the idle kill.
     if (this.autoApprovalMode === 'auto') {
       const row = request.callId === undefined
         ? undefined
         : this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
             candidate.kind === 'tool' && candidate.callId === request.callId)
       const command = row === undefined ? undefined : commandFromArgs(row.name, row.args)
-      if (classifyApproval(request.toolName, command) === 'allow') {
+      const decision = classifyApproval(request.toolName, command)
+      if (decision === 'allow') {
         this.autoAllowedCount += 1
         return 'allowed-once'
+      }
+      if (decision === 'deny' || !this.hasLiveDisplay()) {
+        this.autoDeniedCount += 1
+        return 'rejected'
       }
     }
     if (!this.hasLiveDisplay()) {
@@ -9148,7 +9156,7 @@ export class SshTui {
           this.pushRow({
             kind: 'system',
             text: this.autoApprovalMode === 'auto'
-              ? t('approval.statusAuto', { count: this.autoAllowedCount })
+              ? t('approval.statusAuto', { allowed: this.autoAllowedCount, denied: this.autoDeniedCount })
               : t('approval.statusOff'),
           })
           this.markDirty()

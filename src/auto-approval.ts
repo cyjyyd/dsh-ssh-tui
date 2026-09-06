@@ -1,15 +1,17 @@
 /**
  * Codex-style auto-approval classifier for the /approval auto mode.
  *
- * This is a UX heuristic, not a security boundary: "allow" means the command
- * matches low-risk, high-frequency conventions (reads, builds, tests, git
- * reads) so unattended turns keep moving. Anything unrecognized — and
- * everything dangerous — stays with the human. Real damage containment still
- * comes from the sandbox preset and git.
+ * This is a UX heuristic, not a security boundary. The contract mirrors
+ * Codex's unattended posture: allow-shaped commands (reads, builds, tests,
+ * git reads) approve automatically, danger-shaped commands are REJECTED with
+ * the model informed (it adapts instead of paging the human), and only
+ * genuinely unrecognized shapes fall through to a prompt — which detaches to
+ * a rejection when nobody is watching. Real damage containment still comes
+ * from the sandbox preset and git.
  */
 
 export type AutoApprovalMode = 'off' | 'auto'
-export type ApprovalDecision = 'allow' | 'ask'
+export type ApprovalDecision = 'allow' | 'deny' | 'ask'
 
 /**
  * Whole-command danger patterns, checked before anything else. A match keeps
@@ -66,20 +68,20 @@ function redirectsToRoot(segment: string): boolean {
 }
 
 /**
- * Classify one shell command line. Danger anywhere wins; otherwise the
- * command auto-approves only when every segment is a recognized low-risk
- * pattern — unknown shapes stay with the human.
+ * Classify one shell command line. Danger anywhere auto-rejects; otherwise
+ * the command auto-approves only when every segment is a recognized low-risk
+ * pattern — unknown shapes ask (and detach to a rejection when unattended).
  */
 export function classifyCommand(command: string): ApprovalDecision {
   const trimmed = command.trim()
   if (trimmed === '') return 'ask'
   for (const pattern of DANGER_PATTERNS) {
-    if (pattern.test(trimmed)) return 'ask'
+    if (pattern.test(trimmed)) return 'deny'
   }
   const parts = segments(trimmed)
   if (parts.length === 0) return 'ask'
   for (const segment of parts) {
-    if (redirectsToRoot(segment)) return 'ask'
+    if (redirectsToRoot(segment)) return 'deny'
     if (!ALLOW_SEGMENT_PATTERNS.some(pattern => pattern.test(segment))) return 'ask'
   }
   return 'allow'
@@ -90,7 +92,8 @@ const SAFE_NETWORK_TOOLS = new Set(['web_fetch', 'web_search'])
 
 /**
  * Classify one approval request. `command` is the decoded shell command when
- * the pending call is a shell tool; anything unrecognized asks.
+ * the pending call is a shell tool. 'deny' auto-rejects (the model reads the
+ * rejection and adapts); 'ask' falls through to the interactive prompt.
  */
 export function classifyApproval(toolName: string, command: string | undefined): ApprovalDecision {
   if (SAFE_NETWORK_TOOLS.has(toolName)) return 'allow'

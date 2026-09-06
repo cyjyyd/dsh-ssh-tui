@@ -27,7 +27,7 @@ test('classifyCommand auto-allows low-risk reads, builds, and tests', () => {
   }
 })
 
-test('classifyCommand keeps dangerous shapes with the human', () => {
+test('classifyCommand auto-rejects dangerous shapes (Codex contract)', () => {
   for (const command of [
     'rm -rf /',
     'rm -rf ~/projects',
@@ -44,20 +44,20 @@ test('classifyCommand keeps dangerous shapes with the human', () => {
     'shutdown now',
     'crontab -r',
   ]) {
-    assert.equal(classifyCommand(command), 'ask', command)
+    assert.equal(classifyCommand(command), 'deny', command)
   }
 })
 
-test('classifyCommand asks for unrecognized shapes and mixed commands', () => {
+test('classifyCommand asks for unrecognized shapes, denies mixed danger', () => {
   assert.equal(classifyCommand('node scripts/build.js'), 'ask')
   assert.equal(classifyCommand('python deploy.py'), 'ask')
   assert.equal(classifyCommand('npm install'), 'ask')
   assert.equal(classifyCommand('./configure && make'), 'ask')
   assert.equal(classifyCommand(''), 'ask')
-  // 安全段与危险段混合：危险优先
-  assert.equal(classifyCommand('ls && rm -rf /tmp/x'), 'ask')
-  // 重定向到绝对根路径：ask
-  assert.equal(classifyCommand('echo x > /etc/hosts'), 'ask')
+  // 安全段与危险段混合：危险优先（自动拒绝而非询问）
+  assert.equal(classifyCommand('ls && rm -rf /tmp/x'), 'deny')
+  // 重定向到绝对根路径：deny
+  assert.equal(classifyCommand('echo x > /etc/hosts'), 'deny')
 })
 
 test('classifyApproval gates non-shell tools and passes shell commands through', () => {
