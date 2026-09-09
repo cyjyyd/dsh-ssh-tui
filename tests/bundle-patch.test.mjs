@@ -30,5 +30,8 @@ test('manifest declares exact dshReleases for the store window', async () => {
     assert.ok(status === 'compatible' || status === 'incompatible' || status === 'unknown', version)
   }
   assert.equal(releases['0.1.2-rc.1'], 'compatible')
+  assert.equal(releases['0.1.3-alpha.1'], 'unknown')
+  assert.equal(releases['0.1.3-alpha.2'], 'incompatible')
+  assert.equal(releases['0.1.5-alpha.1'], 'incompatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })

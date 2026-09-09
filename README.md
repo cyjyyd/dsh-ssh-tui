@@ -87,7 +87,7 @@ dsh --profile tui
 ## 环境要求
 
 - Node.js ≥ 22.19
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1`；`0.1.3-alpha.*` / `0.1.5-alpha.1` 尚未声明 compatible）
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1`。`0.1.3-alpha.2` / `0.1.5-alpha.1` 不兼容：会话 persistence 改成 handle API，流式输出从 `assistant/chunk` 改到 `agent/assistant-stream`。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
 

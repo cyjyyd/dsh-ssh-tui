@@ -69,7 +69,7 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 ## Requirements
 
 - Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1`; `0.1.3-alpha.*` / `0.1.5-alpha.1` are not yet declared compatible)
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1`. `0.1.3-alpha.2` / `0.1.5-alpha.1` are incompatible: session persistence moved to a handle API and live tokens moved from `assistant/chunk` to `agent/assistant-stream`. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 
 ## Install
