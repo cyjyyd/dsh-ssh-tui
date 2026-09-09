@@ -56,6 +56,15 @@ import {
   dropFooterQuotaPlanName,
   formatFooterQuota,
   formatFooterBalance,
+  formatCompactCommandError,
+  formatContextPressureChip,
+  formatContextPressureRing,
+  formatContextPressureStatusLine,
+  parseContextPressure,
+  contextPressureView,
+  shouldIdleAutoCompact,
+  CONTEXT_IDLE_COMPACT_RATIO,
+  CONTEXT_RING_EMPTY,
   buildToolHeader,
   toolBodyFitsWorkspace,
   toolStateColor,
@@ -84,6 +93,7 @@ import {
   countOutputLines,
   pickerWindowStart,
   compactToolGroups,
+  compactEditPath,
   compactToolBursts,
   countDiffLines,
   countDiffAddDel,
@@ -521,8 +531,95 @@ test('consecutive same-path reads and edits collapse; a different path starts a 
 
   const previous = { kind: 'tool', name: 'read', args: JSON.stringify({ path: 'a.ts' }), summary: 'a.ts' }
   assert.equal(canMergeToolCall(previous, { name: 'read', args: JSON.stringify({ path: 'a.ts' }) }), true)
+  assert.equal(canMergeToolCall(previous, { name: 'read', args: JSON.stringify({ file_path: 'a.ts' }) }), true)
   assert.equal(canMergeToolCall(previous, { name: 'read', args: JSON.stringify({ path: 'b.ts' }) }), false)
   assert.equal(countOutputLines('a\nb\n'), 2)
+})
+
+test('same-path reads keep one card after merge even when results reuse older call ids', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const session = agent.session
+  const call = (id, path) => {
+    tui.handleSessionEvent(session, {
+      type: 'tool/call',
+      data: { callId: id, name: 'read', arguments: JSON.stringify({ file_path: path }) },
+    })
+  }
+  const result = (id, body) => {
+    tui.handleSessionEvent(session, {
+      type: 'tool/result',
+      data: {
+        message: { source: { callId: id }, content: [{ type: 'text', text: body }] },
+      },
+    })
+  }
+
+  call('r1', 'src/tui.ts')
+  call('r2', 'src/tui.ts')
+  result('r1', 'first-pass\n')
+  result('r2', 'second-pass\n')
+  const tools = tui.rows.filter(row => row.kind === 'tool')
+  assert.equal(tools.length, 1)
+  assert.equal(tools[0].summary, 'src/tui.ts')
+  assert.equal(tools[0].title, '读取')
+  assert.equal(tools[0].repeats, 2)
+  assert.deepEqual(tools[0].mergedCallIds, ['r1', 'r2'])
+  assert.equal(tools[0].output, 'second-pass\n')
+  const untitled = tui.rows.filter(row => row.kind === 'tool' && (row.title === '' || row.summary === ''))
+  assert.equal(untitled.length, 0)
+  const frame = tui.captureFrame(88, 20).join('\n')
+  assert.ok(frame.includes('读取'))
+  assert.ok(frame.includes('src/tui.ts'))
+  assert.ok(frame.includes('×2'))
+})
+
+test('/approval status reports the live mode instead of toggling it', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const lastSystem = () => {
+    const row = tui.rows.findLast(item => item.kind === 'system')
+    return String(row?.text ?? '')
+  }
+  tui.runCommand('/approval status')
+  assert.ok(lastSystem().includes('自动审批关闭'))
+  tui.runCommand('/approval auto')
+  assert.ok(lastSystem().includes('自动审批已开启'))
+  tui.runCommand('/approval status')
+  assert.ok(lastSystem().includes('自动审批开启'))
+  tui.runCommand('/approval STATUS')
+  assert.ok(lastSystem().includes('自动审批开启'))
+  tui.runCommand('/approval on')
+  assert.ok(lastSystem().includes('自动审批已开启'))
+  tui.runCommand('/approval off')
+  assert.ok(lastSystem().includes('自动审批已关闭'))
+  tui.runCommand('/approval status')
+  assert.ok(lastSystem().includes('自动审批关闭'))
+})
+
+test('/submodel reset follows the parent provider again', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'deepseek-official',
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.6' } },
+  })
+  tui.runCommand('/submodel reset')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(tui.subagentSelection.current.provider, undefined)
+  assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
+  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('跟随父会话')))
+  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('仅当前会话')))
 })
 
 test('parseEffortArg accepts default aliases and rejects junk', () => {
@@ -779,10 +876,12 @@ test('footer status keeps one activity and drops identity from the right', () =>
     subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
     idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
     parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
-    quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 1,
+    quotaCode: 'SuperGrok', quotaPercent: 82,
+    contextChip: `${formatContextPressureRing(80)} 400K/500K 80%`,
+    foldedInput: false, multiLineInput: false, queued: 1,
     cwdLabel: '目录:srv',
   })
-  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, '排队 1'])
+  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, `${formatContextPressureRing(80)} 400K/500K 80%`, '排队 1'])
   const withBalance = footerIdentityParts({
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
@@ -831,6 +930,55 @@ test('formatQuotaBar is an 8-pip remaining bar', () => {
   assert.equal(formatQuotaBar(82), '███████░')
   assert.equal(formatQuotaBar(50), '████░░░░')
   assert.equal(formatQuotaBar(0), '░░░░░░░░')
+})
+
+test('context pressure ring is one cell and fills clockwise', () => {
+  assert.equal(formatContextPressureRing(0), CONTEXT_RING_EMPTY)
+  assert.equal(formatContextPressureRing(1), '⠉')
+  assert.equal(formatContextPressureRing(12.5), '⠉')
+  assert.equal(formatContextPressureRing(25), '⠋')
+  assert.equal(formatContextPressureRing(37.5), '⠛')
+  assert.equal(formatContextPressureRing(50), '⠞')
+  assert.equal(formatContextPressureRing(62.5), '⠟')
+  assert.equal(formatContextPressureRing(75), '⠿')
+  assert.equal(formatContextPressureRing(87.5), '⡿')
+  assert.equal(formatContextPressureRing(100), '⣿')
+  assert.equal(displayWidth(formatContextPressureRing(80)), 1)
+  const view = contextPressureView({ usedTokens: 400_000, contextWindow: 500_000 })
+  assert.equal(view.level, 'warn')
+  assert.equal(formatContextPressureChip(view), `${formatContextPressureRing(80)} 400K/500K 80%`)
+  const identity = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'grok-4.6', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.6', subDiffers: false,
+    quotaCode: 'SuperGrok', quotaPercent: 82,
+    contextChip: formatContextPressureChip(view),
+    foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  const quotaAt = identity.indexOf(formatFooterQuota(82, 'SuperGrok'))
+  const contextAt = identity.indexOf(formatContextPressureChip(view))
+  assert.ok(quotaAt >= 0)
+  assert.ok(contextAt === quotaAt + 1)
+  const fitted = fitFooterStatusLine('空闲', identity, 80)
+  assert.ok(fitted.includes(formatContextPressureRing(80)))
+  assert.ok(displayWidth(fitted) <= 80)
+})
+
+test('context pressure uses DSH projectedTokens and a provider-agnostic window', () => {
+  assert.deepEqual(parseContextPressure({
+    projectedTokens: 360_000, pressureTokens: 300_000, contextWindow: 500_000,
+  }), { usedTokens: 360_000, contextWindow: 500_000 })
+  assert.equal(parseContextPressure({ pressureTokens: 10, contextWindow: 0 }), undefined)
+  const warn = contextPressureView({ usedTokens: 400_000, contextWindow: 500_000 })
+  const danger = contextPressureView({ usedTokens: 480_000, contextWindow: 500_000 })
+  const ok = contextPressureView({ usedTokens: 200_000, contextWindow: 1_000_000 })
+  assert.equal(warn.level, 'warn')
+  assert.equal(danger.level, 'danger')
+  assert.equal(ok.level, 'ok')
+  assert.equal(shouldIdleAutoCompact(warn), true)
+  assert.equal(shouldIdleAutoCompact(ok), 200_000 / 1_000_000 >= CONTEXT_IDLE_COMPACT_RATIO)
+  assert.match(formatContextPressureStatusLine(warn), /context: 400K\/500K 80.0%/)
 })
 
 test('formatLinkQualityChip is a compact colored signal bar', () => {
@@ -1275,6 +1423,8 @@ test('presentToolCall localizes mutation and common file tool names', () => {
   assert.equal(presentToolCall('find', JSON.stringify({ pattern: '*.ts' })).title, '搜索文件')
   assert.equal(presentToolCall('delete', JSON.stringify({ path: 'a.ts' })).title, '删除文件')
   assert.equal(presentToolCall('skills', '{}').title, '技能')
+  assert.equal(presentToolCall('skill', JSON.stringify({ name: 'release' })).title, '技能')
+  assert.equal(presentToolCall('skill', JSON.stringify({ name: 'release' })).summary, 'release')
   assert.equal(presentToolCall('bash', JSON.stringify({ command: 'ls' })).title, 'bash')
   assert.equal(presentToolCall('update_goal', JSON.stringify({ action: 'edit', objective: '收口工具卡' })).title, '更新目标')
   assert.equal(presentToolCall('create_goal', JSON.stringify({ objective: '做完 A' })).title, '创建目标')
@@ -1297,6 +1447,13 @@ test('get_goal tool cards stay hidden; update_goal is labelled 更新目标', ()
     data: { callId: 'g1', name: 'get_goal', arguments: '{}' },
   })
   tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 2,
+    data: {
+      message: { source: { kind: 'tool', callId: 'g1' }, content: [{ type: 'text', text: '{}' }] },
+    },
+  })
+  tui.handleSessionEvent(agent.session, {
     type: 'tool/call',
     time: 3,
     data: { callId: 'u1', name: 'update_goal', arguments: JSON.stringify({ objective: '收口工具卡' }) },
@@ -1308,10 +1465,52 @@ test('get_goal tool cards stay hidden; update_goal is labelled 更新目标', ()
   })
   const tools = tui.rows.filter(row => row.kind === 'tool')
   assert.equal(tools.some(row => row.name === 'get_goal'), false)
+  assert.equal(tools.some(row => String(row.callId).startsWith('call-') || String(row.title).startsWith('call-')), false)
   const update = tools.find(row => row.name === 'update_goal')
   assert.equal(update?.title, '更新目标')
   assert.equal(update?.summary, '收口工具卡')
   assert.ok(tui.rows.some(row => row.kind === 'goal' && row.objective === '收口工具卡'))
+})
+
+test('orphan tool/result does not title a card with call-<uuid>', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const callId = 'call-346d8e09-43aa-4aa5-a0e5-cd34359ccc9b-428'
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 1,
+    data: {
+      message: { source: { kind: 'tool', callId }, content: [{ type: 'text', text: 'ok' }] },
+    },
+  })
+  const tools = tui.rows.filter(row => row.kind === 'tool')
+  assert.equal(tools.length, 1)
+  assert.equal(tools[0].name, 'tool')
+  assert.equal(tools[0].title, '工具')
+  assert.equal(String(tools[0].title).startsWith('call-'), false)
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 2,
+    data: { callId, name: 'skill', arguments: JSON.stringify({ name: 'release' }) },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 3,
+    data: {
+      message: { source: { kind: 'tool', callId }, content: [{ type: 'text', text: 'loaded' }] },
+    },
+  })
+  const skill = tui.rows.filter(row => row.kind === 'tool' && row.name === 'skill')
+  assert.equal(skill.length, 1)
+  assert.equal(skill[0].title, '技能')
+  assert.equal(skill[0].summary, 'release')
 })
 
 test('subagent cards stay collapsed, isolated, and animate while running', () => {
@@ -1427,6 +1626,19 @@ test('filterCatalogPresets matches id or name case-insensitively', () => {
   assert.deepEqual(filterCatalogPresets(presets, '  ').map(p => p.id), ['minimax', 'minimax-cn', 'moonshotai'])
 })
 
+test('compactEditPath prefers args, then diff path, then summary', () => {
+  assert.equal(compactEditPath({
+    name: 'edit', args: JSON.stringify({ file_path: 'src/tui.ts' }), summary: 'ignored',
+  }), 'src/tui.ts')
+  assert.equal(compactEditPath({
+    name: 'edit', args: '{}', summary: 'from-summary.ts', diff: [{ path: 'from-diff.ts' }],
+  }), 'from-diff.ts')
+  assert.equal(compactEditPath({
+    name: 'edit', args: '{}', summary: 'from-summary.ts',
+  }), 'from-summary.ts')
+  assert.equal(compactEditPath({ name: 'edit', args: '{}', summary: '' }), '')
+})
+
 test('compactToolBursts keep tools with the preceding assistant reply', () => {
   const bursts = compactToolBursts([
     { kind: 'assistant', text: 'first' },
@@ -1467,7 +1679,7 @@ test('compact view hides thinking and interleaves merged tools after each reply'
   assert.ok(text.includes('first reply'))
   assert.ok(text.includes('second reply'))
   assert.ok(text.includes('已调用 2 个工具'))
-  assert.ok(text.includes('已编辑'))
+  assert.ok(text.includes('已编辑 a.ts'))
   // The merged edit card carries a git-style -deletions +additions stat.
   assert.ok(text.includes('-1 +2'))
   const firstAt = frame.findIndex(line => line.includes('first reply'))
@@ -1502,7 +1714,7 @@ test('compact edit summary expands to the merged diff body', () => {
   tui.toggleCollapsible()
   assert.equal(edit.expanded, true)
   const text = tui.captureFrame(72, 20).join('\n')
-  assert.ok(text.includes('已编辑'))
+  assert.ok(text.includes('已编辑 a.ts'))
   assert.ok(text.includes('old-line'))
   assert.ok(text.includes('new-line'))
   // The expanded per-file entry shows its own -/+ stat instead of a total.
@@ -1811,13 +2023,15 @@ test('planDockNote follows task status instead of always saying plan mode is off
   }), '本轮未收尾：还剩 2 项待办（会话日志未改）。')
 })
 
-test('turn/end marks leftover todos as display-stale and asks once to close them', () => {
+test('turn/end marks leftover todos as display-stale and asks once to close them', async () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const followups = []
   const agent = {
     id: 'main-session',
     options: {},
-    status: 'idle',
+    // Live `turn/end` is appended before the driver flips idle. The nudge
+    // must wait for that idle so /compact is not blocked by a waking follow-up.
+    status: 'running',
     session: { id: 'main-session', events: [] },
     cancel() {},
     followup(message) { followups.push(message) },
@@ -1834,12 +2048,17 @@ test('turn/end marks leftover todos as display-stale and asks once to close them
   const plan = tui.rows.find(row => row.kind === 'plan')
   assert.equal(plan.turnLeftOpen, true)
   assert.equal(plan.todos[0].status, 'in_progress')
+  assert.equal(followups.length, 0)
+  agent.status = 'idle'
+  await new Promise(resolve => queueMicrotask(resolve))
   assert.equal(followups.length, 1)
   assert.ok(String(followups[0].content[0].text).includes('todo_write'))
   assert.ok(String(followups[0].content[0].text).includes('pin the dock'))
+  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('补一次待办')))
   const frame = tui.captureFrame(80, 24)
   assert.ok(frame.some(line => line.includes('本轮未收尾')))
   tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await new Promise(resolve => queueMicrotask(resolve))
   assert.equal(followups.length, 1)
   tui.handleSessionEvent(agent.session, {
     type: 'todo/write',
@@ -2064,6 +2283,74 @@ test('goal cards stay collapsed and report the current phase', () => {
   assert.equal(goal?.objective, 'finish the TUI cards')
 })
 
+test('formatCompactCommandError maps official idle-only compact failures', () => {
+  assert.ok(formatCompactCommandError(
+    'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+  ).includes('空闲'))
+  assert.equal(formatCompactCommandError('No compactable history yet.'), '还没有可压缩的历史。')
+  assert.equal(formatCompactCommandError('Usage: /compact (no arguments)'), '用法：/compact（不接受参数）')
+})
+
+test('id-less compaction/prune does not attach to a leftover compact card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/start',
+    time: 1,
+    data: { compactionId: 'c-open' },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/end',
+    time: 2,
+    data: { compactionId: 'c-open' },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'compaction/prune',
+    time: 3,
+    data: { shadowedTokenCount: 4000 },
+  })
+  const card = tui.rows.find(row => row.kind === 'compaction')
+  assert.equal(card.status, 'ok')
+  assert.equal(card.prunedTokens, 0)
+})
+
+test('idle auto-compact fires at 72% of the routed window', async () => {
+  const executions = []
+  const ctx = {
+    get: (name) => name === 'commands' ? {
+      list: () => [],
+      execute: async (_agent, text) => {
+        executions.push(text)
+        return { commandId: 'cmd-auto-compact', result: { kind: 'success', text: '' } }
+      },
+    } : name === 'sessionProjections' ? {
+      snapshot: () => ({ values: { contextPressure: { projectedTokens: 370_000, contextWindow: 500_000 } } }),
+    } : undefined,
+    on() { return () => {} },
+  }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, { type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [] } } })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(executions, ['/compact'])
+  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('自动压缩')))
+})
+
+test('/compact while the agent is running is refused locally', () => {
+  const ctx = {
+    get: (name) => name === 'commands' ? {
+      list: () => [],
+      execute: async () => { throw new Error('must not dispatch compact while running') },
+    } : undefined,
+    on() { return () => {} },
+  }
+  const agent = { id: 'main-session', options: {}, status: 'running', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.runCommand('/compact')
+  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('空闲')))
+})
+
 test('slash commands that call the model or rewrite the session surface progress', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
@@ -2077,7 +2364,7 @@ test('slash commands that call the model or rewrite the session surface progress
     type: 'command/done',
     data: { commandId: 'cmd-1', kind: 'error', text: 'Compaction is unavailable because the agent is not idle.' },
   })
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('Compaction is unavailable')))
+  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('空闲')))
   tui.handleSessionEvent(agent.session, {
     type: 'llm/retry',
     data: {
@@ -2255,7 +2542,24 @@ test('/status lists the link chip, quota window, and subagent family fit', () =>
   assert.ok(lines.some(line => line.startsWith('paint: SSH ●●●○ 90ms')))
   assert.ok(lines.some(line => line === 'disconnect: continue'))
   assert.ok(lines.some(line => line.startsWith('quota: OpenCode Go')))
+  assert.ok(lines.some(line => line.startsWith('context: unknown')))
   assert.ok(lines.some(line => line.includes('subagent: deepseek-v4-flash') && line.includes('同族')))
+  const withContext = formatStatusReport({
+    sessionId: 'sess-1',
+    pluginVersion: '0.3.8',
+    provider: 'xai',
+    model: 'grok-4.6',
+    agentStatus: 'idle',
+    preset: '标准模式',
+    activeSubagents: 0,
+    plan: 'off',
+    paint: '本机 ●●●●',
+    waitingQuestions: 0,
+    parentModel: 'grok-4.6',
+    subModel: 'grok-4.6',
+    context: contextPressureView({ usedTokens: 360_000, contextWindow: 500_000 }),
+  })
+  assert.ok(withContext.some(line => line.startsWith('context: 360K/500K')))
   const heavy = formatStatusReport({
     sessionId: 'sess-1',
     pluginVersion: '0.3.8',

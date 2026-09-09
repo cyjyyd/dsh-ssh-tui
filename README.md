@@ -227,17 +227,20 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
-`/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
+斜杠命令：`/help`、`/find`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+`/status`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
 `ssh-tui.view`。极简对齐 Codex：藏思考，按「回复 → 已调用 N 个工具 → 已编辑 N 个文件 →
 下一段回复」交错绘制；合并卡头部带 git 红绿增删行数（`-13 +24`），Enter 展开条目（编辑
 展开后画 diff），状态球只有全失败才红；进行中的计划仍钉在输入框上方。这和 `/mode`
 （agent preset）不是一回事。
-以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。`/compact` 进行中会显示
-「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。模型请求失败会显示重试
-进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
+以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。底栏第二行（身份行）在剩余额度
+后面用 1 列 Braille 圆环显示当前模型窗口占用（来自 DSH `contextPressure`，与提供商无关），
+绿 / 黄 / 红对应正常 / 80% / 95%。占用到约 80%/95% 会提示；空闲且占用到约 72% 时
+自动跑 `/compact`，避免等回合中途再压才撞窗。
+`/compact` 进行中会显示「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。
+模型请求失败会显示重试进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
 支持图片附件，会在命令列表和补全提示中标注“可附图”。
 
 `/model` 只换**当前提供商**的模型和思考强度。已经在 SuperGrok 时，直接选

@@ -27,8 +27,8 @@ import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credent
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
-import { classifyApproval, commandFromArgs, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
-import { buildReviewUserMessage, parseReviewOutput, REVIEW_SYSTEM_PROMPT, type ReviewVerdict } from './approval-reviewer.js'
+import { classifyApproval, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
+import { buildReviewUserMessage, parseReviewOutput, REVIEW_SYSTEM_PROMPT } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
@@ -234,6 +234,8 @@ type Row =
       expanded: boolean
       /** Consecutive same-path reads/edits folded into this card. */
       repeats?: number
+      /** Call ids folded into this card; results still match after merge. */
+      mergedCallIds?: string[]
       /** Sum of output characters across folded reads. */
       totalChars?: number
       /** Sum of output lines across folded reads. */
@@ -498,6 +500,143 @@ export function formatTokens(n: number): string {
   return `${scaled(n / 1_000_000)}M`
 }
 
+/**
+ * Prompt occupancy of the next request, from DSH `contextPressure`.
+ * Provider-agnostic: uses the routed model's advertised window, not a
+ * hardcoded xAI size. Compaction-basic still owns in-turn pressure at 80%.
+ */
+export const CONTEXT_PRESSURE_WARN_RATIO = 0.8
+export const CONTEXT_PRESSURE_DANGER_RATIO = 0.95
+/** Idle auto-compact starts here so recovery finishes before the 80% in-turn trigger. */
+export const CONTEXT_IDLE_COMPACT_RATIO = 0.72
+
+export interface ContextPressureSample {
+  usedTokens: number
+  contextWindow: number
+}
+
+export interface ContextPressureView {
+  usedTokens: number
+  contextWindow: number
+  percent: number
+  level: 'ok' | 'warn' | 'danger'
+}
+
+/** Prompt-side occupancy of one usage sample: uncached input plus cache traffic. */
+export function promptPressureTokens(usage: {
+  inputTokens: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+}): number {
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+}
+
+/** Prefer the next-request projection; fall back to last-request pressure. */
+export function contextPressureUsedTokens(pressure: {
+  projectedTokens?: number
+  pressureTokens?: number
+} | undefined): number | undefined {
+  if (pressure === undefined) return undefined
+  if (typeof pressure.projectedTokens === 'number' && Number.isFinite(pressure.projectedTokens)) {
+    return Math.max(0, pressure.projectedTokens)
+  }
+  if (typeof pressure.pressureTokens === 'number' && Number.isFinite(pressure.pressureTokens)) {
+    return Math.max(0, pressure.pressureTokens)
+  }
+  return undefined
+}
+
+export function parseContextPressure(value: unknown): ContextPressureSample | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const raw = value as {
+    projectedTokens?: unknown
+    pressureTokens?: unknown
+    contextWindow?: unknown
+  }
+  const window = typeof raw.contextWindow === 'number' && Number.isFinite(raw.contextWindow)
+    ? raw.contextWindow
+    : undefined
+  if (window === undefined || window <= 0) return undefined
+  const used = contextPressureUsedTokens({
+    ...(typeof raw.projectedTokens === 'number' ? { projectedTokens: raw.projectedTokens } : {}),
+    ...(typeof raw.pressureTokens === 'number' ? { pressureTokens: raw.pressureTokens } : {}),
+  })
+  if (used === undefined) return undefined
+  return { usedTokens: used, contextWindow: window }
+}
+
+export function contextPressureView(sample: ContextPressureSample): ContextPressureView {
+  const percent = (sample.usedTokens / sample.contextWindow) * 100
+  return {
+    usedTokens: sample.usedTokens,
+    contextWindow: sample.contextWindow,
+    percent,
+    level: percent >= CONTEXT_PRESSURE_DANGER_RATIO * 100
+      ? 'danger'
+      : percent >= CONTEXT_PRESSURE_WARN_RATIO * 100
+        ? 'warn'
+        : 'ok',
+  }
+}
+
+/**
+ * 8-segment Braille ring. Empty `⣀`; full `⣿`. Width is always 1 cell.
+ * Index is `ceil(percent / 12.5)` clamped to 0..8.
+ */
+export const CONTEXT_RING_EMPTY = '⣀'
+export const CONTEXT_RING_SEGMENTS = ['⣀', '⠉', '⠋', '⠛', '⠞', '⠟', '⠿', '⡿', '⣿'] as const
+
+export function formatContextPressureRing(percent: number): string {
+  if (!Number.isFinite(percent) || percent <= 0) return CONTEXT_RING_EMPTY
+  const filled = Math.min(8, Math.max(0, Math.ceil(percent / 12.5)))
+  return CONTEXT_RING_SEGMENTS[filled] ?? '⣿'
+}
+
+export function contextPressureRingColor(level: ContextPressureView['level']): string {
+  if (level === 'danger') return '31'
+  if (level === 'warn') return '33'
+  return '32'
+}
+
+export function formatContextPressureChip(view: ContextPressureView, color = false): string {
+  const ring = formatContextPressureRing(view.percent)
+  const painted = color
+    ? `\x1b[${contextPressureRingColor(view.level)}m${ring}\x1b[0m`
+    : ring
+  return t('footer.contextRing', {
+    ring: painted,
+    used: formatTokens(view.usedTokens),
+    window: formatTokens(view.contextWindow),
+    percent: Math.round(view.percent),
+  })
+}
+
+export function formatContextPressureStatusLine(view: ContextPressureView | undefined): string {
+  if (view === undefined) return t('status.contextNone')
+  return t('status.contextLine', {
+    used: formatTokens(view.usedTokens),
+    window: formatTokens(view.contextWindow),
+    percent: view.percent.toFixed(1),
+    level: t(`status.contextLevel.${view.level}`),
+  })
+}
+
+export function contextPressureAlertText(view: ContextPressureView): string {
+  const vars = {
+    used: formatTokens(view.usedTokens),
+    window: formatTokens(view.contextWindow),
+    percent: view.percent.toFixed(0),
+  }
+  return view.level === 'danger'
+    ? t('context.alertDanger', vars)
+    : t('context.alertWarn', vars)
+}
+
+export function shouldIdleAutoCompact(view: ContextPressureView | undefined): boolean {
+  if (view === undefined) return false
+  return view.usedTokens / view.contextWindow >= CONTEXT_IDLE_COMPACT_RATIO
+}
+
 /** Compact duration, matching the web stats line (45.2s / 2m42s). */
 export function formatDuration(ms: number): string {
   const seconds = ms / 1_000
@@ -740,6 +879,7 @@ export interface FooterStatusInput {
   subDiffers: boolean
   quotaCode?: string
   quotaPercent?: number
+  contextChip?: string
   balanceText?: string
   search?: { index: number; total: number }
   foldedInput: boolean
@@ -792,6 +932,7 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   if (input.quotaPercent !== undefined) {
     parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
   }
+  if (input.contextChip !== undefined && input.contextChip !== '') parts.push(input.contextChip)
   if (input.search !== undefined) parts.push(t('footer.search', { index: input.search.index + 1, total: input.search.total }))
   if (input.foldedInput) parts.push(t('footer.inputFolded'))
   else if (input.multiLineInput) parts.push(t('footer.multiLine'))
@@ -1034,6 +1175,7 @@ export interface StatusReportInput {
   disconnect?: DisconnectPolicyName
   waitingQuestions: number
   quota?: QuotaSnapshot
+  context?: ContextPressureView
   parentModel?: string
   subProvider?: string
   subModel: string
@@ -1062,6 +1204,7 @@ export function formatStatusReport(input: StatusReportInput): string[] {
     fit.line,
     `plan: ${input.plan}`,
     formatQuotaStatusLine(input.quota),
+    formatContextPressureStatusLine(input.context),
     `paint: ${input.paint}`,
     `disconnect: ${input.disconnect ?? 'pause'}`,
     input.waitingQuestions > 0 ? `questions: waiting ${input.waitingQuestions}` : 'questions: none',
@@ -1105,6 +1248,7 @@ const LOCAL_COMMANDS = [
   { name: 'view', key: 'cmd.view' },
   { name: 'usage', key: 'cmd.usage' },
   { name: 'balance', key: 'cmd.usage', aliasOf: 'usage' },
+  { name: 'quota', key: 'cmd.usage', aliasOf: 'usage' },
   { name: 'subagents', key: 'cmd.subagents' },
   { name: 'resume', key: 'cmd.resume' },
   { name: 'setup', key: 'cmd.setup' },
@@ -2535,7 +2679,7 @@ function friendlyArgsSummary(name: string, args: string): string {
   if (parsed === null) return sliceCodePoints(args, 120)
   const preferred = [
     'path', 'file_path', 'file', 'query', 'pattern', 'url', 'command',
-    'description', 'content', 'file_text', 'old_string', 'new_string',
+    'name', 'skill', 'description', 'content', 'file_text', 'old_string', 'new_string',
     'old_str', 'new_str', 'insert_line', 'line', 'offset', 'limit',
   ]
   const parts: string[] = []
@@ -2655,14 +2799,36 @@ const TOOL_FLIP_MS = 280
 
 export function toolTargetPath(name: string, args: string, fallback = ''): string {
   const parsed = parseJsonArgs(args)
-  if (parsed === null) return fallback
   if (READ_TOOL_NAMES.has(name)) {
+    if (parsed === null) return fallback
     return firstString(parsed, ['path', 'file_path', 'url']) || fallback
   }
   if (DIFF_TOOL_NAMES.has(name)) {
+    if (parsed === null) return fallback
     return firstString(parsed, ['file_path', 'path']) || fallback
   }
   return fallback
+}
+
+/** Path shown on a compact single-file edit summary. */
+export function compactEditPath(item: {
+  name: string
+  args: string
+  summary?: string
+  diff?: readonly { path?: string }[]
+}): string {
+  const fromArgs = toolTargetPath(item.name, item.args)
+  if (fromArgs !== '') return fromArgs
+  const fromDiff = item.diff?.map(hunk => hunk.path ?? '').find(path => path !== '')
+  if (fromDiff !== undefined && fromDiff !== '') return fromDiff
+  const summary = item.summary?.trim() ?? ''
+  return summary
+}
+
+function sameToolPath(left: string, right: string): boolean {
+  if (left === '' || right === '') return false
+  const normalize = (value: string): string => value.replaceAll('\\', '/').replace(/\/+$/u, '')
+  return normalize(left) === normalize(right)
 }
 
 export function countOutputLines(text: string): number {
@@ -2689,8 +2855,8 @@ export function canMergeToolCall(
   const kind = mergeableToolKind(next.name)
   if (kind === undefined || mergeableToolKind(previous.name) !== kind) return false
   const previousPath = toolTargetPath(previous.name, previous.args, previous.summary)
-  const nextPath = toolTargetPath(next.name, next.args)
-  return previousPath !== '' && previousPath === nextPath
+  const nextPath = toolTargetPath(next.name, next.args, previousPath)
+  return sameToolPath(previousPath, nextPath)
 }
 
 export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>[]): {
@@ -2748,14 +2914,15 @@ const HIDDEN_TOOL_NAMES = new Set(['get_goal'])
 
 const TOOL_TITLE_KEYS = [
   'edit', 'write', 'str_replace_editor', 'fetch', 'list_files', 'list', 'ls',
-  'find', 'search', 'delete', 'rm', 'rename', 'mv', 'mkdir', 'skills',
+  'find', 'search', 'delete', 'rm', 'rename', 'mv', 'mkdir', 'skills', 'skill',
   'create_goal', 'update_goal', 'complete_goal', 'clear_goal', 'pause_goal',
   'resume_goal', 'todo_write', 'todo', 'compact', 'glob', 'grep', 'read',
   'web_search', 'web_fetch',
 ] as const
 
 function toolTitle(name: string): string {
-  return t(`toolTitle.${name}`, undefined, name)
+  if (name === '' || name.startsWith('call-')) return t('card.tool')
+  return t(`toolTitle.${name}`, undefined, name === 'tool' ? t('card.tool') : name)
 }
 const MAX_SUBAGENT_LOGS = 80
 
@@ -2805,10 +2972,7 @@ export function planCloseNudgeText(plan: {
 }): string {
   const leftover = plan.todos.filter(item => item.status !== 'completed')
   const lines = leftover.map(item => `- [${item.status}] ${item.content}`)
-  return [
-    '本轮结束时计划条还有未完成待办。请立刻再调用一次 todo_write，把已经做完的标成 completed，还没做的留 pending。不要开新任务。',
-    ...lines,
-  ].join('\n')
+  return [t('plan.nudge'), ...lines].join('\n')
 }
 
 export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal' | 'prompt'
@@ -2939,6 +3103,27 @@ export function isPromptInjectionMessage(sourceKind: string, text: string, plugi
   return /<system-reminder\b/iu.test(text)
     || SYSTEM_PRESET_HINT.test(text)
     || promptInjectionSources(text, plugin).some(id => id !== SYSTEM_PRESET_LABEL())
+}
+
+/** Official `/compact` idle-only failures, mapped to a local sentence. */
+export function formatCompactCommandError(text: string): string {
+  const raw = text.trim()
+  if (raw === '') return t('command.failed')
+  if (
+    raw.includes('agent is not idle')
+    || raw.includes('active compaction')
+    || raw.includes('requires an idle agent')
+  ) {
+    return t('compact.busy')
+  }
+  if (raw.includes('No compactable history')) return t('compact.nothing')
+  if (raw.startsWith('Usage: /compact')) return t('compact.usage')
+  if (raw === 'Compaction cancelled.') return t('compact.cancelled')
+  if (raw.includes('could not produce a useful summary')) return t('compact.noSummary')
+  if (raw.includes('history selected for compaction changed')) return t('compact.changed')
+  if (raw.includes('did not finish cleanly')) return t('compact.commit')
+  if (raw.includes('could not be saved')) return t('compact.persistence')
+  return raw
 }
 
 export function compactionHeaderText(row: {
@@ -3200,6 +3385,13 @@ export function presentToolCall(name: string, args: string): {
   }
   if (name === 'get_goal') {
     return { title: toolTitle('get_goal'), summary: friendlyArgsSummary(name, args) }
+  }
+  if (name === 'skill' || name === 'skills') {
+    const skill = typeof parsed?.name === 'string' ? parsed.name.trim()
+      : typeof parsed?.skill === 'string' ? parsed.skill.trim()
+        : typeof parsed?.id === 'string' ? parsed.id.trim()
+          : ''
+    return { title: toolTitle('skill'), summary: skill || friendlyArgsSummary(name, args) }
   }
   if (name === 'read') {
     const path = typeof parsed?.path === 'string' ? parsed.path
@@ -3747,6 +3939,8 @@ export class SshTui {
   private activeSubagents = new Map<string, { id: string; provider: string; startedAt: number }>()
   private subagentSessions = new Set<string>()
   private openToolCalls = new Map<string, string>()
+  /** Survives result settlement so a card-less result can still be labelled. */
+  private toolCallNames = new Map<string, string>()
   private readonly stats: SessionStats = {
     turns: 0,
     steps: 0,
@@ -3794,6 +3988,10 @@ export class SshTui {
   private quotaAlerted = new Set<string>()
   private quotaStepsSinceRefresh = 0
   private quotaRefreshInFlight = false
+  private contextPressure: ContextPressureView | undefined
+  private contextAlertLevel: ContextPressureView['level'] | undefined
+  private idleCompactInFlight = false
+  private lastIdleCompactAt = 0
   private searchHits: Row[] = []
   private searchIndex = -1
   private searchQuery = ''
@@ -4082,10 +4280,15 @@ export class SshTui {
         addDel.del += stat.del
       }
     }
+    const singleEditPath = kind === 'edits' && groups.edits.length === 1
+      ? compactEditPath(groups.edits[0]!)
+      : ''
     const title = kind === 'edits'
       ? (groups.edits.length > 1
         ? t('compact.editsFiles', { files: groups.edits.length })
-        : t('compact.edits'))
+        : singleEditPath === ''
+          ? t('compact.edits')
+          : t('compact.editsFile', { path: singleEditPath }))
       : (groups.failedCalls > 0
         ? t('compact.toolsFailed', { count: groups.calls.length, failed: groups.failedCalls })
         : t('compact.tools', { count: groups.calls.length }))
@@ -4199,6 +4402,7 @@ export class SshTui {
     this.streamingReasoning = undefined
     this.thinkingStartedAt = undefined
     this.status = this.agent.status === 'running' ? 'running' : 'idle'
+    this.refreshContextPressure({ compact: false })
     this.dirty = true
   }
 
@@ -4657,17 +4861,38 @@ export class SshTui {
       diff?: ToolDiffHunk[]
     },
   ): void {
+    const ids = previous.mergedCallIds ?? [previous.callId]
+    if (!ids.includes(previous.callId)) ids.push(previous.callId)
+    if (!ids.includes(next.callId)) ids.push(next.callId)
+    previous.mergedCallIds = ids
     previous.callId = next.callId
     previous.name = next.name
     previous.args = next.args
-    previous.title = next.title
-    previous.summary = next.summary
+    if (next.title !== '') previous.title = next.title
+    if (next.summary !== '') previous.summary = next.summary
+    if (next.diff !== undefined && next.diff.length > 0) {
+      previous.diff = (previous.repeats ?? 1) > 1 && previous.diff !== undefined && previous.diff.length > 0
+        ? [...previous.diff, ...next.diff]
+        : next.diff
+    }
     previous.status = 'running'
     previous.output = ''
     previous.exitCode = undefined
     previous.signal = undefined
     previous.repeats = (previous.repeats ?? 1) + 1
     if (!this.replaying) previous.flipUntil = Date.now() + TOOL_FLIP_MS
+  }
+
+  private findToolRowByCallId(callId: string): Extract<Row, { kind: 'tool' }> | undefined {
+    return this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
+      candidate.kind === 'tool'
+      && (candidate.callId === callId || candidate.mergedCallIds?.includes(callId) === true))
+  }
+
+  private findMergeableToolRow(next: { name: string; args: string }): Extract<Row, { kind: 'tool' }> | undefined {
+    const previous = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
+      candidate.kind === 'tool')
+    return canMergeToolCall(previous, next) ? previous : undefined
   }
 
   /** Append one transcript row, bounding memory on long sessions. */
@@ -4844,13 +5069,15 @@ export class SshTui {
     return this.findLivePlanRow() !== undefined
   }
 
-  /** One follow-up per leftover list; replay and cancelled turns stay quiet. */
-  private queuePlanCloseNudge(plan: Extract<Row, { kind: 'plan' }>): void {
+  /** Send the leftover-todo nudge only from true idle, so /compact is not blocked. */
+  private flushPlanCloseNudge(): void {
     if (this.replaying || this.agentGone || this.planNudgePending) return
     if (this.agent.status === 'running') return
+    const plan = this.findLivePlanRow()
+    if (plan === undefined || plan.turnLeftOpen !== true) return
     this.planNudgePending = true
     const text = planCloseNudgeText(plan)
-    this.pushRow({ kind: 'system', text: '已请模型补一次待办状态（本轮只问一次）。' })
+    this.pushRow({ kind: 'system', text: t('plan.nudgeQueued') })
     const message = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
@@ -4859,7 +5086,7 @@ export class SshTui {
       this.agent.followup(message)
     } catch (error: unknown) {
       this.planNudgePending = false
-      this.pushRow({ kind: 'error', text: `补待办状态失败：${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('plan.nudgeFailed', { error: errorChain(error) }) })
     }
   }
 
@@ -5293,7 +5520,7 @@ export class SshTui {
         const header = buildToolHeader({
           focused,
           expanded: row.expanded,
-          title: toolTitle(row.name) || row.title,
+          title: toolTitle(row.name),
           summary: this.toolCardSummary(row),
           status: row.status,
           command: row.command,
@@ -5830,6 +6057,9 @@ export class SshTui {
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
         ? {}
         : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
+      ...(this.contextPressure === undefined
+        ? {}
+        : { contextChip: formatContextPressureChip(this.contextPressure, false) }),
       ...(balanceText === undefined ? {} : { balanceText }),
       ...(this.searchHits.length > 0 && this.searchIndex >= 0
         ? { search: { index: this.searchIndex, total: this.searchHits.length } }
@@ -5848,7 +6078,12 @@ export class SshTui {
         : activity.text
     const identity = footerIdentityParts(footer)
     const statusText = fitFooterStatusLine(activityText, identity, Math.max(1, width))
-    const statusLine = this.styleLine('system', statusText)
+    const statusLine = this.contextPressure === undefined || !this.color
+      ? this.styleLine('system', statusText)
+      : this.styleLine('system', statusText).replace(
+        formatContextPressureRing(this.contextPressure.percent),
+        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${formatContextPressureRing(this.contextPressure.percent)}\x1b[0m\x1b[90m`,
+      )
 
     const paintRows: string[] = [
       ...headerLines,
@@ -6142,6 +6377,7 @@ export class SshTui {
       return
     }
     this.lastActivity = Date.now()
+    this.refreshContextPressure()
     switch (event.type) {
       case 'user/message': {
         const text = event.data.content
@@ -6241,14 +6477,14 @@ export class SshTui {
       }
       case 'tool/call': {
         this.openToolCalls.set(String(event.data.callId), event.data.name)
+        this.toolCallNames.set(String(event.data.callId), event.data.name)
         this.pendingToolTimes.set(String(event.data.callId), event.time)
         if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
           const present = presentToolCall(event.data.name, event.data.arguments)
-          const previous = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
-            candidate.kind === 'tool')
-          if (canMergeToolCall(previous, { name: event.data.name, args: event.data.arguments })) {
+          const previous = this.findMergeableToolRow({ name: event.data.name, args: event.data.arguments })
+          if (previous !== undefined) {
             this.mergeIntoToolCard(previous, {
-              callId: event.data.callId,
+              callId: String(event.data.callId),
               name: event.data.name,
               args: event.data.arguments,
               title: present.title,
@@ -6258,7 +6494,7 @@ export class SshTui {
           } else {
             const row: Row = {
               kind: 'tool',
-              callId: event.data.callId,
+              callId: String(event.data.callId),
               name: event.data.name,
               args: event.data.arguments,
               status: 'running',
@@ -6288,9 +6524,8 @@ export class SshTui {
           this.stats.toolMs += Math.max(0, event.time - dispatchedAt)
           this.pendingToolTimes.delete(String(event.data.message.source.callId))
         }
-        const row = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
-          candidate.kind === 'tool' && candidate.callId === event.data.message.source.callId,
-        )
+        const callId = String(event.data.message.source.callId)
+        const row = this.findToolRowByCallId(callId)
         const output = collectText(event.data.message.content)
         if (row !== undefined) {
           const metaDiffs = diffMetaDiffs(event.data.meta)
@@ -6317,11 +6552,20 @@ export class SshTui {
             row.totalLines = (row.totalLines ?? 0) + countOutputLines(row.output)
           }
         } else {
-          const present = presentToolCall(event.data.message.source.callId, '')
+          const sourceName = (event.data.message.source as { name?: unknown }).name
+          const recordedName = this.toolCallNames.get(callId)
+            ?? (typeof sourceName === 'string' ? sourceName : '')
+          if (recordedName !== '' && HIDDEN_TOOL_NAMES.has(recordedName)) break
+          // Never title a card with the call id (`call-<uuid>`). Prefer the
+          // recorded tool name; fall back to a generic tool card.
+          const toolName = recordedName === '' || recordedName.startsWith('call-')
+            ? 'tool'
+            : recordedName
+          const present = presentToolCall(toolName, '')
           this.pushRow({
             kind: 'tool',
-            callId: event.data.message.source.callId,
-            name: event.data.message.source.callId,
+            callId,
+            name: toolName,
             args: '',
             status: event.data.error === undefined ? 'ok' : 'error',
             output,
@@ -6382,6 +6626,7 @@ export class SshTui {
       case 'turn/end': {
         const reason = event.data.reason
         this.openToolCalls.clear()
+        this.toolCallNames.clear()
         this.pendingToolTimes.clear()
         this.stalledWarningShown = false
         this.pendingMessages.clear()
@@ -6413,7 +6658,9 @@ export class SshTui {
               kind: 'system',
               text: planDockNote(livePlan),
             })
-            this.queuePlanCloseNudge(livePlan)
+            // Driver is still `running` while `turn/end` is appended. Wait for
+            // idle so this follow-up does not make `/compact` report busy.
+            queueMicrotask(() => this.flushPlanCloseNudge())
           }
         }
         this.markDirty()
@@ -6441,6 +6688,10 @@ export class SshTui {
     }
     if (status !== 'running') this.endWait()
     this.status = status === 'running' ? 'running' : 'idle'
+    if (status !== 'running') {
+      this.flushPlanCloseNudge()
+      this.maybeIdleAutoCompact()
+    }
     this.markDirty()
   }
 
@@ -6555,8 +6806,7 @@ export class SshTui {
         row.kind === 'compaction' && row.compactionId === id)
       if (named !== undefined) return named
     }
-    return this.rows.findLast((row): row is Extract<Row, { kind: 'compaction' }> =>
-      row.kind === 'compaction' && row.status === 'running')
+    return undefined
   }
 
   private handleCompactionEvent(type: string, event: SessionEvent): void {
@@ -6580,11 +6830,13 @@ export class SshTui {
     const row = this.findCompactionRow(compactionId)
     if (type === 'compaction/prune') {
       const tokens = typeof data.shadowedTokenCount === 'number' ? data.shadowedTokenCount : 0
+      // Automatic tool-result prunes have no compactionId. Never attach them
+      // to a leftover /compact card — that made the next /compact look failed.
       if (row !== undefined) {
         row.pruneCount += 1
         row.prunedTokens += Math.max(0, tokens)
+        this.markDirty()
       }
-      this.markDirty()
       return
     }
     if (type === 'compaction/summary') {
@@ -6612,9 +6864,141 @@ export class SshTui {
           text: error === undefined ? '上下文压缩已完成。' : `上下文压缩失败：${error}`,
         })
       }
-      if (this.status.startsWith('压缩')) this.status = this.agent.status === 'running' ? 'running' : 'idle'
+      if (this.status.startsWith('压缩') || this.status.startsWith('compact')) {
+        this.status = this.agent.status === 'running' ? 'running' : 'idle'
+      }
+      this.idleCompactInFlight = false
+      this.markDirty()
+      this.refreshContextPressure()
+    }
+  }
+
+  private readContextPressure(): ContextPressureView | undefined {
+    const projections = this.ctx.get('sessionProjections') as {
+      snapshot?: (session: unknown) => { values?: { contextPressure?: unknown } }
+    } | undefined
+    const fromProjection = parseContextPressure(projections?.snapshot?.(this.agent.session)?.values?.contextPressure)
+    if (fromProjection !== undefined) return contextPressureView(fromProjection)
+    const requestContext = (this.agent.session as { requestContext?: () => { contextWindow?: unknown } | undefined }).requestContext?.()
+    const window = typeof requestContext?.contextWindow === 'number' && requestContext.contextWindow > 0
+      ? requestContext.contextWindow
+      : undefined
+    if (window === undefined) return undefined
+    const used = promptPressureTokens(this.stats.usage)
+    if (used <= 0) return undefined
+    return contextPressureView({ usedTokens: used, contextWindow: window })
+  }
+
+  private refreshContextPressure(options: { compact?: boolean } = {}): void {
+    const next = this.readContextPressure()
+    const previous = this.contextPressure
+    this.contextPressure = next
+    if (this.replaying) {
+      this.contextAlertLevel = next?.level === 'ok' ? undefined : next?.level
+      return
+    }
+    if (next !== undefined && next.level !== 'ok' && next.level !== this.contextAlertLevel) {
+      this.contextAlertLevel = next.level
+      this.pushRow({ kind: 'system', text: contextPressureAlertText(next) })
+    } else if (next === undefined || next.level === 'ok') {
+      this.contextAlertLevel = undefined
+    }
+    if (
+      previous?.usedTokens !== next?.usedTokens
+      || previous?.contextWindow !== next?.contextWindow
+      || previous?.level !== next?.level
+    ) {
       this.markDirty()
     }
+    if (options.compact !== false && this.agent.status !== 'running') this.maybeIdleAutoCompact()
+  }
+
+  private canRunCompactCommand(): boolean {
+    if (this.replaying || this.agentGone || this.exiting) return false
+    if (this.agent.status === 'running') return false
+    if (this.idleCompactInFlight) return false
+    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
+    return this.ctx.get('commands') !== undefined
+  }
+
+  private maybeIdleAutoCompact(): void {
+    if (!this.canRunCompactCommand()) return
+    if (!shouldIdleAutoCompact(this.contextPressure)) return
+    if (Date.now() - this.lastIdleCompactAt < 8_000) return
+    this.dispatchCompactCommand('idle')
+  }
+
+  private dispatchCompactCommand(reason: 'idle' | 'user'): void {
+    const commands = this.ctx.get('commands') as {
+      execute?: (agent: Agent, text: string, attachments: unknown[], signal: AbortSignal) => Promise<{
+        commandId?: unknown
+        result?: { kind?: unknown; text?: unknown }
+      } | undefined>
+    } | undefined
+    if (commands?.execute === undefined) {
+      if (reason === 'user') this.pushRow({ kind: 'error', text: `Unknown command: /compact (try /help)` })
+      return
+    }
+    if (this.agent.status === 'running'
+      || this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+      if (reason === 'user') this.pushRow({ kind: 'error', text: t('compact.busy') })
+      this.markDirty()
+      return
+    }
+    this.idleCompactInFlight = true
+    this.lastIdleCompactAt = Date.now()
+    if (reason === 'idle') {
+      const view = this.contextPressure
+      this.pushRow({
+        kind: 'system',
+        text: view === undefined
+          ? t('context.autoCompact')
+          : t('context.autoCompactAt', {
+            used: formatTokens(view.usedTokens),
+            window: formatTokens(view.contextWindow),
+            percent: view.percent.toFixed(0),
+          }),
+      })
+    }
+    this.commandAbort?.abort()
+    const controller = new AbortController()
+    this.commandAbort = controller
+    void commands.execute(this.agent, '/compact', [], controller.signal).then((execution) => {
+      if (execution === undefined) {
+        this.idleCompactInFlight = false
+        if (reason === 'user') this.pushRow({ kind: 'error', text: `Unknown command: /compact (try /help)` })
+        return
+      }
+      const compactionRunning = (): boolean =>
+        this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+      const releaseIfSettled = (): void => {
+        queueMicrotask(() => {
+          if (!compactionRunning()) this.idleCompactInFlight = false
+        })
+      }
+      if (this.seenCommandDoneIds.has(String(execution.commandId))) {
+        releaseIfSettled()
+        return
+      }
+      if (execution.result?.kind === 'error') {
+        this.idleCompactInFlight = false
+        this.pushRow({
+          kind: 'error',
+          text: formatCompactCommandError(this.formatCommandText(String(execution.result.text ?? ''))),
+        })
+      } else if (typeof execution.result?.text === 'string' && execution.result.text !== '') {
+        this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
+        releaseIfSettled()
+      } else {
+        releaseIfSettled()
+      }
+    }).catch((error: unknown) => {
+      this.idleCompactInFlight = false
+      this.pushRow({ kind: 'error', text: `/compact failed: ${errorChain(error)}` })
+    }).finally(() => {
+      if (this.commandAbort === controller) this.commandAbort = undefined
+      this.markDirty()
+    })
   }
 
   private handleCommandRun(data: { name?: unknown; args?: unknown } | undefined): void {
@@ -6679,9 +7063,14 @@ export class SshTui {
     const kind = typeof payload.kind === 'string' ? payload.kind : ''
     const text = typeof payload.text === 'string' ? payload.text.trim() : ''
     if (kind === 'error') {
-      const errText = this.formatCommandText(text)
+      const errText = formatCompactCommandError(this.formatCommandText(text))
       this.pushRow({ kind: 'error', text: errText === '' ? t('command.failed') : errText })
-      if (this.status.startsWith('压缩')) this.status = this.agent.status === 'running' ? 'running' : 'idle'
+      if (this.status.startsWith('压缩') || this.status.startsWith('compact')) {
+        this.status = this.agent.status === 'running' ? 'running' : 'idle'
+      }
+      if (!this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+        this.idleCompactInFlight = false
+      }
       this.markDirty()
       return
     }
@@ -6977,17 +7366,36 @@ export class SshTui {
         source: { kind: 'plugin', plugin: 'dsh-ssh-tui' },
       })],
       system: REVIEW_SYSTEM_PROMPT,
-      maxTokens: 200,
-      sessionId: this.agent.session.id,
+      maxTokens: 400,
+      reasoningEffort: ReasoningEffortId('off'),
       signal,
     }
     this.aiReviewCount += 1
     let text = ''
-    for await (const chunk of llm.stream(options)) {
-      if (chunk.type === 'text-delta') text += chunk.text
+    try {
+      for await (const chunk of llm.stream(options)) {
+        // Classifier reads the final assistant reply only. Reasoning/thinking
+        // is ignored even when it happens to contain JSON.
+        if (chunk.type === 'text-delta') text += chunk.text
+      }
+    } catch (error: unknown) {
+      this.pushRow({
+        kind: 'system',
+        text: t('approval.reviewFailed', { error: errorChain(error) }),
+      })
+      this.markDirty()
+      return undefined
     }
     const verdict = parseReviewOutput(text)
-    if (verdict === undefined) return undefined
+    if (verdict === undefined) {
+      const preview = text.trim() === '' ? t('approval.reviewNoReply') : text.trim()
+      this.pushRow({
+        kind: 'system',
+        text: t('approval.reviewUnparsed', { output: preview.slice(0, 160) }),
+      })
+      this.markDirty()
+      return undefined
+    }
     this.pushRow({
       kind: 'system',
       text: t('approval.reviewRow', {
@@ -7001,7 +7409,34 @@ export class SshTui {
     return verdict.approved ? 'allow' : 'deny'
   }
 
-  private readonly handleApproval = async (
+  private recordAutoApproval(
+    decision: 'allow' | 'deny',
+    risk: 'low' | 'medium' | 'high',
+    toolName: string,
+    command: string | undefined,
+    reason: string,
+  ): void {
+    if (decision === 'allow') this.autoAllowedCount += 1
+    else this.autoDeniedCount += 1
+    const subject = (command ?? '').trim() !== ''
+      ? command!.replace(/\s+/gu, ' ').trim()
+      : toolName
+    const clipped = Array.from(subject).length > 160
+      ? `${Array.from(subject).slice(0, 160).join('')}…`
+      : subject
+    this.pushRow({
+      kind: 'system',
+      text: t('approval.decisionRow', {
+        verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+        command: clipped,
+        risk,
+        reason,
+      }),
+    })
+    this.markDirty()
+  }
+
+  readonly handleApproval = async (
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> => {
@@ -7013,16 +7448,19 @@ export class SshTui {
     if (this.autoApprovalMode === 'auto') {
       const row = request.callId === undefined
         ? undefined
-        : this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
-            candidate.kind === 'tool' && candidate.callId === request.callId)
-      const command = row === undefined ? undefined : commandFromArgs(row.name, row.args)
+        : this.findToolRowByCallId(String(request.callId))
+      const command = commandForApprovalRequest({
+        toolName: request.toolName,
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        ...(row === undefined ? {} : { row: { name: row.name, args: row.args, ...(row.command === undefined ? {} : { command: row.command }) } }),
+      })
       const decision = classifyApproval(request.toolName, command)
       if (decision === 'allow') {
-        this.autoAllowedCount += 1
+        this.recordAutoApproval('allow', 'low', request.toolName, command, t('approval.ruleAllow'))
         return 'allowed-once'
       }
       if (decision === 'deny') {
-        this.autoDeniedCount += 1
+        this.recordAutoApproval('deny', 'high', request.toolName, command, t('approval.ruleDeny'))
         return 'rejected'
       }
       // Unknown shape: the rule table cannot judge it — hand it to the
@@ -7034,8 +7472,12 @@ export class SshTui {
         this.autoAllowedCount += 1
         return 'allowed-once'
       }
-      if (reviewed === 'deny' || !this.hasLiveDisplay()) {
+      if (reviewed === 'deny') {
         this.autoDeniedCount += 1
+        return 'rejected'
+      }
+      if (!this.hasLiveDisplay()) {
+        this.recordAutoApproval('deny', 'medium', request.toolName, command, t('approval.ruleDetached'))
         return 'rejected'
       }
     }
@@ -7751,6 +8193,24 @@ export class SshTui {
     const provider = this.effectiveSubagentProvider()
     const current = this.subagentSelection.current
     const direct = arg.trim()
+    if (direct.toLowerCase() === 'reset' || direct === '跟随' || direct === '默认') {
+      const parentProvider = this.currentProviderId()
+      const nextModel = defaultSubagentModelForProvider(
+        parentProvider,
+        [],
+        this.selectionRef?.current?.model ?? this.agent.options.model,
+      )
+      const persisted = await this.saveSubagentSelection({
+        model: nextModel,
+        reasoningEffort: undefined,
+      })
+      this.pushRow({
+        kind: 'system',
+        text: `子代理已恢复跟随父会话 ${parentProvider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
+      })
+      this.markDirty()
+      return
+    }
     let selectedId = direct
 
     if (selectedId === '') {
@@ -8064,7 +8524,7 @@ export class SshTui {
   }
 
   /** /mode: pick an agent preset (standard / minimal / ptc / cordis / routing-suite / ...). */
-  private async runModeCommand(): Promise<void> {
+  private async runModeCommand(arg = ''): Promise<void> {
     const agentPresets = this.ctx.get('agentPresets')
     if (agentPresets === undefined) {
       this.pushRow({ kind: 'error', text: 'agentPresets 服务不可用。' })
@@ -8077,15 +8537,31 @@ export class SshTui {
       this.markDirty()
       return
     }
-    const answer = await this.askQuestion({
-      id: 'mode-pick',
-      question: '选择模式',
-      options: presets.map(preset => ({
-        label: preset.name ?? preset.id,
-        description: `${preset.id === this.presetId ? '当前 · ' : ''}${preset.description ?? ''}`.trim(),
-      })),
-    })
-    const selected = presets.find(preset => (preset.name ?? preset.id) === answer.selected[0])
+    const direct = arg.trim().toLowerCase()
+    let selected = direct === ''
+      ? undefined
+      : presets.find(preset =>
+        preset.id.toLowerCase() === direct
+        || (preset.name ?? '').toLowerCase() === direct)
+    if (selected === undefined && direct !== '') {
+      this.pushRow({
+        kind: 'error',
+        text: t('mode.unknown', { id: arg.trim(), available: presets.map(preset => preset.id).join(', ') }),
+      })
+      this.markDirty()
+      return
+    }
+    if (selected === undefined) {
+      const answer = await this.askQuestion({
+        id: 'mode-pick',
+        question: '选择模式',
+        options: presets.map(preset => ({
+          label: preset.name ?? preset.id,
+          description: `${preset.id === this.presetId ? '当前 · ' : ''}${preset.description ?? ''}`.trim(),
+        })),
+      })
+      selected = presets.find(preset => (preset.name ?? preset.id) === answer.selected[0])
+    }
     if (selected === undefined) return
     const selectedName = selected.name ?? selected.id
     const hasWork = sessionEvents(this.agent.session).some(event => event.type === 'turn/start')
@@ -9462,7 +9938,7 @@ export class SshTui {
         })
         break
       case 'mode':
-        void this.runModeCommand().catch((error: unknown) => {
+        void this.runModeCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
@@ -9544,6 +10020,7 @@ export class SshTui {
             disconnect: this.disconnectPolicy,
             waitingQuestions: waiting,
             ...(quota === undefined ? {} : { quota }),
+            ...(this.contextPressure === undefined ? {} : { context: this.contextPressure }),
             parentModel: model,
             ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
             subModel: sub.model,
@@ -9611,8 +10088,8 @@ export class SshTui {
         })
         break
       case 'approval': {
-        const requested = arg === '' ? 'toggle' : arg
-        if (requested === 'status') {
+        const requested = arg.trim() === '' ? 'toggle' : arg.trim()
+        if (isApprovalStatusArg(requested)) {
           this.pushRow({
             kind: 'system',
             text: this.autoApprovalMode === 'auto'
@@ -9626,7 +10103,7 @@ export class SshTui {
           ? this.autoApprovalMode === 'auto' ? 'off' : 'auto'
           : parseAutoApprovalMode(requested)
         if (next === undefined) {
-          this.pushRow({ kind: 'error', text: t('approval.unknown', { arg }) })
+          this.pushRow({ kind: 'error', text: t('approval.unknown', { arg: requested }) })
           this.markDirty()
           break
         }
@@ -9678,6 +10155,10 @@ export class SshTui {
             this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
             break
           }
+          if (command === 'compact') {
+            this.dispatchCompactCommand('user')
+            break
+          }
           this.commandAbort?.abort()
           const controller = new AbortController()
           this.commandAbort = controller
@@ -9691,7 +10172,7 @@ export class SshTui {
             // arrived (no persistence, or a handler that skipped the log).
             if (this.seenCommandDoneIds.has(String(execution.commandId))) return
             if (execution.result.kind === 'error') {
-              this.pushRow({ kind: 'error', text: this.formatCommandText(execution.result.text) })
+              this.pushRow({ kind: 'error', text: formatCompactCommandError(this.formatCommandText(execution.result.text)) })
             } else if (execution.result.text !== undefined && execution.result.text !== '') {
               this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
             }

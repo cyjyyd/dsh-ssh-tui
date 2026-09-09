@@ -248,7 +248,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Ctrl+R` | expand the latest card; once a card is selected, expand or collapse all |
 | `Ctrl+T` | fold the input box (display-only) |
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
-| `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply`). `Ctrl+/` or `Alt+/` opens it |
+| `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`). `Ctrl+/` or `Alt+/` opens it |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |
@@ -258,9 +258,18 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/approval`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
-`/compact` shows a spinning 「压缩上下文」 card and footer until it
+`/approval auto` allows low-risk shapes, auto-rejects danger (`rm -rf`,
+`sudo`, `curl|sh`, `git push --force`), and sends unrecognized shapes to
+the subagent-model reviewer (final reply JSON only; thinking is ignored).
+The identity footer row shows a one-cell Braille ring after the
+remaining-quota bar for occupancy of the routed model's context window
+(DSH `contextPressure`, provider-agnostic); green / yellow / red map
+to ok / 80% / 95%.
+`/status` prints the same figures. Warnings fire near 80%/95%; idle
+auto-`/compact` starts near 72% so recovery is not left to a mid-turn
+overflow. `/compact` shows a spinning compact card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
 `/help` lists everything. `/language` (alias `/lang`) opens a picker, or
 `/language zh` / `/language en` switches immediately. `DSH_TUI_LANG` wins,

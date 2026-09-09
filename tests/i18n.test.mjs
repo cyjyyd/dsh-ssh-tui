@@ -104,7 +104,13 @@ test('slash command descriptions are complete and bilingual in zh and en', () =>
 
   // Verify parameter guidance in /approval, /disconnect, /view, /plan, /goal
   assert.ok(zh['cmd.approval'].includes('auto'))
+  assert.ok(zh['cmd.approval'].includes('status'))
   assert.ok(en['cmd.approval'].includes('auto'))
+  assert.ok(en['cmd.approval'].includes('status'))
+  assert.ok(zh['cmd.find'].includes('prompt'))
+  assert.ok(en['cmd.find'].includes('prompt'))
+  assert.ok(zh['cmd.mode'].includes('/mode'))
+  assert.ok(en['cmd.mode'].includes('/mode'))
   assert.ok(zh['cmd.disconnect'].includes('pause') && zh['cmd.disconnect'].includes('continue'))
   assert.ok(en['cmd.disconnect'].includes('pause') && en['cmd.disconnect'].includes('continue'))
   assert.ok(zh['cmd.view'].includes('detailed') && zh['cmd.view'].includes('compact'))

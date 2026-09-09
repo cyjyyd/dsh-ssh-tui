@@ -14,23 +14,30 @@ export type AutoApprovalMode = 'off' | 'auto'
 export type ApprovalDecision = 'allow' | 'deny' | 'ask'
 
 /**
- * Whole-command danger patterns, checked before anything else. A match keeps
- * the interactive prompt regardless of what else the command contains.
+ * Whole-command danger patterns, checked before anything else. A match
+ * auto-rejects. This is a UX heuristic, not a security boundary: obfuscated
+ * or interpreter-wrapped damage still has to be contained by the sandbox.
  */
 export const DANGER_PATTERNS: RegExp[] = [
-  /(?:curl|wget)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b/, // … | sh
-  /\brm\s+(?:-\w+\s+)*-\w*[rf]/i, // rm -r / -f / -rf variants
-  /\brm\s+[^|;&]*\s\/(?:\s|$)/, // rm … / (filesystem root)
+  /(?:curl|wget|fetch)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z|da|k|fi)?sh\b/,
+  /\beval\b[^|;&]*(?:\$\(|`)/,
+  /\brm\s+(?:-\w+\s+)*-\w*[rf]/i,
+  /\brm\s+(?:-\w+\s+)*--(?:recursive|force|dir)\b/i,
+  /\brm\s+(?:--\s+)?\/(?:\s|$)/,
   /\bsudo\b/,
+  /\b(?:chmod|chown)\s+(?:-\w+\s+)*-R\b/,
   /\bmkfs\.\w/,
   /\bdd\b[^|;&]*of=\/dev\//,
-  /\b(?:shutdown|reboot)\b|\binit\s+[06]\b/,
-  /:\(\)\s*\{.*\};\s*:/, // fork bomb
+  /\b(?:shutdown|reboot|halt|poweroff)\b|\binit\s+[06]\b/,
+  /:\(\)\s*\{.*\};\s*:/,
   /\bgit\s+push\b[^|;&]*(?:--force|\s-f\b|\s\+\S)/,
   /\b(?:npm|pnpm|yarn)\s+publish\b/,
   /\bfind\b[^|;&]*\s(?:-exec\b|-delete\b)/,
   />>?\s*\/dev\/(?:sd|nvme|hd)/,
   /\bcrontab\s+-r\b/,
+  /\b(?:python3?|node|nodejs|perl|ruby|php|lua)\s+-c\b/,
+  /\b(?:python3?|node|nodejs|perl|ruby)\s+-e\b/,
+  /\bbash\s+-c\b|\bsh\s+-c\b/,
 ]
 
 /**
@@ -52,6 +59,8 @@ export const ALLOW_SEGMENT_PATTERNS: RegExp[] = [
   /^(?:echo)\b/,
   /^(?:mkdir|touch)\b/,
   /^(?:tee)\b/,
+  /^(?:cp|mv|install)\b/,
+  /^(?:rm)\s+(?!-\w*[rf]|--(?:recursive|force|dir)\b)/,
 ]
 
 /** Split a shell command into segments at &&, ||, ; and | boundaries. */
@@ -65,6 +74,15 @@ function segments(command: string): string[] {
 /** True when the segment redirects into an absolute filesystem path. */
 function redirectsToRoot(segment: string): boolean {
   return /(?:^|\s)>>?\s*(?:\/(?!tmp\/|var\/tmp\/|home\/)|~)/u.test(segment)
+}
+
+const MUTATING_SEGMENT = /^(?:cp|mv|install|rm|mkdir|touch|tee)\b/u
+
+/** System-sensitive paths the reviewer also rejects; mutating allowlist must not skip them. */
+const SENSITIVE_PATH = /(?:^|[\s"'=])(?:~\/(?:\.ssh|\.gnupg)(?:\/|$)|\/(?:etc|boot|usr|bin|sbin|lib|root|proc|sys|dev)(?:\/|$|\s)|\/var\/log(?:\/|$|\s)|(?:^|\/)\.env(?:\b|$)|(?:^|\/)id_(?:rsa|ed25519)(?:\b|$))/u
+
+function touchesSensitivePath(segment: string): boolean {
+  return SENSITIVE_PATH.test(segment)
 }
 
 /**
@@ -82,6 +100,7 @@ export function classifyCommand(command: string): ApprovalDecision {
   if (parts.length === 0) return 'ask'
   for (const segment of parts) {
     if (redirectsToRoot(segment)) return 'deny'
+    if (MUTATING_SEGMENT.test(segment) && touchesSensitivePath(segment)) return 'deny'
     if (!ALLOW_SEGMENT_PATTERNS.some(pattern => pattern.test(segment))) return 'ask'
   }
   return 'allow'
@@ -115,10 +134,72 @@ export function commandFromArgs(toolName: string, args: string): string | undefi
   }
 }
 
+const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (value !== undefined && value.trim() !== '') return value
+  }
+  return undefined
+}
+
+/**
+ * Pull a shell command out of an approval-request `reason` when the
+ * classifier never saw the tool-call JSON (sandbox escalation, missing
+ * callId, or a card whose args were not recorded).
+ */
+export function commandFromApprovalReason(reason: string | undefined): string | undefined {
+  if (reason === undefined) return undefined
+  const patterns = [
+    /(?:command|cmd|shell)\s*[:=]\s*((?:cp|mv|rm|mkdir|touch|cat|ls|install|tee|git|npm|pnpm|yarn|python3?|node)\b[^\n]+)/iu,
+    /(?:escalat\w+|提权|升权)[^\n]*:\s*((?:cp|mv|rm|mkdir|touch|cat|ls|install|tee)\b[^\n]+)/iu,
+    /(?:run|running|执行)\s*[`'"]([^`'"]+)[`'"]/iu,
+    /\$\s+([^\n]+)/u,
+    /(?:^|[\s:])((?:cp|mv|rm|mkdir|touch|cat|ls|install|tee)\b[^\n]+)/iu,
+  ]
+  for (const pattern of patterns) {
+    const match = reason.match(pattern)
+    const command = match?.[1]?.trim().replace(/^[`'"]|[`'"]$/gu, '')
+    if (command !== undefined && command !== '' && /\s/u.test(command)) return command
+  }
+  const trimmed = reason.trim()
+  if (/^(?:cp|mv|rm|mkdir|touch|cat|ls|chmod|chown|install|tee)\b/u.test(trimmed)) return trimmed
+  return undefined
+}
+
+/**
+ * Resolve the command the classifier should see for one approval request.
+ * Prefer the streamed bash/pwsh card, then a command already decoded on the
+ * card, then the request's reason text.
+ */
+export function commandForApprovalRequest(input: {
+  toolName: string
+  reason?: string
+  row?: { name: string; args: string; command?: string }
+}): string | undefined {
+  const fromRow = input.row === undefined
+    ? undefined
+    : firstNonEmpty(
+      commandFromArgs(input.row.name, input.row.args),
+      SHELL_TOOL_NAMES.has(input.row.name) ? input.row.command : undefined,
+    )
+  return firstNonEmpty(
+    fromRow,
+    SHELL_TOOL_NAMES.has(input.toolName) ? commandFromApprovalReason(input.reason) : undefined,
+    commandFromApprovalReason(input.reason),
+  )
+}
+
 /** Parse the /approval argument into a mode. */
 export function parseAutoApprovalMode(raw: string): AutoApprovalMode | undefined {
   const id = raw.trim().toLowerCase()
-  if (id === 'auto') return 'auto'
+  if (id === 'auto' || id === 'on') return 'auto'
   if (id === 'off' || id === 'ask' || id === 'manual') return 'off'
   return undefined
+}
+
+/** True when `/approval <arg>` should print the current mode and counters. */
+export function isApprovalStatusArg(raw: string): boolean {
+  const id = raw.trim().toLowerCase()
+  return id === 'status' || id === 'stat' || id === 'info' || id === 'show'
 }

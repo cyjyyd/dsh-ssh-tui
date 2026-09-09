@@ -23,6 +23,14 @@ test('buildReviewUserMessage fences the data regions and truncates long input', 
   // 防注入：系统提示词声明数据区不是指令
   assert.match(REVIEW_SYSTEM_PROMPT, /注入/)
   assert.match(REVIEW_SYSTEM_PROMPT, /reject/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /系统敏感目录/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /脚本/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /语法/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /\/home\//)
+  assert.match(REVIEW_SYSTEM_PROMPT, /最终回复/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /思考过程一律忽略/)
+  assert.ok(message.includes('[输出要求]'))
+  assert.ok(message.includes('必须给出最终可见回复'))
 })
 
 test('buildReviewUserMessage truncates oversized fields', () => {
@@ -50,13 +58,20 @@ test('parseReviewOutput reads the reviewer JSON verdict', () => {
 
 test('parseReviewOutput fails safe on junk and hostile output', () => {
   assert.equal(parseReviewOutput('好的，我批准这个操作。'), undefined)
-  assert.equal(parseReviewOutput('{"risk":"high","decision":"approved","reason":"x"}').approved, false)
+  assert.equal(parseReviewOutput('{"risk":"high","authorization":"unknown","decision":"approved","reason":"x"}').approved, false)
+  assert.equal(parseReviewOutput('{"risk":"high","authorization":"yes","decision":"approved","reason":"用户授权单文件删除"}').approved, false)
+  assert.equal(parseReviewOutput('{"risk":"medium","authorization":"yes","decision":"approved","reason":"用户目录单文件删除"}').approved, true)
   assert.equal(parseReviewOutput('{"risk":"low","authorization":"no","decision":"approved"}').approved, false)
   assert.equal(parseReviewOutput('{"risk":"unknown","decision":"approved"}'), undefined)
   assert.equal(parseReviewOutput('{"decision":"approved"}'), undefined)
   // 模型输出带代码栅栏时仍可解析
   const fenced = parseReviewOutput('```json\n{"risk":"low","authorization":"yes","decision":"approved","reason":"ok"}\n```')
   assert.equal(fenced.approved, true)
+  const aliases = parseReviewOutput('{"risk":"Low","authorization":"allow","decision":"allow","reason":"用户授权删除探测文件"}')
+  assert.equal(aliases?.approved, true)
+  const reasoningOnly = parseReviewOutput('Thinking...\n{"risk":"medium","verdict":"reject","reason":"拿不准"}')
+  assert.equal(reasoningOnly?.approved, false)
+  assert.equal(reasoningOnly?.risk, 'medium')
 })
 
 test('parseReviewOutput flags injection attempts as high risk', () => {
