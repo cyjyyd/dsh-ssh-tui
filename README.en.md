@@ -106,10 +106,11 @@ From a checkout: `bash scripts/smoke-headless.sh` (prints an outcome summary, ne
 ### After an SSH drop
 
 Closing the laptop or an idle jump host tears down the TTY. The TUI treats
-SIGHUP, stdin close, and a failed TTY write as hangup: it drops the display,
-cancels a running turn, flushes the session log, and **keeps the Host**.
-Reconnect with the same command — the picker prefers a live process
-(labelled attachable). Do not start a second Host:
+SIGHUP, stdin close, and a failed TTY write as hangup: it drops the display
+and flushes the session log. **Idle hangup does not keep the Host** (next
+`--resume` replays the log). A busy turn — thinking, reply, tools, subagents —
+**keeps the Host**. Reconnect with the same command — the picker prefers a live
+process (labelled attachable). Do not start a second Host:
 
 ```sh
 dsh --profile tui --resume                 # picker (live hosts first)
@@ -121,12 +122,12 @@ and approvals). Locks live under `$DSH_HOME/tui-locks/`; the display socket
 under `$DSH_HOME/tui-socks/`. A leftover lock from a crash is stolen if the
 pid is dead. `DSH_TUI_NO_SESSION_LOCK=1` skips this.
 
-Hangup pauses the turn by default (cancelled). After attach, send another
+A busy hangup pauses the turn by default (cancelled). After attach, send another
 message to continue. `/disconnect continue`, `ssh-tui.disconnect: continue`,
 or `DSH_TUI_DISCONNECT=continue` leaves the turn running in the background;
-approvals and questions wait until a Display attaches. With no display and
-6h idle (`DSH_TUI_DETACHED_IDLE_MS`) the Host exits itself. Optional: wrap
-the TUI in tmux.
+approvals and questions wait until a Display attaches. Idle hangup exits
+immediately. With no display and 6h idle (`DSH_TUI_DETACHED_IDLE_MS`) the Host
+exits itself. Optional: wrap the TUI in tmux.
 
 New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows
@@ -243,7 +244,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | --- | --- |
 | `Enter` | send; while running, steer; with empty input, toggle the selected card. Oversized tool bodies open a dedicated inspect view; `Esc` returns |
 | `Tab` | complete the highlighted slash command |
-| `↑` / `↓` | empty input: move among cards; otherwise history. Same as `Ctrl+N` / `Ctrl+P` |
+| `↑` / `↓` | empty input: move among cards; otherwise history (↓ past the newest item restores the live draft). Same as `Ctrl+N` / `Ctrl+P` |
 | `Ctrl+R` | expand the latest card; once a card is selected, expand or collapse all |
 | `Ctrl+T` | fold the input box (display-only) |
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
@@ -257,7 +258,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/provider`, `/language`, `/view`, `/disconnect`, `/help`, ...) with every command the harness
+commands (`/find`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/compact` shows a spinning 「压缩上下文」 card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
@@ -379,8 +380,12 @@ seconds after completion, and `待命` when idle. A terminal bell rings on
 completion (`DSH_TUI_NO_BELL=1` disables it).
 
 Tool calls render as compact cards instead of raw argument JSON. The title
-stays the default foreground; only the status dot and `[ok]` / `[error]` /
-`[running…]` (plus `[退出码 N]` / `[信号 X]`) are yellow / green / red.
+stays the default foreground; the status dot is yellow / green / red for
+running / ok / error. Success no longer repeats `[ok]` next to the green
+dot; failures still show `[error]`, and in-flight calls still show
+`[running…]` (plus `[退出码 N]` / `[信号 X]` when a shell exits). Consecutive
+reads or edits of the same path fold into one card (`×N`, cumulative
+chars/lines, appended diffs, a brief flip animation).
 Shell tools show the command as dim-grey `$ command`. File mutations
 (`edit` / `write` / `str_replace_editor`) carry a git-style red/green
 deletions/additions stat in the header (` -13 +24`; zero parts drop out)

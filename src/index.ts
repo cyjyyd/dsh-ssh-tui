@@ -152,7 +152,7 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(t('attach.zombie', { session: sessionId, pid: live.lock.pid }))
       }
       const spawned = spawnDetachedHost(sessionId)
-      await waitForDisplaySock(spawned.sock)
+      await waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile)
       await attachExisting(sessionId, spawned.sock)
     }
     // An explicit in-process change (/setup or /model) wins over launch-time
@@ -346,6 +346,8 @@ export function apply(ctx: Context, config: Config): void {
           liveSelection = next
         },
         onHangup: async () => {
+          // Only reached when hangup keeps the Host (busy at drop). Idle hangup
+          // exits through dispose + appExit and must drop the lock.
           hostOrphaned = true
           const policy = controller?.disconnectPolicy() ?? 'pause'
           await patchLock({
@@ -439,8 +441,9 @@ export function apply(ctx: Context, config: Config): void {
 
     return async (): Promise<void> => {
       if (hostOrphaned) {
-        // SSH drop: keep agent + display socket. Launcher fiber dispose must
-        // not release the lock or cancel the leftover Host.
+        // Busy SSH drop: keep agent + display socket. Launcher fiber dispose
+        // must not release the lock or cancel the leftover Host. Idle hangup
+        // never sets this flag, so the lock is released below.
         return
       }
       disposed = true

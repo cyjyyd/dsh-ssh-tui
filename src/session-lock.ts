@@ -5,7 +5,7 @@
  */
 import { access, readdir } from 'node:fs/promises'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
-import { constants as fsConstants } from 'node:fs'
+import { constants as fsConstants, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
@@ -19,6 +19,10 @@ export interface SessionLockInfo {
   pid: number
   sessionId: string
   startedAt: string
+  /** `/proc/sys/kernel/random/boot_id` when the lock was taken (POSIX only). */
+  bootId?: string
+  /** `/proc/<pid>/stat` starttime (field 22) of `pid` when the lock was taken. */
+  pidStart?: string
   tty?: string
   sock?: string
   state?: SessionLockState
@@ -59,6 +63,8 @@ export function parseSessionLock(raw: string): SessionLockInfo | undefined {
       pid,
       sessionId,
       startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : '',
+      ...(optionalString(parsed.bootId) !== undefined ? { bootId: optionalString(parsed.bootId) } : {}),
+      ...(optionalString(parsed.pidStart) !== undefined ? { pidStart: optionalString(parsed.pidStart) } : {}),
       ...(optionalString(parsed.tty) !== undefined ? { tty: optionalString(parsed.tty) } : {}),
       ...(optionalString(parsed.sock) !== undefined ? { sock: optionalString(parsed.sock) } : {}),
       ...(state === 'attached' || state === 'paused' || state === 'running-detached' ? { state } : {}),
@@ -81,6 +87,65 @@ export function processIsAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM'
   }
+}
+
+/** `/proc/sys/kernel/random/boot_id` or undefined where procfs is unavailable (win32). */
+function readBootId(): string | undefined {
+  try {
+    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+  } catch {
+    return undefined
+  }
+}
+
+/** `/proc/<pid>/stat` starttime (field 22) or undefined when unreadable/gone. */
+function readProcStarttime(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close === -1) return undefined
+    const fields = stat.slice(close + 2).split(' ')
+    return fields[22 - 3]
+  } catch {
+    return undefined
+  }
+}
+
+function readProcCmdline(pid: number): string | undefined {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when `pid` is genuinely the Host process that wrote `lock`.
+ *
+ * `processIsAlive` alone is not enough: the pid may have been recorded inside
+ * a different pid namespace (sandbox/container) and then be recycled by an
+ * unrelated host process — e.g. a lock written as pid 5 in a sandbox matches
+ * the forever-alive pid 5 kernel thread on the host, which used to produce a
+ * permanent false "zombie" that blocked `--resume`. We therefore verify the
+ * process identity:
+ *  - new locks carry `bootId` + `pidStart` (boot_id + /proc/<pid>/stat
+ *    starttime): a matching pair can only be the same process on the same
+ *    boot, so a recycled or cross-namespace pid fails the check;
+ *  - older locks fall back to `/proc/<pid>/cmdline`: the detached Host is
+ *    always launched with `--resume=<sessionId>` in argv, so any other
+ *    process (kernel threads have an empty cmdline) is proven stale.
+ * On platforms without procfs the legacy kill(pid, 0) behavior is kept.
+ */
+export function lockOwnerIsAlive(lock: SessionLockInfo): boolean {
+  const pid = lock.pid
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (!processIsAlive(pid)) return false
+  if (lock.bootId !== undefined && lock.pidStart !== undefined) {
+    return readBootId() === lock.bootId && readProcStarttime(pid) === lock.pidStart
+  }
+  const cmdline = readProcCmdline(pid)
+  if (cmdline === undefined) return true // no /proc (win32/darwin): legacy best-effort
+  return cmdline.includes(`--resume=${lock.sessionId}`)
 }
 
 export function formatLockHeldMessage(lock: SessionLockInfo): string {
@@ -126,10 +191,15 @@ export async function acquireSessionLock(
   const dshHome = options.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const path = sessionLockPath(sessionId, dshHome)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const pid = options.pid ?? process.pid
+  const bootId = readBootId()
+  const pidStart = bootId !== undefined ? readProcStarttime(pid) : undefined
   const info: SessionLockInfo = {
-    pid: options.pid ?? process.pid,
+    pid,
     sessionId,
     startedAt: new Date().toISOString(),
+    ...(bootId !== undefined ? { bootId } : {}),
+    ...(pidStart !== undefined ? { pidStart } : {}),
     ...(options.tty ? { tty: options.tty } : {}),
     sock: options.sock ?? sessionSockPath(sessionId, dshHome),
     state: options.state ?? 'attached',
@@ -150,7 +220,7 @@ export async function acquireSessionLock(
         existing = undefined
       }
       const ours = options.pid ?? process.pid
-      if (existing !== undefined && processIsAlive(existing.pid) && existing.pid !== ours) {
+      if (existing !== undefined && existing.pid !== ours && lockOwnerIsAlive(existing)) {
         throw new SessionLockHeldError(existing, path)
       }
       try {
@@ -190,7 +260,7 @@ async function inspectHeldLock(
   dshHome: string,
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
   const sock = info.sock ?? sessionSockPath(info.sessionId, dshHome)
-  const alive = processIsAlive(info.pid)
+  const alive = lockOwnerIsAlive(info)
   let sockExists = false
   try {
     await access(sock, fsConstants.F_OK)

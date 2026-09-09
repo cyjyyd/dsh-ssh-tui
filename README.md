@@ -59,7 +59,8 @@ dsh --profile tui
 - 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
   粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以粗体白色显示；
 - 系统提示词 / `system-reminder` / `AGENTS.md` 等注入折叠为「提示词注入:系统预设 AGENTS.MD」卡片，默认收起，Enter 展开看全文；
-- 工具调用卡片化：标题默认色，只把状态点与 `[ok]`/`[error]` 染成黄/绿/红；
+- 工具调用卡片化：标题默认色，状态球绿/黄/红表示成功/运行中/失败（成功不再跟 `[ok]` 重复；失败仍标 `[error]`）；
+  连续读/编辑同一路径会叠成一张卡（`×N` + 累计字数/行数，编辑 diff 跟随追加，合并时翻牌动画）；
   shell 命令浅灰、路径 cyan；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
   文件统计），头部带 git 红绿增删行数（如 ` -13 +24`），默认收起，Enter 展开；
   正文超出窗口时单独全览（Esc 返回）；JSON 参数与结果自动转可读内容；
@@ -119,7 +120,8 @@ dsh --profile tui          # 必须在真实终端 / SSH 会话里
 ### SSH 断了之后
 
 合盖、跳板 idle、换网会拆掉当前 TTY。TUI 把 SIGHUP / stdin 关闭 / 写 TTY 失败
-当成挂断：放下显示器、若这一轮还在跑则取消并 flush 日志，**Host 进程留下**。
+当成挂断：放下显示器并 flush 日志。**空闲断线不保活**（Host 退出，下次从日志
+`--resume`）；模型思考 / 回复 / 工具 / 子代理等忙碌状态则 **Host 留下**。
 重新 SSH 后同一条命令会优先接入那个进程（选择器标「可接入」），不要再开第二份 Host：
 
 ```bash
@@ -131,10 +133,10 @@ dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从�
 `$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在
 下次启动时核对 pid，已死则自动从日志接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
 
-默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
+忙碌时默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
 `ssh-tui.disconnect: continue`（也可用 `DSH_TUI_DISCONNECT=continue`）则不取消，
-Host 在后台跑完这一轮；审批和提问等接上后再弹。无显示器且空闲超过 6 小时
-（`DSH_TUI_DETACHED_IDLE_MS`）Host 自行退出。可选：用 tmux 包一层。
+Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线直接退出，不占后台。
+无显示器且空闲超过 6 小时（`DSH_TUI_DETACHED_IDLE_MS`）Host 自行退出。可选：用 tmux 包一层。
 
 启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
@@ -210,7 +212,7 @@ dsh --profile tui --no-color
 | 键 | 作用 |
 | --- | --- |
 | `Enter` | 发送；运行中则插入指示；空输入且已选卡片时展开/收起。工具正文超出窗口则单独全览，`Esc` 返回 |
-| `↑` / `↓` | 空输入：在卡片间移动；有输入：历史。与 `Ctrl+N` / `Ctrl+P` 相同 |
+| `↑` / `↓` | 空输入：在卡片间移动；有输入：历史（↓ 越过最新一条会回到当前草稿）。与 `Ctrl+N` / `Ctrl+P` 相同 |
 | `Ctrl+R` | 展开最新一条卡片；已用 ↑/↓ 选中时全部展开或全部收起 |
 | `Ctrl+T` | 折叠输入框（只影响显示） |
 | `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复 |
@@ -225,7 +227,7 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
@@ -381,7 +383,7 @@ npm run build
   `DSH_TUI_NO_BELL=1` 关闭。
 - **滚轮误触取消**：已加入转义序列缓冲，网络拆包也不会把 `ESC` 当取消。
 - **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。统计行最左是 `SSH ●●●○ 90ms`（一格红、两格黄、三格及以上绿）。探测不写进转录。
-- **SSH 断了**：默认取消当前轮次、flush 日志，Host 留下。`/disconnect continue` 则不取消，后台跑完。回来 `--resume` 会接入那个进程（见上文）。不要再开第二份 Host。
+- **SSH 断了**：空闲则 flush 后退出（不保活）。忙碌（思考/回复/工具/子代理）则默认取消当前轮次、flush 日志，Host 留下。`/disconnect continue` 则不取消，后台跑完。回来 `--resume` 会接入那个进程（见上文）。不要再开第二份 Host。
 - **提示会话已在 pid 运行 / 可接入**：那份 Host 还活着。用 `--resume` 接入；只有 pid 已死、显示通道也连不上时才删 `$DSH_HOME/tui-locks/` 再从日志恢复。
 
 ## License

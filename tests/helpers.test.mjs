@@ -79,6 +79,9 @@ import {
   wrapWaitDetails,
   parseWorkspaceView,
   parseDisconnectPolicy,
+  parseEffortArg,
+  canMergeToolCall,
+  countOutputLines,
   pickerWindowStart,
   compactToolGroups,
   compactToolBursts,
@@ -296,6 +299,7 @@ test('hangup cancels a running turn, flushes, and exits without writing goodbye'
 test('hangup on an idle agent flushes without cancel', async () => {
   const cancelled = []
   const flushed = []
+  const hangups = []
   const exits = []
   const ctx = {
     get(name) {
@@ -314,11 +318,18 @@ test('hangup on an idle agent flushes without cancel', async () => {
     session: { id: 'main-session', events: [] },
     cancel(reason) { cancelled.push(reason) },
   }
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
   await tui.handleHangup()
   assert.deepEqual(cancelled, [])
   assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(hangups, [], 'idle hangup must not keep the Host')
   assert.deepEqual(exits, [129])
+  assert.equal(tui.disposed, true)
 })
 
 test('captureHangupSignals drops the launcher SIGTERM handler', () => {
@@ -424,6 +435,104 @@ test('parseDisconnectPolicy accepts pause/continue aliases', () => {
   assert.equal(parseDisconnectPolicy('nope'), undefined)
 })
 
+test('arrow-up history restores the live draft when arrow-down past the newest item', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+    followup() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.history.push('first')
+  tui.history.push('second')
+  tui.historyIndex = 2
+  tui.input = 'draft-now'
+  tui.cursor = tui.input.length
+  tui.historyBack()
+  assert.equal(tui.input, 'second')
+  tui.historyBack()
+  assert.equal(tui.input, 'first')
+  tui.historyForward()
+  assert.equal(tui.input, 'second')
+  tui.historyForward()
+  assert.equal(tui.input, 'draft-now')
+  tui.historyBack()
+  assert.equal(tui.input, 'second')
+  tui.historyForward()
+  assert.equal(tui.input, 'draft-now')
+})
+
+test('consecutive same-path reads and edits collapse; a different path starts a new card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const session = agent.session
+  const read = (id, path, body) => {
+    tui.handleSessionEvent(session, {
+      type: 'tool/call',
+      data: { callId: id, name: 'read', arguments: JSON.stringify({ path }) },
+    })
+    tui.handleSessionEvent(session, {
+      type: 'tool/result',
+      data: {
+        message: { source: { callId: id }, content: [{ type: 'text', text: body }] },
+      },
+    })
+  }
+  const edit = (id, path, oldText, newText) => {
+    tui.handleSessionEvent(session, {
+      type: 'tool/call',
+      data: { callId: id, name: 'edit', arguments: JSON.stringify({ file_path: path, old_string: oldText, new_string: newText }) },
+    })
+    tui.handleSessionEvent(session, {
+      type: 'tool/result',
+      data: {
+        message: { source: { callId: id }, content: [{ type: 'text', text: 'ok' }] },
+        meta: { diffs: [{ path, oldText, newText }] },
+      },
+    })
+  }
+
+  read('r1', 'a.ts', 'aaaa\n')
+  read('r2', 'a.ts', 'aaaa\nbbbb\n')
+  read('r3', 'b.ts', 'b\n')
+  read('r4', 'a.ts', 'again\n')
+  edit('e1', 'c.ts', 'old', 'new1')
+  edit('e2', 'c.ts', 'new1', 'new2')
+  edit('e3', 'd.ts', 'x', 'y')
+
+  const tools = tui.rows.filter(row => row.kind === 'tool')
+  assert.equal(tools.length, 5)
+  assert.equal(tools[0].summary, 'a.ts')
+  assert.equal(tools[0].repeats, 2)
+  assert.equal(tools[0].totalLines, 3)
+  assert.equal(tools[0].output, 'aaaa\nbbbb\n')
+  assert.equal(tools[1].summary, 'b.ts')
+  assert.equal(tools[1].repeats, undefined)
+  assert.equal(tools[2].summary, 'a.ts')
+  assert.equal(tools[2].repeats, undefined)
+  assert.equal(tools[3].summary, 'c.ts')
+  assert.equal(tools[3].repeats, 2)
+  assert.equal(tools[3].diff?.length, 2)
+  assert.equal(tools[4].summary, 'd.ts')
+
+  const previous = { kind: 'tool', name: 'read', args: JSON.stringify({ path: 'a.ts' }), summary: 'a.ts' }
+  assert.equal(canMergeToolCall(previous, { name: 'read', args: JSON.stringify({ path: 'a.ts' }) }), true)
+  assert.equal(canMergeToolCall(previous, { name: 'read', args: JSON.stringify({ path: 'b.ts' }) }), false)
+  assert.equal(countOutputLines('a\nb\n'), 2)
+})
+
+test('parseEffortArg accepts default aliases and rejects junk', () => {
+  assert.deepEqual(parseEffortArg('default'), { kind: 'default' })
+  assert.deepEqual(parseEffortArg('默认'), { kind: 'default' })
+  assert.deepEqual(parseEffortArg('xhigh'), { kind: 'id', id: 'xhigh' })
+  assert.equal(parseEffortArg('not an effort'), undefined)
+  assert.equal(parseEffortArg(''), undefined)
+})
+
 test('hangup with disconnect continue does not cancel a running turn', async () => {
   const cancelled = []
   const flushed = []
@@ -461,6 +570,77 @@ test('hangup with disconnect continue does not cancel a running turn', async () 
   assert.deepEqual(exits, [])
 })
 
+test('idle hangup with continue still exits instead of keeping the host', async () => {
+  const cancelled = []
+  const flushed = []
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return { flush: async (session) => { flushed.push(session.id) } }
+      }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel(reason) { cancelled.push(reason) },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    disconnectPolicy: 'continue',
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
+  assert.deepEqual(cancelled, [])
+  assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(hangups, [])
+  assert.deepEqual(exits, [129])
+  assert.equal(tui.disposed, true)
+})
+
+test('pause hangup of a running turn still keeps the host after cancel settles', async () => {
+  const cancelled = []
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel(reason) { cancelled.push(reason); this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    disconnectPolicy: 'pause',
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
+  assert.deepEqual(cancelled, [{ kind: 'user' }])
+  assert.equal(agent.status, 'idle')
+  assert.deepEqual(hangups, ['hung'], 'busy-at-drop still keeps Host after pause cancel')
+  assert.deepEqual(exits, [])
+  assert.equal(tui.disposed, false)
+})
+
 test('hangup keeps the host when a display socket is listening', async () => {
   const flushed = []
   const hangups = []
@@ -490,6 +670,68 @@ test('hangup keeps the host when a display socket is listening', async () => {
   tui.displayHost = { attached: false, close: async () => {} }
   await tui.handleHangup()
   assert.deepEqual(flushed, ['main-session'])
+  assert.deepEqual(hangups, ['hung'])
+  assert.deepEqual(exits, [])
+  assert.equal(tui.disposed, false)
+})
+
+test('headless idle hangup exits instead of orphaning the host', async () => {
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
+  assert.deepEqual(hangups, [])
+  assert.deepEqual(exits, [129])
+  assert.equal(tui.disposed, true)
+})
+
+test('headless hangup during a running turn keeps the host', async () => {
+  const hangups = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() { this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    onHangup: () => { hangups.push('hung') },
+  })
+  tui.displayHost = { attached: false, close: async () => {} }
+  await tui.handleHangup()
   assert.deepEqual(hangups, ['hung'])
   assert.deepEqual(exits, [])
   assert.equal(tui.disposed, false)
@@ -1401,7 +1643,7 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
   }
     const okFrame = build('ok', 'bash', '$ npm test', 'bash', '3 passing')
     assert.match(okFrame, /\x1b\[32m●/)
-    assert.match(okFrame, /\x1b\[32m\[ok\]/)
+    assert.equal(okFrame.includes('[ok]'), false)
     assert.match(okFrame, /\x1b\[90m\s*\$\s?npm test/)
     assert.match(okFrame, /3 passing/)
     const errFrame = build('error', 'bash', '$ npm test', 'bash', '1 failing')
@@ -1426,17 +1668,22 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
   }
 })
 
-test('buildToolHeader colors only the status dot and [ok]/[error] word', () => {
+test('buildToolHeader colors the status dot; ok omits the duplicate [ok] word', () => {
   const header = buildToolHeader({
     focused: false, expanded: false, title: '读取', summary: 'src/tui.ts', status: 'ok',
   })
-  assert.match(header.plain, /● 读取  src\/tui\.ts  \[ok\]/)
+  assert.match(header.plain, /● 读取  src\/tui\.ts$/)
+  assert.equal(header.plain.includes('[ok]'), false)
   const dot = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '●')
-  const state = header.segments.find(segment => header.plain.slice(segment.start, segment.end).includes('[ok]'))
   const summary = header.segments.find(segment => header.plain.slice(segment.start, segment.end).includes('src/tui.ts'))
   assert.equal(dot?.sgr, '32')
-  assert.equal(state?.sgr, '32')
   assert.equal(summary?.sgr, '90')
+  const failed = buildToolHeader({
+    focused: false, expanded: false, title: '读取', summary: 'src/tui.ts', status: 'error',
+  })
+  assert.match(failed.plain, /\[error\]/)
+  const errorWord = failed.segments.find(segment => failed.plain.slice(segment.start, segment.end).includes('[error]'))
+  assert.equal(errorWord?.sgr, '31')
   assert.equal(toolStateColor('running'), '33')
   assert.equal(toolStateColor('error'), '31')
 })
@@ -1446,7 +1693,7 @@ test('buildToolHeader paints the diff stat git red/green between summary and sta
     focused: false, expanded: false, title: '编辑', summary: 'src/tui.ts', status: 'ok',
     diffStat: { add: 24, del: 13 },
   })
-  assert.match(header.plain, /● 编辑  src\/tui\.ts  -13 \+24  \[ok\]/)
+  assert.match(header.plain, /● 编辑  src\/tui\.ts  -13 \+24$/)
   const red = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '-13')
   const green = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '+24')
   assert.equal(red?.sgr, '31')
@@ -1454,11 +1701,11 @@ test('buildToolHeader paints the diff stat git red/green between summary and sta
   // New file: additions only; pure deletion: the minus part only.
   assert.equal(
     buildToolHeader({ focused: false, expanded: false, title: '编辑', summary: '', status: 'ok', diffStat: { add: 24, del: 0 } }).plain,
-    '  ▸ ● 编辑  +24  [ok]',
+    '  ▸ ● 编辑  +24',
   )
   assert.equal(
     buildToolHeader({ focused: false, expanded: false, title: '编辑', summary: '', status: 'ok', diffStat: { add: 0, del: 13 } }).plain,
-    '  ▸ ● 编辑  -13  [ok]',
+    '  ▸ ● 编辑  -13',
   )
 })
 
@@ -2091,4 +2338,45 @@ test('persistSuperGrokToken writes 0600 grok-bridge auth.json', async () => {
   assert.equal(raw.access_token, 'new')
   assert.equal(raw.refresh_token, 'next')
   assert.equal(raw.expires_at, 1_700_000_000_000 + 3600 * 1000)
+})
+
+test('enlarging window beyond standard sizes does not corrupt frame layout', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, provider: 'xai' })
+  tui.rows.push({
+    kind: 'plan',
+    active: true,
+    pending: false,
+    expanded: true,
+    todos: [
+      { content: 'Task 1 in progress', status: 'in_progress' },
+      { content: 'Task 2 pending', status: 'pending' },
+    ],
+    planMarkdown: '# Big Plan\nDetails here',
+  })
+  tui.input = 'test input'
+  tui.cursor = 10
+
+  // Test across normal, wide, ultra-wide, tall dimensions
+  for (const [w, h] of [[80, 24], [120, 30], [160, 50], [200, 60], [240, 80]]) {
+    const frame = tui.captureFrame(w, h)
+    assert.equal(frame.length, h, `frame height for ${w}x${h} must be exactly ${h}`)
+    for (let r = 0; r < frame.length; r++) {
+      const vw = visibleWidth(frame[r])
+      assert.ok(vw <= w, `row ${r} width ${vw} must be <= ${w}`)
+    }
+    // Plan card should be present in the docked area, rendered once
+    const text = frame.join('\n')
+    assert.ok(text.includes('Task 1 in progress'))
+    assert.ok(text.includes('test input'))
+    // Divider line should be present
+    assert.ok(frame.some(line => line.includes('────')))
+  }
 })

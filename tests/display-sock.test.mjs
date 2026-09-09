@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
@@ -20,6 +20,7 @@ import {
   FRAME_RTT,
   hostArgvForSession,
   sessionSockPath,
+  waitForDisplaySock,
 } from '../lib/display-sock.js'
 import { parseSessionLock } from '../lib/session-lock.js'
 
@@ -91,6 +92,21 @@ test('sessionSockPath sanitizes ids next to the lock dir', () => {
     sessionSockPath('main-session/../evil id', '/tmp/dsh-home'),
     join('/tmp/dsh-home', 'tui-socks', 'main-session_.._evil_id.sock'),
   )
+})
+
+test('waitForDisplaySock reports host stderr when the pid dies first', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const sock = join(home, 'missing.sock')
+  const errFile = `${sock}.err`
+  await writeFile(errFile, 'host boom\n')
+  const deadPid = 2 ** 22 - 1
+  await assert.rejects(
+    () => waitForDisplaySock(sock, 400, deadPid, errFile),
+    error => error instanceof Error
+      && error.message.includes(`pid ${deadPid} exited before display socket appeared`)
+      && error.message.includes('host boom'),
+  )
+  await rm(home, { recursive: true, force: true })
 })
 
 test('parseSessionLock keeps sock and paused state', () => {
@@ -199,6 +215,44 @@ test('DisplayHost claims HELLO and kicks the previous relay', async () => {
   assert.equal(attaches.length, 2)
   second.destroy()
   first.destroy()
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+test('DisplayHost handles multiple resize events smoothly as window enlarges', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = join(home, 'tui-socks', 'resize.sock')
+  const resizes = []
+  const attaches = []
+  const detaches = []
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: (columns, rows) => { resizes.push([columns, rows]) },
+    onDetach: () => { detaches.push(1) },
+    onAttach: () => { attaches.push(1) },
+  })
+  await host.listen()
+  const client = createConnection(path)
+  await new Promise((resolve, reject) => {
+    client.once('connect', resolve)
+    client.once('error', reject)
+  })
+  // Initial connect with 80x24
+  client.write(Buffer.concat([
+    encodeFrame(FRAME_HELLO),
+    encodeResize(80, 24),
+  ]))
+  await new Promise(resolve => setTimeout(resolve, 40))
+  // Enlarging window multiple steps: 120x40, 160x60, 200x80
+  client.write(encodeResize(120, 40))
+  client.write(encodeResize(160, 60))
+  client.write(encodeResize(200, 80))
+  await new Promise(resolve => setTimeout(resolve, 40))
+
+  assert.equal(attaches.length, 1)
+  assert.equal(detaches.length, 0)
+  assert.deepEqual(resizes, [[80, 24], [120, 40], [160, 60], [200, 80]])
+  client.destroy()
   await host.close()
   await rm(home, { recursive: true, force: true })
 })

@@ -187,13 +187,13 @@ export interface TuiConfig {
    * link. Defaults from `DSH_TUI_PAINT_MS` (160).
    */
   paintIntervalMs?: number
-  /** Called after hangup so the launcher can keep the Host and update the lock. */
+  /** Called after hangup when the Host is kept (busy) so the launcher can update the lock. */
   onHangup?: () => void | Promise<void>
   /** Called when a Display relay attaches after hangup. */
   onReattach?: () => void | Promise<void>
   /** Host process: no local TTY; paint only through the display socket. */
   headlessDisplay?: boolean
-  /** Hangup policy: pause cancels the turn; continue lets it finish detached. */
+  /** Hangup policy while busy: pause cancels the turn; continue lets it finish detached. Idle hangup always exits. */
   disconnectPolicy?: DisconnectPolicyName
 }
 
@@ -232,6 +232,14 @@ type Row =
       exitCode?: number
       signal?: string
       expanded: boolean
+      /** Consecutive same-path reads/edits folded into this card. */
+      repeats?: number
+      /** Sum of output characters across folded reads. */
+      totalChars?: number
+      /** Sum of output lines across folded reads. */
+      totalLines?: number
+      /** Flip-card animation until this timestamp (ms since epoch). */
+      flipUntil?: number
     }
   | {
       kind: 'subagent'
@@ -1083,6 +1091,7 @@ export function providerUsesLocalOAuth(provider: string): boolean {
 const LOCAL_COMMANDS = [
   { name: 'help', key: 'cmd.help' },
   { name: 'model', key: 'cmd.model' },
+  { name: 'effort', key: 'cmd.effort' },
   { name: 'provider', key: 'cmd.provider' },
   { name: 'submodel', key: 'cmd.submodel' },
   { name: 'subeffort', key: 'cmd.subeffort' },
@@ -2485,6 +2494,14 @@ function parseJsonArgs(args: string): Record<string, unknown> | null {
   }
 }
 
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+  return ''
+}
+
 /** A short scalar rendering of one argument value, or null for objects/arrays. */
 function scalarText(value: unknown): string | null {
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -2561,6 +2578,32 @@ export function parseDisconnectPolicy(raw: string): DisconnectPolicyName | undef
   return undefined
 }
 
+const UNDECLARED_EFFORT_IDS = ['off', 'low', 'medium', 'high', 'max', 'xhigh'] as const
+const DEFAULT_EFFORT_ALIASES = new Set(['default', 'none', 'auto', 'reset', '默认'])
+
+function effortChoices(ids: readonly string[]): { id: string; label: string }[] {
+  return ids.map(id => ({ id, label: t(`effort.option.${id}`) }))
+}
+
+function undeclaredEffortChoices(): { id: string; label: string }[] {
+  return effortChoices(UNDECLARED_EFFORT_IDS)
+}
+
+function localOAuthEffortChoices(modelId: string): { id: string; label: string }[] {
+  return effortChoices(modelId === 'grok-4.6'
+    ? ['off', 'low', 'medium', 'high', 'xhigh']
+    : ['off', 'low', 'medium', 'high'])
+}
+
+/** Parse `/effort high` / `/subeffort default`. Empty or unknown → undefined. */
+export function parseEffortArg(raw: string): { kind: 'default' } | { kind: 'id'; id: string } | undefined {
+  const id = raw.trim().toLowerCase()
+  if (id === '') return undefined
+  if (DEFAULT_EFFORT_ALIASES.has(id)) return { kind: 'default' }
+  if (/^[a-z][a-z0-9_-]{0,31}$/u.test(id)) return { kind: 'id', id }
+  return undefined
+}
+
 export function parseWorkspaceView(raw: string): WorkspaceView | undefined {
   const id = raw.trim().toLowerCase()
   if (id === 'detailed' || id === 'detail' || id === 'full' || id === '详细') return 'detailed'
@@ -2605,6 +2648,49 @@ export function diffStatToken(add: number, del: number): string {
   if (del > 0) parts.push(`-${del}`)
   if (add > 0) parts.push(`+${add}`)
   return parts.join(' ')
+}
+
+const READ_TOOL_NAMES = new Set(['read'])
+const TOOL_FLIP_MS = 280
+
+export function toolTargetPath(name: string, args: string, fallback = ''): string {
+  const parsed = parseJsonArgs(args)
+  if (parsed === null) return fallback
+  if (READ_TOOL_NAMES.has(name)) {
+    return firstString(parsed, ['path', 'file_path', 'url']) || fallback
+  }
+  if (DIFF_TOOL_NAMES.has(name)) {
+    return firstString(parsed, ['file_path', 'path']) || fallback
+  }
+  return fallback
+}
+
+export function countOutputLines(text: string): number {
+  if (text === '') return 0
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text
+  return body === '' ? 0 : body.split('\n').length
+}
+
+function mergeableToolKind(name: string): 'read' | 'edit' | undefined {
+  if (READ_TOOL_NAMES.has(name)) return 'read'
+  if (DIFF_TOOL_NAMES.has(name)) return 'edit'
+  return undefined
+}
+
+/**
+ * Consecutive same-path reads (or edits) collapse onto one card.
+ * A → B → C → A becomes four cards; A ×5 stays one card with repeats=5.
+ */
+export function canMergeToolCall(
+  previous: Extract<Row, { kind: 'tool' }> | undefined,
+  next: { name: string; args: string },
+): previous is Extract<Row, { kind: 'tool' }> {
+  if (previous === undefined) return false
+  const kind = mergeableToolKind(next.name)
+  if (kind === undefined || mergeableToolKind(previous.name) !== kind) return false
+  const previousPath = toolTargetPath(previous.name, previous.args, previous.summary)
+  const nextPath = toolTargetPath(next.name, next.args)
+  return previousPath !== '' && previousPath === nextPath
 }
 
 export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>[]): {
@@ -3196,7 +3282,7 @@ export function toolStateLabel(status: 'running' | 'ok' | 'error' | undefined): 
   return 'running…'
 }
 
-/** Header + SGR spans: default title, dim operand, colored ● and [ok]/[error]. */
+/** Header + SGR spans: default title, dim operand, colored ●. `[ok]` is omitted — the green dot is enough. */
 export function buildToolHeader(input: {
   focused: boolean
   expanded: boolean
@@ -3207,10 +3293,11 @@ export function buildToolHeader(input: {
   signal?: string
   exitCode?: number
   spinner?: string
+  flipping?: boolean
   diffStat?: { add: number; del: number }
 }): { plain: string; segments: TextSegment[] } {
   const running = input.status === undefined || input.status === 'running'
-  const state = toolStateLabel(input.status)
+  const stateToken = input.status === 'ok' ? '' : `[${toolStateLabel(input.status)}]`
   const exit = !running && input.command !== undefined
     ? input.signal !== undefined
       ? `  [信号 ${input.signal}]`
@@ -3220,18 +3307,23 @@ export function buildToolHeader(input: {
     : ''
   const spinner = input.spinner ?? ''
   const prefix = input.focused ? '▶ ' : '  '
-  const marker = input.expanded ? '▾' : '▸'
+  const flipping = input.flipping === true
+  const marker = flipping ? '◇' : input.expanded ? '▾' : '▸'
   const lead = `${prefix}${marker} ● ${input.title}`
   const summaryText = input.summary === '' ? '' : `  ${input.summary}`
   const statToken = input.diffStat === undefined ? '' : diffStatToken(input.diffStat.add, input.diffStat.del)
   const statText = statToken === '' ? '' : `  ${statToken}`
-  const stateToken = `[${state}]`
-  const tail = `  ${stateToken}${exit}${spinner}`
+  const stateGap = stateToken === '' ? '' : '  '
+  const tail = `${stateGap}${stateToken}${exit}${spinner}`
   const plain = `${lead}${summaryText}${statText}${tail}`
   const stateCode = toolStateColor(input.status)
   const dotIndex = lead.indexOf('●')
-  const stateIndex = lead.length + summaryText.length + statText.length + 2
+  const stateIndex = stateToken === '' ? -1 : lead.length + summaryText.length + statText.length + stateGap.length
   const segments: TextSegment[] = []
+  if (flipping) {
+    const markerIndex = prefix.length
+    segments.push({ start: markerIndex, end: markerIndex + marker.length, sgr: '36' })
+  }
   if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
   if (summaryText.length > 0) {
     segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: '90' })
@@ -3253,10 +3345,16 @@ export function buildToolHeader(input: {
       segments.push({ start: addStart, end: statStart + statToken.length, sgr: '32' })
     }
   }
-  segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
+  if (stateIndex >= 0) {
+    segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
+  } else if (exit !== '') {
+    const exitIndex = lead.length + summaryText.length + statText.length
+    segments.push({ start: exitIndex, end: exitIndex + exit.length, sgr: stateCode })
+  }
   if (spinner !== '') {
+    const spinnerStart = (stateIndex >= 0 ? stateIndex + stateToken.length + exit.length : lead.length + summaryText.length + statText.length + exit.length)
     segments.push({
-      start: stateIndex + stateToken.length + exit.length,
+      start: spinnerStart,
       end: plain.length,
       sgr: '90',
     })
@@ -3466,14 +3564,6 @@ interface NamedToolBodySource extends ToolBodySource {
   name?: string
 }
 
-function firstString(record: Record<string, unknown>, keys: readonly string[]): string {
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' && value.trim() !== '') return value
-  }
-  return ''
-}
-
 function specializedToolBody(row: NamedToolBodySource, maxLines = Number.MAX_SAFE_INTEGER): DiffDisplayLine[] | null {
   const name = row.name ?? ''
   const args = parseJsonArgs(row.args)
@@ -3599,6 +3689,8 @@ export class SshTui {
   private inPaste = false
   private history: string[] = []
   private historyIndex = -1
+  /** Live input parked while browsing history with ↑. Restored by ↓ past the newest item. */
+  private historyDraft = ''
   private status = 'idle'
   private dialog: Dialog | undefined
   private readonly dialogQueue: Dialog[] = []
@@ -3607,6 +3699,11 @@ export class SshTui {
   private disposed = false
   private exiting = false
   private hangingUp = false
+  private readonly onDirectResize = (): void => {
+    this.forceFullPaint = true
+    this.dirty = true
+    this.paint()
+  }
   private readonly headlessDisplay: boolean
   private disconnectPolicy: DisconnectPolicyName
   private detachedIdleTimer: ReturnType<typeof setTimeout> | undefined
@@ -3646,6 +3743,7 @@ export class SshTui {
   private stalledWarningShown = false
   private lastPaintAt = 0
   private commandAbort: AbortController | undefined
+  private readonly seenCommandDoneIds = new Set<string>()
   private activeSubagents = new Map<string, { id: string; provider: string; startedAt: number }>()
   private subagentSessions = new Set<string>()
   private openToolCalls = new Map<string, string>()
@@ -3760,8 +3858,10 @@ export class SshTui {
     }
     process.stdin.setRawMode(true)
     process.stdin.resume()
-    process.stdout.on('resize', this.markDirty)
-    process.on('SIGWINCH', this.markDirty)
+    process.stdout.on('resize', this.onDirectResize)
+    if (process.platform !== 'win32') {
+      process.on('SIGWINCH', this.onDirectResize)
+    }
     process.stdin.prependListener('end', this.handleHangupStream)
     process.stdin.prependListener('close', this.handleHangupStream)
     process.stdout.on('error', this.handleIoError)
@@ -3996,6 +4096,7 @@ export class SshTui {
       summary: '',
       status,
       spinner: running ? ` ${this.spinnerFrame()}` : '',
+      flipping: items.some(item => item.flipUntil !== undefined && Date.now() < item.flipUntil),
       ...(kind === 'edits' && (addDel.add > 0 || addDel.del > 0) ? { diffStat: addDel } : {}),
     })
     const headerSegments = this.color ? header.segments : []
@@ -4027,8 +4128,8 @@ export class SshTui {
         continue
       }
       const extra = item.summary
-      const state = item.status === 'error' ? 'error' : item.status === 'ok' ? 'ok' : 'running…'
-      addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}  [${state}]`, width)), item)
+      const state = item.status === 'error' ? '  [error]' : item.status === 'ok' ? '' : '  [running…]'
+      addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}${state}`, width)), item)
     }
   }
 
@@ -4044,7 +4145,8 @@ export class SshTui {
         || this.activeSubagents.size > 0
         || this.waitCardVisible()
         || this.rows.some(row =>
-          (row.kind === 'question' && row.status === 'waiting')
+          (row.kind === 'tool' && row.flipUntil !== undefined && now < row.flipUntil)
+          || (row.kind === 'question' && row.status === 'waiting')
           || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
           || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked'))
           || (row.kind === 'compaction' && row.status === 'running'))
@@ -4215,12 +4317,12 @@ export class SshTui {
     if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
     this.escapeTimer = undefined
     process.stdin.removeListener('data', this.handleData)
-    process.stdout.removeListener('resize', this.markDirty)
+    process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
     process.stdin.removeListener('error', this.handleIoError)
     process.stdin.removeListener('end', this.handleHangupStream)
     process.stdin.removeListener('close', this.handleHangupStream)
-    process.removeListener('SIGWINCH', this.markDirty)
+    process.removeListener('SIGWINCH', this.onDirectResize)
     if (!this.hangingUp) releaseHangupSignals(this.handleHangupSignal)
     try {
       process.stdin.setRawMode(false)
@@ -4300,8 +4402,26 @@ export class SshTui {
   }
 
   /**
-   * SSH / TTY hangup: drop the local display, cancel a running turn, flush.
-   * The Host stays if the display socket is listening so a later SSH can attach.
+   * True while the session is doing work the user would lose by killing the
+   * Host: a running turn (thinking / reply / tools), live subagents, in-flight
+   * compaction, or an LLM retry. Idle (including a waiting approval dialog
+   * after the turn has already settled) is not busy — hangup then exits
+   * instead of leaving a leftover process.
+   */
+  private isBusyForHangupKeepalive(): boolean {
+    if (this.agent.status === 'running') return true
+    if (this.activeSubagents.size > 0) return true
+    if (this.streaming !== undefined) return true
+    if (this.openToolCalls.size > 0) return true
+    if (this.llmRetry !== undefined) return true
+    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return true
+    return false
+  }
+
+  /**
+   * SSH / TTY hangup: drop the local display, flush, and either keep the Host
+   * (busy: thinking / reply / tools / subagents) or exit (idle).
+   * When keeping the Host, `pause` cancels the turn; `continue` lets it finish.
    * Ctrl+C is not a hangup.
    */
   async handleHangup(): Promise<void> {
@@ -4309,6 +4429,7 @@ export class SshTui {
     this.hangingUp = true
     ignoreFurtherHangupSignals()
     this.detachDisplay()
+    const busy = this.isBusyForHangupKeepalive()
     const pauseTurn = this.disconnectPolicy !== 'continue'
     if (pauseTurn && this.agent.status === 'running') {
       try {
@@ -4322,7 +4443,8 @@ export class SshTui {
       )
     }
     await this.flushSession()
-    if (this.displayHost !== undefined) {
+    const keepHost = this.displayHost !== undefined && busy
+    if (keepHost) {
       this.hangingUp = false
       this.armDetachedIdleTimer()
       await this.onHangup?.()
@@ -4441,13 +4563,14 @@ export class SshTui {
         const changed = this.relayColumns !== columns || this.relayRows !== rows
         this.relayColumns = columns
         this.relayRows = rows
-        if (this.displayHost?.attached === true && (this.headlessDisplay || this.displayDetached)) {
+        if (this.displayHost?.attached === true && this.displayDetached) {
           this.attachRelayDisplay()
           return
         }
         if (changed) {
           this.forceFullPaint = true
-          this.markDirty()
+          this.dirty = true
+          this.paint()
         }
       },
       onRtt: (rttMs) => {
@@ -4455,8 +4578,7 @@ export class SshTui {
       },
       onDetach: () => {
         if (this.disposed || this.hangingUp) return
-        if (this.displayDetached) void this.onHangup?.()
-        else void this.handleHangup()
+        void this.handleHangup()
       },
       onAttach: () => {
         if (this.disposed) return
@@ -4475,7 +4597,7 @@ export class SshTui {
 
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
-    if (!this.headlessDisplay) this.displayDetached = false
+    this.displayDetached = false
     this.hangingUp = false
     this.clearDetachedIdleTimer()
     this.lastActivity = Date.now()
@@ -4509,6 +4631,43 @@ export class SshTui {
 
   private markDirty = (): void => {
     this.dirty = true
+  }
+
+  private toolCardSummary(row: Extract<Row, { kind: 'tool' }>): string {
+    const repeats = row.repeats ?? 1
+    const parts: string[] = []
+    if (row.summary !== '') parts.push(row.summary)
+    if (repeats > 1) parts.push(t('tool.repeatCount', { count: repeats }))
+    if (READ_TOOL_NAMES.has(row.name) && (row.totalChars !== undefined || row.totalLines !== undefined)) {
+      const chars = row.totalChars ?? 0
+      const lines = row.totalLines ?? 0
+      parts.push(t('tool.readStats', { chars: formatTokens(chars), lines: String(lines) }))
+    }
+    return parts.join(' · ')
+  }
+
+  private mergeIntoToolCard(
+    previous: Extract<Row, { kind: 'tool' }>,
+    next: {
+      callId: string
+      name: string
+      args: string
+      title: string
+      summary: string
+      diff?: ToolDiffHunk[]
+    },
+  ): void {
+    previous.callId = next.callId
+    previous.name = next.name
+    previous.args = next.args
+    previous.title = next.title
+    previous.summary = next.summary
+    previous.status = 'running'
+    previous.output = ''
+    previous.exitCode = undefined
+    previous.signal = undefined
+    previous.repeats = (previous.repeats ?? 1) + 1
+    if (!this.replaying) previous.flipUntil = Date.now() + TOOL_FLIP_MS
   }
 
   /** Append one transcript row, bounding memory on long sessions. */
@@ -5135,12 +5294,13 @@ export class SshTui {
           focused,
           expanded: row.expanded,
           title: toolTitle(row.name) || row.title,
-          summary: row.summary,
+          summary: this.toolCardSummary(row),
           status: row.status,
           command: row.command,
           signal: row.signal,
           exitCode: row.exitCode,
           spinner: running ? ` ${this.spinnerFrame()}` : '',
+          flipping: row.flipUntil !== undefined && Date.now() < row.flipUntil,
           ...(row.diff !== undefined && row.diff.length > 0
             ? { diffStat: countDiffAddDel(row.diff) }
             : {}),
@@ -5572,7 +5732,7 @@ export class SshTui {
       : []
     const inputDivider = this.styleLine('system', repeatToWidth('─', width))
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
-    const available = Math.max(1, height - reserved - dialogLines.length)
+    const available = Math.max(0, height - reserved - dialogLines.length)
     const maxOffset = Math.max(0, display.length - available)
     const reveal = this.pendingReveal
     if (reveal !== undefined) {
@@ -5784,13 +5944,17 @@ export class SshTui {
     const seen = new Set(local.map(command => command.name))
     const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
       .filter(command => !seen.has(command.name))
-      .map(command => ({
-        name: command.name,
-        description: command.input?.images === true
-          ? `${command.description}（${t('cmd.withImages')}）`
-          : command.description,
-        local: false,
-      }))
+      .map(command => {
+        const descKey = `cmd.${command.name}`
+        const desc = t(descKey, undefined, command.description)
+        return {
+          name: command.name,
+          description: command.input?.images === true
+            ? t('cmd.withImagesSuffix', { desc })
+            : desc,
+          local: false,
+        }
+      })
     const all = [...local, ...dsh]
     const filtered = prefix === ''
       ? all
@@ -6080,21 +6244,34 @@ export class SshTui {
         this.pendingToolTimes.set(String(event.data.callId), event.time)
         if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
           const present = presentToolCall(event.data.name, event.data.arguments)
-          const row: Row = {
-            kind: 'tool',
-            callId: event.data.callId,
-            name: event.data.name,
-            args: event.data.arguments,
-            status: 'running',
-            output: '',
-            title: present.title,
-            summary: present.summary,
-            ...present.command === undefined ? {} : { command: present.command },
-            ...present.cwd === undefined ? {} : { cwd: present.cwd },
-            ...present.diff === undefined ? {} : { diff: present.diff },
-            expanded: false,
+          const previous = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
+            candidate.kind === 'tool')
+          if (canMergeToolCall(previous, { name: event.data.name, args: event.data.arguments })) {
+            this.mergeIntoToolCard(previous, {
+              callId: event.data.callId,
+              name: event.data.name,
+              args: event.data.arguments,
+              title: present.title,
+              summary: present.summary,
+              ...present.diff === undefined ? {} : { diff: present.diff },
+            })
+          } else {
+            const row: Row = {
+              kind: 'tool',
+              callId: event.data.callId,
+              name: event.data.name,
+              args: event.data.arguments,
+              status: 'running',
+              output: '',
+              title: present.title,
+              summary: present.summary,
+              ...present.command === undefined ? {} : { command: present.command },
+              ...present.cwd === undefined ? {} : { cwd: present.cwd },
+              ...present.diff === undefined ? {} : { diff: present.diff },
+              expanded: false,
+            }
+            this.pushRow(row)
           }
-          this.pushRow(row)
         }
         if (event.data.name === 'exit_plan_mode') {
           const markdown = planMarkdownFromArgs(event.data.arguments)
@@ -6118,7 +6295,9 @@ export class SshTui {
         if (row !== undefined) {
           const metaDiffs = diffMetaDiffs(event.data.meta)
           if (metaDiffs !== null) {
-            row.diff = metaDiffs
+            row.diff = (row.repeats ?? 1) > 1 && row.diff !== undefined && row.diff.length > 0
+              ? [...row.diff, ...metaDiffs]
+              : metaDiffs
           }
           const isShell = SHELL_TOOL_NAMES.has(row.name)
           if (isShell) {
@@ -6133,6 +6312,10 @@ export class SshTui {
             || event.data.message.content[0]?.isError === true
             || (isShell && ((row.exitCode !== undefined && row.exitCode !== 0) || row.signal !== undefined))
           row.status = failed ? 'error' : 'ok'
+          if (READ_TOOL_NAMES.has(row.name)) {
+            row.totalChars = (row.totalChars ?? 0) + row.output.length
+            row.totalLines = (row.totalLines ?? 0) + countOutputLines(row.output)
+          }
         } else {
           const present = presentToolCall(event.data.message.source.callId, '')
           this.pushRow({
@@ -6464,17 +6647,47 @@ export class SshTui {
     this.markDirty()
   }
 
+  private formatCommandText(text: string): string {
+    const permMatch = text.match(/^current preset (\S+) \(available: (.+)\)$/)
+    if (permMatch) {
+      const current = permMatch[1] ?? ''
+      const avail = permMatch[2] ?? ''
+      const localize = (name: string): string => {
+        const key = `preset.${name}`
+        const trans = t(key)
+        return trans !== key ? t('preset.named', { name, label: trans }) : name
+      }
+      const currentLabel = localize(current)
+      const availLabel = avail.split(', ').map(s => localize(s.trim())).join(t('list.sep'))
+      return t('permission.currentInfo', { current: currentLabel, available: availLabel })
+    }
+    const permSwitched = text.match(/^preset (\S+)$/)
+    if (permSwitched) {
+      const name = permSwitched[1] ?? ''
+      const key = `preset.${name}`
+      const trans = t(key)
+      const label = trans !== key ? t('preset.named', { name, label: trans }) : name
+      return t('permission.switched', { preset: label })
+    }
+    return text
+  }
+
   private handleCommandDone(data: unknown): void {
     const payload = data !== null && typeof data === 'object' ? data as Record<string, unknown> : {}
+    const commandId = typeof payload.commandId === 'string' ? payload.commandId : ''
+    if (commandId !== '') this.seenCommandDoneIds.add(commandId)
     const kind = typeof payload.kind === 'string' ? payload.kind : ''
     const text = typeof payload.text === 'string' ? payload.text.trim() : ''
     if (kind === 'error') {
-      this.pushRow({ kind: 'error', text: text === '' ? '命令失败。' : text })
+      const errText = this.formatCommandText(text)
+      this.pushRow({ kind: 'error', text: errText === '' ? t('command.failed') : errText })
       if (this.status.startsWith('压缩')) this.status = this.agent.status === 'running' ? 'running' : 'idle'
       this.markDirty()
       return
     }
-    if (text !== '') this.pushRow({ kind: 'system', text })
+    if (text !== '') {
+      this.pushRow({ kind: 'system', text: this.formatCommandText(text) })
+    }
     this.markDirty()
   }
 
@@ -7316,39 +7529,41 @@ export class SshTui {
       effortOptions = []
     }
     if (effortOptions.length === 0 && providerUsesLocalOAuth(provider)) {
-      effortOptions = modelId === 'grok-4.6'
-        ? [
-            { id: 'off', label: 'Off' },
-            { id: 'low', label: 'Low' },
-            { id: 'medium', label: 'Medium' },
-            { id: 'high', label: 'High' },
-            { id: 'xhigh', label: 'Extra high' },
-          ]
-        : [
-            { id: 'off', label: 'Off' },
-            { id: 'low', label: 'Low' },
-            { id: 'medium', label: 'Medium' },
-            { id: 'high', label: 'High' },
-          ]
+      effortOptions = localOAuthEffortChoices(modelId)
     }
 
-    let effort: string | undefined
-    if (effortOptions.length > 0) {
-      const rememberedEffort = this.rememberedRoute(provider)?.reasoningEffort ?? preferredEffort ?? ''
-      const currentEffort = current?.provider === provider
-        ? String(current?.reasoningEffort ?? '')
-        : rememberedEffort
-      const currentIndex = Math.max(0, effortOptions.findIndex(option => option.id === currentEffort))
-      const effortAnswer = await this.askQuestion({
-        id: 'effort-pick',
-        question: `选择思考强度（${modelId}）`,
-        options: effortOptions.map(option => ({
-          label: option.label,
-          description: option.id === currentEffort ? '当前' : undefined,
-        })),
-      }, 0, 1, currentIndex)
-      effort = effortOptions.find(option => option.label === effortAnswer.selected[0])?.id
-    }
+    const isUndeclared = effortOptions.length === 0
+    const available = isUndeclared ? undeclaredEffortChoices() : effortOptions
+
+    const choices: { id: string | undefined; label: string; desc?: string }[] = [
+      {
+        id: undefined,
+        label: t('footer.effortDefault'),
+        desc: isUndeclared ? t('effort.descUndeclared') : t('effort.descFollow'),
+      },
+      ...available.map(opt => ({
+        id: opt.id,
+        label: opt.label,
+        desc: undefined,
+      })),
+    ]
+
+    const rememberedEffort = this.rememberedRoute(provider)?.reasoningEffort ?? preferredEffort ?? ''
+    const currentEffort = current?.provider === provider
+      ? String(current?.reasoningEffort ?? '')
+      : rememberedEffort
+    const currentIndex = Math.max(0, choices.findIndex(option => option.id === (currentEffort === '' ? undefined : currentEffort)))
+    const effortAnswer = await this.askQuestion({
+      id: 'effort-pick',
+      question: isUndeclared
+        ? t('effort.pickUndeclared', { model: modelId })
+        : t('effort.pick', { model: modelId }),
+      options: choices.map(option => ({
+        label: option.label,
+        description: option.id === (currentEffort === '' ? undefined : currentEffort) ? t('disconnect.current') : option.desc,
+      })),
+    }, 0, 1, currentIndex)
+    const effort = choices.find(option => option.label === effortAnswer.selected[0])?.id
 
     const next: ModelSelection = {
       provider,
@@ -7360,9 +7575,11 @@ export class SshTui {
     await this.persistDefaultSelection(next)
     await this.rememberRoute(next)
     const kind = describeProviderRoute(provider)
+    const effortText = effort ?? t('effort.defaultShort')
+    const note = isUndeclared && effort !== undefined ? t('effort.manualNote') : ''
     this.pushRow({
       kind: 'system',
-      text: `已切换到 ${kind.kind}：${provider}/${modelId}（思考强度 ${effort ?? '默认'}${effortOptions.length === 0 ? '，该模型未声明可选强度' : ''}）；下一步请求生效。`,
+      text: t('effort.switchedModel', { kind: kind.kind, provider, model: modelId, effort: effortText, note }),
     })
     const listedIds = listed.filter(id => id !== '__switch_provider__' && id !== '')
     const previousProvider = current?.provider ?? this.agent.options.provider ?? this.providerName
@@ -7557,8 +7774,114 @@ export class SshTui {
     this.markDirty()
   }
 
+  /** /effort: pick or set the reasoning effort for the current model. */
+  private async runEffortCommand(arg?: string): Promise<void> {
+    const provider = this.currentProviderId()
+    const current = this.selectionRef?.current
+    if (current === undefined || current.model === undefined) {
+      this.pushRow({ kind: 'error', text: t('effort.noModel') })
+      this.markDirty()
+      return
+    }
+    const modelId = current.model
+    const llm = this.ctx.get('llm')
+
+    let declaredOptions: { id: string; label: string }[] = []
+    try {
+      const info = await llm?.resolveModelInfo(provider, modelId)
+      declaredOptions = (info?.reasoning?.efforts ?? []).map(e => ({ id: String(e.id), label: e.name }))
+    } catch {
+      declaredOptions = []
+    }
+    if (declaredOptions.length === 0 && providerUsesLocalOAuth(provider)) {
+      declaredOptions = localOAuthEffortChoices(modelId)
+    }
+
+    const parsed = parseEffortArg(arg ?? '')
+    if ((arg ?? '').trim() !== '') {
+      if (parsed === undefined) {
+        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) })
+        this.markDirty()
+        return
+      }
+      const allowed: readonly string[] = declaredOptions.length === 0
+        ? UNDECLARED_EFFORT_IDS
+        : declaredOptions.map(option => option.id)
+      if (parsed.kind === 'id' && !allowed.includes(parsed.id)) {
+        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: parsed.id }) })
+        this.markDirty()
+        return
+      }
+      await this.setReasoningEffort(
+        provider,
+        modelId,
+        parsed.kind === 'default' ? undefined : parsed.id,
+        declaredOptions.length === 0,
+      )
+      return
+    }
+
+    const isUndeclared = declaredOptions.length === 0
+    const available = isUndeclared ? undeclaredEffortChoices() : declaredOptions
+
+    const currentEffort = current.reasoningEffort === undefined ? undefined : String(current.reasoningEffort)
+
+    const choices: { id: string | undefined; label: string; desc?: string }[] = [
+      {
+        id: undefined,
+        label: t('footer.effortDefault'),
+        desc: isUndeclared ? t('effort.descUndeclared') : t('effort.descFollow'),
+      },
+      ...available.map(opt => ({
+        id: opt.id,
+        label: opt.label,
+        desc: undefined,
+      })),
+    ]
+
+    const currentIndex = Math.max(0, choices.findIndex(c => c.id === currentEffort))
+    const answer = await this.askQuestion({
+      id: 'effort-pick',
+      question: isUndeclared
+        ? t('effort.pickCurrentUndeclared', { provider, model: modelId })
+        : t('effort.pickCurrent', { provider, model: modelId }),
+      options: choices.map(c => ({
+        label: c.label,
+        description: c.id === currentEffort ? t('disconnect.current') : c.desc,
+      })),
+    }, 0, 1, currentIndex)
+
+    const picked = choices.find(c => c.label === answer.selected[0])
+    if (picked === undefined) return
+    await this.setReasoningEffort(provider, modelId, picked.id, isUndeclared)
+  }
+
+  private async setReasoningEffort(
+    provider: string,
+    modelId: string,
+    effort: string | undefined,
+    isUndeclared: boolean,
+  ): Promise<void> {
+    const next: ModelSelection = {
+      provider,
+      model: modelId,
+      ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
+    }
+    if (this.selectionRef !== undefined) this.selectionRef.current = next
+    this.onSelectionChanged?.(next)
+    await this.persistDefaultSelection(next)
+    await this.rememberRoute(next)
+    const effortText = effort ?? t('effort.defaultExplicit')
+    const note = isUndeclared && effort !== undefined ? t('effort.manualNote') : ''
+    this.pushRow({
+      kind: 'system',
+      text: t('effort.updated', { provider, model: modelId, effort: effortText, note }),
+    })
+    this.markDirty()
+  }
+
   /** /subeffort: pick the reasoning effort subagent children use. */
-  private async runSubeffortCommand(): Promise<void> {
+  private async runSubeffortCommand(arg?: string): Promise<void> {
     const provider = this.effectiveSubagentProvider()
     const current = this.subagentSelection.current
     const llm = this.ctx.get('llm')
@@ -7570,31 +7893,61 @@ export class SshTui {
     } catch {
       effortOptions = []
     }
-    if (effortOptions.length === 0 && current.reasoningEffort === undefined) {
+
+    const parsed = parseEffortArg(arg ?? '')
+    if ((arg ?? '').trim() !== '') {
+      if (parsed === undefined) {
+        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) })
+        this.markDirty()
+        return
+      }
+      const allowed: readonly string[] = effortOptions.length === 0
+        ? UNDECLARED_EFFORT_IDS
+        : effortOptions.map(option => option.id)
+      if (parsed.kind === 'id' && !allowed.includes(parsed.id)) {
+        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: parsed.id }) })
+        this.markDirty()
+        return
+      }
+      const targetEffort = parsed.kind === 'default' ? undefined : parsed.id
+      const next: SubagentSelection = {
+        ...current,
+        ...(targetEffort === undefined ? { reasoningEffort: undefined } : { reasoningEffort: ReasoningEffortId(targetEffort) }),
+      }
+      const persisted = await this.saveSubagentSelection(next)
       this.pushRow({
         kind: 'system',
-        text: `模型 ${provider}/${current.model} 未声明可选 reasoning effort，已保持提供商默认；请勿手动设置 high/max。`,
+        text: `${targetEffort === undefined
+          ? t('effort.subDefault')
+          : t('effort.subSwitched', { effort: targetEffort })}${persisted ? '' : t('effort.sessionOnly')}`,
       })
       this.markDirty()
       return
     }
 
-    const choices: { id: string | undefined; label: string }[] = [
-      { id: undefined, label: SUBAGENT_DEFAULT_EFFORT_LABEL() },
-      ...effortOptions.map(option => ({ id: option.id, label: option.label })),
+    const isUndeclared = effortOptions.length === 0
+    const available = isUndeclared ? undeclaredEffortChoices() : effortOptions
+
+    const choices: { id: string | undefined; label: string; desc?: string }[] = [
+      {
+        id: undefined,
+        label: SUBAGENT_DEFAULT_EFFORT_LABEL(),
+        desc: isUndeclared ? t('effort.subDescUndeclared') : t('effort.subDescFollow'),
+      },
+      ...available.map(option => ({ id: option.id, label: option.label, desc: undefined })),
     ]
+    const currentEffort = current.reasoningEffort === undefined ? undefined : String(current.reasoningEffort)
+    const currentIndex = Math.max(0, choices.findIndex(c => c.id === currentEffort))
     const answer = await this.askQuestion({
       id: 'subagent-effort-pick',
-      question: `选择子代理思考强度（${provider}/${current.model}）`,
+      question: isUndeclared
+        ? t('effort.pickSubUndeclared', { provider, model: current.model })
+        : t('effort.pickSub', { provider, model: current.model }),
       options: choices.map(option => ({
         label: option.label,
-        description: option.id === undefined
-          ? '清空自定义强度，跟随提供商/模型默认'
-          : option.id === String(current.reasoningEffort)
-            ? '当前'
-            : undefined,
+        description: option.id === currentEffort ? t('disconnect.current') : option.desc,
       })),
-    })
+    }, 0, 1, currentIndex)
     const picked = choices.find(option => option.label === answer.selected[0])
     if (picked === undefined) return
 
@@ -7608,8 +7961,8 @@ export class SshTui {
     this.pushRow({
       kind: 'system',
       text: `${picked.id === undefined
-        ? '子代理思考强度已恢复为提供商默认。'
-        : `子代理思考强度已切换：${picked.id}。`}${persisted ? '' : '（仅当前会话）'}`,
+        ? t('effort.subDefault')
+        : t('effort.subSwitched', { effort: picked.id })}${persisted ? '' : t('effort.sessionOnly')}`,
     })
     this.markDirty()
   }
@@ -8236,6 +8589,7 @@ export class SshTui {
   private handlePasteText(text: string): void {
     const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     if (normalized === '') return
+    this.leaveHistoryBrowse()
     this.input = `${this.input.slice(0, this.cursor)}${normalized}${this.input.slice(this.cursor)}`
     this.cursor += normalized.length
     const cols = Math.max(10, this.screenColumns())
@@ -8293,8 +8647,8 @@ export class SshTui {
         return
       case '\x01': this.cursor = 0; this.markDirty(); return
       case '\x05': this.cursor = this.input.length; this.markDirty(); return
-      case '\x15': this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
-      case '\x0b': this.input = this.input.slice(0, this.cursor); this.markDirty(); return
+      case '\x15': this.leaveHistoryBrowse(); this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
+      case '\x0b': this.leaveHistoryBrowse(); this.input = this.input.slice(0, this.cursor); this.markDirty(); return
       case '\x0e': this.moveCollapsibleFocus(1); return
       case '\x10': this.moveCollapsibleFocus(-1); return
       case '\x12':
@@ -8335,6 +8689,7 @@ export class SshTui {
       return
     }
     if (char >= ' ' && char !== '\x7f') {
+      this.leaveHistoryBrowse()
       this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
       this.cursor += char.length
       this.markDirty()
@@ -8991,12 +9346,15 @@ export class SshTui {
     const text = this.input.trim()
     if (text === '') return
     if (text.startsWith('/')) {
+      this.historyIndex = this.history.length
+      this.historyDraft = ''
       this.runCommand(text)
       return
     }
     if (this.agentGone) return
     this.history.push(text)
     this.historyIndex = this.history.length
+    this.historyDraft = ''
     this.input = ''
     this.cursor = 0
     this.inputFolded = false
@@ -9026,7 +9384,11 @@ export class SshTui {
         const seen = new Set(localizedCommands().map(item => item.name))
         const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
           .filter(item => !seen.has(item.name))
-          .map(item => `/${item.name.padEnd(12)} ${item.description}${item.input?.images === true ? `（${t('cmd.withImages')}）` : ''}  (dsh)`)
+          .map(item => {
+            const descKey = `cmd.${item.name}`
+            const desc = t(descKey, undefined, item.description)
+            return `/${item.name.padEnd(12)} ${item.input?.images === true ? t('cmd.withImagesSuffix', { desc }) : desc}  (dsh)`
+          })
         this.pushRow({
           kind: 'system',
           text: [
@@ -9059,6 +9421,16 @@ export class SshTui {
           this.markDirty()
         })
         break
+      case 'effort':
+        void this.runEffortCommand(arg).catch((error: unknown) => {
+          if (error instanceof UserQuestionError) {
+            this.pushRow({ kind: 'system', text: t('help.effortCancel') })
+          } else {
+            this.pushRow({ kind: 'error', text: `/effort failed: ${errorChain(error)}` })
+          }
+          this.markDirty()
+        })
+        break
       case 'provider':
         void this.runProviderCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
@@ -9080,7 +9452,7 @@ export class SshTui {
         })
         break
       case 'subeffort':
-        void this.runSubeffortCommand().catch((error: unknown) => {
+        void this.runSubeffortCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.subeffortCancel') })
           } else {
@@ -9314,13 +9686,14 @@ export class SshTui {
               this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
               return
             }
-            const result = execution.result
-            if (result.kind === 'success') {
-              if (result.text !== undefined && result.text !== '') {
-                this.pushRow({ kind: 'system', text: result.text })
-              }
-            } else {
-              this.pushRow({ kind: 'error', text: result.text })
+            // command/run + command/done already paint via handleCommandDone
+            // when the session log is live. Fall back if those events never
+            // arrived (no persistence, or a handler that skipped the log).
+            if (this.seenCommandDoneIds.has(String(execution.commandId))) return
+            if (execution.result.kind === 'error') {
+              this.pushRow({ kind: 'error', text: this.formatCommandText(execution.result.text) })
+            } else if (execution.result.text !== undefined && execution.result.text !== '') {
+              this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
             }
           }).catch((error: unknown) => {
             this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })
@@ -9365,6 +9738,7 @@ export class SshTui {
 
   private backspace(): void {
     if (this.cursor === 0) return
+    this.leaveHistoryBrowse()
     const range = this.graphemeBefore(this.cursor)
     this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
     this.cursor = range.start
@@ -9374,6 +9748,7 @@ export class SshTui {
   private deleteAtCursor(): void {
     const range = this.graphemeAfter(this.cursor)
     if (range === undefined) return
+    this.leaveHistoryBrowse()
     this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
     this.cursor = range.start
     this.markDirty()
@@ -9408,6 +9783,7 @@ export class SshTui {
 
   private historyBack(): void {
     if (this.history.length === 0) return
+    if (this.historyIndex === this.history.length) this.historyDraft = this.input
     if (this.historyIndex <= 0) return
     this.historyIndex -= 1
     this.input = this.history[this.historyIndex] ?? ''
@@ -9416,11 +9792,21 @@ export class SshTui {
   }
 
   private historyForward(): void {
-    if (this.historyIndex >= this.history.length) return
+    if (this.historyIndex < 0 || this.historyIndex >= this.history.length) return
     this.historyIndex += 1
-    this.input = this.history[this.historyIndex] ?? ''
+    this.input = this.historyIndex >= this.history.length
+      ? this.historyDraft
+      : (this.history[this.historyIndex] ?? '')
     this.cursor = this.input.length
     this.markDirty()
+  }
+
+  /** Typing while browsing history detaches from the saved item. */
+  private leaveHistoryBrowse(): void {
+    if (this.historyIndex >= 0 && this.historyIndex < this.history.length) {
+      this.historyIndex = this.history.length
+      this.historyDraft = this.input
+    }
   }
 }
 

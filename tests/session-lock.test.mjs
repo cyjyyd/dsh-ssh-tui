@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { setLocale } from '../lib/i18n/index.js'
 setLocale('zh')
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
@@ -17,6 +19,25 @@ import {
   releaseSessionLock,
   sessionLockPath,
 } from '../lib/session-lock.js'
+
+function readBootId() {
+  try {
+    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+  } catch {
+    return undefined
+  }
+}
+
+function procStarttimeOf(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[22 - 3]
+  } catch {
+    return undefined
+  }
+}
+
+const bootId = readBootId()
 
 test('parseSessionLock rejects junk and keeps pid/session', () => {
   assert.equal(parseSessionLock('not-json'), undefined)
@@ -70,6 +91,8 @@ test('inspectLiveHost is attachable only while the host pid is alive', async () 
     pid: process.pid,
     sessionId,
     startedAt: new Date().toISOString(),
+    bootId,
+    pidStart: procStarttimeOf(process.pid),
     sock,
     state: 'paused',
   }, null, 2)}\n`)
@@ -101,4 +124,124 @@ test('a dead pid with a leftover sock is not attachable and the lock is stolen',
   const stolen = await acquireSessionLock(sessionId, { pid: process.pid, dshHome: home })
   assert.equal(stolen.info.pid, process.pid)
   await releaseSessionLock(stolen.path)
+})
+
+// --- regression: a pid recorded in another pid namespace must not block resume ---
+
+const HOST_FIXTURE = join(import.meta.dirname, 'fixtures', 'sleep-host.mjs')
+const posixOnly = { skip: bootId === undefined }
+
+function spawnHost(sid) {
+  return spawn(process.execPath, [HOST_FIXTURE, '--profile', 'tui', `--resume=${sid}`], { stdio: 'ignore' })
+}
+
+function spawnDecoy() {
+  return spawn(process.execPath, [HOST_FIXTURE, '--profile', 'tui', '--not-a-host'], { stdio: 'ignore' })
+}
+
+function lockJson(sid, pid, sock, extra = {}) {
+  return `${JSON.stringify({
+    pid, sessionId: sid, startedAt: new Date().toISOString(),
+    ...extra, sock, state: 'paused', disconnectPolicy: 'pause', agentStatus: 'idle',
+  }, null, 2)}\n`
+}
+
+async function makeHome(t) {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
+  const { mkdir, rm } = await import('node:fs/promises')
+  await mkdir(join(home, 'tui-locks'), { recursive: true })
+  await mkdir(join(home, 'tui-socks'), { recursive: true })
+  t.after(async () => { await rm(home, { recursive: true, force: true }) })
+  return home
+}
+
+test('old-format lock: alive pid that is not the Host is stolen, a genuine Host is kept', posixOnly, async t => {
+  const home = await makeHome(t)
+  const decoy = spawnDecoy()
+  t.after(() => decoy.kill('SIGKILL'))
+  await new Promise(resolve => setTimeout(resolve, 300))
+
+  // pid is alive but unrelated (no --resume=<sid> in its cmdline) → stale.
+  const sid = 'main-session-recycled-pid'
+  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  const lockPath = join(home, 'tui-locks', `${sid}.json`)
+  await writeFile(lockPath, lockJson(sid, decoy.pid, sock))
+  assert.equal(await inspectLiveHost(sid, home), undefined, 'unrelated alive pid must be stolen')
+  assert.equal(existsSync(lockPath), false)
+
+  // genuine host: cmdline carries --resume=<sid> → attachable, then zombie.
+  const hostSid = 'main-session-genuine-host'
+  const host = spawnHost(hostSid)
+  t.after(() => host.kill('SIGKILL'))
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const hostSock = join(home, 'tui-socks', `${hostSid}.sock`)
+  await writeFile(hostSock, '')
+  await writeFile(join(home, 'tui-locks', `${hostSid}.json`), lockJson(hostSid, host.pid, hostSock))
+  assert.equal((await inspectLiveHost(hostSid, home))?.kind, 'attachable')
+  const { rm } = await import('node:fs/promises')
+  await rm(hostSock)
+  assert.equal((await inspectLiveHost(hostSid, home))?.kind, 'zombie')
+})
+
+test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posixOnly, async t => {
+  const home = await makeHome(t)
+  const sid = 'main-session-identity'
+  const host = spawnHost(sid)
+  t.after(() => host.kill('SIGKILL'))
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  const lockPath = join(home, 'tui-locks', `${sid}.json`)
+
+  await writeFile(sock, '')
+  await writeFile(lockPath, lockJson(sid, host.pid, sock, {
+    bootId, pidStart: procStarttimeOf(host.pid),
+  }))
+  assert.equal((await inspectLiveHost(sid, home))?.kind, 'attachable', 'matching identity must attach')
+  const { rm } = await import('node:fs/promises')
+  await rm(sock)
+  assert.equal((await inspectLiveHost(sid, home))?.kind, 'zombie', 'alive Host without socket stays zombie')
+
+  // same pid but a foreign boot identity (recycled pid / cross-namespace) → stale.
+  await writeFile(sock, '')
+  await writeFile(lockPath, lockJson(sid, host.pid, sock, {
+    bootId: '00000000-0000-0000-0000-000000000000', pidStart: '1',
+  }))
+  assert.equal(await inspectLiveHost(sid, home), undefined, 'foreign identity must be stolen')
+  assert.equal(existsSync(sock), false, 'stale socket removed too')
+})
+
+test('acquire steals a stale old-format lock and records identity on the new lock', posixOnly, async t => {
+  const home = await makeHome(t)
+  const sid = 'main-session-steal'
+  const host = spawnHost(sid)
+  const decoy = spawnDecoy()
+  t.after(() => { host.kill('SIGKILL'); decoy.kill('SIGKILL') })
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, decoy.pid, sock))
+
+  const { path, info } = await acquireSessionLock(sid, { pid: host.pid, dshHome: home })
+  assert.equal(info.pid, host.pid)
+  assert.equal(info.bootId, bootId, 'new lock records bootId')
+  assert.equal(info.pidStart, procStarttimeOf(host.pid), 'new lock records pidStart')
+  assert.equal(parseSessionLock(await readFile(path, 'utf8'))?.bootId, bootId, 'parse keeps bootId')
+
+  await assert.rejects(
+    () => acquireSessionLock(sid, { pid: decoy.pid, dshHome: home }),
+    error => error instanceof SessionLockHeldError && error.lock.pid === host.pid,
+    'a live genuine Host lock must still block acquisition',
+  )
+  await releaseSessionLock(path, host.pid)
+})
+
+test('real-world pid-5 leftovers are classified stale', posixOnly, async t => {
+  const home = await makeHome(t)
+  for (const sid of [
+    'main-session-79b3cc75-1ca3-40e2-87b5-3c5cc6d8dafc',
+    'main-session-916ce9a2-3d6e-4e73-97e4-9e23bbddcdb7',
+  ]) {
+    await writeFile(join(home, 'tui-locks', `${sid}.json`),
+      lockJson(sid, 5, join(home, 'tui-socks', `${sid}.sock`)))
+    assert.equal(await inspectLiveHost(sid, home), undefined, `${sid} must be stolen`)
+  }
 })

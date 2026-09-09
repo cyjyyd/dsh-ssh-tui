@@ -12,8 +12,8 @@
  */
 import { spawn } from 'node:child_process'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
-import { access, mkdir, unlink } from 'node:fs/promises'
-import { constants as fsConstants } from 'node:fs'
+import { access, mkdir, readFile, unlink } from 'node:fs/promises'
+import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -312,17 +312,58 @@ export class DisplayHost {
   }
 }
 
-export async function waitForDisplaySock(path: string, timeoutMs = 15_000): Promise<void> {
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+export async function waitForDisplaySock(
+  path: string,
+  timeoutMs = 15_000,
+  pid?: number,
+  errFile?: string,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
       await access(path, fsConstants.F_OK)
+      if (errFile !== undefined) {
+        try { await unlink(errFile) } catch { /* ignore */ }
+      }
       return
     } catch {
+      if (pid !== undefined && !isPidAlive(pid)) {
+        let detail = ''
+        if (errFile !== undefined) {
+          try {
+            detail = (await readFile(errFile, 'utf8')).trim()
+            await unlink(errFile)
+          } catch {
+            detail = ''
+          }
+        }
+        const suffix = detail !== '' ? `:\n${detail}` : ''
+        throw new Error(`dsh-ssh-tui: host process pid ${pid} exited before display socket appeared${suffix}`)
+      }
       await new Promise(resolve => setTimeout(resolve, 50))
     }
   }
-  throw new Error(`dsh-ssh-tui: host display socket did not appear: ${path}`)
+  let detail = ''
+  if (errFile !== undefined) {
+    try {
+      detail = (await readFile(errFile, 'utf8')).trim()
+      await unlink(errFile)
+    } catch {
+      detail = ''
+    }
+  }
+  const suffix = detail !== '' ? `:\n${detail}` : ''
+  throw new Error(`dsh-ssh-tui: host display socket did not appear: ${path}${suffix}`)
 }
 
 export function hostArgvForSession(sessionId: string, argv = process.argv.slice(1), execArgv = process.execArgv): string[] {
@@ -344,16 +385,27 @@ export function hostArgvForSession(sessionId: string, argv = process.argv.slice(
 }
 
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
-export function spawnDetachedHost(sessionId: string): { pid: number; sock: string } {
+export function spawnDetachedHost(sessionId: string): { pid: number; sock: string; errFile?: string } {
   const sock = sessionSockPath(sessionId)
+  const errFile = `${sock}.err`
+  let errFd: number | undefined
+  try {
+    mkdirSync(dirname(sock), { recursive: true, mode: 0o700 })
+    errFd = openSync(errFile, 'w')
+  } catch {
+    errFd = undefined
+  }
   const child = spawn(process.execPath, hostArgvForSession(sessionId), {
     env: { ...process.env, [TUI_HOST_ENV]: '1' },
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', errFd ?? 'ignore'],
   })
+  if (errFd !== undefined) {
+    try { closeSync(errFd) } catch { /* ignore */ }
+  }
   if (child.pid === undefined) throw new Error('dsh-ssh-tui: failed to spawn host process')
   child.unref()
-  return { pid: child.pid, sock }
+  return { pid: child.pid, sock, ...errFd !== undefined ? { errFile } : {} }
 }
 
 export async function probeDisplaySock(path: string, timeoutMs = 400): Promise<boolean> {
@@ -412,6 +464,14 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       } catch {
         // ignore
       }
+      if (resizeTimer !== undefined) {
+        clearTimeout(resizeTimer)
+        resizeTimer = undefined
+      }
+      process.stdout.off('resize', onResize)
+      if (process.platform !== 'win32') {
+        process.off('SIGWINCH', onResize)
+      }
       try {
         process.stdin.pause()
       } catch {
@@ -433,12 +493,20 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
         finish('host-closed')
       }
     }
-    const onResize = (): void => {
+    let resizeTimer: NodeJS.Timeout | undefined
+    const sendResize = (): void => {
       try {
         socket.write(encodeResize(process.stdout.columns || 80, process.stdout.rows || 24))
       } catch {
         finish('host-closed')
       }
+    }
+    const onResize = (): void => {
+      if (resizeTimer !== undefined) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined
+        sendResize()
+      }, 20)
     }
     const onLocalHangup = (): void => {
       finish('signal')
@@ -469,6 +537,9 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
           process.stdin.on('end', onLocalHangup)
           process.stdin.on('close', onLocalHangup)
           process.stdout.on('resize', onResize)
+          if (process.platform !== 'win32') {
+            process.on('SIGWINCH', onResize)
+          }
           process.on('SIGHUP', onLocalHangup)
           process.on('SIGTERM', onLocalHangup)
         } catch (error) {

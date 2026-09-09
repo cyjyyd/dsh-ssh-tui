@@ -77,6 +77,12 @@
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
       disabled: !!js (function () { try { process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/').resolve('@deepseek-ai/dsh-code-runtime-worker-thread'); return false } catch (err) { return true } })()
 
+    # Host-owned subagent model selection settings sampled by standard/ptc presets.
+    # Keep it optional so an older dsh install without the package still boots.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+      disabled: !!js (function () { try { process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/').resolve('@deepseek-ai/dsh-tool-subagent/model-selection-settings'); return false } catch (err) { return true } })()
+
     - id: ssh-tui-startup
       name: 'dsh-ssh-tui/startup'
 
