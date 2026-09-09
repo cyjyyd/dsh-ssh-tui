@@ -1,88 +1,11 @@
 # dsh-ssh-tui — SSH-friendly interactive terminal mode over dsh-base.
 #
-# A patch replaces the targeted row's whole `config`, so each overridden row
-# restates every key it owns. Later layers (profile cordis.patch.yml,
-# $DSH_HOME/cordis.patch.yml, --patch overlays) can re-patch any of these rows.
-
-# The persona section keeps identity and behavior; tool plugins own tool
-# guidance. The loop resolves {{model}} from the agent configuration.
-- id: system-prompt
-  config:
-    persona: >-
-      You are a coding agent powered by the {{model}} model. Your working
-      directory is {{cwd}}. Verify your work by running the code or tests.
-      Keep answers brief and factual.
-
-# A patch replaces the targeted row's whole `config`, so restating `root`
-# keeps the official HMR row complete while the TUI keeps module reload off.
-# The launcher's watch-only fallback still keeps user patch layers live.
-- id: hmr
-  disabled: true
-  config:
-    root: ['.']
-
-- id: tools
-  config:
-    # 0.1.2 renamed the tools-mode value `code` → `ptc` with no alias.
-    # Map either env value onto the schema this dsh install actually accepts.
-    mode: !!js (function () { var mode = process.env.DSH_TOOLS_MODE; if (mode !== 'code' && mode !== 'ptc') return mode; try { var req = process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/'); var ver = req('@deepseek-ai/dsh-tools/package.json').version || ''; if (!/^0\.(0|1)\.(0|1)/.test(ver)) return 'ptc'; return 'code' } catch (err) { if (mode === 'code') return 'ptc'; return mode } })()
-
-# The `main` agent is created by the TUI plugin itself after the loader
-# settles, so it can read the saved default provider/model from
-# `agent-default-model` without a boot-time race. The base `agent-loop` row
-# stays mounted (empty) because it owns the agent factory.
-
-# Full thinking at max effort on every request. Key and endpoint stay
-# unconfigured here: both resolve per request from the `llm-deepseek:`
-# settings section, the credential store, and DEEPSEEK_BASE_URL.
-- id: llm-deepseek
-  config:
-    thinking: enabled
-    reasoningEffort: max
-
-# Subagents follow the parent session's provider and default to the
-# lightweight model. The TUI's /submodel and /subeffort commands can override
-# both model and reasoning effort at runtime through the request waterfall.
-- id: tool-subagent
-  config:
-    provider: spawn
-    toolName: subagent
-    backgroundMode: continuable
-    agentOptions:
-      model: deepseek-v4-flash
-
-- id: tool-subagent-fork
-  config:
-    provider: fork
-    toolName: subagent_fork
-    backgroundMode: one-shot
-    agentOptions:
-      model: deepseek-v4-flash
+# DSH STORE requires an additive Bundle Patch: unique plugin-owned entry IDs
+# only, no @deepseek-ai/* names, and no disable/replace of official rows.
+# Persona, HMR, tools-mode, DeepSeek thinking, and subagent defaults stay with
+# the profile / dsh-base composition; this patch only mounts the TUI.
 
 - insert:
-    # The agent-mode roster (standard / PTC / minimal / cordis / routing-suite).
-    # The launcher injects the shipped preset root into this row when it is
-    # present.
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
-      config:
-        default: standard
-
-    # Host-plane PTC runtime used by the shipped `ptc` preset. Absent on
-    # dsh-base; web/headless insert it themselves. Keep it optional so an
-    # older dsh install without the package still boots standard mode.
-    # Disabled when the package is not installed (older dsh 0.1.1 runtimes
-    # still boot; 0.1.2's ptc preset can mount once the worker is on disk).
-    - id: code-runtime
-      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
-      disabled: !!js (function () { try { process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/').resolve('@deepseek-ai/dsh-code-runtime-worker-thread'); return false } catch (err) { return true } })()
-
-    # Host-owned subagent model selection settings sampled by standard/ptc presets.
-    # Keep it optional so an older dsh install without the package still boots.
-    - id: subagent-model-selection-settings
-      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
-      disabled: !!js (function () { try { process.getBuiltinModule('module').createRequire(ctx.baseUrl || process.cwd() + '/').resolve('@deepseek-ai/dsh-tool-subagent/model-selection-settings'); return false } catch (err) { return true } })()
-
     - id: ssh-tui-startup
       name: 'dsh-ssh-tui/startup'
 

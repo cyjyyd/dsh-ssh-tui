@@ -87,7 +87,7 @@ dsh --profile tui
 ## 环境要求
 
 - Node.js ≥ 22.19
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1`；`0.1.3-alpha.*` / `0.1.5-alpha.1` 尚未声明 compatible）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
 
@@ -364,7 +364,7 @@ src/session-lock.ts 同会话防双开
 src/update-check.ts npm 最新版提示（不自动升级）
 src/tui.ts          终端渲染、交互、统计、标题/铃声
 src/i18n/           中英界面字典（/language、DSH_TUI_LANG）
-cordis.patch.yml    dsh bundle patch（挂载 TUI 与 agent-presets）
+cordis.patch.yml    dsh bundle patch（仅 insert ssh-tui-startup / ssh-tui）
 scripts/            安装 / 卸载 / 验证脚本
 ```
 

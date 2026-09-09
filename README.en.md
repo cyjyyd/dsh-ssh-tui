@@ -69,7 +69,7 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 ## Requirements
 
 - Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh`
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1`; `0.1.3-alpha.*` / `0.1.5-alpha.1` are not yet declared compatible)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 
 ## Install
@@ -452,8 +452,8 @@ the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
 starts with `SSH ●●●○ 90ms` (1 pip red, 2 yellow, 3+ green). The probe
 does not write into the transcript.
 
-Hangup cancels a running turn, flushes the session log, and keeps the Host.
-`--resume` attaches to that process; do not start a second Host.
+Idle hangup exits the Host. A busy turn keeps it; `--resume` attaches to that
+process. Do not start a second Host.
 
 ## Development
 
