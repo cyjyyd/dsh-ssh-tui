@@ -162,7 +162,7 @@ export interface DisplayHostHandlers {
   onStdin(bytes: Buffer): void
   onResize(columns: number, rows: number): void
   onRtt?(rttMs: number | undefined): void
-  onDetach(): void
+  onDetach(info?: { replaced?: boolean }): void
   onAttach(): void
 }
 
@@ -210,14 +210,19 @@ export class DisplayHost {
       if (claimed) return
       claimed = true
       if (this.socket !== undefined && this.socket !== socket) {
+        const previous = this.socket
+        this.socket = undefined
+        this.attached = false
         try {
-          this.socket.destroy()
+          previous.destroy()
         } catch {
           // ignore
         }
-        this.socket = undefined
-        this.attached = false
-        this.handlers.onDetach()
+        // Replacing a Display is not an SSH hangup. The previous socket's
+        // `close` handler must not fire onDetach after we already claimed
+        // the new relay — that would idle-exit a leftover Host the user
+        // just reattached to.
+        this.handlers.onDetach({ replaced: true })
       }
       this.reader = reader
       this.socket = socket

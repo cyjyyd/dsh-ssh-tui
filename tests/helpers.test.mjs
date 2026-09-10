@@ -124,6 +124,16 @@ import {
   subagentModelMatchesProvider,
 } from '../lib/subagent-model.js'
 
+/** Minimal DisplayHost stand-in for hangup tests. */
+function fakeDisplayHost() {
+  const host = {
+    attached: false,
+    sendStdout() { return true },
+    close: async () => { host.attached = false },
+  }
+  return host
+}
+
 test('truncateToWidth never splits a surrogate pair', () => {
   const cut = truncateToWidth('🙂🙂', 1)
   assert.equal(cut, '…')
@@ -141,6 +151,24 @@ test('displayWidth matches glibc wcwidth for CJK vs ambiguous TUI glyphs', () =>
   assert.equal(repeatToWidth('─', 8), '────────')
   assert.equal(displayWidth(repeatToWidth('─', 80)), 80)
   assert.equal(displayWidth('❯ hello'), 7)
+})
+
+test('displayWidth counts emoji symbols two cells and variation selectors zero', () => {
+  // npm test's pass/fail marks: an emoji font draws these double-width, so a
+  // row measured at one cell spilled onto the next card.
+  assert.equal(displayWidth('✔'), 2)
+  assert.equal(displayWidth('✖'), 2)
+  assert.equal(displayWidth('✔️'), 2)
+  assert.equal(displayWidth('✅'), 2)
+  assert.equal(displayWidth('❌'), 2)
+  assert.equal(displayWidth('⚠️'), 2)
+  // Box-drawing, TUI chrome, and text arrows keep their one-cell width.
+  assert.equal(displayWidth('✓'), 1)
+  assert.equal(displayWidth('✗'), 1)
+  assert.equal(displayWidth('→'), 1)
+  assert.equal(displayWidth('·'), 1)
+  assert.equal(displayWidth('#️⃣'), 2)
+  assert.equal(displayWidth('✔ 计划'), 7)
 })
 
 test('clipAnsiToWidth keeps SGR and never exceeds the cell budget', () => {
@@ -374,7 +402,7 @@ test('hangup on an idle agent flushes without cancel', async () => {
     color: false,
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(cancelled, [])
   assert.deepEqual(flushed, ['main-session'])
@@ -700,7 +728,7 @@ test('hangup with disconnect continue does not cancel a running turn', async () 
     disconnectPolicy: 'continue',
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(cancelled, [])
   assert.equal(agent.status, 'running')
@@ -737,7 +765,7 @@ test('idle hangup with continue still exits instead of keeping the host', async 
     disconnectPolicy: 'continue',
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(cancelled, [])
   assert.deepEqual(flushed, ['main-session'])
@@ -771,7 +799,7 @@ test('pause hangup of a running turn still keeps the host after cancel settles',
     disconnectPolicy: 'pause',
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(cancelled, [{ kind: 'user' }])
   assert.equal(agent.status, 'idle')
@@ -806,7 +834,7 @@ test('hangup keeps the host when a display socket is listening', async () => {
     color: false,
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(flushed, ['main-session'])
   assert.deepEqual(hangups, ['hung'])
@@ -838,11 +866,73 @@ test('headless idle hangup exits instead of orphaning the host', async () => {
     headlessDisplay: true,
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(hangups, [])
   assert.deepEqual(exits, [129])
   assert.equal(tui.disposed, true)
+})
+
+test('reattach after detached completion does not idle-exit the host', async () => {
+  const hangups = []
+  const reattaches = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    disconnectPolicy: 'continue',
+    onHangup: () => { hangups.push('hung') },
+    onReattach: () => { reattaches.push('up') },
+  })
+  const sent = []
+  const display = fakeDisplayHost()
+  display.attached = true
+  display.sendStdout = (chunk) => { sent.push(chunk); return true }
+  tui.displayHost = display
+  await tui.handleHangup()
+  assert.deepEqual(hangups, ['hung'], 'busy drop keeps the host')
+  assert.deepEqual(exits, [])
+  assert.equal(tui.disposed, false)
+
+  // The agent finishes while nobody is attached; the Host is now idle.
+  agent.status = 'idle'
+
+  // A reconnect HELLOs: DisplayHost kicks the leftover socket and reports the
+  // replacement. That must not run the idle hangup path.
+  tui.relayColumns = 80
+  tui.relayRows = 24
+  tui.handleDisplayDetach({ replaced: true })
+  assert.deepEqual(exits, [], 'replacing a leftover Display must not exit the idle host')
+  assert.equal(tui.disposed, false)
+
+  const originalWrite = process.stdout.write
+  process.stdout.write = () => true
+  try {
+    tui.attachRelayDisplay()
+  } finally {
+    process.stdout.write = originalWrite
+  }
+  assert.equal(tui.displayDetached, false)
+  assert.deepEqual(reattaches, ['up'], 'reattach callback must run so the lock returns to attached')
+  assert.deepEqual(exits, [])
+  assert.equal(tui.disposed, false)
+  assert.ok(sent.some(chunk => chunk.includes('\x1b[?1000h')), 'reattach must repaint into the new relay')
 })
 
 test('headless hangup during a running turn keeps the host', async () => {
@@ -869,7 +959,7 @@ test('headless hangup during a running turn keeps the host', async () => {
     headlessDisplay: true,
     onHangup: () => { hangups.push('hung') },
   })
-  tui.displayHost = { attached: false, close: async () => {} }
+  tui.displayHost = fakeDisplayHost()
   await tui.handleHangup()
   assert.deepEqual(hangups, ['hung'])
   assert.deepEqual(exits, [])
@@ -1083,6 +1173,84 @@ test('composePaintOutput is one write of dirty rows only', () => {
   assert.equal((second.match(/\x1b\[\d+;1H/g) ?? []).length, 1)
   assert.ok(second.includes('there'))
   assert.equal(second.includes('hello'), false)
+})
+
+test('composePaintOutput disables auto-wrap around the row batch', () => {
+  const painted = composePaintOutput({
+    width: 8,
+    height: 2,
+    paintRows: ['hello', 'world'],
+    previousRows: [],
+    sizeChanged: false,
+    chromeChanged: true,
+    chromeStart: 0,
+    cursorRow: 2,
+    cursorColumn: 2,
+  })
+  const off = painted.indexOf('\x1b[?7l')
+  const on = painted.indexOf('\x1b[?7h')
+  assert.ok(off >= 0 && on > off, 'row batch must be guarded')
+  assert.ok(painted.indexOf('hello') > off && painted.indexOf('hello') < on)
+  assert.ok(painted.indexOf('world') > off && painted.indexOf('world') < on)
+  // Nothing painted and the cursor stays hidden: no mode churn at all.
+  const idle = composePaintOutput({
+    width: 8,
+    height: 2,
+    paintRows: ['hello', 'world'],
+    previousRows: ['hello', 'world'],
+    sizeChanged: false,
+    chromeChanged: false,
+    chromeStart: 2,
+    cursorRow: 1,
+    cursorColumn: 1,
+    hideCursor: true,
+  })
+  assert.equal(idle, '')
+})
+
+test('painted frames never exceed the terminal width with npm-test emoji', () => {
+  // Independent terminal truth: a terminal with an emoji font draws ✔ / ✖
+  // two cells wide. Reusing displayWidth here would hide the very mismatch
+  // this test exists to catch.
+  const emojiWide = new Set([0x2714, 0x2716, 0x2705, 0x274c, 0x26a0, 0x2b50])
+  const terminalWidth = (line) => {
+    let used = 0
+    for (const char of line.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')) {
+      used += emojiWide.has(char.codePointAt(0)) ? 2 : displayWidth(char)
+    }
+    return used
+  }
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.rows.push({
+    kind: 'tool',
+    callId: 'c1',
+    name: 'bash',
+    args: '{"command":"npm test"}',
+    status: 'ok',
+    output: [
+      '> dsh-ssh-tui@0.5.6 test',
+      '✔ classifyCommand auto-allows low-risk reads, builds, and tests',
+      '✖ a failing test that keeps the cross mark on the row',
+      '✔ test with a trailing check ✔',
+    ].join('\n'),
+    title: 'bash',
+    summary: 'npm test',
+    command: 'npm test',
+    expanded: true,
+  })
+  const width = 40
+  const frame = tui.captureFrame(width, 18)
+  const wide = frame.filter(line => terminalWidth(line) > width)
+  assert.deepEqual(wide, [], 'every painted row must fit the terminal width')
+  assert.ok(frame.some(line => line.includes('✔')), 'the emoji body is actually painted')
 })
 
 test('prompt plus ASCII input cursor stays on integer columns', () => {

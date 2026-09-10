@@ -193,6 +193,7 @@ export function composePaintOutput(options: {
   // thinking/tool/assistant glyphs sitting on the next card.
   const rowCount = Math.min(height, paintRows.length)
   let painted = sizeChanged
+  let rows = ''
   for (let i = 0; i < rowCount; i++) {
     const current = paintRows[i] ?? ''
     if (current === prev[i] && !(chromeChanged && i >= dirtyChromeStart)) continue
@@ -201,13 +202,21 @@ export function composePaintOutput(options: {
     // EL2 *before* the glyphs, from column 1. A full-width write followed
     // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
     // next card instead of the row we just drew.
-    out += `\x1b[${i + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
+    rows += `\x1b[${i + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
   }
   if (rowCount < height && (sizeChanged || previousRows.length !== paintRows.length)) {
     painted = true
-    out += `\x1b[${rowCount + 1};1H\x1b[J`
+    rows += `\x1b[${rowCount + 1};1H\x1b[J`
   }
   if (!painted && options.hideCursor === true) return ''
+  if (rows !== '') {
+    // DECAWM off for the row batch. A glyph the width table under-counts (a
+    // terminal drawing some emoji wider than wcwidth says) then loses its
+    // last cell instead of wrapping onto the row below and punching through
+    // the next card. Rows are addressed individually, so auto-wrap is never
+    // needed here.
+    out += `\x1b[?7l${rows}\x1b[?7h`
+  }
   out += '\x1b[0m'
   if (options.hideCursor === true) return out
   const cursorRow = Math.min(height, Math.max(1, options.cursorRow))

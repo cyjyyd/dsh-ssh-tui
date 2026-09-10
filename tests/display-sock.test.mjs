@@ -188,7 +188,7 @@ test('DisplayHost claims HELLO and kicks the previous relay', async () => {
   const host = new DisplayHost(path, {
     onStdin: (bytes) => { stdin.push(bytes.toString()) },
     onResize: () => {},
-    onDetach: () => { detaches.push(1) },
+    onDetach: (info) => { detaches.push(info) },
     onAttach: () => { attaches.push(1) },
   })
   await host.listen()
@@ -211,8 +211,15 @@ test('DisplayHost claims HELLO and kicks the previous relay', async () => {
   })
   second.write(encodeFrame(FRAME_HELLO))
   await new Promise(resolve => setTimeout(resolve, 40))
-  assert.ok(detaches.length >= 1)
+  // The kick is reported as a replacement, never as a bare detach: a bare
+  // detach would idle-exit a leftover Host the user just reattached to.
+  assert.deepEqual(detaches, [{ replaced: true }])
   assert.equal(attaches.length, 2)
+  assert.equal(host.attached, true)
+  // The reattached relay drives the same session.
+  second.write(encodeFrame(FRAME_STDIN, Buffer.from('j')))
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.deepEqual(stdin, ['k', 'j'])
   second.destroy()
   first.destroy()
   await host.close()

@@ -1700,6 +1700,17 @@ export class SshTui {
   }
 
   /**
+   * Display socket closed. Replacing a leftover Display with a new HELLO,
+   * or closing a socket after we already detached, is not an SSH hangup.
+   */
+  handleDisplayDetach(info?: { replaced?: boolean }): void {
+    if (this.disposed || this.hangingUp) return
+    if (info?.replaced === true) return
+    if (this.displayDetached) return
+    void this.handleHangup()
+  }
+
+  /**
    * SSH / TTY hangup: drop the local display, flush, and either keep the Host
    * (busy: thinking / reply / tools / subagents) or exit (idle).
    * When keeping the Host, `pause` cancels the turn; `continue` lets it finish.
@@ -1867,9 +1878,8 @@ export class SshTui {
       onRtt: (rttMs) => {
         this.applyProbedRtt(rttMs)
       },
-      onDetach: () => {
-        if (this.disposed || this.hangingUp) return
-        void this.handleHangup()
+      onDetach: (info) => {
+        this.handleDisplayDetach(info)
       },
       onAttach: () => {
         if (this.disposed) return
