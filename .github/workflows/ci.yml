@@ -9,25 +9,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Dual-stack: pin 0.1.2-rc.1 in package.json; the 0.1.5-rc.1
-        # leg overrides every @deepseek-ai/dsh-* package (legacy-peer-deps
-        # because 0.1.5 peers do not accept a mixed 0.1.2 tree).
-        dsh: ["0.1.2-rc.1", "0.1.5-rc.1"]
+        # Dual-stack: package.json pins the newest verified host, 0.1.5-rc.1.
+        # The older leg rewrites every @deepseek-ai/dsh-* devDependency and
+        # resolves from scratch, so each leg installs one coherent host tree
+        # instead of mixing versions (which needs no legacy-peer-deps).
+        dsh: ["0.1.5-rc.1", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-audit --no-fund
-      - name: Pin @deepseek-ai packages to dsh ${{ matrix.dsh }}
-        if: matrix.dsh != '0.1.2-rc.1'
+      - name: Pin @deepseek-ai/dsh-* devDependencies to ${{ matrix.dsh }}
+        if: matrix.dsh != '0.1.5-rc.1'
         run: |
-          PKGS=$(node -e "
-            const deps = Object.keys(require('./package.json').devDependencies)
-              .filter(name => name.startsWith('@deepseek-ai/dsh-'))
-              .map(name => name + '@${{ matrix.dsh }}');
-            console.log(deps.join(' '));
-          ")
-          npm install --no-save --legacy-peer-deps $PKGS
+          node -e "
+            const fs = require('node:fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            for (const name of Object.keys(pkg.devDependencies)) {
+              if (name.startsWith('@deepseek-ai/dsh-')) pkg.devDependencies[name] = '${{ matrix.dsh }}';
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          rm -f package-lock.json
+      - run: npm install --no-audit --no-fund
       - run: npx tsc -p tsconfig.json --noEmit
       - run: node --test tests/*.test.mjs

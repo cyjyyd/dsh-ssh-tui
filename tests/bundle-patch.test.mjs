@@ -51,3 +51,37 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.1.5-rc.1'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })
+
+test('declared dsh range admits every release marked compatible', async () => {
+  const semver = (await import('semver')).default
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  const range = manifest.dsh?.compatibility?.dsh
+  assert.equal(typeof range, 'string')
+  // Node-semver only admits a prerelease when a comparator carries the same
+  // [major, minor, patch] tuple, so a bare `>=0.1.2-rc.1` would silently
+  // reject 0.1.5-rc.1. Pin the exact semantics pnpm and the store see.
+  const inRange = version => semver.satisfies(version, range)
+  assert.equal(inRange('0.1.2-rc.1'), true)
+  assert.equal(inRange('0.1.3-alpha.2'), true)
+  assert.equal(inRange('0.1.5-alpha.1'), true)
+  assert.equal(inRange('0.1.5-alpha.2'), true)
+  assert.equal(inRange('0.1.5-rc.1'), true)
+  assert.equal(inRange('0.1.5-rc.2'), true)
+  assert.equal(inRange('0.1.5'), true)
+  assert.equal(inRange('0.1.1-rc.2'), false)
+  assert.equal(inRange('0.1.3-alpha.1'), false)
+  assert.equal(inRange('0.1.6-alpha.1'), false)
+  assert.equal(inRange('0.1.6'), false)
+  assert.equal(semver.maxSatisfying(['0.1.2-rc.1', '0.1.5-rc.1'], range), '0.1.5-rc.1')
+  // Every release the manifest calls compatible must actually satisfy the range.
+  for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
+    if (status !== 'compatible') continue
+    assert.equal(inRange(version), true, `${version} is marked compatible but outside ${range}`)
+  }
+  // Every dsh peer shares that range, so a 0.1.5-rc.1 host satisfies the
+  // declaration while a 0.1.2-rc.1 install keeps resolving.
+  for (const [name, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
+    if (!name.startsWith('@deepseek-ai/dsh-')) continue
+    assert.equal(peerRange, range, `${name} must accept both verified hosts`)
+  }
+})
