@@ -11,6 +11,7 @@ import {
   describeProviderRoute,
   displayWidth,
   padAnsiToWidth,
+  cursorVisualPosition,
   foldInputView,
   formatOpenCodeGoUsage,
   formatAccountBalance,
@@ -29,7 +30,11 @@ import {
   quotaRefreshEverySteps,
   tightestQuotaWindow,
   friendlyJsonLines,
+  hrefAtColumn,
   isEscapePrefix,
+  osc52Clipboard,
+  osc8Enabled,
+  paintedLinkHits,
   openCodeSourceFor,
   parseExitStatus,
   parseFindQuery,
@@ -82,6 +87,12 @@ import {
   renderToolDiff,
   repeatToWidth,
   SshTui,
+  commandAcceptsAttachments,
+  forEachSessionEvent,
+  inspectPersistenceSession,
+  listPersistenceHeaders,
+  streamChunkOf,
+  writeBootSplash,
   fmtElapsedCompact,
   waitCardCopy,
   waitSummaryFromReasoning,
@@ -1084,6 +1095,64 @@ test('prompt plus ASCII input cursor stays on integer columns', () => {
   assert.equal(displayWidth(text.slice(cursor)), 5)
 })
 
+test('cursorVisualPosition wraps a full-width row instead of overlaying the last glyph', () => {
+  const width = 8
+  const filled = 'abcdefgh'
+  assert.equal(displayWidth(filled), width)
+  const atEnd = cursorVisualPosition(filled, filled.length, width)
+  assert.equal(atEnd.row, 1)
+  assert.equal(atEnd.col, 0)
+  const mid = cursorVisualPosition(filled, 3, width)
+  assert.equal(mid.row, 0)
+  assert.equal(mid.col, 3)
+  const wrapped = cursorVisualPosition(`${filled}x`, `${filled}x`.length, width)
+  assert.equal(wrapped.row, 1)
+  assert.equal(wrapped.col, 1)
+})
+
+test('input caret at the right edge does not sit on the last glyph', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const width = 20
+  tui.input = 'abcdefghijklmnopqr' // 18 ASCII + 2-col prompt = 20
+  tui.cursor = tui.input.length
+  tui.inputFolded = false
+  const frame = tui.captureFrame(width, 16)
+  const inputIndex = frame.findIndex(line => line.startsWith('> '))
+  assert.ok(inputIndex >= 0)
+  const inputLine = frame[inputIndex]
+  assert.equal(displayWidth(inputLine), width)
+  assert.equal(tui.lastPaintedCursorColumn() <= width, true)
+  const next = frame[inputIndex + 1] ?? ''
+  // Either an empty wrap row (caret at col 1 of the next input row) or the
+  // caret stayed on this row in a cell after the last glyph.
+  const col = tui.lastPaintedCursorColumn()
+  const row = tui.lastPaintedCursorRow()
+  assert.equal(row === inputIndex + 1 || row === inputIndex + 2, true)
+  if (row === inputIndex + 1) {
+    assert.ok(col < width, `caret col ${col} must not overlay the last glyph of a full row`)
+  }
+  if (row === inputIndex + 2) {
+    assert.equal(col, 1)
+    assert.equal(next.trim(), '')
+  }
+})
+
+test('folded input keeps a blank cell for the caret at the right edge', () => {
+  const line = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const view = foldInputView(line, line.length, 16)
+  assert.equal(view.folded, true)
+  assert.ok(view.cursorOffset < 16)
+  assert.ok(displayWidth(view.text) < 16)
+})
+
 test('isEscapePrefix keeps multi-digit CSI / paste / SGR prefixes buffered', () => {
   assert.equal(isEscapePrefix('\x1b'), true)
   assert.equal(isEscapePrefix('\x1b[20'), true)
@@ -1091,6 +1160,8 @@ test('isEscapePrefix keeps multi-digit CSI / paste / SGR prefixes buffered', () 
   assert.equal(isEscapePrefix('\x1b[201'), true)
   assert.equal(isEscapePrefix('\x1b[<0;5;1'), true)
   assert.equal(isEscapePrefix('\x1b[1~'), true)
+  assert.equal(isEscapePrefix('\x1b[99;6'), true)
+  assert.equal(isEscapePrefix('\x1b[99;6u'), true)
   assert.equal(isEscapePrefix('a'), false)
 })
 
@@ -1116,6 +1187,144 @@ test('waitCardCopy keeps the full tool detail and never echoes the prompt', () =
     reasoning: '**Inspecting paint** then a long explanation of leftover glyphs.',
     prompt: 'please fix leftover paint',
   }).header, 'Inspecting paint')
+})
+
+test('writeBootSplash paints banner and status on the first frame', () => {
+  const writes = []
+  const originalWrite = process.stdout.write
+  process.stdout.write = (chunk) => { writes.push(String(chunk)); return true }
+  try {
+    writeBootSplash('正在启动会话…', false)
+  } finally {
+    process.stdout.write = originalWrite
+  }
+  const out = writes.join('')
+  assert.match(out, /DeepSeek Harness/)
+  assert.match(out, /正在启动会话/)
+  assert.match(out, /\x1b\[H/)
+})
+
+test('replayHistory skips assistant chunks and still paints the assembled reply', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const events = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } },
+    { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'skip-me' } } },
+    { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'think' } } },
+    {
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          content: [
+            { type: 'reasoning', text: 'think' },
+            { type: 'text', text: 'hello' },
+          ],
+        },
+      },
+    },
+  ]
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: {
+      id: 'main-session',
+      seq: events.length,
+      eventAt: (seq) => events[seq],
+    },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.replayHistory()
+  const kinds = tui.rows.map(row => row.kind)
+  assert.equal(kinds.includes('user'), true)
+  assert.equal(kinds.includes('assistant'), true)
+  assert.equal(kinds.includes('reasoning'), true)
+  assert.equal(tui.streaming, undefined)
+  assert.equal(tui.rows.some(row => row.kind === 'assistant' && row.text.includes('hello')), true)
+  assert.equal(tui.rows.some(row => row.kind === 'assistant' && row.text.includes('skip-me')), false)
+})
+
+test('listPersistenceHeaders unwraps 0.1.5 snapshots and inspectPersistenceSession uses open+read', async () => {
+  const headers = await listPersistenceHeaders({
+    list: async () => [
+      { header: { id: 'a', createdAt: 1, cwd: '/tmp' }, revision: 'r1', sizeBytes: 12 },
+      { id: 'b', createdAt: 2, cwd: '/tmp' },
+    ],
+  })
+  assert.deepEqual(headers.map(item => item.id), ['a', 'b'])
+  let closed = false
+  const inspection = await inspectPersistenceSession({
+    open: async (id, access) => {
+      assert.equal(id, 'sess')
+      assert.equal(access, 'read')
+      return {
+        header: { id: 'sess', createdAt: 9, cwd: '/tmp' },
+        read: async () => ({ events: [{ type: 'user/message' }] }),
+        close: async () => { closed = true },
+      }
+    },
+  }, 'sess')
+  assert.equal(closed, true)
+  assert.equal(inspection.header?.id, 'sess')
+  assert.equal(inspection.events[0].type, 'user/message')
+})
+
+test('streamChunkOf reads assistant/chunk events and live stream frames', () => {
+  const fromEvent = streamChunkOf({
+    type: 'assistant/chunk',
+    time: 10,
+    data: { turn: 1, step: 2, chunk: { type: 'text-delta', text: 'hi' } },
+  })
+  assert.equal(fromEvent?.chunk.text, 'hi')
+  assert.equal(fromEvent?.turn, 1)
+  const fromFrame = streamChunkOf({
+    type: 'chunk',
+    time: 11,
+    turn: 3,
+    step: 1,
+    chunk: { type: 'reasoning-delta', text: 'think' },
+  })
+  assert.equal(fromFrame?.chunk.type, 'reasoning-delta')
+  assert.equal(fromFrame?.turn, 3)
+  assert.equal(commandAcceptsAttachments({ images: true }), true)
+  assert.equal(commandAcceptsAttachments({ attachments: true }), true)
+  assert.equal(commandAcceptsAttachments({ hint: 'x' }), false)
+})
+
+test('live assistant-stream frames paint tokens that 0.1.5 no longer logs', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleAssistantStream({
+    agent,
+    frame: {
+      type: 'chunk',
+      time: Date.now(),
+      turn: 1,
+      step: 1,
+      chunk: { type: 'text-delta', text: 'streamed-live' },
+    },
+  })
+  assert.equal(tui.streaming?.text.includes('streamed-live'), true)
+})
+
+test('forEachSessionEvent walks eventAt without snapshotting', () => {
+  const seen = []
+  const session = {
+    seq: 3,
+    eventAt: (seq) => ({ type: `e${seq}` }),
+    snapshotEvents() { throw new Error('should not snapshot') },
+  }
+  forEachSessionEvent(session, event => { seen.push(event.type) })
+  assert.deepEqual(seen, ['e0', 'e1', 'e2'])
 })
 
 test('waitSummaryFromReasoning only accepts a closed bold or a heading', () => {
@@ -1235,6 +1444,52 @@ test('folded long paste does not park the caret on the stats/status chrome', () 
 test('renderMarkdownLines strips terminal control sequences', () => {
   const lines = renderMarkdownLines('a\x1b[31mRED\x1b[0mb', 20, false)
   assert.deepEqual(lines, ['a[31mRED[0mb'])
+})
+
+test('renderMarkdownLines contrasts inline bold against a non-bold body', () => {
+  const lines = renderMarkdownLines('**跳板机上的风**比文档里写的更干。', 80, true, false)
+  assert.equal(lines.length, 1)
+  const line = lines[0]
+  assert.match(line, /^\x1b\[37m/)
+  assert.match(line, /\x1b\[1;97m跳板机上的风\x1b\[0m\x1b\[37m/)
+  assert.match(line, /比文档里写的更干。/)
+  assert.equal(line.includes('\x1b[1;37m'), false)
+})
+
+test('renderMarkdownLines resets italic so it does not leak into following text', () => {
+  const lines = renderMarkdownLines('a *slant* b', 80, true, false)
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /\x1b\[3;37mslant\x1b\[0m\x1b\[37m b/)
+})
+
+test('renderMarkdownLines wraps markdown and bare URLs in OSC 8', () => {
+  const md = renderMarkdownLines('see [docs](https://example.com/a) please', 80, false, true)
+  assert.equal(md.length, 1)
+  assert.ok(md[0].includes('\x1b]8;;https://example.com/a\x1b\\'))
+  assert.ok(md[0].includes('docs'))
+  assert.equal(md[0].includes('(https://example.com/a)'), false)
+  const bare = renderMarkdownLines('go https://example.com/b end', 80, false, true)
+  assert.ok(bare[0].includes('\x1b]8;;https://example.com/b\x1b\\'))
+  const off = renderMarkdownLines('see [docs](https://example.com/a)', 80, false, false)
+  assert.equal(off[0].includes('\x1b]8;;'), false)
+  assert.ok(off[0].includes('docs'))
+})
+
+test('paintedLinkHits maps OSC 8 spans to display columns', () => {
+  const line = `see ${'\x1b]8;;https://ex.test/x\x1b\\'}docs${'\x1b]8;;\x1b\\'}!`
+  const hits = paintedLinkHits(line)
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].href, 'https://ex.test/x')
+  assert.equal(hrefAtColumn(hits, hits[0].startCol), 'https://ex.test/x')
+  assert.equal(hrefAtColumn(hits, hits[0].endCol), undefined)
+})
+
+test('osc52Clipboard encodes UTF-8 as base64', () => {
+  const seq = osc52Clipboard('hi')
+  assert.equal(seq, `\x1b]52;c;${Buffer.from('hi', 'utf8').toString('base64')}\x1b\\`)
+  assert.equal(osc8Enabled({ DSH_TUI_OSC8: '0', TERM: 'xterm-256color' }), false)
+  assert.equal(osc8Enabled({ DSH_TUI_OSC8: '1', TERM: 'dumb' }), true)
+  assert.equal(osc8Enabled({ TERM: 'dumb' }), false)
 })
 
 test('friendlyJsonLines bounds recursion and entry count', () => {

@@ -3,12 +3,19 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 setLocale('zh')
 
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   enterSessionCwd,
   formatFooterCwd,
   listResumableSessions,
+  listResumableSessionsProgressive,
   sessionCwdLabel,
 } from '../lib/session-list.js'
+
+const testIndexDir = mkdtempSync(join(tmpdir(), 'dsh-tui-index-'))
+process.env.DSH_TUI_SESSION_INDEX = join(testIndexDir, 'index.json')
 
 function header(id, createdAt, overrides = {}) {
   return {
@@ -48,6 +55,30 @@ function readableSession(id, createdAt, text = `task ${id}`) {
     ],
   }
 }
+
+test('0.1.5 snapshot list() and open()/read() persistence still lists sessions', async () => {
+  const sessions = new Map([
+    ['snap-readable', readableSession('snap-readable', 200)],
+  ])
+  const persistence = {
+    list: async () => [
+      { header: header('snap-readable', 200), revision: 'r1', sizeBytes: 32 },
+    ],
+    open: async (id, access) => {
+      assert.equal(access, 'read')
+      const session = sessions.get(id)
+      if (session === undefined) throw new Error('missing')
+      return {
+        header: session.meta,
+        read: async () => ({ events: session.events }),
+        close: async () => {},
+      }
+    },
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  assert.equal(listed.length, 1)
+  assert.equal(listed[0].id, 'snap-readable')
+})
 
 test('sessions that fail inspect stay visible and are marked unreadable', async () => {
   const sessions = new Map([
@@ -184,6 +215,61 @@ test('the current session is excluded and older sessions stay listed past nine',
   assert.equal(listed.length, 11)
   assert.equal(listed.some(item => item.id === 'session-0'), false)
   assert.deepEqual(listed.map(item => item.id), ids.slice(1))
+})
+
+test('session index cache skips inspect when the artifact fingerprint matches', async () => {
+  const { writeFileSync } = await import('node:fs')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-index-log-'))
+  const artifact = join(dir, 'session.jsonl.zstd')
+  writeFileSync(artifact, 'x')
+  const sessions = new Map([['cached', readableSession('cached', 400, 'cached task')]])
+  let inspects = 0
+  const persistence = {
+    list: async () => [header('cached', 400)],
+    inspect: async (id) => {
+      inspects += 1
+      return sessions.get(id)
+    },
+    locate: () => ({ kind: 'jsonl', path: artifact }),
+  }
+  const indexPath = join(dir, 'index.json')
+  const first = await listResumableSessionsProgressive(persistence, '', {
+    listHosts: async () => [],
+    indexPath,
+  })
+  assert.equal(first.complete[0].label, 'cached task')
+  assert.equal(inspects, 1)
+  const second = await listResumableSessionsProgressive(persistence, '', {
+    listHosts: async () => [],
+    indexPath,
+  })
+  assert.equal(second.complete[0].label, 'cached task')
+  assert.equal(inspects, 1)
+})
+
+test('progressive listing paints the newest page before inspecting the rest', async () => {
+  const ids = Array.from({ length: 20 }, (_, index) => `session-${index}`)
+  const seen = []
+  const updates = []
+  const persistence = {
+    list: async () => ids.map((id, index) => header(id, 2000 - index)),
+    inspect: async (id) => {
+      seen.push(id)
+      return readableSession(id, 2000 - ids.indexOf(id), `task ${id}`)
+    },
+  }
+  const listed = await listResumableSessionsProgressive(persistence, '', {
+    listHosts: async () => [],
+    indexPath: join(testIndexDir, 'progressive.json'),
+    priorityCount: 4,
+    onUpdate: (listing) => { updates.push({ pending: listing.pending, count: listing.sessions.length }) },
+  })
+  assert.deepEqual(seen.slice(0, 4), ids.slice(0, 4))
+  assert.equal(listed.complete.length, 20)
+  assert.equal(updates[0].pending, true)
+  assert.equal(updates[0].count, 20)
+  assert.equal(updates.at(-1).pending, false)
+  assert.equal(updates.at(-1).count, 20)
 })
 
 test('attachable hosts are injected at the front of the picker list', async () => {

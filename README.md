@@ -57,7 +57,7 @@ dsh --profile tui
 - 模型思考流默认折叠，显示 `▸ 思考中 ⠹ · N 字 · Ns` 动画；结束后折叠为
   `▸ 已思考 · N 行`，可单独展开；思考过程中也能实时展开/收起查看原文；
 - 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
-  粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以粗体白色显示；
+  粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以普通白色显示，行内 `**粗体**` 用更亮的粗体区分；
 - 系统提示词 / `system-reminder` / `AGENTS.md` 等注入折叠为「提示词注入:系统预设 AGENTS.MD」卡片，默认收起，Enter 展开看全文；
 - 工具调用卡片化：标题默认色，状态球绿/黄/红表示成功/运行中/失败（成功不再跟 `[ok]` 重复；失败仍标 `[error]`）；
   连续读/编辑同一路径会叠成一张卡（`×N` + 累计字数/行数，编辑 diff 跟随追加，合并时翻牌动画）；
@@ -88,7 +88,7 @@ dsh --profile tui
 ## 环境要求
 
 - Node.js ≥ 22.19
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1`。`0.1.3-alpha.2` / `0.1.5-alpha.1` 不兼容：会话 persistence 改成 handle API，流式输出从 `assistant/chunk` 改到 `agent/assistant-stream`。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1` 与 `0.1.5-rc.1`。`0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` 走同一套 handle API + `agent/assistant-stream` 兼容层。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
 
@@ -206,7 +206,7 @@ dsh --profile tui --provider <id>
 dsh --profile tui --no-color
 ```
 
-选择器操作：一页固定 9 条，空筛选时 `1-9` 对应屏幕上每一项，`0` 新建。`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）移动高亮，`Enter` 恢复当前项。输入文字（或 `/` / `Ctrl+F`）按标题、会话 ID、工作目录筛选；`PgUp`/`PgDn` 翻页，`Esc` 先退出筛选再取消。历史列表本身不截断。
+选择器操作：一页固定 9 条，空筛选时 `1-9` 对应屏幕上每一项，`0` 新建。`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）移动高亮，`Enter` 恢复当前项。输入文字（或 `/` / `Ctrl+F`）按标题、会话 ID、工作目录筛选；`PgUp`/`PgDn` 翻页，`Esc` 先退出筛选再取消。历史列表本身不截断。选择器先用会话头画出列表，标题在后台补齐；标签缓存在 `$DSH_HOME/tui-session-index.json`。新建/恢复会立刻画出启动屏，前端不再等插件加载完才拉 Host。恢复历史会话时跳过 token chunk，首屏只排可见尾部。
 
 ## 交互与快捷键
 
@@ -219,7 +219,8 @@ dsh --profile tui --no-color
 | `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复 |
 | `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮）。类：`思考` `计划` `子代理` `回复` `提示词`。`Ctrl+/` 或 `Alt+/` 打开 |
 | `Ctrl+G` / `Alt+N` | 下一条搜索结果；`Alt+P` 上一条 |
-| 鼠标左键 | 点击卡片标题展开/收起 |
+| `/copy` | 把焦点卡片纯文本写入本机剪贴板（无焦点则最近一条回复；支持 OSC 52 的终端/tmux） |
+| 鼠标左键 | 点击卡片标题展开/收起；点 markdown 链接则复制 URL |
 | `PgUp` / `PgDn`、滚轮 | 转录回看 |
 | `Esc` | 取消选择 → 回底部 → 取消当前轮次 |
 | `Ctrl+C` | 中断当前轮次；空闲连按两次退出 |
@@ -228,7 +229,7 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
 `/status`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入

@@ -6,7 +6,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { padAnsiToWidth } from './term-text.js'
+import { padAnsiToWidth, truncateToWidth } from './term-text.js'
 
 const RENDER_INTERVAL_MS = 160
 const LOCAL_PAINT_INTERVAL_MS = 80
@@ -211,7 +211,12 @@ export function composePaintOutput(options: {
   out += '\x1b[0m'
   if (options.hideCursor === true) return out
   const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
-  out += `\x1b[${cursorRow};${Math.max(1, options.cursorColumn)}H\x1b[?25h`
+  // Column `width + 1` (and writing into the last cell then parking past
+  // it) trips DEC auto-margin: the hardware cursor wraps onto the next
+  // row and the caret punches through the last glyph. Keep the caret on
+  // this row, in a real cell.
+  const cursorColumn = Math.min(width, Math.max(1, options.cursorColumn))
+  out += `\x1b[${cursorRow};${cursorColumn}H\x1b[?25h`
   return out
 }
 
@@ -227,6 +232,7 @@ export function isEscapePrefix(text: string): boolean {
   if (/^\x1b\[\d+~?$/u.test(text)) return true
   if (/^\x1b\[\d+(?:;\d+)?R?$/u.test(text)) return true
   if (/^\x1b\[<(?:\d*;?)*[Mm]?$/u.test(text)) return true
+  if (/^\x1b\[\d+(?:;\d+)*u?$/u.test(text)) return true
   return false
 }
 
@@ -284,5 +290,24 @@ export function pickerWindowStart(cursor: number, total: number, windowSize = PI
   const maxStart = Math.max(0, total - windowSize)
   const start = cursor - Math.floor((windowSize - 1) / 2)
   return Math.max(0, Math.min(maxStart, start))
+}
+
+/** Immediate first-frame chrome so a 2–3s Host boot is not a blank TTY. */
+export function writeBootSplash(message: string, color = true): void {
+  const width = Math.max(20, process.stdout.columns || 80)
+  const title = t('boot.banner')
+  const line = color
+    ? `\x1b[1m${truncateToWidth(title, width)}\x1b[0m`
+    : truncateToWidth(title, width)
+  const detail = color
+    ? `\x1b[36m${truncateToWidth(message, width)}\x1b[0m`
+    : truncateToWidth(message, width)
+  const useAlt = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
+    && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+  try {
+    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${line}\n${'─'.repeat(width)}\n${detail}\n`)
+  } catch {
+    // TTY may already be gone.
+  }
 }
 

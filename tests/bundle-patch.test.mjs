@@ -32,13 +32,22 @@ test('manifest declares exact dshReleases for the store window', async () => {
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   const releases = manifest.dsh?.compatibility?.dshReleases
   assert.equal(typeof releases, 'object')
-  for (const version of ['0.1.2-rc.1', '0.1.3-alpha.1', '0.1.3-alpha.2', '0.1.5-alpha.1']) {
+  for (const version of [
+    '0.1.2-rc.1',
+    '0.1.3-alpha.1',
+    '0.1.3-alpha.2',
+    '0.1.5-alpha.1',
+    '0.1.5-alpha.2',
+    '0.1.5-rc.1',
+  ]) {
     const status = releases[version]
     assert.ok(status === 'compatible' || status === 'incompatible' || status === 'unknown', version)
   }
   assert.equal(releases['0.1.2-rc.1'], 'compatible')
   assert.equal(releases['0.1.3-alpha.1'], 'unknown')
-  assert.equal(releases['0.1.3-alpha.2'], 'incompatible')
-  assert.equal(releases['0.1.5-alpha.1'], 'incompatible')
+  assert.equal(releases['0.1.3-alpha.2'], 'compatible')
+  assert.equal(releases['0.1.5-alpha.1'], 'compatible')
+  assert.equal(releases['0.1.5-alpha.2'], 'compatible')
+  assert.equal(releases['0.1.5-rc.1'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })

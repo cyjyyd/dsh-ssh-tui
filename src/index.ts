@@ -32,6 +32,7 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
+import { writeBootSplash } from './paint.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
 import { createSubagentSelection } from './subagent-model.js'
@@ -174,6 +175,12 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     const start = async (sessionId: SessionId, resume: boolean): Promise<void> => {
+      if (!hostProcess) {
+        writeBootSplash(resume ? t('boot.resume') : t('boot.host'), config.color !== false)
+        await spawnHostAndRelay(String(sessionId))
+        return
+      }
+      writeBootSplash(resume ? t('boot.resume') : t('boot.starting'), config.color !== false)
       await ctx.get('loader')?.await()
       if (disposed) return
       const agents = ctx.get('agents')
@@ -269,10 +276,6 @@ export function apply(ctx: Context, config: Config): void {
       const setup = async (agentCtx: Context): Promise<void> => {
         installModelSelection(agentCtx, selectionRef)
         await agentPresets?.mount(agentCtx)
-      }
-      if (!hostProcess) {
-        await spawnHostAndRelay(String(sessionId))
-        return
       }
       await takeSessionLock(String(sessionId))
       let resumeCwdNotice: string | undefined
@@ -397,7 +400,6 @@ export function apply(ctx: Context, config: Config): void {
     let bootingSessionId = config.sessionId
     const boot = async (): Promise<void> => {
       if (config.resumePicker === true) {
-        await ctx.get('loader')?.await()
         const picked = await showSessionPicker(ctx, config.color !== false, pickerAbort.signal)
         if (disposed) return
         if (picked === null) {

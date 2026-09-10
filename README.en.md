@@ -69,7 +69,7 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 ## Requirements
 
 - Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1`. `0.1.3-alpha.2` / `0.1.5-alpha.1` are incompatible: session persistence moved to a handle API and live tokens moved from `assistant/chunk` to `agent/assistant-stream`. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1` and `0.1.5-rc.1`. `0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` share the same handle API + `agent/assistant-stream` shims. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 
 ## Install
@@ -249,6 +249,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Ctrl+T` | fold the input box (display-only) |
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
 | `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`). `Ctrl+/` or `Alt+/` opens it |
+| `/copy` | copy the focused card as plain text to the local clipboard (latest reply if none; OSC 52) |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |
@@ -258,7 +259,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `1..9` + `Enter` | answer an `ask_user_question` dialog |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
-commands (`/find`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/approval`, `/help`, ...) with every command the harness
+commands (`/find`, `/copy`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/approval`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
 `/approval auto` allows low-risk shapes (reads/builds/tests, workspace
 `edit`/`write`/`read`), auto-rejects danger (`rm -rf`, `sudo`, `curl|sh`,
@@ -369,9 +370,9 @@ Model reasoning blocks are collapsed by default: while thinking a compact
 `▸ 思考中 ⠹ · N 字 · Ns` line with a spinner replaces the raw stream, and
 after the turn each block collapses to a `▸ 已思考 · N 行` summary without
 its content. The thinking block can be expanded live while streaming to watch
-the raw reasoning as it arrives. Assistant replies render in bold white with
+the raw reasoning as it arrives. Assistant replies render in normal white with
 terminal markdown support: heading levels (H1 enlarged/underlined, H2
-underlined, H3 colored), bold, italic, inline code, fenced code blocks,
+underlined, H3 colored), bold (bright white so it still contrasts on CJK fonts), italic, inline code, fenced code blocks,
 lists, quotes, and links all get ANSI styling while remaining
 width-wrapped for the terminal. System-prompt / `<system-reminder>` / `AGENTS.md` injections collapse to a
 `提示词注入:系统预设 AGENTS.MD` card (sources joined when several match).
@@ -462,7 +463,11 @@ on-screen item (`0` starts a new session). `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`)
 move the highlight; `Enter` resumes the focused row. Typing (or `/` /
 `Ctrl+F`) filters by title, session id, or cwd; `PgUp`/`PgDn` page; `Esc`
 first leaves the filter, then cancels. The history list itself is not
-capped.
+capped. The picker paints from session headers first and fills titles in
+the background; labels are cached in `$DSH_HOME/tui-session-index.json`.
+New and resume launches paint a splash immediately; the frontend relay
+spawns the Host without waiting for the plugin loader. Resuming a session
+skips token chunks and lays out only the visible tail on the first paint.
 
 ## Jump-host / proxied SSH
 

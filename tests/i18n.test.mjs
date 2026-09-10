@@ -103,6 +103,12 @@ test('zh and en catalogs share every key including the resume picker strings', (
   assert.equal(en['picker.hint'].includes('↑/↓'), true)
   assert.equal(zh['picker.filter'].includes('{query}'), true)
   assert.equal(en['picker.filter'].includes('{query}'), true)
+  assert.equal(zh['picker.loading'].includes('会话'), true)
+  assert.equal(en['picker.loading'].includes('loading'), true)
+  assert.equal(zh['history.folded'].includes('滚动'), true)
+  assert.equal(en['history.folded'].includes('scroll'), true)
+  assert.equal(zh['boot.starting'].includes('启动'), true)
+  assert.equal(en['boot.host'].includes('host'), true)
 })
 
 test('slash command descriptions are complete and bilingual in zh and en', () => {

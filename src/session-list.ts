@@ -7,9 +7,24 @@
 import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import {
+  inspectPersistenceSession,
+  listPersistenceHeaders,
+  persistenceLocate,
+  type SessionHeaderLike,
+} from './dsh-compat.js'
 import { t } from './i18n/index.js'
 import { listAttachableHosts } from './session-lock.js'
+import {
+  indexEntryMatchesStat,
+  loadSessionIndex,
+  PICKER_PRIORITY_COUNT,
+  pruneSessionIndex,
+  saveSessionIndex,
+  sessionArtifactStat,
+  sessionIndexPath,
+  type SessionIndexEntry,
+} from './session-index.js'
 
 /** Last path segment for the footer chip (`\root\genshin\srv` → `srv`). */
 export function sessionCwdLabel(cwd: string): string {
@@ -112,11 +127,11 @@ function isBlankSession(hasUserInput: boolean, hasReply: boolean): boolean {
 
 /** Delete one session's on-disk artifacts (log directory), best effort. */
 async function pruneSessionArtifacts(
-  persistence: SessionPersistence,
-  meta: Parameters<SessionPersistence['locate']>[0],
+  persistence: object,
+  meta: object,
 ): Promise<void> {
   try {
-    const location = persistence.locate(meta)
+    const location = persistenceLocate(persistence, meta)
     if (location?.path !== undefined && location.path !== '') {
       await rm(dirname(location.path), { recursive: true, force: true })
     }
@@ -130,6 +145,45 @@ const INSPECT_BATCH_SIZE = 30
 
 /** Internal inspection result before display filtering. */
 type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: boolean }
+
+/** Incremental listing so the picker can paint before older logs are parsed. */
+export interface ResumableSessionListing {
+  /** Sessions already inspected (or restored from the disk cache). */
+  sessions: ResumableSession[]
+  /** Whether older logs are still being inspected. */
+  pending: boolean
+}
+
+function toResumable(item: InspectedSession): ResumableSession {
+  const { hasUserInput: _hasUserInput, hasReply: _hasReply, ...rest } = item
+  return rest
+}
+
+function indexFromInspected(item: InspectedSession, stat: { mtimeMs: number; size: number }): SessionIndexEntry {
+  return {
+    id: item.id,
+    label: item.label,
+    updatedAt: item.updatedAt,
+    cwd: item.cwd,
+    hasUserInput: item.hasUserInput,
+    hasReply: item.hasReply,
+    ...(item.unreadable === true ? { unreadable: true } : {}),
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+  }
+}
+
+function inspectedFromIndex(entry: SessionIndexEntry): InspectedSession {
+  return {
+    id: entry.id,
+    label: entry.label,
+    updatedAt: entry.updatedAt,
+    cwd: entry.cwd,
+    hasUserInput: entry.hasUserInput,
+    hasReply: entry.hasReply,
+    ...(entry.unreadable === true ? { unreadable: true } : {}),
+  }
+}
 
 /**
  * List resumable top-level sessions, newest first.
@@ -145,11 +199,36 @@ type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: bo
  *   hosts first, then readable logs, then unreadable).
  */
 export async function listResumableSessions(
-  persistence: SessionPersistence,
+  persistence: object,
   currentId: string,
   listHosts: typeof listAttachableHosts = listAttachableHosts,
 ): Promise<ResumableSession[]> {
-  const headers = await persistence.list()
+  const listing = await listResumableSessionsProgressive(persistence, currentId, { listHosts })
+  return listing.complete
+}
+
+/**
+ * List resumable sessions, painting the recent page first.
+ *
+ * `onUpdate` fires after the priority page (cached + newest logs) and again
+ * after each later inspect batch. Unchanged logs reuse `$DSH_HOME/tui-session-index.json`.
+ */
+export async function listResumableSessionsProgressive(
+  persistence: object,
+  currentId: string,
+  options: {
+    listHosts?: typeof listAttachableHosts
+    onUpdate?: (listing: ResumableSessionListing) => void
+    indexPath?: string
+    priorityCount?: number
+  } = {},
+): Promise<ResumableSessionListing & { complete: ResumableSession[] }> {
+  const listHosts = options.listHosts ?? listAttachableHosts
+  const indexPath = options.indexPath
+    ?? process.env.DSH_TUI_SESSION_INDEX
+    ?? sessionIndexPath()
+  const priorityCount = options.priorityCount ?? PICKER_PRIORITY_COUNT
+  const headers = await listPersistenceHeaders(persistence)
   const candidates = headers
     .filter(meta =>
       meta.id !== currentId
@@ -158,17 +237,60 @@ export async function listResumableSessions(
       && (meta.delegationDepth ?? 0) === 0)
     .sort((a, b) => b.createdAt - a.createdAt)
 
-  const inspectCandidate = async (meta: (typeof candidates)[number]): Promise<InspectedSession> => {
+  const [index, hosts] = await Promise.all([
+    loadSessionIndex(indexPath),
+    listHosts(),
+  ])
+  const keepIds = new Set(candidates.map(meta => String(meta.id)))
+  const indexSizeBefore = index.size
+  pruneSessionIndex(index, keepIds)
+  let indexDirty = index.size !== indexSizeBefore
+
+  const sketchFromHeader = (meta: SessionHeaderLike): InspectedSession => {
+    const cached = index.get(String(meta.id))
+    const stat = sessionArtifactStat(persistence, meta)
+    if (stat.size > 0 && indexEntryMatchesStat(cached, stat) && cached !== undefined) {
+      return inspectedFromIndex(cached)
+    }
+    return {
+      id: meta.id,
+      label: cached?.label && cached.label !== '' ? cached.label : meta.id,
+      updatedAt: cached?.updatedAt ?? meta.createdAt,
+      cwd: meta.cwd ?? cached?.cwd ?? '',
+      hasUserInput: cached?.hasUserInput ?? true,
+      hasReply: cached?.hasReply ?? true,
+    }
+  }
+  const sketched = candidates.map(meta => toResumable(sketchFromHeader(meta)))
+  const sketchedById = new Map(sketched.map(item => [item.id, item]))
+  for (const host of hosts) {
+    if (host.sessionId === currentId) continue
+    const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
+    const existing = sketchedById.get(host.sessionId)
+    if (existing !== undefined) {
+      existing.attach = attach
+      continue
+    }
+    sketched.unshift({
+      id: host.sessionId,
+      label: host.sessionId,
+      updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
+      cwd: '',
+      attach,
+    })
+  }
+  options.onUpdate?.({ sessions: sketched, pending: true })
+
+  const inspectCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession> => {
     try {
-      const inspection = await persistence.inspect(meta.id)
-      const firstUserMessage = inspection.events.find(
-        (event): event is Extract<typeof event, { type: 'user/message' }> =>
-          event.type === 'user/message'
-          && event.data.source.kind === 'user')
+      const inspection = await inspectPersistenceSession(persistence, meta.id)
+      const firstUserMessage = inspection.events.find(event => isUserMessageEvent(event)) as
+        | { data?: { content?: readonly unknown[] } }
+        | undefined
       const firstUserText = firstUserMessage === undefined
         ? undefined
         : Array.from(
-            firstUserMessage.data.content
+            (firstUserMessage.data?.content ?? [])
               .map((block) => {
                 const candidate = block as { type: string; text?: unknown }
                 return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
@@ -184,7 +306,8 @@ export async function listResumableSessions(
       const title = titleEvent === undefined
         ? undefined
         : (titleEvent as unknown as { data: { title: string } }).data.title
-      const updatedAt = inspection.events.at(-1)?.time ?? meta.createdAt
+      const last = inspection.events.at(-1) as { time?: number } | undefined
+      const updatedAt = last?.time ?? meta.createdAt
       return {
         id: meta.id,
         // The persisted generated title first: the web session list shows the
@@ -217,73 +340,110 @@ export async function listResumableSessions(
     }
   }
 
-  // Headers only carry creation time. Inspect in bounded batches so a large
-  // store cannot fan out unbounded, but do not stop after a fixed count —
-  // the picker filters and scrolls, so older real conversations must stay
-  // reachable. Recent empty boot rows are pruned instead of listed.
-  const inspected: InspectedSession[] = []
-  for (let offset = 0; offset < candidates.length; offset += INSPECT_BATCH_SIZE) {
-    const batch = candidates.slice(offset, offset + INSPECT_BATCH_SIZE)
-    const settled = await Promise.all(batch.map(async meta => ({ meta, item: await inspectCandidate(meta) })))
-    for (const { meta, item } of settled) {
-      // Unreadable logs stay visible regardless; a readable blank (a boot
-      // that died before any input or reply) gets deleted so the raw id
-      // never shows up as resumable again.
-      if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
-        void pruneSessionArtifacts(persistence, meta)
-        continue
-      }
-      inspected.push(item)
+  const resolveCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession | undefined> => {
+    const stat = sessionArtifactStat(persistence, meta)
+    const cached = index.get(String(meta.id))
+    // Fingerprint 0/0 means locate/stat failed: never treat that as a hit.
+    if (stat.size > 0 && indexEntryMatchesStat(cached, stat) && cached !== undefined) {
+      return inspectedFromIndex(cached)
     }
+    const item = await inspectCandidate(meta)
+    if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
+      index.delete(String(meta.id))
+      indexDirty = true
+      void pruneSessionArtifacts(persistence, meta)
+      return undefined
+    }
+    if (stat.size > 0) {
+      index.set(String(meta.id), indexFromInspected(item, stat))
+      indexDirty = true
+    }
+    return item
   }
 
-  const resumable = inspected.filter(item => item.hasUserInput || item.unreadable === true)
-  const hosts = await listHosts()
-  const byId = new Map(resumable.map(item => [item.id, item]))
-  for (const host of hosts) {
-    if (host.sessionId === currentId) continue
-    const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
-    // A live Host whose session never saw input nor a reply is a crashed
-    // boot: stop it, remove its artifacts, and keep it out of the picker.
-    let blankLive = false
-    let liveHasUserInput = true
-    try {
-      const inspection = await persistence.inspect(host.sessionId as Parameters<SessionPersistence['inspect']>[0])
-      const hasInput = inspection.events.some(event => isUserMessageEvent(event))
-      blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
-      liveHasUserInput = hasInput
-    } catch {
-      // No durable log: the Host booted and never did anything.
-      blankLive = true
-      liveHasUserInput = false
+  const inspected: InspectedSession[] = []
+  const blankLiveIds = new Set<string>()
+  const extraLive = new Map<string, InspectedSession>()
+  const mergeHosts = async (items: InspectedSession[]): Promise<InspectedSession[]> => {
+    const resumable = items.filter(item => item.hasUserInput || item.unreadable === true)
+    const byId = new Map(resumable.map(item => [item.id, item]))
+    for (const host of hosts) {
+      if (host.sessionId === currentId || blankLiveIds.has(host.sessionId)) continue
+      const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
+      const existing = byId.get(host.sessionId) ?? extraLive.get(host.sessionId)
+      if (existing !== undefined) {
+        existing.attach = attach
+        if (!byId.has(host.sessionId)) {
+          resumable.push(existing)
+          byId.set(host.sessionId, existing)
+        }
+        continue
+      }
+      // A live Host whose session never saw input nor a reply is a crashed
+      // boot: stop it, remove its artifacts, and keep it out of the picker.
+      let blankLive = false
+      let liveHasUserInput = true
+      try {
+        const inspection = await inspectPersistenceSession(persistence, host.sessionId)
+        const hasInput = inspection.events.some(event => isUserMessageEvent(event))
+        blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
+        liveHasUserInput = hasInput
+      } catch {
+        blankLive = true
+        liveHasUserInput = false
+      }
+      if (blankLive) {
+        blankLiveIds.add(host.sessionId)
+        try { process.kill(attach.pid, 'SIGTERM') } catch { /* already gone */ }
+        const header = candidates.find(candidate => candidate.id === host.sessionId)
+        if (header !== undefined) void pruneSessionArtifacts(persistence, header)
+        continue
+      }
+      const injected: InspectedSession = {
+        id: host.sessionId,
+        label: host.sessionId,
+        updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
+        cwd: '',
+        hasUserInput: liveHasUserInput,
+        hasReply: true,
+        attach,
+      }
+      extraLive.set(host.sessionId, injected)
+      resumable.push(injected)
+      byId.set(host.sessionId, injected)
     }
-    if (blankLive) {
-      try { process.kill(attach.pid, 'SIGTERM') } catch { /* already gone */ }
-      const header = candidates.find(candidate => candidate.id === host.sessionId)
-      if (header !== undefined) void pruneSessionArtifacts(persistence, header)
-      continue
-    }
-    const existing = byId.get(host.sessionId)
-    if (existing !== undefined) {
-      existing.attach = attach
-      continue
-    }
-    const injected: InspectedSession = {
-      id: host.sessionId,
-      label: host.sessionId,
-      updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
-      cwd: '',
-      hasUserInput: liveHasUserInput,
-      hasReply: true,
-      attach,
-    }
-    resumable.push(injected)
-    byId.set(host.sessionId, injected)
+    resumable.sort((a, b) =>
+      (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
+      || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
+      || b.updatedAt - a.updatedAt)
+    return resumable
   }
-  // Attachable live hosts first, then readable logs, then unreadable.
-  resumable.sort((a, b) =>
-    (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
-    || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
-    || b.updatedAt - a.updatedAt)
-  return resumable.map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
+  const emit = async (pending: boolean): Promise<ResumableSession[]> => {
+    const listed = (await mergeHosts(inspected)).map(toResumable)
+    options.onUpdate?.({ sessions: listed, pending })
+    return listed
+  }
+
+  // Newest page first so the picker can paint before older logs are parsed.
+  const priority = candidates.slice(0, Math.max(0, priorityCount))
+  const rest = candidates.slice(priority.length)
+  const first = await Promise.all(priority.map(async meta => ({ meta, item: await resolveCandidate(meta) })))
+  for (const { item } of first) {
+    if (item !== undefined) inspected.push(item)
+  }
+  await emit(rest.length > 0)
+
+  for (let offset = 0; offset < rest.length; offset += INSPECT_BATCH_SIZE) {
+    const batch = rest.slice(offset, offset + INSPECT_BATCH_SIZE)
+    const settled = await Promise.all(batch.map(async meta => ({ meta, item: await resolveCandidate(meta) })))
+    for (const { item } of settled) {
+      if (item !== undefined) inspected.push(item)
+    }
+    await emit(offset + INSPECT_BATCH_SIZE < rest.length)
+  }
+
+  const complete = (await mergeHosts(inspected)).map(toResumable)
+  if (indexDirty) await saveSessionIndex(indexPath, index)
+  options.onUpdate?.({ sessions: complete, pending: false })
+  return { sessions: complete, pending: false, complete }
 }

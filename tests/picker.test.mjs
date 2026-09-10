@@ -163,3 +163,11 @@ test('pasted text types digits instead of firing 1-9 shortcuts', () => {
   assert.equal(arrow.kind, 'continue')
   assert.equal(arrow.state.cursor, 0)
 })
+
+test('pickerStateUnchanged treats loading as part of the frame', () => {
+  const sessions = [session('a')]
+  const idle = state(sessions)
+  const loading = state(sessions, { loading: true })
+  assert.equal(pickerStateUnchanged(idle, idle), true)
+  assert.equal(pickerStateUnchanged(idle, loading), false)
+})

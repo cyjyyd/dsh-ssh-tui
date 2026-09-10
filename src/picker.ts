@@ -11,7 +11,7 @@
 import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { formatSessionTime, listResumableSessions, type ResumableSession } from './session-list.js'
+import { formatSessionTime, listResumableSessionsProgressive, type ResumableSession } from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
 import { truncateToWidth } from './term-text.js'
 import { t } from './i18n/index.js'
@@ -42,6 +42,8 @@ export interface SessionPickerState {
    * shortcuts. Set automatically by the first letter, or by `/` / Ctrl+F.
    */
   filterActive: boolean
+  /** Older logs are still being inspected in the background. */
+  loading?: boolean
 }
 
 /** One key / control action against {@link SessionPickerState}. */
@@ -115,6 +117,7 @@ export function pickerStateUnchanged(previous: SessionPickerState, next: Session
     && previous.cursor === next.cursor
     && previous.filterActive === next.filterActive
     && previous.sessions === next.sessions
+    && previous.loading === next.loading
 }
 
 function resultFor(session: ResumableSession): SessionPickerResult {
@@ -370,17 +373,7 @@ export function feedPicker(
  * @returns the selection, or null when cancelled.
  */
 export async function showSessionPicker(ctx: Context, color: boolean, signal?: AbortSignal): Promise<SessionPickerResult> {
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence === undefined) {
-    process.stderr.write(t('picker.noPersistence'))
-    return { kind: 'new' }
-  }
-  const sessions = await listResumableSessions(persistence, '')
   if (signal?.aborted) return null
-  if (sessions.length === 0) {
-    process.stdout.write(t('picker.none'))
-    return { kind: 'new' }
-  }
 
   const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
@@ -390,7 +383,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
   process.stdout.write(`${useAltScreen ? '\x1b[?1049h' : ''}\x1b[?25l`)
 
   const style = (text: string, code: string): string => color ? `\x1b[${code}m${text}\x1b[0m` : text
-  let state: SessionPickerState = { sessions, query: '', cursor: 0, filterActive: false }
+  let state: SessionPickerState = { sessions: [], query: '', cursor: 0, filterActive: false, loading: true }
   let previousRows: string[] = []
   let previousWidth = 0
   let previousHeight = 0
@@ -412,9 +405,14 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
     lines.push(style(truncateToWidth(t('picker.count', {
       shown: filtered.length,
       total: state.sessions.length,
-    }), width), '90'))
+    }) + (state.loading === true ? t('picker.loading') : ''), width), '90'))
     if (filtered.length === 0) {
-      lines.push(style(truncateToWidth(t('picker.noMatch', { query: state.query }), width), '33'))
+      const empty = state.loading === true
+        ? t('picker.loadingList')
+        : state.query === ''
+          ? t('picker.noneYet')
+          : t('picker.noMatch', { query: state.query })
+      lines.push(style(truncateToWidth(empty, width), '33'))
     } else {
       if (start > 0) {
         lines.push(style(truncateToWidth(t('picker.moreAbove', { count: start }), width), '90'))
@@ -557,5 +555,41 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
     process.stdin.on('data', onData)
     process.stdout.on('resize', () => { render(true) })
     render(true)
+    const applyListing = (listing: { sessions: ResumableSession[]; pending: boolean }): void => {
+      if (done) return
+      const focusedId = filterResumableSessions(state.sessions, state.query)[state.cursor]?.id
+      const nextFiltered = filterResumableSessions(listing.sessions, state.query)
+      state = {
+        ...state,
+        sessions: listing.sessions,
+        loading: listing.pending,
+        cursor: retainCursor(focusedId, nextFiltered, state.cursor),
+      }
+      render()
+    }
+    const startListing = async (): Promise<void> => {
+      let persistence = ctx.get('sessionPersistence')
+      if (persistence === undefined) {
+        await ctx.get('loader')?.await()
+        if (done || signal?.aborted) return
+        persistence = ctx.get('sessionPersistence')
+      }
+      if (persistence === undefined) {
+        process.stderr.write(t('picker.noPersistence'))
+        cleanup({ kind: 'new' })
+        return
+      }
+      const listing = await listResumableSessionsProgressive(persistence, '', {
+        onUpdate: applyListing,
+      })
+      if (done) return
+      if (listing.complete.length === 0 && state.query === '') {
+        cleanup({ kind: 'new' })
+        process.stdout.write(t('picker.none'))
+      }
+    }
+    void startListing().catch(() => {
+      if (!done) cleanup({ kind: 'new' })
+    })
   })
 }

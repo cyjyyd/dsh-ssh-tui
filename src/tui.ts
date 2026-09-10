@@ -31,7 +31,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { sessionEvents, settingsNamespace } from './dsh-compat.js'
+import {
+  commandAcceptsAttachments,
+  forEachSessionEvent,
+  isAssistantStreamEvent,
+  listenHostEvent,
+  sessionEventType,
+  sessionEvents,
+  settingsNamespace,
+  streamChunkOf,
+  type StreamChunkLike,
+} from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
 import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
@@ -72,6 +82,7 @@ import {
   type SubagentSelectionRef,
 } from './subagent-model.js'
 import { resolveFreshSuperGrokToken } from './supergrok-token.js'
+import { copyTextFromTranscript } from './copy-text.js'
 
 import {
   UserQuestionError,
@@ -92,6 +103,9 @@ import type {
 } from './transcript-types.js'
 import {
   clipAnsiToWidth,
+  hrefAtColumn,
+  osc52Clipboard,
+  paintedLinkHits,
   cursorVisualPosition,
   displayWidth,
   foldInputView,
@@ -242,8 +256,13 @@ export type {
 } from './transcript-types.js'
 export {
   clipAnsiToWidth,
+  cursorVisualPosition,
   displayWidth,
   foldInputView,
+  hrefAtColumn,
+  osc52Clipboard,
+  osc8Enabled,
+  paintedLinkHits,
   fmtElapsedCompact,
   padAnsiToWidth,
   padToWidth,
@@ -274,6 +293,7 @@ export {
   releaseHangupSignals,
   resolvePaintIntervalMs,
   waitUntilIdleOrTimeout,
+  writeBootSplash,
   type LinkQuality,
   type PaintLinkKind,
 } from './paint.js'
@@ -341,6 +361,17 @@ export {
   type QuotaSnapshot,
   type QuotaWindow,
 } from './quota.js'
+export {
+  commandAcceptsAttachments,
+  forEachSessionEvent,
+  isAssistantStreamEvent,
+  listPersistenceHeaders,
+  inspectPersistenceSession,
+  sessionEventType,
+  sessionEvents,
+  settingsNamespace,
+  streamChunkOf,
+} from './dsh-compat.js'
 export {
   applyTurnEndToPlan,
   askSummary,
@@ -827,6 +858,7 @@ const LOCAL_COMMANDS = [
   { name: 'resume', key: 'cmd.resume' },
   { name: 'setup', key: 'cmd.setup' },
   { name: 'find', key: 'cmd.find' },
+  { name: 'copy', key: 'cmd.copy' },
   { name: 'language', key: 'cmd.language' },
   { name: 'lang', key: 'cmd.language', aliasOf: 'language' },
   { name: 'dialog-test', key: 'cmd.dialog-test' },
@@ -987,6 +1019,16 @@ export class SshTui {
   private lastStatsTurn: number | null = null
   private scrollOffset = 0
   private readonly clickableRows = new Map<number, CollapsibleBlock>()
+  private readonly paintedLinkHitsByRow = new Map<number, ReturnType<typeof paintedLinkHits>>()
+  private copyYank = ''
+  /** Last OSC-52 payload (tests; empty when nothing has been copied). */
+  get lastCopiedText(): string {
+    return this.copyYank
+  }
+  /** Screen-row → OSC 8 hits from the last paint (tests). */
+  get linkHitsByRow(): Map<number, ReturnType<typeof paintedLinkHits>> {
+    return this.paintedLinkHitsByRow
+  }
   private streamingReasoning: { kind: 'streaming-reasoning'; expanded: boolean } | undefined
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
@@ -994,9 +1036,13 @@ export class SshTui {
   private waitStartedAt: number | undefined
   private completionSignaled = false
   private replaying = false
+  /** Display-line budget for the first paint after resume; 0 = full transcript. */
+  private paintTailBudget = 0
   private completedAt = 0
   private lastTitleUpdateAt = 0
   private lastPaintRows: string[] = []
+  private lastPaintCursorColumn = 1
+  private lastPaintCursorRow = 1
   private lastChromeKey = ''
   private lastPaintWidth = 0
   private lastPaintHeight = 0
@@ -1111,6 +1157,7 @@ export class SshTui {
   private bindAgentEvents(): void {
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
+      listenHostEvent(this.ctx, 'agent/assistant-stream', this.handleAssistantStream),
       this.ctx.on('agent/status', this.handleStatus),
       this.ctx.on('agent/error', this.handleError),
       this.ctx.on('agent/disposed', this.handleDisposed),
@@ -1421,9 +1468,9 @@ export class SshTui {
   replayHistory(): void {
     this.replaying = true
     try {
-      for (const event of sessionEvents(this.agent.session)) {
+      forEachSessionEvent(this.agent.session, (event) => {
         this.handleSessionEvent(this.agent.session, event)
-      }
+      })
     } finally {
       this.replaying = false
     }
@@ -1432,6 +1479,7 @@ export class SshTui {
     this.thinkingStartedAt = undefined
     this.status = this.agent.status === 'running' ? 'running' : 'idle'
     this.refreshContextPressure({ compact: false })
+    this.paintTailBudget = Math.max(24, this.screenRows() * 3)
     this.dirty = true
   }
 
@@ -1750,6 +1798,16 @@ export class SshTui {
       process.stdout.columns = previousColumns
       process.stdout.rows = previousRows
     }
+  }
+
+  /** Last CSI cursor column written by {@link paint} (1-based). Tests only. */
+  lastPaintedCursorColumn(): number {
+    return this.lastPaintCursorColumn
+  }
+
+  /** Last CSI cursor row written by {@link paint} (1-based). Tests only. */
+  lastPaintedCursorRow(): number {
+    return this.lastPaintCursorRow
   }
 
   private screenColumns(): number {
@@ -2254,6 +2312,8 @@ export class SshTui {
       cursorRow: height,
       cursorColumn: 1,
     }))
+    this.lastPaintCursorRow = height
+    this.lastPaintCursorColumn = 1
     this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     this.lastChromeKey = `inspect:${dialog.offset}:${width}x${height}`
     this.lastPaintWidth = width
@@ -2400,6 +2460,10 @@ export class SshTui {
     } else {
       this.focusedRow = null
     }
+    if (this.paintTailBudget > 0) {
+      this.paintTailBudget = 0
+      this.forceFullPaint = true
+    }
     this.pendingReveal = row
     this.markDirty()
   }
@@ -2524,8 +2588,17 @@ export class SshTui {
       if (burst.after !== undefined) compactBurstByReply.set(burst.after, burst)
     }
 
-    let paintedLeadingCompact = false
-    for (const row of this.rows) {
+    const skipMiddle = this.paintTailBudget > 0 && this.scrollOffset === 0 && this.pendingReveal === undefined
+      && this.rows.length > this.paintTailBudget + 8
+    const historyStart = skipMiddle ? Math.max(0, this.rows.length - this.paintTailBudget) : 0
+    let paintedLeadingCompact = skipMiddle
+    for (let rowIndex = 0; rowIndex < this.rows.length; rowIndex += 1) {
+      if (skipMiddle && rowIndex >= 4 && rowIndex < historyStart) {
+        if (rowIndex === 4) addDisplay(this.styleLine('system', t('history.folded')))
+        continue
+      }
+      const row = this.rows[rowIndex]
+      if (row === undefined) continue
       if (compact && (row.kind === 'reasoning' || row.kind === 'prompt' || row.kind === 'tool')) continue
       if (compact && !paintedLeadingCompact && (row.kind === 'assistant' || row.kind === 'user')) {
         const leading = compactBursts.find(burst => burst.after === undefined)
@@ -2983,6 +3056,11 @@ export class SshTui {
     // across the full terminal grid, which parked the caret on a later
     // chrome line after a long paste. Un-folded multi-line input still
     // maps through wrap() so newlines stay on the right visual row.
+    //
+    // A caret after a glyph that filled the row must move to col 1 of the
+    // next row (and that row must exist). Parking it on the last cell
+    // punches through the glyph; parking at width+1 trips DEC auto-margin
+    // onto the stats line.
     let cursorRowOffset: number
     let column: number
     if (inputView.folded || masked) {
@@ -2990,16 +3068,10 @@ export class SshTui {
       column = Math.min(width, promptWidth + inputView.cursorOffset + 1)
     } else {
       const pos = cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)
-      // A cursor exactly at the end of a full-width row sits at the start of
-      // the next row; if that row does not exist yet, reserve an empty row.
-      if (pos.col === inputTextWidth) {
-        if (pos.row + 1 >= inputDisplayLines.length) inputDisplayLines.push('')
-        cursorRowOffset = Math.min(pos.row + 1, Math.max(0, inputDisplayLines.length - 1))
-        column = (cursorRowOffset === 0 ? promptWidth : 0) + 1
-      } else {
-        cursorRowOffset = Math.min(pos.row, Math.max(0, inputDisplayLines.length - 1))
-        column = (pos.row === 0 ? promptWidth : 0) + pos.col + 1
-      }
+      while (pos.row >= inputDisplayLines.length) inputDisplayLines.push('')
+      cursorRowOffset = pos.row
+      const rowPrefix = pos.row === 0 ? promptWidth : 0
+      column = Math.min(width, rowPrefix + pos.col + 1)
     }
     const inputRows = Math.max(1, inputDisplayLines.length)
 
@@ -3032,9 +3104,13 @@ export class SshTui {
       visibleRefs.unshift(undefined)
     }
     this.clickableRows.clear()
+    this.paintedLinkHitsByRow.clear()
     for (let index = 0; index < visibleRefs.length; index++) {
       const ref = visibleRefs[index]
-      if (ref !== undefined && 'expanded' in ref) this.clickableRows.set(headerLines.length + index + 1, ref)
+      const screenY = headerLines.length + index + 1
+      if (ref !== undefined && 'expanded' in ref) this.clickableRows.set(screenY, ref)
+      const hits = paintedLinkHits(visible[index] ?? '')
+      if (hits.length > 0) this.paintedLinkHitsByRow.set(screenY, hits)
     }
     const dockPlan = this.findLivePlanRow()
     if (dockPlan !== undefined && planDockLines.length > 0) {
@@ -3197,6 +3273,8 @@ export class SshTui {
       cursorRow: row,
       cursorColumn: column,
     }))
+    this.lastPaintCursorRow = row
+    this.lastPaintCursorColumn = Math.min(width, Math.max(1, column))
     this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     this.lastChromeKey = chromeKey
     this.lastPaintWidth = width
@@ -3234,7 +3312,7 @@ export class SshTui {
         const desc = t(descKey, undefined, command.description)
         return {
           name: command.name,
-          description: command.input?.images === true
+          description: commandAcceptsAttachments(command.input)
             ? t('cmd.withImagesSuffix', { desc })
             : desc,
           local: false,
@@ -3376,7 +3454,7 @@ export class SshTui {
     if (!this.color) return safe
     const code =
       kind === 'user' ? '36' :
-      kind === 'assistant' ? '1;37' :
+      kind === 'assistant' ? '37' :
       kind === 'reasoning' ? '2;3' :
       kind === 'brand' ? '1;38;2;77;107;253' :
       kind === 'tool' || kind === 'tool-result' ? '37' :
@@ -3391,6 +3469,62 @@ export class SshTui {
       kind === 'error' ? '31' :
       '90'
     return `\x1b[${code}m${safe}\x1b[0m`
+  }
+
+  /**
+   * Fold one live or durable stream chunk into the in-progress assistant
+   * row. 0.1.2 hosts append `assistant/chunk`; 0.1.5 emits the same chunk
+   * on `agent/assistant-stream` and never writes it to the log.
+   */
+  private applyStreamChunk(streamed: {
+    chunk: StreamChunkLike
+    turn: number
+    step: number
+    time: number
+  }): void {
+    const { chunk } = streamed
+    const open = this.openStepStats
+    if (open !== null && open !== undefined
+      && open.turn === streamed.turn && open.step === streamed.step) {
+      if (open.firstTokenTime === null
+        && chunk.type === 'text-delta'
+        && chunk.text !== '') {
+        this.openStepStats = { ...open, firstTokenTime: streamed.time }
+      }
+    }
+    if (chunk.type === 'usage' && chunk.usage !== undefined) {
+      this.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
+    }
+    if (chunk.type === 'text-delta') {
+      this.streaming ??= { text: '', reasoning: '' }
+      this.streaming.text += chunk.text ?? ''
+      this.markDirty()
+    } else if (chunk.type === 'reasoning-delta') {
+      this.streaming ??= { text: '', reasoning: '' }
+      if (this.streaming.reasoning === '' && (chunk.text ?? '') !== '') {
+        this.thinkingStartedAt = Date.now()
+        this.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
+      }
+      this.streaming.reasoning += chunk.text ?? ''
+      this.markDirty()
+    }
+  }
+
+  /**
+   * 0.1.5 live tokens arrive as process-local `agent/assistant-stream`
+   * frames (start / chunk / end). Chunk frames carry the same
+   * `StreamChunk` the 0.1.2 log used to store as `assistant/chunk`.
+   */
+  readonly handleAssistantStream = (...args: unknown[]): void => {
+    const payload = args[0] as { agent?: Agent; frame?: unknown } | undefined
+    if (payload === undefined) return
+    const agent = payload.agent
+    if (agent === undefined || agent !== this.agent) return
+    if (this.replaying) return
+    this.lastActivity = Date.now()
+    this.refreshContextPressure()
+    const streamed = streamChunkOf(payload.frame)
+    if (streamed !== undefined) this.applyStreamChunk(streamed)
   }
 
   // ── event handling ──────────────────────────────────────────────────────
@@ -3427,7 +3561,14 @@ export class SshTui {
       return
     }
     this.lastActivity = Date.now()
-    this.refreshContextPressure()
+    if (this.replaying && isAssistantStreamEvent(event)) return
+    if (!this.replaying) this.refreshContextPressure()
+    const eventType = sessionEventType(event)
+    if (eventType === 'assistant/chunk') {
+      const streamed = streamChunkOf(event)
+      if (streamed !== undefined) this.applyStreamChunk(streamed)
+      return
+    }
     switch (event.type) {
       case 'user/message': {
         const text = event.data.content
@@ -3456,35 +3597,6 @@ export class SshTui {
           }
           this.streaming = undefined
           this.streamingReasoning = undefined
-          this.markDirty()
-        }
-        break
-      }
-      case 'assistant/chunk': {
-        const chunk = event.data.chunk
-        const open = this.openStepStats
-        if (open !== null && open !== undefined
-          && open.turn === event.data.turn && open.step === event.data.step) {
-          if (open.firstTokenTime === null
-            && chunk.type === 'text-delta'
-            && chunk.text !== '') {
-            this.openStepStats = { ...open, firstTokenTime: event.time }
-          }
-        }
-        if (chunk.type === 'usage' && chunk.usage !== undefined) {
-          this.recordUsage(event.data.turn, event.data.step, chunk.usage)
-        }
-        if (chunk.type === 'text-delta') {
-          this.streaming ??= { text: '', reasoning: '' }
-          this.streaming.text += chunk.text
-          this.markDirty()
-        } else if (chunk.type === 'reasoning-delta') {
-          this.streaming ??= { text: '', reasoning: '' }
-          if (this.streaming.reasoning === '' && chunk.text !== '') {
-            this.thinkingStartedAt = Date.now()
-            this.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
-          }
-          this.streaming.reasoning += chunk.text
           this.markDirty()
         }
         break
@@ -4214,14 +4326,13 @@ export class SshTui {
   readonly handleSubagentSessionEvent = (sessionId: SessionId, event: SessionEvent): void => {
     const row = this.findSubagentRow(String(sessionId))
     if (row === undefined) return
+    if (sessionEventType(event) === 'assistant/chunk') return
     switch (event.type) {
       case 'user/message': {
         const text = collectText(event.data.content)
         if (text !== '') appendSubagentLog(row, { kind: 'user', text: `❯ ${truncate(text, 4)}` })
         break
       }
-      case 'assistant/chunk':
-        break
       case 'assistant/message': {
         const text = collectText(event.data.message.content)
         if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: truncate(text, 8) })
@@ -6094,7 +6205,8 @@ export class SshTui {
           return
         }
         if (button === 0) {
-          this.handleMouseClick(y)
+          const x = Number(sgrMouse[2])
+          this.handleMouseClick(y, x)
           return
         }
       }
@@ -6112,6 +6224,11 @@ export class SshTui {
     if (combined === '\x1b[H' || combined === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
     if (combined === '\x1b[F' || combined === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
     if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
+    // kitty / CSI-u Ctrl+Shift+C (codepoint 99, mods 6 = Ctrl+Shift)
+    if (combined === '\x1b[99;6u') {
+      this.copyFocusedCard()
+      return
+    }
     const ss3 = /^\x1bO[A-Z]/u.exec(combined)
     if (ss3 !== null) {
       const rest = combined.slice(ss3[0].length)
@@ -6890,9 +7007,15 @@ export class SshTui {
     }
   }
 
-  /** Toggle the collapsible row under a click on the transcript area. */
-  handleMouseClick(y: number): void {
+  /** Toggle the collapsible row under a click, or copy an OSC-8 link. */
+  handleMouseClick(y: number, x = 1): void {
     if (this.dialog !== undefined) return
+    const hits = this.paintedLinkHitsByRow.get(y)
+    const href = hits === undefined ? undefined : hrefAtColumn(hits, Math.max(0, x - 1))
+    if (href !== undefined && href.trim() !== '') {
+      this.copyPlainText(href, t('copy.link', { url: href }))
+      return
+    }
     if (this.cwdChipRow !== undefined && y === this.cwdChipRow) {
       this.announceWorkspaceCwd()
       return
@@ -6902,11 +7025,40 @@ export class SshTui {
     this.toggleCard(row)
   }
 
+  private copyPlainText(text: string, notice: string): void {
+    this.copyYank = text
+    this.focusedRow = null
+    this.input = ''
+    this.cursor = 0
+    this.inputFolded = false
+    this.leaveHistoryBrowse()
+    this.write(osc52Clipboard(text))
+    this.pushRow({ kind: 'system', text: notice })
+    this.markDirty()
+  }
+
+  copyFocusedCard(): boolean {
+    if (this.dialog !== undefined) return false
+    const picked = copyTextFromTranscript(this.rows, this.focusedRow)
+    if (picked.text.trim() === '') {
+      this.pushRow({ kind: 'system', text: t('copy.empty') })
+      this.markDirty()
+      return false
+    }
+    const source = picked.source === 'focused' ? t('copy.sourceFocused') : t('copy.sourceAssistant')
+    this.copyPlainText(picked.text, t('copy.ok', { chars: picked.text.length, source }))
+    return true
+  }
+
   private scrollInspectOrTranscript(delta: number): void {
     if (this.dialog?.kind === 'inspect') {
       this.dialog.offset = Math.max(0, this.dialog.offset + delta)
       this.markDirty()
       return
+    }
+    if (this.paintTailBudget > 0) {
+      this.paintTailBudget = 0
+      this.forceFullPaint = true
     }
     this.scrollOffset = Math.max(0, this.scrollOffset + delta)
     this.markDirty()
@@ -6998,7 +7150,7 @@ export class SshTui {
           .map(item => {
             const descKey = `cmd.${item.name}`
             const desc = t(descKey, undefined, item.description)
-            return `/${item.name.padEnd(12)} ${item.input?.images === true ? t('cmd.withImagesSuffix', { desc }) : desc}  (dsh)`
+            return `/${item.name.padEnd(12)} ${commandAcceptsAttachments(item.input) ? t('cmd.withImagesSuffix', { desc }) : desc}  (dsh)`
           })
         this.pushRow({
           kind: 'system',
@@ -7112,6 +7264,9 @@ export class SshTui {
           }
           this.markDirty()
         })
+        break
+      case 'copy':
+        this.copyFocusedCard()
         break
       case 'find':
         this.runFindCommand(arg)

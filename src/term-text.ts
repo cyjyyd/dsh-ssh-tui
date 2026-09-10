@@ -419,6 +419,111 @@ type InlineMarkdownKind = 'text' | 'bold' | 'italic' | 'code' | 'link' | 'muted'
 interface MarkdownSegment {
   kind: InlineMarkdownKind
   text: string
+  href?: string
+}
+
+/** One OSC-8 hyperlink span in a painted row, in display columns. */
+export interface PaintedLinkHit {
+  href: string
+  startCol: number
+  endCol: number
+}
+
+export function osc8Open(href: string): string {
+  return `\x1b]8;;${href.replace(/[\x00-\x1f\x7f]/gu, '')}\x1b\\`
+}
+
+export function osc8Close(): string {
+  return `\x1b]8;;\x1b\\`
+}
+
+/** True when OSC 8 hyperlinks should be painted. Off when DSH_TUI_OSC8=0/false. */
+export function osc8Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.DSH_TUI_OSC8 ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  if (raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes') return true
+  const term = (env.TERM ?? '').toLowerCase()
+  if (term === '' || term === 'dumb' || term === 'linux' || term === 'vt100' || term === 'vt220') return false
+  return true
+}
+
+/** OSC 52 clipboard write. Empty payload clears. ST is ESC \\ so a following CSI cannot be eaten as OSC payload. */
+export function osc52Clipboard(text: string): string {
+  const payload = Buffer.from(text, 'utf8').toString('base64')
+  return `\x1b]52;c;${payload}\x1b\\`
+}
+
+export function stripAnsi(text: string): string {
+  let out = ''
+  let index = 0
+  while (index < text.length) {
+    if (text.charCodeAt(index) === 0x1b) {
+      index = skipAnsiSequence(text, index)
+      continue
+    }
+    const cp = text.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    out += char
+    index += char.length
+  }
+  return out
+}
+
+/**
+ * Locate OSC 8 hyperlinks in a painted ANSI line. Columns are 0-based
+ * display cells of the visible glyphs (not counting the sequences).
+ */
+export function paintedLinkHits(line: string): PaintedLinkHit[] {
+  const hits: PaintedLinkHit[] = []
+  let index = 0
+  let col = 0
+  let openHref: string | undefined
+  let openCol = 0
+  const close = (endCol: number): void => {
+    if (openHref === undefined) return
+    if (endCol > openCol) hits.push({ href: openHref, startCol: openCol, endCol })
+    openHref = undefined
+  }
+  while (index < line.length) {
+    if (line.charCodeAt(index) !== 0x1b) {
+      const cp = line.codePointAt(index)
+      if (cp === undefined) break
+      const char = String.fromCodePoint(cp)
+      col += displayWidth(char)
+      index += char.length
+      continue
+    }
+    const seqEnd = skipAnsiSequence(line, index)
+    const seq = line.slice(index, seqEnd)
+    const osc = parseOsc8(seq)
+    if (osc !== undefined) {
+      if (osc === '') close(col)
+      else {
+        close(col)
+        openHref = osc
+        openCol = col
+      }
+    }
+    index = seqEnd
+  }
+  close(col)
+  return hits
+}
+
+function parseOsc8(seq: string): string | undefined {
+  if (!seq.startsWith('\x1b]8;')) return undefined
+  const body = seq.slice(4).replace(/\x07$/u, '').replace(/\x1b\\$/u, '')
+  const second = body.indexOf(';')
+  if (second === -1) return ''
+  return body.slice(second + 1)
+}
+
+export function hrefAtColumn(hits: readonly PaintedLinkHit[], col: number): string | undefined {
+  for (const hit of hits) {
+    if (col >= hit.startCol && col < hit.endCol) return hit.href
+  }
+  return undefined
 }
 
 type MarkdownBlockKind = 'assistant' | 'heading1' | 'heading2' | 'heading3' | 'code' | 'quote' | 'rule'
@@ -429,7 +534,7 @@ interface MarkdownBlockLine {
 }
 
 const INLINE_MARKDOWN_PATTERN =
-  /(\*\*[^*\n]+\*\*)|(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(\*[^*\n]+\*)|(_[^_\n]+_)/gu
+  /(\*\*[^*\n]+\*\*)|(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(https?:\/\/[^\s<>\[\]()'"`]+)|(\*[^*\n]+\*)|(_[^_\n]+_)/giu
 
 /** Parse one line's bold / italic / inline-code / link spans. */
 function parseInlineMarkdown(line: string): MarkdownSegment[] {
@@ -447,11 +552,13 @@ function parseInlineMarkdown(line: string): MarkdownSegment[] {
       const labelEnd = token.indexOf('](')
       const label = token.slice(1, labelEnd)
       const url = token.slice(labelEnd + 2, -1)
-      segments.push({ kind: 'link', text: label })
-      if (url !== '') segments.push({ kind: 'muted', text: ` (${url})` })
+      segments.push({ kind: 'link', text: label === '' ? url : label, href: url })
     } else if (match[4] !== undefined) {
-      segments.push({ kind: 'italic', text: token.slice(1, -1) })
+      const href = token.replace(/[),.;:!?]+$/u, '')
+      segments.push({ kind: 'link', text: href, href })
     } else if (match[5] !== undefined) {
+      segments.push({ kind: 'italic', text: token.slice(1, -1) })
+    } else if (match[6] !== undefined) {
       segments.push({ kind: 'italic', text: token.slice(1, -1) })
     }
     last = index + token.length
@@ -499,7 +606,11 @@ function wrapMarkdownSegments(
         }
         chunk = Array.from(rest)[0] ?? rest.slice(0, 1)
       }
-      current.push({ kind: segment.kind, text: chunk })
+      current.push({
+        kind: segment.kind,
+        text: chunk,
+        ...(segment.href === undefined ? {} : { href: segment.href }),
+      })
       used += displayWidth(chunk)
       rest = rest.slice(chunk.length)
       if (rest !== '') {
@@ -515,6 +626,7 @@ function wrapMarkdownSegments(
 
 function markdownSegmentCode(kind: InlineMarkdownKind): string {
   switch (kind) {
+    // Bright + bold so **span** still pops when the font has no heavy CJK weight.
     case 'bold': return '1;97'
     case 'italic': return '3;37'
     case 'code': return '36'
@@ -532,23 +644,37 @@ function markdownBaseCode(kind: MarkdownBlockKind): string {
     case 'code': return '36'
     case 'quote': return '3;37'
     case 'rule': return '90'
-    default: return '1;37'
+    // Body is normal white so inline bold/italic/code are not painted on
+    // already-bold text (CJK fonts often have only one weight).
+    default: return '37'
   }
 }
 
+function wrapHyperlink(label: string, href: string | undefined, hyperlinks: boolean): string {
+  if (!hyperlinks || href === undefined || href.trim() === '') return label
+  return `${osc8Open(href)}${label}${osc8Close()}`
+}
+
 /** Render one pre-wrapped markdown line as ANSI (or plain text without color). */
-function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean): string {
-  const segments = block.segments.map(segment => ({ ...segment, text: sanitizeTerminalText(segment.text) }))
-  if (!color) return segments.map(segment => segment.text).join('')
+function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean, hyperlinks: boolean): string {
+  const segments = block.segments.map(segment => ({
+    ...segment,
+    text: sanitizeTerminalText(segment.text),
+    href: segment.href === undefined ? undefined : sanitizeTerminalText(segment.href),
+  }))
+  if (!color) {
+    return segments.map(segment => wrapHyperlink(segment.text, segment.href, hyperlinks)).join('')
+  }
   const base = markdownBaseCode(block.base)
   let out = `\x1b[${base}m`
   for (const segment of segments) {
     const code = markdownSegmentCode(segment.kind)
-    if (code === '') {
-      out += segment.text
-    } else {
-      out += `\x1b[${code}m${segment.text}\x1b[${base}m`
-    }
+    const body = code === ''
+      ? segment.text
+      // SGR 0 first: restoring only the base codes does not clear italic,
+      // underline, or bold, so those attributes would leak into later spans.
+      : `\x1b[${code}m${segment.text}\x1b[0m\x1b[${base}m`
+    out += wrapHyperlink(body, segment.href, hyperlinks)
   }
   return `${out}\x1b[0m`
 }
@@ -580,10 +706,15 @@ function headingSegments(text: string, level: number): MarkdownSegment[] {
 
 /**
  * Render workspace markdown into width-bounded terminal rows. Assistant
- * replies get a bold-white base; code blocks, headings, quotes, lists, rules,
- * links and inline spans keep their own ANSI treatment.
+ * replies use a normal-white base so inline bold can contrast; code blocks,
+ * headings, quotes, lists, rules, links and inline spans keep their own ANSI.
  */
-export function renderMarkdownLines(text: string, width: number, color: boolean): string[] {
+export function renderMarkdownLines(
+  text: string,
+  width: number,
+  color: boolean,
+  hyperlinks = osc8Enabled(),
+): string[] {
   const lines: string[] = []
   let inFence = false
 
@@ -595,7 +726,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
       lines.push(renderMarkdownBlockLine({
         base: 'code',
         segments: [{ kind: 'text', text: `\`\`\`${fence[1] ?? ''}` }],
-      }, color))
+      }, color, hyperlinks))
       continue
     }
     if (inFence) {
@@ -607,7 +738,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
         lines.push(renderMarkdownBlockLine({
           base: 'code',
           segments: [{ kind: 'text', text: line }],
-        }, color))
+        }, color, hyperlinks))
       }
       continue
     }
@@ -616,7 +747,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
     if (heading !== null) {
       // The hashes are markdown syntax, not content: replace them with
       // heading style. Levels differ visually: H1 is enlarged and
-      // underlined, H2 underlined, H3 colored, H4+ bold white.
+      // underlined, H2 underlined, H3 colored, H4+ body white.
       const level = Math.min(6, (heading[1] ?? '#').length)
       const base: MarkdownBlockKind = level === 1
         ? 'heading1'
@@ -627,7 +758,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
             : 'assistant'
       if (level === 1 && lines.at(-1) !== '') lines.push('')
       for (const segments of wrapMarkdownSegments(headingSegments(heading[2] ?? '', level), width)) {
-        lines.push(renderMarkdownBlockLine({ base, segments }, color))
+        lines.push(renderMarkdownBlockLine({ base, segments }, color, hyperlinks))
       }
       if (level === 1) lines.push('')
       continue
@@ -637,7 +768,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
       lines.push(renderMarkdownBlockLine({
         base: 'rule',
         segments: [{ kind: 'text', text: repeatToWidth('─', Math.max(1, width)) }],
-      }, color))
+      }, color, hyperlinks))
       continue
     }
 
@@ -650,7 +781,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
         width,
         [{ kind: 'text', text: prefix }],
       )) {
-        lines.push(renderMarkdownBlockLine({ base: 'quote', segments }, color))
+        lines.push(renderMarkdownBlockLine({ base: 'quote', segments }, color, hyperlinks))
       }
       continue
     }
@@ -665,7 +796,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
         width,
         [{ kind: 'text', text: prefix }],
       )) {
-        lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
+        lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color, hyperlinks))
       }
       continue
     }
@@ -676,7 +807,7 @@ export function renderMarkdownLines(text: string, width: number, color: boolean)
     }
 
     for (const segments of wrapMarkdownSegments(parseInlineMarkdown(raw), width)) {
-      lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
+      lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color, hyperlinks))
     }
   }
   return lines
@@ -793,6 +924,21 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
     return { text: line, cursorOffset, folded: false }
   }
   if (totalWidth <= width) {
+    // One-row fold: keep a blank cell for the caret when the line fills
+    // the row, otherwise CSI lands on the last glyph.
+    if (cursorOffset >= width && width > 1) {
+      let budget = width - 1
+      const probe = backwardSliceByWidth(line, lineCursor, budget)
+      const left = probe.start > 0
+      if (left) budget = Math.max(1, width - 2)
+      const clipped = backwardSliceByWidth(line, lineCursor, budget)
+      const beforeText = line.slice(clipped.start, lineCursor)
+      return {
+        text: `${left ? '…' : ''}${beforeText}`,
+        cursorOffset: (left ? 1 : 0) + displayWidth(beforeText),
+        folded: true,
+      }
+    }
     return { text: line, cursorOffset, folded: true }
   }
   const before = cursorOffset
@@ -800,7 +946,9 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
   const leftFolded = before > 0
   const rightFolded = after > 0
   const markers = (leftFolded ? 1 : 0) + (rightFolded ? 1 : 0)
-  const available = Math.max(1, width - markers)
+  // Leave one cell for the caret so it never sits on the last glyph
+  // (DEC auto-margin would otherwise punch the caret through that cell).
+  const available = Math.max(1, width - markers - 1)
   let beforeBudget = Math.min(before, Math.ceil(available / 2))
   let afterBudget = Math.min(after, available - beforeBudget)
   // If the tail is shorter than its budget, spend the spare columns on the
@@ -824,27 +972,18 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
  * when the input contains literal newlines from multi-line pastes.
  */
 export function cursorVisualPosition(text: string, cursor: number, width: number): { row: number; col: number } {
-  let row = 0
-  let col = 0
-  let used = 0
-  let offset = 0
-  for (const char of text) {
-    if (offset >= cursor) break
-    if (char === '\n') {
-      row += 1
-      col = 0
-      used = 0
-    } else {
-      const charWidth = displayWidth(char)
-      if (used + charWidth > width) {
-        row += 1
-        col = 0
-        used = 0
-      }
-      used += charWidth
-      col += charWidth
-    }
-    offset += char.length
+  const limit = Math.max(1, width)
+  const safeCursor = Math.max(0, Math.min(cursor, text.length))
+  const lines = wrap(text.slice(0, safeCursor), limit)
+  const last = lines.at(-1) ?? ''
+  let row = Math.max(0, lines.length - 1)
+  let col = displayWidth(last)
+  // wrap() keeps a full-width last line on this row. The caret *after*
+  // that last glyph belongs at col 0 of the next row — sitting at
+  // `limit` would overlay the glyph (DEC auto-margin punch-through).
+  if (col >= limit) {
+    row += 1
+    col = 0
   }
   return { row, col }
 }

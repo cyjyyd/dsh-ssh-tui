@@ -9,10 +9,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 0.1.2 is not frozen yet: keep both supported hosts green. The
-        # devDependencies pin 0.1.2-rc.1; the rc.2 leg overrides every
-        # @deepseek-ai/dsh-* package to 0.1.1-rc.2 (all published there).
-        dsh: ["0.1.1-rc.2", "0.1.2-rc.1"]
+        # Dual-stack: pin 0.1.2-rc.1 in package.json; the 0.1.5-rc.1
+        # leg overrides every @deepseek-ai/dsh-* package (legacy-peer-deps
+        # because 0.1.5 peers do not accept a mixed 0.1.2 tree).
+        dsh: ["0.1.2-rc.1", "0.1.5-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
