@@ -78,18 +78,6 @@ export function formatSessionTime(timestamp: number): string {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-/**
- * List the most recent resumable top-level sessions, newest first.
- *
- * Subagent-owned sessions and the current session are excluded. Sessions
- * whose event log cannot be inspected are kept (marked `unreadable`) instead
- * of silently disappearing from history; readable sessions with user input
- * sort first. The label is the user's first input, falling back to the
- * session title and then the id.
- * @param persistence - the session persistence service.
- * @param currentId - the live session to exclude (empty at launch).
- * @returns up to nine candidates in display order.
- */
 /** Whether one durable event is a user-authored message. */
 function isUserMessageEvent(event: unknown): boolean {
   const candidate = event as { type?: string; data?: { source?: { kind?: string } } }
@@ -143,6 +131,19 @@ const INSPECT_BATCH_SIZE = 30
 /** Internal inspection result before display filtering. */
 type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: boolean }
 
+/**
+ * List resumable top-level sessions, newest first.
+ *
+ * Subagent-owned sessions and the current session are excluded. Sessions
+ * whose event log cannot be inspected are kept (marked `unreadable`) instead
+ * of silently disappearing from history; readable sessions with user input
+ * sort first. The label is the persisted title, then the user's first input,
+ * then the id.
+ * @param persistence - the session persistence service.
+ * @param currentId - the live session to exclude (empty at launch).
+ * @returns every resumable candidate in display order (attachable live
+ *   hosts first, then readable logs, then unreadable).
+ */
 export async function listResumableSessions(
   persistence: SessionPersistence,
   currentId: string,
@@ -216,10 +217,10 @@ export async function listResumableSessions(
     }
   }
 
-  // Headers only carry creation time, so inspect by creation recency until
-  // nine sessions with real user input are found. Recent empty boot rows (a
-  // launch that exited before the first message) must not push older real
-  // conversations out of the fixed window.
+  // Headers only carry creation time. Inspect in bounded batches so a large
+  // store cannot fan out unbounded, but do not stop after a fixed count —
+  // the picker filters and scrolls, so older real conversations must stay
+  // reachable. Recent empty boot rows are pruned instead of listed.
   const inspected: InspectedSession[] = []
   for (let offset = 0; offset < candidates.length; offset += INSPECT_BATCH_SIZE) {
     const batch = candidates.slice(offset, offset + INSPECT_BATCH_SIZE)
@@ -234,7 +235,6 @@ export async function listResumableSessions(
       }
       inspected.push(item)
     }
-    if (inspected.filter(item => item.hasUserInput).length >= 9) break
   }
 
   const resumable = inspected.filter(item => item.hasUserInput || item.unreadable === true)
@@ -285,7 +285,5 @@ export async function listResumableSessions(
     (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
     || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
     || b.updatedAt - a.updatedAt)
-  return resumable
-    .slice(0, 9)
-    .map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
+  return resumable.map(({ hasUserInput: _hasUserInput, ...rest }) => rest)
 }

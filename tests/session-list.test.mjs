@@ -173,7 +173,7 @@ test('recent empty boot sessions do not hide older readable sessions beyond the 
   assert.equal(listed.every(item => item.unreadable !== true), true)
 })
 
-test('the current session is excluded and the result is capped at nine', async () => {
+test('the current session is excluded and older sessions stay listed past nine', async () => {
   const ids = Array.from({ length: 12 }, (_, index) => `session-${index}`)
   const persistence = {
     list: async () => ids.map((id, index) => header(id, 1000 - index)),
@@ -181,9 +181,9 @@ test('the current session is excluded and the result is capped at nine', async (
   }
 
   const listed = await listResumableSessions(persistence, 'session-0', async () => [])
-  assert.equal(listed.length, 9)
+  assert.equal(listed.length, 11)
   assert.equal(listed.some(item => item.id === 'session-0'), false)
-  assert.deepEqual(listed.map(item => item.id), ids.slice(1, 10))
+  assert.deepEqual(listed.map(item => item.id), ids.slice(1))
 })
 
 test('attachable hosts are injected at the front of the picker list', async () => {

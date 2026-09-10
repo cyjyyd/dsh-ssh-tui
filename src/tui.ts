@@ -9,6 +9,11 @@
  * write of dirty rows only — jump-host / proxied SSH should see one packet
  * per paint, not one per line. Cadence is DSH_TUI_PAINT_MS, else local 80 ms
  * or an SSH tier from a CSI 6n round-trip (default 160 ms).
+ *
+ * Pure helpers live next to this file (`term-text`, `paint`, `footer`,
+ * `quota`, `plan`, `tool-present`) and are re-exported here so existing
+ * `lib/tui.js` imports keep working. The launch picker imports `paint` /
+ * `term-text` directly and does not load this module.
  */
 
 import { spawn } from 'node:child_process'
@@ -27,8 +32,8 @@ import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credent
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { sessionEvents, settingsNamespace } from './dsh-compat.js'
-import { classifyApproval, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
-import { buildReviewUserMessage, parseReviewOutput, REVIEW_SYSTEM_PROMPT } from './approval-reviewer.js'
+import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
+import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
@@ -61,7 +66,6 @@ import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
   defaultSubagentModelForProvider,
-  describeSubagentFit,
   subagentModelMatchesProvider,
   subagentSettingsValue,
   type SubagentSelection,
@@ -76,6 +80,311 @@ import {
   type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+
+import type {
+  CollapsibleBlock,
+  DisplayKind,
+  DisconnectPolicyName,
+  PlanTodoItem,
+  Row,
+  SubagentLogEntry,
+  ToolDiffHunk,
+} from './transcript-types.js'
+import {
+  clipAnsiToWidth,
+  cursorVisualPosition,
+  displayWidth,
+  foldInputView,
+  fmtElapsedCompact,
+  lastCodePoints,
+  padToWidth,
+  sliceCodePoints,
+  paintSegmentedLine,
+  renderMarkdownLines,
+  repeatToWidth,
+  sanitizeTerminalText,
+  shimmerText,
+  truncate,
+  truncateToWidth,
+  waitCardCopy,
+  wrap,
+  wrapSegmented,
+  wrapWaitDetails,
+  type InputView,
+  type TextSegment,
+} from './term-text.js'
+import {
+  captureHangupSignals,
+  composePaintOutput,
+  detectSshSession,
+  formatLinkQualityChip,
+  HANGUP_CANCEL_TIMEOUT_MS,
+  ignoreFurtherHangupSignals,
+  isEscapePrefix,
+  isHangupErrno,
+  parseCursorPositionReply,
+  PICKER_WINDOW,
+  pickerWindowStart,
+  probeTerminalRttMs,
+  releaseHangupSignals,
+  resolvePaintIntervalMs,
+  waitUntilIdleOrTimeout,
+  type PaintLinkKind,
+} from './paint.js'
+import {
+  contextPressureAlertText,
+  contextPressureRingColor,
+  contextPressureView,
+  formatContextPressureRing,
+  describeProviderRoute,
+  fitFooterStatsLine,
+  fitFooterStatusLine,
+  footerActivity,
+  footerIdentityParts,
+  footerStatsGroups,
+  formatContextPressureChip,
+  formatStatusReport,
+  formatTokens,
+  parseContextPressure,
+  promptPressureTokens,
+  providerUsesLocalOAuth,
+  shouldIdleAutoCompact,
+  type ContextPressureView,
+  type FooterStatsInput,
+  type FooterStatusInput,
+} from './footer.js'
+import {
+  crossedQuotaThresholds,
+  DEEPSEEK_PUBLIC_BASE_URL,
+  formatAccountBalance,
+  formatFooterBalance,
+  formatQuotaSnapshot,
+  joinUrl,
+  OPENAI_COMPAT_BALANCE_PATHS,
+  OPENCODE_GO_USAGE_URL,
+  OPENCODE_ZEN_BASE_URL,
+  openCodeApiErrorMessage,
+  openCodeSourceFor,
+  parseDeepSeekBalance,
+  parseOpenAiCompatibleBalance,
+  parseOpenCodeGoQuota,
+  parseSuperGrokBilling,
+  quotaAlertText,
+  quotaRefreshEverySteps,
+  reasoningEffortsForDefault,
+  SUPERGROK_BILLING_URL,
+  tightestQuotaWindow,
+  type AccountBalanceSnapshot,
+  type LlmPiAiProviderProfile,
+  type LlmPiAiSection,
+  type OpenCodeSource,
+  type QuotaSnapshot,
+  type QuotaWindow,
+} from './quota.js'
+import {
+  appendSubagentLog,
+  applyTurnEndToPlan,
+  cardCategoryLabel,
+  cardCategoryOf,
+  compactionHeaderText,
+  formatCompactCommandError,
+  isPromptInjectionMessage,
+  matchTranscriptRows,
+  parseFindQuery,
+  parsePlanTodos,
+  planCloseNudgeText,
+  planMarkdownFromArgs,
+  planDockNote,
+  planIsLive,
+  planTitleFromMarkdown,
+  promptInjectionSources,
+  promptInjectionTitle,
+  subagentHeaderText,
+  todoItemKind,
+  todoProgressLabel,
+  TODO_STATUS_MARK,
+  type CardCategory,
+} from './plan.js'
+import {
+  buildToolHeader,
+  canMergeToolCall,
+  compactEditPath,
+  compactToolBursts,
+  compactToolGroups,
+  countDiffAddDel,
+  countDiffLines,
+  countOutputLines,
+  diffMetaDiffs,
+  diffStatToken,
+  formatModelList,
+  HIDDEN_TOOL_NAMES,
+  parseExitStatus,
+  planReviewOf,
+  presentToolCall,
+  type DiffDisplayLine,
+  READ_TOOL_NAMES,
+  SHELL_TOOL_NAMES,
+  toolBodyFitsWorkspace,
+  toolBodyLines,
+  toolTitle,
+  TOOL_FLIP_MS,
+  wrappedToolBodyLineCount,
+} from './tool-present.js'
+
+export type {
+  CollapsibleBlock,
+  DisplayKind,
+  DisconnectPolicyName,
+  PlanTodoItem,
+  Row,
+  SubagentLogEntry,
+  ToolDiffHunk,
+} from './transcript-types.js'
+export {
+  clipAnsiToWidth,
+  displayWidth,
+  foldInputView,
+  fmtElapsedCompact,
+  padAnsiToWidth,
+  padToWidth,
+  renderMarkdownLines,
+  repeatToWidth,
+  shimmerText,
+  truncateToWidth,
+  visibleWidth,
+  waitCardCopy,
+  waitSummaryFromReasoning,
+  wrapWaitDetails,
+} from './term-text.js'
+export {
+  captureHangupSignals,
+  composePaintOutput,
+  detectSshSession,
+  formatLinkQualityChip,
+  ignoreFurtherHangupSignals,
+  isEscapePrefix,
+  isHangupErrno,
+  linkQualityOf,
+  linkSignalPips,
+  paintIntervalForRtt,
+  paintLinkLabel,
+  parseCursorPositionReply,
+  pickerWindowStart,
+  probeTerminalRttMs,
+  releaseHangupSignals,
+  resolvePaintIntervalMs,
+  waitUntilIdleOrTimeout,
+  type LinkQuality,
+  type PaintLinkKind,
+} from './paint.js'
+export {
+  CONTEXT_IDLE_COMPACT_RATIO,
+  CONTEXT_PRESSURE_DANGER_RATIO,
+  CONTEXT_PRESSURE_WARN_RATIO,
+  CONTEXT_RING_EMPTY,
+  CONTEXT_RING_SEGMENTS,
+  contextPressureAlertText,
+  contextPressureRingColor,
+  contextPressureUsedTokens,
+  contextPressureView,
+  describeProviderRoute,
+  dropFooterQuotaPlanName,
+  fitFooterStatsLine,
+  fitFooterStatusLine,
+  footerActivity,
+  footerIdentityParts,
+  footerStatsGroups,
+  formatContextPressureChip,
+  formatContextPressureRing,
+  formatContextPressureStatusLine,
+  formatDuration,
+  formatFooterQuota,
+  formatQuotaBar,
+  formatStatusReport,
+  formatTokens,
+  formatTokensPerSecond,
+  parseContextPressure,
+  promptPressureTokens,
+  providerShortCode,
+  providerUsesLocalOAuth,
+  shouldIdleAutoCompact,
+  type ContextPressureSample,
+  type ContextPressureView,
+  type FooterActivityKind,
+  type FooterStatsInput,
+  type FooterStatusInput,
+  type StatusReportInput,
+} from './footer.js'
+export {
+  crossedQuotaThresholds,
+  formatAccountBalance,
+  formatFooterBalance,
+  formatOpenCodeGoUsage,
+  formatQuotaSnapshot,
+  formatQuotaStatusLine,
+  joinUrl,
+  openCodeSourceFor,
+  parseDeepSeekBalance,
+  parseOpenAiCompatibleBalance,
+  parseOpenCodeGoQuota,
+  parseSuperGrokBilling,
+  quotaAlertText,
+  quotaRefreshEverySteps,
+  quotaRefreshEveryTurns,
+  remainingPercentFromUsed,
+  tightestQuotaWindow,
+  type AccountBalanceLine,
+  type AccountBalanceSnapshot,
+  type OpenCodeFlavor,
+  type OpenCodeSource,
+  type QuotaPeriod,
+  type QuotaSnapshot,
+  type QuotaWindow,
+} from './quota.js'
+export {
+  applyTurnEndToPlan,
+  askSummary,
+  cardCategoryOf,
+  compactionHeaderText,
+  formatCompactCommandError,
+  isPromptInjectionMessage,
+  matchTranscriptRows,
+  parseFindQuery,
+  parsePlanTodos,
+  planCloseNudgeText,
+  planDockNote,
+  planIsLive,
+  planTitleFromMarkdown,
+  planTurnLeftOpen,
+  promptInjectionSources,
+  promptInjectionTitle,
+  subagentHeaderText,
+  todoProgressLabel,
+  todoSummary,
+  type CardCategory,
+} from './plan.js'
+export {
+  buildToolHeader,
+  canMergeToolCall,
+  compactEditPath,
+  compactToolBursts,
+  compactToolGroups,
+  countDiffAddDel,
+  countDiffLines,
+  countOutputLines,
+  diffMetaDiffs,
+  diffStatToken,
+  friendlyJsonLines,
+  parseExitStatus,
+  presentToolCall,
+  READ_TOOL_NAMES,
+  renderToolDiff,
+  toolBodyFitsWorkspace,
+  toolBodyLines,
+  toolStateColor,
+  toolStateLabel,
+  wrappedToolBodyLineCount,
+} from './tool-present.js'
 
 /** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-rc.1.
  *  0.1.1 reads `request.signal`; 0.1.2 reads the third argument and dropped
@@ -143,7 +452,6 @@ function installUserQuestionAnswerer(
 
 const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
 
-export type DisconnectPolicyName = 'pause' | 'continue'
 
 /** Presentation configuration for the terminal channel. */
 export interface TuiConfig {
@@ -195,136 +503,6 @@ export interface TuiConfig {
   headlessDisplay?: boolean
   /** Hangup policy while busy: pause cancels the turn; continue lets it finish detached. Idle hangup always exits. */
   disconnectPolicy?: DisconnectPolicyName
-}
-
-type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
-
-/** One child-session event folded into a parent-side subagent card. */
-export interface SubagentLogEntry {
-  kind: SubagentLogKind
-  text: string
-}
-
-/** One todo-list item as the plan card renders it. */
-export interface PlanTodoItem {
-  content: string
-  status: 'pending' | 'in_progress' | 'completed'
-}
-
-type Row =
-  | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string }
-  | { kind: 'reasoning'; text: string; expanded: boolean }
-  | { kind: 'brand'; text: string }
-  | { kind: 'brand-logo' }
-  | {
-      kind: 'tool'
-      callId: string
-      name: string
-      args: string
-      status?: 'running' | 'ok' | 'error'
-      output: string
-      title: string
-      summary: string
-      command?: string
-      cwd?: string
-      diff?: ToolDiffHunk[]
-      exitCode?: number
-      signal?: string
-      expanded: boolean
-      /** Consecutive same-path reads/edits folded into this card. */
-      repeats?: number
-      /** Call ids folded into this card; results still match after merge. */
-      mergedCallIds?: string[]
-      /** Sum of output characters across folded reads. */
-      totalChars?: number
-      /** Sum of output lines across folded reads. */
-      totalLines?: number
-      /** Flip-card animation until this timestamp (ms since epoch). */
-      flipUntil?: number
-    }
-  | {
-      kind: 'subagent'
-      sessionId: string
-      runId: string
-      provider: string
-      local: boolean
-      label: string
-      status: 'running' | 'ok' | 'error' | 'aborted'
-      startedAt: number
-      endedAt?: number
-      stopReason?: string
-      lastActivity: string
-      logs: SubagentLogEntry[]
-      expanded: boolean
-    }
-  | {
-      kind: 'plan'
-      active: boolean
-      pending: boolean
-      todos: PlanTodoItem[]
-      planMarkdown?: string
-      expanded: boolean
-      /** When true the plan stays in the scrolling transcript, not the dock. */
-      archived?: boolean
-      /**
-       * Display-only: the last turn ended while todos were still open.
-       * Does not rewrite the session log.
-       */
-      turnLeftOpen?: boolean
-    }
-  | {
-      kind: 'question'
-      questionId: string
-      title: string
-      header?: string
-      detail?: string
-      intent: 'ask' | 'plan-review'
-      status: 'waiting' | 'answered' | 'cancelled'
-      summary: string
-      expanded: boolean
-    }
-  | {
-      kind: 'goal'
-      objective: string
-      phase: 'active' | 'paused' | 'blocked' | 'complete' | 'cleared'
-      blockedReason?: string
-      expanded: boolean
-    }
-  | {
-      kind: 'compaction'
-      compactionId: string
-      status: 'running' | 'ok' | 'error'
-      startedAt: number
-      endedAt?: number
-      pruneCount: number
-      prunedTokens: number
-      summary?: string
-      error?: string
-      expanded: boolean
-    }
-  | {
-      kind: 'prompt'
-      sources: string[]
-      text: string
-      plugin?: string
-      expanded: boolean
-    }
-  | { kind: 'system'; text: string }
-  | { kind: 'error'; text: string }
-
-/** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */
-type CollapsibleBlock =
-  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }>
-  | { kind: 'streaming-reasoning'; expanded: boolean }
-
-type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'plan-dock'
-
-/** One file's change, matching the web diff-card contract (`card: 'diff'`). */
-interface ToolDiffHunk {
-  path: string
-  oldText: string | null
-  newText: string
 }
 
 /** Whole-log session figures for the stats line below the input box. */
@@ -480,539 +658,6 @@ export interface TuiController {
   disconnectPolicy(): DisconnectPolicyName
 }
 
-const RENDER_INTERVAL_MS = 160
-const LOCAL_PAINT_INTERVAL_MS = 80
-const WAIT_INDICATOR_MS = 8000
-const MIN_PAINT_INTERVAL_MS = 40
-const MAX_PAINT_INTERVAL_MS = 1000
-const DSR_PROBE_TIMEOUT_MS = 800
-/** Give a running turn this long to settle after cancel before we flush anyway. */
-const HANGUP_CANCEL_TIMEOUT_MS = 10_000
-
-export type PaintLinkKind = 'local' | 'ssh'
-
-/** Compact token count, matching the web stats line (517 / 12.2K / 1.2M). */
-export function formatTokens(n: number): string {
-  const scaled = (value: number): string =>
-    value >= 100 ? String(Math.round(value)) : String(Math.round(value * 10) / 10)
-  if (n < 1_000) return String(n)
-  if (n < 1_000_000) return `${scaled(n / 1_000)}K`
-  return `${scaled(n / 1_000_000)}M`
-}
-
-/**
- * Prompt occupancy of the next request, from DSH `contextPressure`.
- * Provider-agnostic: uses the routed model's advertised window, not a
- * hardcoded xAI size. Compaction-basic still owns in-turn pressure at 80%.
- */
-export const CONTEXT_PRESSURE_WARN_RATIO = 0.8
-export const CONTEXT_PRESSURE_DANGER_RATIO = 0.95
-/** Idle auto-compact starts here so recovery finishes before the 80% in-turn trigger. */
-export const CONTEXT_IDLE_COMPACT_RATIO = 0.72
-
-export interface ContextPressureSample {
-  usedTokens: number
-  contextWindow: number
-}
-
-export interface ContextPressureView {
-  usedTokens: number
-  contextWindow: number
-  percent: number
-  level: 'ok' | 'warn' | 'danger'
-}
-
-/** Prompt-side occupancy of one usage sample: uncached input plus cache traffic. */
-export function promptPressureTokens(usage: {
-  inputTokens: number
-  cacheReadTokens?: number
-  cacheWriteTokens?: number
-}): number {
-  return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
-}
-
-/** Prefer the next-request projection; fall back to last-request pressure. */
-export function contextPressureUsedTokens(pressure: {
-  projectedTokens?: number
-  pressureTokens?: number
-} | undefined): number | undefined {
-  if (pressure === undefined) return undefined
-  if (typeof pressure.projectedTokens === 'number' && Number.isFinite(pressure.projectedTokens)) {
-    return Math.max(0, pressure.projectedTokens)
-  }
-  if (typeof pressure.pressureTokens === 'number' && Number.isFinite(pressure.pressureTokens)) {
-    return Math.max(0, pressure.pressureTokens)
-  }
-  return undefined
-}
-
-export function parseContextPressure(value: unknown): ContextPressureSample | undefined {
-  if (value === null || typeof value !== 'object') return undefined
-  const raw = value as {
-    projectedTokens?: unknown
-    pressureTokens?: unknown
-    contextWindow?: unknown
-  }
-  const window = typeof raw.contextWindow === 'number' && Number.isFinite(raw.contextWindow)
-    ? raw.contextWindow
-    : undefined
-  if (window === undefined || window <= 0) return undefined
-  const used = contextPressureUsedTokens({
-    ...(typeof raw.projectedTokens === 'number' ? { projectedTokens: raw.projectedTokens } : {}),
-    ...(typeof raw.pressureTokens === 'number' ? { pressureTokens: raw.pressureTokens } : {}),
-  })
-  if (used === undefined) return undefined
-  return { usedTokens: used, contextWindow: window }
-}
-
-export function contextPressureView(sample: ContextPressureSample): ContextPressureView {
-  const percent = (sample.usedTokens / sample.contextWindow) * 100
-  return {
-    usedTokens: sample.usedTokens,
-    contextWindow: sample.contextWindow,
-    percent,
-    level: percent >= CONTEXT_PRESSURE_DANGER_RATIO * 100
-      ? 'danger'
-      : percent >= CONTEXT_PRESSURE_WARN_RATIO * 100
-        ? 'warn'
-        : 'ok',
-  }
-}
-
-/**
- * 8-segment Braille ring. Empty `⣀`; full `⣿`. Width is always 1 cell.
- * Index is `ceil(percent / 12.5)` clamped to 0..8.
- */
-export const CONTEXT_RING_EMPTY = '⣀'
-export const CONTEXT_RING_SEGMENTS = ['⣀', '⠉', '⠋', '⠛', '⠞', '⠟', '⠿', '⡿', '⣿'] as const
-
-export function formatContextPressureRing(percent: number): string {
-  if (!Number.isFinite(percent) || percent <= 0) return CONTEXT_RING_EMPTY
-  const filled = Math.min(8, Math.max(0, Math.ceil(percent / 12.5)))
-  return CONTEXT_RING_SEGMENTS[filled] ?? '⣿'
-}
-
-export function contextPressureRingColor(level: ContextPressureView['level']): string {
-  if (level === 'danger') return '31'
-  if (level === 'warn') return '33'
-  return '32'
-}
-
-export function formatContextPressureChip(view: ContextPressureView, color = false): string {
-  const ring = formatContextPressureRing(view.percent)
-  const painted = color
-    ? `\x1b[${contextPressureRingColor(view.level)}m${ring}\x1b[0m`
-    : ring
-  return t('footer.contextRing', {
-    ring: painted,
-    used: formatTokens(view.usedTokens),
-    window: formatTokens(view.contextWindow),
-    percent: Math.round(view.percent),
-  })
-}
-
-export function formatContextPressureStatusLine(view: ContextPressureView | undefined): string {
-  if (view === undefined) return t('status.contextNone')
-  return t('status.contextLine', {
-    used: formatTokens(view.usedTokens),
-    window: formatTokens(view.contextWindow),
-    percent: view.percent.toFixed(1),
-    level: t(`status.contextLevel.${view.level}`),
-  })
-}
-
-export function contextPressureAlertText(view: ContextPressureView): string {
-  const vars = {
-    used: formatTokens(view.usedTokens),
-    window: formatTokens(view.contextWindow),
-    percent: view.percent.toFixed(0),
-  }
-  return view.level === 'danger'
-    ? t('context.alertDanger', vars)
-    : t('context.alertWarn', vars)
-}
-
-export function shouldIdleAutoCompact(view: ContextPressureView | undefined): boolean {
-  if (view === undefined) return false
-  return view.usedTokens / view.contextWindow >= CONTEXT_IDLE_COMPACT_RATIO
-}
-
-/** Compact duration, matching the web stats line (45.2s / 2m42s). */
-export function formatDuration(ms: number): string {
-  const seconds = ms / 1_000
-  if (seconds < 60) return `${Math.round(seconds * 10) / 10}s`
-  const whole = Math.round(seconds)
-  return `${Math.floor(whole / 60)}m${whole % 60}s`
-}
-
-export function formatTokensPerSecond(tokensPerSecond: number): string {
-  return `${Math.round(tokensPerSecond)} tok/s`
-}
-
-/**
- * Explicit env/config always wins. Otherwise local TTYs stay snappy and SSH
- * sessions pick a tier from a measured round-trip (CSI 6n), falling back to
- * 160 ms when the probe is missing.
- */
-export function resolvePaintIntervalMs(
-  configured?: number,
-  env: NodeJS.ProcessEnv = process.env,
-  options: { ssh?: boolean; rttMs?: number } = {},
-): number {
-  const raw = configured ?? Number.parseInt(env.DSH_TUI_PAINT_MS ?? '', 10)
-  if (Number.isFinite(raw) && raw > 0) {
-    return Math.min(MAX_PAINT_INTERVAL_MS, Math.max(MIN_PAINT_INTERVAL_MS, Math.floor(raw)))
-  }
-  if (options.ssh === true) return paintIntervalForRtt(options.rttMs)
-  return LOCAL_PAINT_INTERVAL_MS
-}
-
-/** True when this process is attached to an SSH session (jump host / proxy). */
-export function detectSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)
-}
-
-/** Node errno on a write/close that means the TTY is gone (SSH drop, HUP). */
-export function isHangupErrno(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code
-  return code === 'EIO' || code === 'EPIPE' || code === 'ENXIO' || code === 'ECONNRESET'
-}
-
-const HANGUP_SIGNAL_NAMES = ['SIGHUP', 'SIGTERM', 'SIGINT'] as const
-
-/**
- * Replace launcher SIGTERM/SIGINT/SIGHUP handlers with `handler`. SSH drop
- * otherwise lets `dsh` dispose the whole tree before this plugin can detach.
- */
-export function captureHangupSignals(handler: () => void): void {
-  for (const name of HANGUP_SIGNAL_NAMES) {
-    process.removeAllListeners(name)
-    process.prependListener(name, handler)
-  }
-}
-
-export function releaseHangupSignals(handler: () => void): void {
-  for (const name of HANGUP_SIGNAL_NAMES) {
-    process.removeListener(name, handler)
-  }
-}
-
-/** After detach, extra HUP/TERM from sshd must not kill the leftover Host. */
-export function ignoreFurtherHangupSignals(): void {
-  const ignore = (): void => {}
-  for (const name of HANGUP_SIGNAL_NAMES) {
-    process.removeAllListeners(name)
-    process.on(name, ignore)
-  }
-}
-
-/**
- * Wait until `isIdle` is true or `timeoutMs` elapses. Used after cancel so a
- * hangup can flush a settled session log instead of tearing a live write.
- */
-export async function waitUntilIdleOrTimeout(
-  isIdle: () => boolean,
-  timeoutMs: number,
-  now: () => number = Date.now,
-  wait: (ms: number) => Promise<void> = (ms) => new Promise(resolve => {
-    setTimeout(resolve, ms)
-  }),
-): Promise<'idle' | 'timeout'> {
-  const deadline = now() + Math.max(0, timeoutMs)
-  while (!isIdle()) {
-    if (now() >= deadline) return 'timeout'
-    await wait(Math.min(50, Math.max(0, deadline - now())))
-  }
-  return 'idle'
-}
-
-/** Map a CSI-6n round-trip to a paint cadence. Unknown RTT uses the SSH default. */
-export function paintIntervalForRtt(rttMs: number | undefined): number {
-  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs < 0) return RENDER_INTERVAL_MS
-  if (rttMs < 50) return LOCAL_PAINT_INTERVAL_MS
-  if (rttMs < 150) return 160
-  if (rttMs < 350) return 250
-  return 400
-}
-
-export function paintLinkLabel(kind: PaintLinkKind, intervalMs: number, probed: boolean): string {
-  if (kind === 'local') return t('paint.localMs', { ms: intervalMs })
-  return probed ? t('paint.sshMs', { ms: intervalMs }) : t('paint.sshMsUnprobed', { ms: intervalMs })
-}
-
-export type LinkQuality = 'local' | 'good' | 'ok' | 'slow' | 'poor' | 'unknown'
-
-/** Signal-bar quality from a measured SSH round-trip, or local TTY. */
-export function linkQualityOf(kind: PaintLinkKind, rttMs: number | undefined): LinkQuality {
-  if (kind === 'local') return 'local'
-  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs < 0) return 'unknown'
-  if (rttMs < 50) return 'good'
-  if (rttMs < 150) return 'ok'
-  if (rttMs < 350) return 'slow'
-  return 'poor'
-}
-
-/** How many filled signal pips: 4 local/fast, 3 ok, 2 slow, 1 poor, 0 unknown. */
-export function linkSignalPips(quality: LinkQuality): number {
-  if (quality === 'local' || quality === 'good') return 4
-  if (quality === 'ok') return 3
-  if (quality === 'slow') return 2
-  if (quality === 'poor') return 1
-  return 0
-}
-
-const LINK_PIP_COLOR: Record<number, string> = {
-  0: '90',
-  1: '31',
-  2: '33',
-  3: '32',
-  4: '32',
-}
-
-/** Compact footer chip: `SSH ●●●○ 90ms` — 1 pip red, 2 yellow, 3+ green. */
-export function formatLinkQualityChip(
-  kind: PaintLinkKind,
-  intervalMs: number,
-  rttMs: number | undefined,
-  probed: boolean,
-  color = false,
-): string {
-  const quality = linkQualityOf(kind, probed ? rttMs : undefined)
-  const filled = linkSignalPips(quality)
-  const pips = `${'●'.repeat(filled)}${'○'.repeat(4 - filled)}`
-  const colored = color
-    ? `\x1b[${LINK_PIP_COLOR[filled] ?? '90'}m${pips}\x1b[0m`
-    : pips
-  if (kind === 'local') return t('paint.localChip', { pips: colored })
-  const delay = probed && rttMs !== undefined && Number.isFinite(rttMs)
-    ? `${Math.round(rttMs)}ms`
-    : `${intervalMs}ms`
-  return t('paint.sshChip', { pips: colored, delay })
-}
-
-export function providerShortCode(provider: string): string {
-  const id = provider.trim()
-  if (id === 'deepseek-official' || id === 'deepseek') return t('route.deepseek')
-  if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) return 'SuperGrok'
-  if (id === 'opencode-go') return 'OpenCode Go'
-  if (id === 'opencode') return 'OpenCode Zen'
-  return id
-}
-
-export interface FooterStatsInput {
-  turns: number
-  steps: number
-  llmMs: number
-  toolMs: number
-  ttftMs: number
-  ttftSteps: number
-  decodeMs: number
-  decodeTokens: number
-  inputTokens: number
-  outputTokens: number
-  cacheReadTokens: number
-  cacheWriteTokens: number
-}
-
-/** Stats groups in drop order (last is dropped first when the row is too wide). */
-export function footerStatsGroups(stats: FooterStatsInput): string[] {
-  const groups: string[] = []
-  if (stats.steps > 0) groups.push(t('footer.turnsSteps', { turns: stats.turns, steps: stats.steps }))
-  const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
-  if (billedInput > 0 || stats.outputTokens > 0) {
-    groups.push(t('footer.tokens', { input: formatTokens(billedInput), output: formatTokens(stats.outputTokens) }))
-  }
-  const speeds: string[] = []
-  if (stats.decodeMs > 0 && stats.decodeTokens > 0) {
-    speeds.push(formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1_000)))
-  } else if (stats.ttftSteps > 0) {
-    speeds.push(t('footer.ttft', { duration: formatDuration(stats.ttftMs / stats.ttftSteps) }))
-  }
-  if (speeds.length > 0) groups.push(speeds.join(' '))
-  const durations: string[] = []
-  if (stats.llmMs > 0) durations.push(t('footer.llmMs', { duration: formatDuration(stats.llmMs) }))
-  if (stats.toolMs > 0) durations.push(t('footer.toolMs', { duration: formatDuration(stats.toolMs) }))
-  if (durations.length > 0) groups.push(durations.join(' '))
-  if (billedInput > 0) groups.push(t('footer.cacheHit', { percent: Math.round(stats.cacheReadTokens / billedInput * 100) }))
-  return groups
-}
-
-export function fitFooterStatsLine(chip: string, groups: readonly string[], width: number): string {
-  const kept = [...groups]
-  const render = (): string => kept.length === 0 ? chip : `${chip} │ ${kept.join(' │ ')}`
-  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
-  return truncateToWidth(render(), Math.max(1, width))
-}
-
-export type FooterActivityKind =
-  | 'plan-review'
-  | 'waiting'
-  | 'compacting'
-  | 'retry'
-  | 'subagents'
-  | 'tools'
-  | 'plan-open'
-  | 'plan-pending'
-  | 'goal'
-  | 'waiting-llm'
-  | 'idle'
-
-export interface FooterStatusInput {
-  running: boolean
-  planReview: boolean
-  waitingQuestion: boolean
-  compacting: boolean
-  retry?: { retry: number; maxRetries: number }
-  subagents: number
-  tools: number
-  planLeftOpen: boolean
-  planPending: boolean
-  planActive: boolean
-  goalPhase?: 'active' | 'paused' | 'blocked'
-  idleMs: number
-  model: string
-  effort?: string
-  preset?: string
-  provider: string
-  parentModel: string
-  subModel: string
-  subDiffers: boolean
-  quotaCode?: string
-  quotaPercent?: number
-  contextChip?: string
-  balanceText?: string
-  search?: { index: number; total: number }
-  foldedInput: boolean
-  multiLineInput: boolean
-  queued: number
-  cwdLabel?: string
-  compactView?: boolean
-}
-
-export function footerActivity(input: FooterStatusInput): { kind: FooterActivityKind; text: string } {
-  if (input.planReview) return { kind: 'plan-review', text: t('footer.planReview') }
-  if (input.waitingQuestion) return { kind: 'waiting', text: t('footer.waiting') }
-  if (input.compacting) return { kind: 'compacting', text: t('footer.compacting') }
-  if (input.retry !== undefined) {
-    return { kind: 'retry', text: t('footer.retry', { retry: input.retry.retry, max: input.retry.maxRetries }) }
-  }
-  if (input.subagents > 0) return { kind: 'subagents', text: t('footer.subagents', { count: input.subagents }) }
-  if (input.running && input.tools > 0) return { kind: 'tools', text: t('footer.tools', { count: input.tools }) }
-  if (input.planLeftOpen) return { kind: 'plan-open', text: t('footer.planOpen') }
-  if (input.planPending) return { kind: 'plan-pending', text: t('footer.planSwitching') }
-  if (input.planActive) return { kind: 'plan-pending', text: t('footer.planMode') }
-  if (input.goalPhase === 'active') return { kind: 'goal', text: t('footer.goalActive') }
-  if (input.goalPhase === 'paused') return { kind: 'goal', text: t('footer.goalPaused') }
-  if (input.goalPhase === 'blocked') return { kind: 'goal', text: t('footer.goalBlocked') }
-  if (input.running && input.idleMs > WAIT_INDICATOR_MS) {
-    return { kind: 'waiting-llm', text: t('footer.waitSeconds', { seconds: Math.floor(input.idleMs / 1000) }) }
-  }
-  if (input.running) return { kind: 'idle', text: t('footer.running') }
-  return { kind: 'idle', text: t('footer.idle') }
-}
-
-/** Short remaining-quota bar: 8 pips, filled from the left. */
-export function formatQuotaBar(remainingPercent: number, width = 8): string {
-  const remaining = Math.max(0, Math.min(100, remainingPercent))
-  const filled = Math.round(remaining / 100 * width)
-  return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
-}
-
-export function footerIdentityParts(input: FooterStatusInput): string[] {
-  const parts: string[] = []
-  if (input.compactView === true) parts.push(`[${t('view.footerCompact')}]`)
-  if (input.preset !== undefined && input.preset !== '') parts.push(`[${input.preset}]`)
-  if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
-  const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
-  if (model !== '') parts.push(model)
-  if (input.subDiffers) parts.push(`sub:${input.subModel}`)
-  if (input.balanceText !== undefined && input.balanceText !== '') {
-    parts.push(input.balanceText)
-  }
-  if (input.quotaPercent !== undefined) {
-    parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
-  }
-  if (input.contextChip !== undefined && input.contextChip !== '') parts.push(input.contextChip)
-  if (input.search !== undefined) parts.push(t('footer.search', { index: input.search.index + 1, total: input.search.total }))
-  if (input.foldedInput) parts.push(t('footer.inputFolded'))
-  else if (input.multiLineInput) parts.push(t('footer.multiLine'))
-  if (input.queued > 0) parts.push(t('footer.queued', { count: input.queued }))
-  return parts
-}
-
-/** `SuperGrok ███████░ 82%`, or just the bar + percent when `code` is omitted. */
-export function formatFooterQuota(percent: number, code?: string): string {
-  const bar = `${formatQuotaBar(percent)} ${percent.toFixed(0)}%`
-  return code !== undefined && code.trim() !== '' ? `${code.trim()} ${bar}` : bar
-}
-
-/**
- * Drop the Go / SuperGrok plan name from a quota identity part, keeping the
- * remaining-percent bar. Returns true when a part was rewritten.
- */
-export function dropFooterQuotaPlanName(parts: string[]): boolean {
-  for (let index = 0; index < parts.length; index++) {
-    const part = parts[index]
-    if (part === undefined) continue
-    const barAt = part.search(/ [█░]+ \d+%$/)
-    if (barAt <= 0) continue
-    parts[index] = part.slice(barAt + 1)
-    return true
-  }
-  return false
-}
-
-export function fitFooterStatusLine(activity: string, identity: readonly string[], width: number): string {
-  const kept = [...identity]
-  const render = (): string => kept.length === 0 ? activity : `${activity}  ${kept.join(' · ')}`
-  if (displayWidth(render()) > width) dropFooterQuotaPlanName(kept)
-  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
-  return truncateToWidth(render(), Math.max(1, width))
-}
-
-/** One incremental paint as a single stdout write (one SSH packet when corked). */
-export function composePaintOutput(options: {
-  width: number
-  height: number
-  paintRows: readonly string[]
-  previousRows: readonly string[]
-  sizeChanged: boolean
-  chromeChanged: boolean
-  chromeStart: number
-  previousChromeStart?: number
-  cursorRow: number
-  cursorColumn: number
-}): string {
-  const { width, height, paintRows, previousRows, sizeChanged, chromeChanged, chromeStart } = options
-  const previousChromeStart = options.previousChromeStart ?? chromeStart
-  // When a card expands, the input box moves up. Rows that used to be
-  // transcript may now be chrome (or vice versa); force-repaint from the
-  // higher of the two chrome starts so leftover tool-body glyphs cannot sit
-  // on the prompt.
-  const dirtyChromeStart = Math.min(chromeStart, previousChromeStart)
-  let out = '\x1b[?25l'
-  const prev = sizeChanged ? [] : previousRows
-  if (sizeChanged) out += '\x1b[H\x1b[J'
-  // Never address row height+1: that scrolls the SSH viewport and leaves
-  // thinking/tool/assistant glyphs sitting on the next card.
-  const rowCount = Math.min(height, paintRows.length)
-  for (let i = 0; i < rowCount; i++) {
-    const current = paintRows[i] ?? ''
-    if (current === prev[i] && !(chromeChanged && i >= dirtyChromeStart)) continue
-    const clipped = padAnsiToWidth(current, width)
-    // EL2 *before* the glyphs, from column 1. A full-width write followed
-    // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
-    // next card instead of the row we just drew.
-    out += `\x1b[${i + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
-  }
-  if (rowCount < height) {
-    out += `\x1b[${rowCount + 1};1H\x1b[J`
-  }
-  out += '\x1b[0m'
-  const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
-  out += `\x1b[${cursorRow};${Math.max(1, options.cursorColumn)}H\x1b[?25h`
-  return out
-}
 const PLUGIN_VERSION = ((): string => {
   try {
     const require = createRequire(import.meta.url)
@@ -1024,7 +669,6 @@ const PLUGIN_VERSION = ((): string => {
 })()
 const STALL_WARNING_MS = 60000
 const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
-const PICKER_WINDOW = 12
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -1161,76 +805,6 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
   },
 ]
 
-export interface StatusReportInput {
-  sessionId: string
-  pluginVersion: string
-  provider: string
-  model: string
-  effort?: string
-  agentStatus: string
-  preset: string
-  activeSubagents: number
-  plan: 'off' | 'pending' | 'on'
-  paint: string
-  disconnect?: DisconnectPolicyName
-  waitingQuestions: number
-  quota?: QuotaSnapshot
-  context?: ContextPressureView
-  parentModel?: string
-  subProvider?: string
-  subModel: string
-  cwd?: string
-}
-
-/** Lines printed by `/status` — SSH first-boot diagnostics, no extra command. */
-export function formatStatusReport(input: StatusReportInput): string[] {
-  const route = describeProviderRoute(input.provider)
-  const effort = input.effort === undefined ? '' : ` (${input.effort})`
-  const fit = describeSubagentFit({
-    parentProvider: input.provider,
-    parentModel: input.parentModel,
-    subProvider: input.subProvider,
-    subModel: input.subModel,
-  })
-  return [
-    `session: ${input.sessionId}`,
-    `plugin: dsh-ssh-tui ${input.pluginVersion}`,
-    `cwd: ${input.cwd ?? ''}`,
-    `route: ${input.provider}/${input.model}${effort}`,
-    `provider: ${route.kind}`,
-    `status: ${input.agentStatus}`,
-    `preset: ${input.preset}`,
-    `subagents: ${input.activeSubagents}`,
-    fit.line,
-    `plan: ${input.plan}`,
-    formatQuotaStatusLine(input.quota),
-    formatContextPressureStatusLine(input.context),
-    `paint: ${input.paint}`,
-    `disconnect: ${input.disconnect ?? 'pause'}`,
-    input.waitingQuestions > 0 ? `questions: waiting ${input.waitingQuestions}` : 'questions: none',
-  ]
-}
-
-/** Human-facing kind for a live LLM route. */
-export function describeProviderRoute(provider: string): { kind: string; short: string } {
-  const id = provider.trim()
-  if (id === 'deepseek-official' || id === 'deepseek') {
-    return { kind: t('route.deepseek'), short: t('route.deepseek') }
-  }
-  if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) {
-    return { kind: t('route.supergrokKind'), short: t('route.supergrokShort') }
-  }
-  if (id === 'opencode-go') return { kind: t('route.go'), short: t('route.go') }
-  if (id === 'opencode') return { kind: t('route.zen'), short: t('route.zen') }
-  return { kind: t('route.registered'), short: id }
-}
-
-/** Routes that authenticate without a harness API-key credential. */
-export function providerUsesLocalOAuth(provider: string): boolean {
-  const id = provider.trim()
-  return id === 'xai' || id === 'grok' || id.startsWith('xai-')
-}
-
 const LOCAL_COMMANDS = [
   { name: 'help', key: 'cmd.help' },
   { name: 'model', key: 'cmd.model' },
@@ -1271,1449 +845,7 @@ function localizedCommands(): { name: string; description: string; aliasOf?: str
   }))
 }
 
-/**
- * Terminal cell width for one string.
- *
- * Match glibc wcwidth / typical UTF-8 SSH terminals: CJK ideographs and
- * fullwidth forms occupy two cells; East-Asian Ambiguous box-drawing and
- * ornaments (`─`, `●`, `·`, `▸`, `❯`, Braille spinners) occupy one. Counting
- * those ambiguous glyphs as two made `repeatToWidth('─', cols)` paint a
- * half-width rule and parked the input cursor half a cell past the text.
- *
- * Overflow into the input box is handled by clipping/padding painted rows to
- * the measured column count, not by inflating glyph width.
- */
-
-/**
- * Codex-style compact elapsed: `0s`, `1m 05s`, `1h 01m 01s`.
- * Used by the workspace wait card while the model has not streamed yet.
- */
-export function fmtElapsedCompact(elapsedSecs: number): string {
-  const secs = Math.max(0, Math.floor(elapsedSecs))
-  if (secs < 60) return `${secs}s`
-  if (secs < 3600) {
-    const minutes = Math.floor(secs / 60)
-    const seconds = secs % 60
-    return `${minutes}m ${String(seconds).padStart(2, '0')}s`
-  }
-  const hours = Math.floor(secs / 3600)
-  const minutes = Math.floor((secs % 3600) / 60)
-  const seconds = secs % 60
-  return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`
-}
-
-/**
- * Sweep highlight across `text` (Codex `shimmer.rs`). Truecolor blends a
- * highlight band; otherwise DIM / default / BOLD. Process-start based so
- * every paint of the same frame stays in phase.
- */
-export function shimmerText(text: string, nowMs: number, color: boolean): string {
-  const chars = Array.from(text)
-  if (chars.length === 0) return ''
-  if (!color) return text
-  const padding = 10
-  const period = chars.length + padding * 2
-  const sweepMs = 2000
-  const pos = Math.floor(((nowMs % sweepMs) / sweepMs) * period)
-  const bandHalf = 5
-  let out = ''
-  for (let index = 0; index < chars.length; index += 1) {
-    const dist = Math.abs(index + padding - pos)
-    const t = dist <= bandHalf
-      ? 0.5 * (1 + Math.cos(Math.PI * (dist / bandHalf)))
-      : 0
-    const style = t < 0.2 ? '2' : t < 0.6 ? '0' : '1'
-    out += `\x1b[${style}m${chars[index]}\x1b[0m`
-  }
-  return out
-}
-
-/**
- * Codex `extract_first_bold`: the first **closed** `**bold**` in the thinking
- * stream, else the first markdown heading. An unclosed `**` means the title
- * has not arrived yet, so return undefined and keep the default header —
- * never fall back to hard-truncated reasoning, reply, or prompt text.
- */
-export function waitSummaryFromReasoning(text: string): string | undefined {
-  const raw = text.replace(/\r\n?/gu, '\n')
-  const chars = Array.from(raw)
-  for (let i = 0; i + 1 < chars.length; i += 1) {
-    if (chars[i] !== '*' || chars[i + 1] !== '*') continue
-    let j = i + 2
-    while (j + 1 < chars.length && !(chars[j] === '*' && chars[j + 1] === '*')) j += 1
-    if (j + 1 >= chars.length) return undefined
-    const inner = chars.slice(i + 2, j).join('').replace(/\s+/gu, ' ').trim()
-    return inner === '' ? undefined : inner
-  }
-  const heading = /^#{1,6}\s+(.+)$/mu.exec(raw)?.[1]
-  const source = heading?.replace(/\s+/gu, ' ').trim() ?? ''
-  return source === '' ? undefined : source
-}
-
-/** Wait-card header + optional detail. Header tracks model work when known. */
-export function waitCardCopy(input: {
-  toolTitle?: string
-  toolSummary?: string
-  reasoning?: string
-}): { header: string; detail?: string } {
-  const toolTitle = input.toolTitle?.trim() ?? ''
-  const toolSummary = input.toolSummary?.trim() ?? ''
-  const header = waitSummaryFromReasoning(input.reasoning ?? '') ?? t('wait.working')
-  if (toolTitle !== '') {
-    return { header, detail: toolSummary === '' ? toolTitle : `${toolTitle}  ${toolSummary}` }
-  }
-  return { header }
-}
-
-const WAIT_DETAIL_PREFIX = '  └ '
-const WAIT_DETAIL_MAX_LINES = 3
-
-/**
- * Codex `wrapped_details_lines`: word-wrap the wait-card detail under the
- * `  └ ` prefix, continue wrapped rows at the prefix width, cap at 3 rows and
- * end the last one with an ellipsis when the text does not fit.
- */
-export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_DETAIL_MAX_LINES): string[] {
-  const prefixWidth = displayWidth(WAIT_DETAIL_PREFIX)
-  const contentWidth = Math.max(1, width - prefixWidth)
-  const rows: string[] = []
-  let current = ''
-  const flush = (): void => {
-    if (current !== '') rows.push(current)
-    current = ''
-  }
-  for (const word of detail.split(/\s+/u)) {
-    if (word === '') continue
-    let rest = word
-    while (displayWidth(rest) > contentWidth) {
-      flush()
-      let cut = 0
-      let used = 0
-      for (const char of rest) {
-        const charWidth = displayWidth(char)
-        if (used + charWidth > contentWidth) break
-        used += charWidth
-        cut += char.length
-      }
-      if (cut === 0) cut = firstCodePointLength(rest)
-      rows.push(rest.slice(0, cut))
-      rest = rest.slice(cut)
-    }
-    if (rest === '') continue
-    if (current === '') current = rest
-    else if (displayWidth(current) + 1 + displayWidth(rest) <= contentWidth) current += ` ${rest}`
-    else {
-      flush()
-      current = rest
-    }
-  }
-  flush()
-  if (rows.length === 0) return []
-  const overflow = rows.length > maxLines
-  const kept = overflow ? rows.slice(0, maxLines) : rows
-  if (overflow) {
-    // Codex rewrites the last kept row with an explicit ellipsis so it reads
-    // as "more below", even when the row itself still has spare room.
-    const last = kept[maxLines - 1] ?? ''
-    const limit = Math.max(1, contentWidth - 1)
-    let cut = 0
-    let used = 0
-    for (const char of last) {
-      const charWidth = displayWidth(char)
-      if (used + charWidth > limit) break
-      used += charWidth
-      cut += char.length
-    }
-    kept[maxLines - 1] = `${last.slice(0, cut)}…`
-  }
-  return kept.map((line, index) =>
-    index === 0 ? `${WAIT_DETAIL_PREFIX}${line}` : `${' '.repeat(prefixWidth)}${line}`)
-}
-
-export function displayWidth(text: string): number {
-  let width = 0
-  for (const char of text) {
-    if (char === '\t') {
-      // Tabs are expanded to spaces before rendering; keep the width
-      // calculation consistent with `sanitizeTerminalText()`.
-      width += 4
-      continue
-    }
-    const cp = char.codePointAt(0) ?? 0
-    if (cp === 0x00ad || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2060 && cp <= 0x2064) || cp === 0xfeff) {
-      continue
-    }
-    if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) {
-      continue
-    }
-    const wide =
-      (cp >= 0x1100 && cp <= 0x115f) ||
-      cp === 0x2329 || cp === 0x232a ||
-      (cp >= 0x2e80 && cp <= 0xa4cf) ||
-      (cp >= 0xac00 && cp <= 0xd7a3) ||
-      (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xfe10 && cp <= 0xfe19) ||
-      (cp >= 0xfe30 && cp <= 0xfe6f) ||
-      (cp >= 0xff00 && cp <= 0xff60) ||
-      (cp >= 0xffe0 && cp <= 0xffe6) ||
-      (cp >= 0x1f300 && cp <= 0x1faff) ||
-      (cp >= 0x20000 && cp <= 0x3fffd)
-    width += wide ? 2 : 1
-  }
-  return width
-}
-
-/** Pad or clip one already-sanitized line so it occupies exactly `width` cells. */
-export function padToWidth(text: string, width: number): string {
-  const safe = sanitizeTerminalText(text)
-  if (width <= 0) return ''
-  const clipped = truncateToWidth(safe, width)
-  const used = displayWidth(clipped)
-  return used >= width ? clipped : `${clipped}${' '.repeat(width - used)}`
-}
-
-/**
- * Pad an already-styled ANSI line to `width` cells without resetting SGR.
- * Diff add/del rows keep their background across the whole terminal row
- * instead of only the glyphs.
- */
-export function padAnsiToWidth(text: string, width: number): string {
-  if (width <= 0) return ''
-  const clipped = clipAnsiToWidth(text, width)
-  const used = visibleWidth(clipped)
-  if (used >= width) return clipped
-  const pad = ' '.repeat(width - used)
-  // Insert spaces before a trailing SGR reset so backgrounds (diff rows)
-  // and the cell budget both fill the whole terminal row.
-  if (clipped.endsWith('\x1b[0m')) return `${clipped.slice(0, -4)}${pad}\x1b[0m`
-  return `${clipped}${pad}`
-}
-
-/** Visible width of an ANSI-styled line, ignoring CSI / OSC sequences. */
-export function visibleWidth(text: string): number {
-  let used = 0
-  let index = 0
-  while (index < text.length) {
-    if (text.charCodeAt(index) === 0x1b) {
-      index = skipAnsiSequence(text, index)
-      continue
-    }
-    const cp = text.codePointAt(index)
-    if (cp === undefined) break
-    const char = String.fromCodePoint(cp)
-    used += displayWidth(char)
-    index += char.length
-  }
-  return used
-}
-
-/** Advance past one ESC sequence starting at `index`. */
-function skipAnsiSequence(text: string, index: number): number {
-  let seqEnd = index + 1
-  if (seqEnd >= text.length) return text.length
-  const intro = text.charCodeAt(seqEnd)
-  if (intro === 0x5b) {
-    seqEnd += 1
-    while (seqEnd < text.length) {
-      const code = text.charCodeAt(seqEnd)
-      seqEnd += 1
-      if (code >= 0x40 && code <= 0x7e) break
-    }
-    return seqEnd
-  }
-  if (intro === 0x5d) {
-    seqEnd += 1
-    while (seqEnd < text.length) {
-      const code = text.charCodeAt(seqEnd)
-      seqEnd += 1
-      if (code === 0x07) break
-      if (code === 0x1b && text.charCodeAt(seqEnd) === 0x5c) {
-        seqEnd += 1
-        break
-      }
-    }
-    return seqEnd
-  }
-  while (seqEnd < text.length) {
-    const code = text.charCodeAt(seqEnd)
-    seqEnd += 1
-    if (code >= 0x40 && code <= 0x7e) break
-  }
-  return seqEnd
-}
-
-/** Repeat a glyph until it occupies exactly `width` cells. */
-export function repeatToWidth(glyph: string, width: number): string {
-  if (width <= 0) return ''
-  const unit = displayWidth(glyph)
-  if (unit <= 0) return ' '.repeat(width)
-  const count = Math.max(1, Math.floor(width / unit))
-  return padToWidth(glyph.repeat(count), width)
-}
-
-/** Strip terminal control sequences and expand tabs for display output. */
-function sanitizeTerminalText(text: string): string {
-  return text
-    .replace(/[\x1b\u009b]/gu, '')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
-    .replaceAll('\t', '    ')
-}
-
-/** UTF-16 length of the first code point, so fallback cuts never split a surrogate pair. */
-function firstCodePointLength(text: string): number {
-  return Array.from(text)[0]?.length ?? 1
-}
-
-function wrap(text: string, width: number): string[] {
-  const limit = Math.max(1, width)
-  const lines: string[] = []
-  for (const sourceLine of text.split('\n')) {
-    if (sourceLine === '') {
-      lines.push('')
-      continue
-    }
-    let rest = sanitizeTerminalText(sourceLine)
-    while (displayWidth(rest) > limit) {
-      let cut = 0
-      let used = 0
-      for (const char of rest) {
-        const charWidth = displayWidth(char)
-        if (charWidth > 0 && used + charWidth > limit) break
-        used += charWidth
-        cut += char.length
-      }
-      if (cut === 0) {
-        // A single double-width glyph on a 1-cell row still has to occupy a
-        // line; the next wrap continues after it so we never stall.
-        cut = firstCodePointLength(rest)
-      }
-      lines.push(rest.slice(0, cut))
-      rest = rest.slice(cut)
-    }
-    lines.push(rest)
-  }
-  return lines
-}
-
-/** One colored span inside a tool-card header line. Offsets are UTF-16 char indices. */
-interface TextSegment {
-  start: number
-  end: number
-  sgr: string
-}
-
-/** Wrap plain text and report each output line's char range in the source. */
-function wrapTracked(text: string, width: number): { line: string; start: number; end: number }[] {
-  const limit = Math.max(1, width)
-  const out: { line: string; start: number; end: number }[] = []
-  let base = 0
-  for (const sourceLine of text.split('\n')) {
-    if (sourceLine === '') {
-      out.push({ line: '', start: base, end: base })
-      base += 1
-      continue
-    }
-    let rest = sourceLine
-    let cursor = base
-    while (displayWidth(rest) > limit) {
-      let cut = 0
-      let used = 0
-      for (const char of rest) {
-        const charWidth = displayWidth(char)
-        if (charWidth > 0 && used + charWidth > limit) break
-        used += charWidth
-        cut += char.length
-      }
-      if (cut === 0) cut = firstCodePointLength(rest)
-      out.push({ line: rest.slice(0, cut), start: cursor, end: cursor + cut })
-      rest = rest.slice(cut)
-      cursor += cut
-    }
-    out.push({ line: rest, start: cursor, end: cursor + rest.length })
-    base += sourceLine.length + 1
-  }
-  return out
-}
-
-/** Paint one already-wrapped output line by the segments overlapping its range. */
-function paintSegmentedLine(
-  line: string,
-  start: number,
-  end: number,
-  segments: readonly TextSegment[],
-): string {
-  if (segments.length === 0) return line
-  let out = ''
-  let cursor = start
-  for (const seg of segments) {
-    if (seg.end <= start) continue
-    if (seg.start >= end) break
-    const from = Math.max(seg.start, start)
-    const to = Math.min(seg.end, end)
-    if (to <= from) continue
-    // Gaps (the tool title) stay default foreground — do not drop them.
-    if (from > cursor) out += line.slice(cursor - start, from - start)
-    out += `\x1b[${seg.sgr}m${line.slice(from - start, to - start)}\x1b[0m`
-    cursor = to
-  }
-  if (cursor < end) out += line.slice(cursor - start, end - start)
-  return out === '' ? line : out
-}
-
-/** Wrap `text` and color each output line by overlapping `segments`. */
-function wrapSegmented(
-  text: string,
-  width: number,
-  segments: readonly TextSegment[],
-): string[] {
-  return wrapTracked(text, width).map(({ line, start, end }) =>
-    paintSegmentedLine(line, start, end, segments))
-}
-
-function truncate(text: string, maxLines: number): string {
-  const lines = text.split('\n')
-  if (maxLines <= 0) return ''
-  if (lines.length <= maxLines) return text
-  if (maxLines === 1) return `… ${lines.length - 1} more line(s) …`
-  const head = lines.slice(0, Math.max(0, maxLines - 2))
-  const tail = lines.slice(-1)
-  return [...head, `… ${lines.length - head.length - 1} more line(s) …`, ...tail].join('\n')
-}
-type InlineMarkdownKind = 'text' | 'bold' | 'italic' | 'code' | 'link' | 'muted'
-
-interface MarkdownSegment {
-  kind: InlineMarkdownKind
-  text: string
-}
-
-type MarkdownBlockKind = 'assistant' | 'heading1' | 'heading2' | 'heading3' | 'code' | 'quote' | 'rule'
-
-interface MarkdownBlockLine {
-  base: MarkdownBlockKind
-  segments: MarkdownSegment[]
-}
-
-const INLINE_MARKDOWN_PATTERN =
-  /(\*\*[^*\n]+\*\*)|(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(\*[^*\n]+\*)|(_[^_\n]+_)/gu
-
-/** Parse one line's bold / italic / inline-code / link spans. */
-function parseInlineMarkdown(line: string): MarkdownSegment[] {
-  const segments: MarkdownSegment[] = []
-  let last = 0
-  for (const match of line.matchAll(INLINE_MARKDOWN_PATTERN)) {
-    const index = match.index
-    if (index > last) segments.push({ kind: 'text', text: line.slice(last, index) })
-    const token = match[0]
-    if (match[1] !== undefined) {
-      segments.push({ kind: 'bold', text: token.slice(2, -2) })
-    } else if (match[2] !== undefined) {
-      segments.push({ kind: 'code', text: token.slice(1, -1) })
-    } else if (match[3] !== undefined) {
-      const labelEnd = token.indexOf('](')
-      const label = token.slice(1, labelEnd)
-      const url = token.slice(labelEnd + 2, -1)
-      segments.push({ kind: 'link', text: label })
-      if (url !== '') segments.push({ kind: 'muted', text: ` (${url})` })
-    } else if (match[4] !== undefined) {
-      segments.push({ kind: 'italic', text: token.slice(1, -1) })
-    } else if (match[5] !== undefined) {
-      segments.push({ kind: 'italic', text: token.slice(1, -1) })
-    }
-    last = index + token.length
-  }
-  if (last < line.length) segments.push({ kind: 'text', text: line.slice(last) })
-  if (segments.length === 0) segments.push({ kind: 'text', text: line })
-  return segments
-}
-
-function markdownSegmentWidth(segments: MarkdownSegment[]): number {
-  return segments.reduce((total, segment) => total + displayWidth(segment.text), 0)
-}
-
-/** Wrap styled inline segments into visual rows, carrying a prefix only on row one. */
-function wrapMarkdownSegments(
-  segments: MarkdownSegment[],
-  width: number,
-  prefixSegments: MarkdownSegment[] = [],
-): MarkdownSegment[][] {
-  const limit = Math.max(1, width)
-  const lines: MarkdownSegment[][] = []
-  let current: MarkdownSegment[] = [...prefixSegments]
-  let used = markdownSegmentWidth(current)
-
-  for (const segment of segments) {
-    let rest = segment.text
-    while (rest !== '') {
-      const available = limit - used
-      if (available <= 0) {
-        lines.push(current)
-        current = []
-        used = 0
-        continue
-      }
-      const slice = forwardSliceByWidth(rest, available)
-      let chunk = slice.text
-      if (chunk === '') {
-        // A wide character does not fit the remaining cell: wrap to the next
-        // row instead of overflowing that cell into the input area.
-        if (used > 0) {
-          lines.push(current)
-          current = []
-          used = 0
-          continue
-        }
-        chunk = Array.from(rest)[0] ?? rest.slice(0, 1)
-      }
-      current.push({ kind: segment.kind, text: chunk })
-      used += displayWidth(chunk)
-      rest = rest.slice(chunk.length)
-      if (rest !== '') {
-        lines.push(current)
-        current = []
-        used = 0
-      }
-    }
-  }
-  if (current.length > 0 || lines.length === 0) lines.push(current)
-  return lines.map(line => line.length === 0 ? [{ kind: 'text', text: '' }] : line)
-}
-
-function markdownSegmentCode(kind: InlineMarkdownKind): string {
-  switch (kind) {
-    case 'bold': return '1;97'
-    case 'italic': return '3;37'
-    case 'code': return '36'
-    case 'link': return '4;36'
-    case 'muted': return '2;37'
-    default: return ''
-  }
-}
-
-function markdownBaseCode(kind: MarkdownBlockKind): string {
-  switch (kind) {
-    case 'heading1': return '1;4;97'
-    case 'heading2': return '1;4;36'
-    case 'heading3': return '1;36'
-    case 'code': return '36'
-    case 'quote': return '3;37'
-    case 'rule': return '90'
-    default: return '1;37'
-  }
-}
-
-/** Render one pre-wrapped markdown line as ANSI (or plain text without color). */
-function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean): string {
-  const segments = block.segments.map(segment => ({ ...segment, text: sanitizeTerminalText(segment.text) }))
-  if (!color) return segments.map(segment => segment.text).join('')
-  const base = markdownBaseCode(block.base)
-  let out = `\x1b[${base}m`
-  for (const segment of segments) {
-    const code = markdownSegmentCode(segment.kind)
-    if (code === '') {
-      out += segment.text
-    } else {
-      out += `\x1b[${code}m${segment.text}\x1b[${base}m`
-    }
-  }
-  return `${out}\x1b[0m`
-}
-
-/** Enlarge H1 text visually: fullwidth ASCII and spaced CJK glyphs. */
-function expandHeadingText(text: string): string {
-  let out = ''
-  for (const char of text) {
-    const cp = char.codePointAt(0) ?? 0
-    if (cp >= 0x21 && cp <= 0x7e) {
-      out += String.fromCodePoint(0xff01 + cp - 0x21)
-    } else if (char.trim() === '') {
-      out += ' '
-    } else {
-      out += `${char} `
-    }
-  }
-  return out
-}
-
-function headingSegments(text: string, level: number): MarkdownSegment[] {
-  const segments = parseInlineMarkdown(text)
-  if (level !== 1) return segments
-  return segments.map(segment =>
-    segment.kind === 'code' || segment.kind === 'link' || segment.kind === 'muted'
-      ? segment
-      : { kind: segment.kind, text: expandHeadingText(segment.text) })
-}
-
-/**
- * Render workspace markdown into width-bounded terminal rows. Assistant
- * replies get a bold-white base; code blocks, headings, quotes, lists, rules,
- * links and inline spans keep their own ANSI treatment.
- */
-export function renderMarkdownLines(text: string, width: number, color: boolean): string[] {
-  const lines: string[] = []
-  let inFence = false
-
-  for (const sourceLine of text.split('\n')) {
-    const raw = sanitizeTerminalText(sourceLine)
-    const fence = /^```([^\n]*)$/u.exec(raw.trim())
-    if (fence !== null) {
-      inFence = !inFence
-      lines.push(renderMarkdownBlockLine({
-        base: 'code',
-        segments: [{ kind: 'text', text: `\`\`\`${fence[1] ?? ''}` }],
-      }, color))
-      continue
-    }
-    if (inFence) {
-      if (raw === '') {
-        lines.push('')
-        continue
-      }
-      for (const line of wrap(raw, width)) {
-        lines.push(renderMarkdownBlockLine({
-          base: 'code',
-          segments: [{ kind: 'text', text: line }],
-        }, color))
-      }
-      continue
-    }
-
-    const heading = /^(#{1,6})\s+(.*)$/u.exec(raw)
-    if (heading !== null) {
-      // The hashes are markdown syntax, not content: replace them with
-      // heading style. Levels differ visually: H1 is enlarged and
-      // underlined, H2 underlined, H3 colored, H4+ bold white.
-      const level = Math.min(6, (heading[1] ?? '#').length)
-      const base: MarkdownBlockKind = level === 1
-        ? 'heading1'
-        : level === 2
-          ? 'heading2'
-          : level === 3
-            ? 'heading3'
-            : 'assistant'
-      if (level === 1 && lines.at(-1) !== '') lines.push('')
-      for (const segments of wrapMarkdownSegments(headingSegments(heading[2] ?? '', level), width)) {
-        lines.push(renderMarkdownBlockLine({ base, segments }, color))
-      }
-      if (level === 1) lines.push('')
-      continue
-    }
-
-    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/u.test(raw) && raw.trim() !== '') {
-      lines.push(renderMarkdownBlockLine({
-        base: 'rule',
-        segments: [{ kind: 'text', text: repeatToWidth('─', Math.max(1, width)) }],
-      }, color))
-      continue
-    }
-
-    const quote = /^(\s*)>\s?(.*)$/u.exec(raw)
-    if (quote !== null) {
-      const indent = quote[1] ?? ''
-      const prefix = `${indent}│ `
-      for (const segments of wrapMarkdownSegments(
-        parseInlineMarkdown(quote[2] ?? ''),
-        width,
-        [{ kind: 'text', text: prefix }],
-      )) {
-        lines.push(renderMarkdownBlockLine({ base: 'quote', segments }, color))
-      }
-      continue
-    }
-
-    const list = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/u.exec(raw)
-    if (list !== null) {
-      const indent = list[1] ?? ''
-      const marker = list[2] ?? '-'
-      const prefix = `${indent}${marker} `
-      for (const segments of wrapMarkdownSegments(
-        parseInlineMarkdown(list[3] ?? ''),
-        width,
-        [{ kind: 'text', text: prefix }],
-      )) {
-        lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
-      }
-      continue
-    }
-
-    if (raw === '') {
-      lines.push('')
-      continue
-    }
-
-    for (const segments of wrapMarkdownSegments(parseInlineMarkdown(raw), width)) {
-      lines.push(renderMarkdownBlockLine({ base: 'assistant', segments }, color))
-    }
-  }
-  return lines
-}
-
-
-
-/** Cut one line to fit a width, appending an ellipsis when truncated. */
-export function truncateToWidth(text: string, width: number): string {
-  const safe = sanitizeTerminalText(text)
-  if (width <= 0) return ''
-  if (displayWidth(safe) <= width) return safe
-  if (width === 1) return '…'
-  const limit = width - 1
-  let cut = 0
-  let used = 0
-  for (const char of safe) {
-    const charWidth = displayWidth(char)
-    if (used + charWidth > limit) break
-    used += charWidth
-    cut += char.length
-  }
-  if (cut === 0) cut = firstCodePointLength(safe)
-  return `${safe.slice(0, cut)}…`
-}
-
-/**
- * Clip an already-styled ANSI line to `width` terminal cells without dropping
- * the reset/SGR sequences. Used by the incremental painter so a leftover wide
- * glyph cannot wrap into the next row.
- */
-export function clipAnsiToWidth(text: string, width: number): string {
-  if (width <= 0) return ''
-  let used = 0
-  let out = ''
-  let index = 0
-  while (index < text.length) {
-    if (text.charCodeAt(index) === 0x1b) {
-      const seqEnd = skipAnsiSequence(text, index)
-      out += text.slice(index, seqEnd)
-      index = seqEnd
-      continue
-    }
-    const cp = text.codePointAt(index)
-    if (cp === undefined) break
-    const char = String.fromCodePoint(cp)
-    const charWidth = displayWidth(char)
-    if (used + charWidth > width) break
-    out += char
-    used += charWidth
-    index += char.length
-  }
-  return out
-}
-
-/** One renderable view of the input line: text plus the cursor's visual offset. */
-interface InputView {
-  text: string
-  cursorOffset: number
-  folded: boolean
-}
-
-/** Slice up to `maxWidth` display columns from the beginning of `text`. */
-function forwardSliceByWidth(text: string, maxWidth: number): { text: string; width: number } {
-  let cut = 0
-  let used = 0
-  for (const char of text) {
-    const charWidth = displayWidth(char)
-    if (used + charWidth > maxWidth) break
-    used += charWidth
-    cut += char.length
-  }
-  return { text: text.slice(0, cut), width: used }
-}
-
-/** Slice up to `maxWidth` display columns ending at `end` in `text`. */
-function backwardSliceByWidth(text: string, end: number, maxWidth: number): { start: number; width: number } {
-  if (end <= 0 || maxWidth <= 0) return { start: end, width: 0 }
-  const chars = Array.from(text.slice(0, end))
-  let used = 0
-  let firstIncluded = chars.length
-  for (let index = chars.length - 1; index >= 0; index--) {
-    const charWidth = displayWidth(chars[index] ?? '')
-    if (used + charWidth > maxWidth) break
-    used += charWidth
-    firstIncluded = index
-  }
-  return {
-    start: chars.slice(0, firstIncluded).join('').length,
-    width: used,
-  }
-}
-
-/**
- * Fold a long input into one terminal row around the cursor.
- *
- * Newlines from a paste are display-only: they do not occupy cells, so a
- * naive `displayWidth(input)` under-counts a multi-line paste and parks the
- * caret in the middle of later text. Fold the *current line* (between the
- * surrounding newlines) and keep `\n` out of the visible slice.
- */
-export function foldInputView(input: string, cursor: number, maxWidth: number): InputView {
-  const width = Math.max(1, maxWidth)
-  const safeCursor = Math.max(0, Math.min(cursor, input.length))
-  const lineStart = input.lastIndexOf('\n', Math.max(0, safeCursor - 1)) + 1
-  const lineEndRaw = input.indexOf('\n', safeCursor)
-  const lineEnd = lineEndRaw === -1 ? input.length : lineEndRaw
-  const line = input.slice(lineStart, lineEnd)
-  const lineCursor = safeCursor - lineStart
-  const totalWidth = displayWidth(line)
-  const cursorOffset = displayWidth(line.slice(0, lineCursor))
-  const hasMoreLines = lineStart > 0 || lineEnd < input.length
-  if (totalWidth <= width && !hasMoreLines) {
-    return { text: line, cursorOffset, folded: false }
-  }
-  if (totalWidth <= width) {
-    return { text: line, cursorOffset, folded: true }
-  }
-  const before = cursorOffset
-  const after = totalWidth - cursorOffset
-  const leftFolded = before > 0
-  const rightFolded = after > 0
-  const markers = (leftFolded ? 1 : 0) + (rightFolded ? 1 : 0)
-  const available = Math.max(1, width - markers)
-  let beforeBudget = Math.min(before, Math.ceil(available / 2))
-  let afterBudget = Math.min(after, available - beforeBudget)
-  // If the tail is shorter than its budget, spend the spare columns on the
-  // side before the cursor so the cursor stays visible near its true offset.
-  beforeBudget = Math.min(before, beforeBudget + (available - beforeBudget - afterBudget))
-  const beforeSlice = backwardSliceByWidth(line, lineCursor, beforeBudget)
-  const afterSlice = forwardSliceByWidth(line.slice(lineCursor), afterBudget)
-  const beforeText = line.slice(beforeSlice.start, lineCursor)
-  return {
-    text: `${leftFolded ? '…' : ''}${beforeText}${afterSlice.text}${rightFolded ? '…' : ''}`,
-    cursorOffset: (leftFolded ? 1 : 0) + displayWidth(beforeText),
-    folded: true,
-  }
-}
-
-/**
- * Map a character index in the input text to its visual (row, col) after the
- * same width wrapping `wrap()` applies to the rendered input. `row` is the
- * 0-based input display line, `col` the 0-based column within that line
- * (before any prompt prefix). This keeps the cursor on the correct line/column
- * when the input contains literal newlines from multi-line pastes.
- */
-function cursorVisualPosition(text: string, cursor: number, width: number): { row: number; col: number } {
-  let row = 0
-  let col = 0
-  let used = 0
-  let offset = 0
-  for (const char of text) {
-    if (offset >= cursor) break
-    if (char === '\n') {
-      row += 1
-      col = 0
-      used = 0
-    } else {
-      const charWidth = displayWidth(char)
-      if (used + charWidth > width) {
-        row += 1
-        col = 0
-        used = 0
-      }
-      used += charWidth
-      col += charWidth
-    }
-    offset += char.length
-  }
-  return { row, col }
-}
-
-/** A recognized OpenCode provider route, used by /usage and /quota. */
-export type OpenCodeFlavor = 'zen' | 'go'
-
-export interface OpenCodeSource {
-  provider: string
-  flavor: OpenCodeFlavor
-  label: string
-  apiKeyEnv: string
-  baseURL?: string
-}
-
-interface LlmPiAiProviderProfile {
-  displayName?: unknown
-  apiKeyEnv?: unknown
-  baseURL?: unknown
-  api?: unknown
-  models?: unknown
-  reasoning?: unknown
-}
-
-interface LlmPiAiSection {
-  providers?: Record<string, LlmPiAiProviderProfile>
-}
-
-/** Build per-model reasoningEfforts from a provider-level reasoning default. */
-function reasoningEffortsForDefault(reasoning: unknown): Record<string, string | null> | undefined {
-  if (typeof reasoning !== 'string') return undefined
-  const level = reasoning.trim()
-  if (level === '' || level === 'off') return undefined
-  return { off: null, [level]: level }
-}
-
-const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage'
-const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1'
-const SUPERGROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
-const DEEPSEEK_PUBLIC_BASE_URL = 'https://api.deepseek.com'
-/** OpenAI-completions gateways: probe these relative to the configured base URL. */
-const OPENAI_COMPAT_BALANCE_PATHS = [
-  '/user/balance',
-  '/dashboard/billing/credit_grants',
-  '/v1/dashboard/billing/credit_grants',
-  '/v1/dashboard/billing/subscription',
-] as const
-const QUOTA_ALERT_THRESHOLDS = [50, 25, 10, 5] as const
-/** Remaining % at or below this is “close” and uses the faster cadence. */
-const QUOTA_NEAR_THRESHOLD_PERCENT = 55
-
-/**
- * Classify the currently selected provider as an OpenCode route. Built-in
- * `opencode`/`opencode-go` ids are recognized directly, and custom llm-pi-ai
- * routes are recognized by their `opencode.ai` base URL.
- */
-export function openCodeSourceFor(provider: string, llmPiAiSection: unknown): OpenCodeSource | null {
-  const section = llmPiAiSection as LlmPiAiSection | null | undefined
-  const profile = section?.providers?.[provider]
-  const baseURL = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
-  const lowerBase = baseURL?.toLowerCase() ?? ''
-  const isGo = provider === 'opencode-go' || lowerBase.includes('opencode.ai/zen/go')
-  const isZen = provider === 'opencode' || (lowerBase.includes('opencode.ai/zen') && !isGo)
-  if (!isGo && !isZen) return null
-
-  const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
-    ? profile.apiKeyEnv
-    : provider === 'opencode'
-      ? 'OPENCODE_API_KEY'
-      : provider === 'opencode-go'
-        ? 'OPENCODE_GO_API_KEY'
-        : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
-  const label = typeof profile?.displayName === 'string' && profile.displayName.trim() !== ''
-    ? profile.displayName
-    : isGo ? 'OpenCode Go' : 'OpenCode Zen'
-
-  return {
-    provider,
-    flavor: isGo ? 'go' : 'zen',
-    label,
-    apiKeyEnv,
-    ...(baseURL === undefined ? {} : { baseURL }),
-  }
-}
-
-interface OpenCodeGoUsageWindow {
-  status?: string
-  percent?: number
-  resetsAt?: string
-}
-
-interface OpenCodeGoUsagePayload {
-  usage?: {
-    rolling?: OpenCodeGoUsageWindow
-    weekly?: OpenCodeGoUsageWindow
-    monthly?: OpenCodeGoUsageWindow
-  }
-}
-
-function openCodeGoUsageWindow(value: unknown): OpenCodeGoUsageWindow | undefined {
-  if (typeof value !== 'object' || value === null) return undefined
-  const raw = value as Record<string, unknown>
-  return {
-    ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
-    ...(typeof raw.percent === 'number' && Number.isFinite(raw.percent) ? { percent: raw.percent } : {}),
-    ...(typeof raw.resetsAt === 'string' ? { resetsAt: raw.resetsAt } : {}),
-  }
-}
-
-/** A days/hours/minutes/seconds relative duration for quota reset times. */
-function formatRelativeDuration(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000))
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
-  if (seconds < 86400) {
-    return `${Math.floor(seconds / 3600)}h${Math.floor(seconds % 3600 / 60)}m`
-  }
-  return `${Math.floor(seconds / 86400)}d${Math.floor(seconds % 86400 / 3600)}h`
-}
-
-/** One compact `████░░ 40.0% · 正常 · 约 2m 后重置` line for a Go limit. */
-function formatOpenCodeGoWindow(label: string, value: unknown): string {
-  const window = openCodeGoUsageWindow(value)
-  const percent = window?.percent === undefined
-    ? null
-    : Math.max(0, Math.min(100, window.percent))
-  const state = window?.status === 'rate-limited'
-    ? '已限流'
-    : window?.status === 'ok'
-      ? '正常'
-      : window?.status ?? '未知状态'
-  const parts: string[] = [label]
-  if (percent !== null) {
-    const barWidth = 16
-    const filled = Math.round(percent / 100 * barWidth)
-    parts.push(`${'█'.repeat(filled)}${'░'.repeat(barWidth - filled)} ${percent.toFixed(1)}%`)
-  }
-  parts.push(state)
-  if (window?.resetsAt !== undefined) {
-    const reset = new Date(window.resetsAt)
-    if (!Number.isNaN(reset.getTime())) {
-      const until = reset.getTime() - Date.now()
-      parts.push(until > 0
-        ? `约 ${formatRelativeDuration(until)} 后重置（${reset.toLocaleString()}）`
-        : `已于 ${reset.toLocaleString()} 重置`)
-    }
-  }
-  return `  ${parts.join(' · ')}`
-}
-
-export type QuotaPeriod = 'hourly' | 'weekly' | 'monthly' | 'unknown'
-
-export interface QuotaWindow {
-  label: string
-  period: QuotaPeriod
-  /** Remaining percent of the window (100 = unused). */
-  remainingPercent: number
-  resetsAt?: string
-}
-
-export interface QuotaSnapshot {
-  provider: string
-  plan: string
-  windows: QuotaWindow[]
-}
-
-export function remainingPercentFromUsed(usedPercent: number): number {
-  if (!Number.isFinite(usedPercent)) return 100
-  return Math.max(0, Math.min(100, Math.round((100 - usedPercent) * 10) / 10))
-}
-
-/** Cross a remaining-percent threshold from above (50 / 25 / 10 / 5).
- *  Only the tightest (lowest) crossed threshold is returned, so one drop
- *  never paints 50/25/10 as three identical warnings. */
-export function crossedQuotaThresholds(previousRemaining: number | undefined, remaining: number): number[] {
-  const crossed = QUOTA_ALERT_THRESHOLDS.filter(threshold =>
-    remaining <= threshold && (previousRemaining === undefined || previousRemaining > threshold))
-  if (crossed.length === 0) return []
-  return [crossed[crossed.length - 1] as number]
-}
-
-export function quotaAlertText(snapshot: QuotaSnapshot, window: QuotaWindow): string {
-  const reset = window.resetsAt === undefined ? '' : `（${formatQuotaReset(window.resetsAt)}）`
-  return t('quota.alert', {
-    plan: snapshot.plan,
-    period: quotaPeriodLabel(window.period),
-    percent: window.remainingPercent.toFixed(0),
-    reset,
-  })
-}
-
-/**
- * How often to re-fetch quota or prepaid balance, counted in model steps.
- * Default is every 10 steps. Near a remaining-percent threshold, hourly
- * windows refresh every 4 steps.
- */
-export function quotaRefreshEverySteps(window: QuotaWindow | undefined): number {
-  if (window === undefined) return 10
-  const near = window.remainingPercent <= QUOTA_NEAR_THRESHOLD_PERCENT
-  if (window.period === 'hourly' && near) return 4
-  return 10
-}
-
-/** @deprecated Same cadence as {@link quotaRefreshEverySteps}; the name predates step accounting. */
-export const quotaRefreshEveryTurns = quotaRefreshEverySteps
-
-function quotaPeriodLabel(period: QuotaPeriod): string {
-  if (period === 'hourly') return t('quota.periodHourly')
-  if (period === 'weekly') return t('quota.periodWeekly')
-  if (period === 'monthly') return t('quota.periodMonthly')
-  return t('quota.periodUnknown')
-}
-
-function formatQuotaReset(iso: string): string {
-  const reset = new Date(iso)
-  if (Number.isNaN(reset.getTime())) return iso
-  const until = reset.getTime() - Date.now()
-  return until > 0 ? `约 ${formatRelativeDuration(until)} 后重置` : `已于 ${reset.toLocaleString()} 重置`
-}
-
-export function parseSuperGrokBilling(payload: unknown): QuotaSnapshot {
-  if (payload === null || typeof payload !== 'object') {
-    throw new Error('SuperGrok 额度接口返回格式无法识别')
-  }
-  const root = payload as Record<string, unknown>
-  const cfg = root.config
-  if (cfg === null || typeof cfg !== 'object') {
-    throw new Error('SuperGrok 额度接口返回格式无法识别')
-  }
-  const config = cfg as Record<string, unknown>
-  const usedRaw = config.creditUsagePercent ?? config.credit_usage_percent
-  const used = typeof usedRaw === 'number' && Number.isFinite(usedRaw) ? usedRaw : 0
-  const periodRaw = config.currentPeriod ?? config.current_period
-  const periodObj = periodRaw !== null && typeof periodRaw === 'object' ? periodRaw as Record<string, unknown> : undefined
-  const type = typeof periodObj?.type === 'string' ? periodObj.type : ''
-  const period: QuotaPeriod = type.includes('WEEKLY') ? 'weekly' : type.includes('MONTHLY') ? 'monthly' : 'unknown'
-  const end = typeof periodObj?.end === 'string'
-    ? periodObj.end
-    : typeof config.billingPeriodEnd === 'string'
-      ? config.billingPeriodEnd
-      : typeof config.billing_period_end === 'string'
-        ? config.billing_period_end
-        : undefined
-  const plan = typeof root.subscription_tier === 'string' && root.subscription_tier.trim() !== ''
-    ? root.subscription_tier.trim()
-    : typeof root.subscriptionTier === 'string' && root.subscriptionTier.trim() !== ''
-      ? root.subscriptionTier.trim()
-      : 'SuperGrok'
-  return {
-    provider: 'xai',
-    plan,
-    windows: [{
-      label: period === 'monthly' ? '本月' : '本周',
-      period: period === 'unknown' ? 'weekly' : period,
-      remainingPercent: remainingPercentFromUsed(used),
-      ...(end === undefined ? {} : { resetsAt: end }),
-    }],
-  }
-}
-
-export function parseOpenCodeGoQuota(payload: unknown, provider: string): QuotaSnapshot {
-  const raw = payload as OpenCodeGoUsagePayload | null | undefined
-  const usage = raw?.usage
-  if (usage === null || usage === undefined) throw new Error('额度接口返回格式无法识别')
-  const windows: QuotaWindow[] = []
-  const push = (label: string, period: QuotaPeriod, value: unknown): void => {
-    const window = openCodeGoUsageWindow(value)
-    if (window?.percent === undefined) return
-    windows.push({
-      label,
-      period,
-      remainingPercent: remainingPercentFromUsed(window.percent),
-      ...(window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt }),
-    })
-  }
-  push('滚动 5 小时', 'hourly', usage.rolling)
-  push('本周', 'weekly', usage.weekly)
-  push('本月', 'monthly', usage.monthly)
-  if (windows.length === 0) throw new Error('额度接口返回格式无法识别')
-  return { provider, plan: 'OpenCode Go', windows }
-}
-
-export function formatQuotaSnapshot(snapshot: QuotaSnapshot): string {
-  const lines = [`${snapshot.plan} 额度（${snapshot.provider}）`]
-  for (const window of snapshot.windows) {
-    const remaining = Math.max(0, Math.min(100, window.remainingPercent))
-    const barWidth = 16
-    const filled = Math.round(remaining / 100 * barWidth)
-    const reset = window.resetsAt === undefined ? '' : ` · ${formatQuotaReset(window.resetsAt)}`
-    lines.push(`  ${window.label} · ${'█'.repeat(filled)}${'░'.repeat(barWidth - filled)} 剩余 ${remaining.toFixed(1)}%${reset}`)
-  }
-  return lines.join('\n')
-}
-
-/** Compact `/status` quota line: tightest window first, then the rest. */
-export function formatQuotaStatusLine(snapshot: QuotaSnapshot | undefined): string {
-  if (snapshot === undefined || snapshot.windows.length === 0) return 'quota: none'
-  const tightest = tightestQuotaWindow(snapshot)
-  const ordered = tightest === undefined
-    ? snapshot.windows
-    : [tightest, ...snapshot.windows.filter(window => window !== tightest)]
-  const parts = ordered.map(window => {
-    const remaining = Math.max(0, Math.min(100, window.remainingPercent))
-    return `${window.label} ${remaining.toFixed(0)}%`
-  })
-  return `quota: ${snapshot.plan} ${parts.join(' · ')}`
-}
-
-/** Tightest remaining window — used for threshold alerts. */
-export function tightestQuotaWindow(snapshot: QuotaSnapshot): QuotaWindow | undefined {
-  return snapshot.windows.reduce<QuotaWindow | undefined>((best, window) => {
-    if (best === undefined || window.remainingPercent < best.remainingPercent) return window
-    return best
-  }, undefined)
-}
-
-/** Render the OpenCode Go quota payload as a transcript block. */
-export function formatOpenCodeGoUsage(payload: unknown, source: OpenCodeSource): string {
-  return formatQuotaSnapshot(parseOpenCodeGoQuota(payload, source.provider))
-}
-
-export interface AccountBalanceLine {
-  label: string
-  amount: string
-  currency?: string
-}
-
-export interface AccountBalanceSnapshot {
-  provider: string
-  plan: string
-  available?: boolean
-  lines: AccountBalanceLine[]
-  sourcePath?: string
-}
-
-export function joinUrl(base: string, path: string): string {
-  const root = base.replace(/\/+$/u, '')
-  const suffix = path.startsWith('/') ? path : `/${path}`
-  if (root.endsWith('/v1') && suffix.startsWith('/v1/')) return `${root}${suffix.slice(3)}`
-  return `${root}${suffix}`
-}
-
-export function parseDeepSeekBalance(payload: unknown, provider = 'deepseek-official'): AccountBalanceSnapshot {
-  if (payload === null || typeof payload !== 'object') {
-    throw new Error('DeepSeek 余额接口返回格式无法识别')
-  }
-  const raw = payload as Record<string, unknown>
-  const infos = Array.isArray(raw.balance_infos) ? raw.balance_infos : []
-  const lines: AccountBalanceLine[] = []
-  for (const item of infos) {
-    if (item === null || typeof item !== 'object') continue
-    const row = item as Record<string, unknown>
-    const currency = typeof row.currency === 'string' ? row.currency : undefined
-    const total = typeof row.total_balance === 'string' ? row.total_balance : typeof row.total_balance === 'number' ? String(row.total_balance) : undefined
-    if (total === undefined) continue
-    lines.push({
-      label: '可用余额',
-      amount: total,
-      ...(currency === undefined ? {} : { currency }),
-    })
-    const granted = typeof row.granted_balance === 'string' ? row.granted_balance : undefined
-    const topped = typeof row.topped_up_balance === 'string' ? row.topped_up_balance : undefined
-    if (granted !== undefined) lines.push({ label: '赠送余额', amount: granted, ...(currency === undefined ? {} : { currency }) })
-    if (topped !== undefined) lines.push({ label: '充值余额', amount: topped, ...(currency === undefined ? {} : { currency }) })
-  }
-  if (lines.length === 0) throw new Error('DeepSeek 余额接口返回格式无法识别')
-  return {
-    provider,
-    plan: 'DeepSeek 官方',
-    available: typeof raw.is_available === 'boolean' ? raw.is_available : undefined,
-    lines,
-    sourcePath: '/user/balance',
-  }
-}
-
-function numberish(value: unknown): string | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
-  if (typeof value === 'string' && value.trim() !== '') return value.trim()
-  return undefined
-}
-
-function recordOf(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
-}
-
-/** Best-effort parse of OpenAI-compatible credit/balance JSON. */
-export function parseOpenAiCompatibleBalance(payload: unknown, provider: string, path: string): AccountBalanceSnapshot | undefined {
-  const raw = recordOf(payload)
-  if (raw === undefined) return undefined
-  const lines: AccountBalanceLine[] = []
-  const totalGranted = numberish(raw.total_granted)
-  const totalUsed = numberish(raw.total_used)
-  const totalAvailable = numberish(raw.total_available)
-  if (totalAvailable !== undefined) lines.push({ label: '剩余额度', amount: totalAvailable, currency: 'USD' })
-  if (totalGranted !== undefined) lines.push({ label: '总额度', amount: totalGranted, currency: 'USD' })
-  if (totalUsed !== undefined) lines.push({ label: '已用', amount: totalUsed, currency: 'USD' })
-  const hardLimit = numberish(raw.hard_limit_usd ?? raw.hard_limit)
-  const softLimit = numberish(raw.soft_limit_usd ?? raw.soft_limit)
-  if (hardLimit !== undefined) lines.push({ label: '硬限额', amount: hardLimit, currency: 'USD' })
-  if (softLimit !== undefined) lines.push({ label: '软限额', amount: softLimit, currency: 'USD' })
-  const data = recordOf(raw.data) ?? raw
-  const balance = numberish(data.balance ?? data.total_balance ?? data.credit ?? data.credits ?? data.quota)
-  if (lines.length === 0 && balance !== undefined) {
-    lines.push({ label: '余额', amount: balance, currency: typeof data.currency === 'string' ? data.currency : undefined })
-  }
-  if (Array.isArray(raw.balance_infos)) {
-    try {
-      return { ...parseDeepSeekBalance(raw, provider), plan: provider, sourcePath: path }
-    } catch {
-      // Not DeepSeek-shaped despite the field name.
-    }
-  }
-  if (lines.length === 0) return undefined
-  return { provider, plan: provider, lines, sourcePath: path }
-}
-
-/** Compact footer chip: `余额 86.42 CNY`. Prefers remaining/available lines. */
-export function formatFooterBalance(snapshot: AccountBalanceSnapshot): string | undefined {
-  const preferred = snapshot.lines.find(line =>
-    /剩余|可用|余额|available|remaining|credit/iu.test(line.label))
-    ?? snapshot.lines[0]
-  if (preferred === undefined) return undefined
-  const amount = preferred.amount.trim()
-  if (amount === '') return undefined
-  const currency = preferred.currency === undefined || preferred.currency === '' ? '' : ` ${preferred.currency}`
-  return t('footer.balance', { amount: `${amount}${currency}` })
-}
-
-export function formatAccountBalance(snapshot: AccountBalanceSnapshot): string {
-  const header = [`${snapshot.plan} 余额（${snapshot.provider}）`]
-  if (snapshot.available === false) header.push('账号当前不可用')
-  for (const line of snapshot.lines) {
-    const currency = line.currency === undefined ? '' : ` ${line.currency}`
-    header.push(`  ${line.label} · ${line.amount}${currency}`)
-  }
-  if (snapshot.sourcePath !== undefined) header.push(`  来源 ${snapshot.sourcePath}`)
-  return header.join('\n')
-}
-
-/** Extract a safe human-readable message from an OpenCode error payload. */
-function openCodeApiErrorMessage(payload: unknown): string {
-  if (typeof payload !== 'object' || payload === null) return ''
-  const raw = payload as Record<string, unknown>
-  const error = raw.error
-  if (typeof error === 'string' && error.trim() !== '') return error.trim()
-  if (typeof error === 'object' && error !== null) {
-    const message = (error as Record<string, unknown>).message
-    if (typeof message === 'string' && message.trim() !== '') return message.trim()
-  }
-  if (typeof raw.message === 'string' && raw.message.trim() !== '') return raw.message.trim()
-  return ''
-}
-
-/** Whether `text` could still grow into a recognized escape sequence. */
-export function isEscapePrefix(text: string): boolean {
-  if (text === '\x1b') return true
-  if (!text.startsWith('\x1b')) return false
-  if (text === '\x1b[') return true
-  if (text === '\x1bO' || /^\x1bO[A-Z]?$/u.test(text)) return true
-  if (/^\x1b\[[A-D]$/u.test(text)) return true
-  if (/^\x1b\[[HF]$/u.test(text)) return true
-  if (/^\x1b\[\d+~?$/u.test(text)) return true
-  if (/^\x1b\[\d+(?:;\d+)?R?$/u.test(text)) return true
-  if (/^\x1b\[<(?:\d*;?)*[Mm]?$/u.test(text)) return true
-  return false
-}
-
-/** Parse a Device Status Report cursor reply (`CSI row;col R`). */
-export function parseCursorPositionReply(text: string): { row: number; column: number } | undefined {
-  const match = /^\x1b\[(\d+);(\d+)R$/u.exec(text)
-  if (match === null) return undefined
-  return { row: Number(match[1]), column: Number(match[2]) }
-}
-
-/**
- * Round-trip to the attached terminal via CSI 6n. Returns undefined when the
- * reply never arrives (dumb pipe, blocked DSR). Does not interpret the
- * coordinates — only the elapsed milliseconds matter.
- */
-export async function probeTerminalRttMs(
-  stdin: NodeJS.ReadStream = process.stdin,
-  stdout: NodeJS.WriteStream = process.stdout,
-  timeoutMs = DSR_PROBE_TIMEOUT_MS,
-): Promise<number | undefined> {
-  if (!stdin.isTTY || !stdout.isTTY) return undefined
-  return await new Promise(resolve => {
-    let buffer = ''
-    let settled = false
-    const started = Date.now()
-    const finish = (value: number | undefined): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      stdin.removeListener('data', onData)
-      resolve(value)
-    }
-    const onData = (chunk: Buffer): void => {
-      buffer += chunk.toString('utf8')
-      if (parseCursorPositionReply(buffer) !== undefined) {
-        finish(Math.max(0, Date.now() - started))
-        return
-      }
-      if (buffer.length > 32 && !buffer.includes('\x1b[')) finish(undefined)
-    }
-    const timer = setTimeout(() => finish(undefined), timeoutMs)
-    stdin.on('data', onData)
-    try {
-      stdout.write('\x1b[6n')
-    } catch {
-      finish(undefined)
-    }
-  })
-}
-
-/** Parse a tool call's raw arguments JSON into an object; null when unparsable. */
-function parseJsonArgs(args: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = JSON.parse(args)
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null
-  } catch {
-    return null
-  }
-}
-
-function firstString(record: Record<string, unknown>, keys: readonly string[]): string {
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' && value.trim() !== '') return value
-  }
-  return ''
-}
-
-/** A short scalar rendering of one argument value, or null for objects/arrays. */
-function scalarText(value: unknown): string | null {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value)
-  }
-  return null
-}
-
-/** Take the first `max` code points of a string without splitting surrogates. */
-function sliceCodePoints(text: string, max: number): string {
-  if (max <= 0) return ''
-  return Array.from(text).slice(0, max).join('')
-}
-
-/** Take the last `max` code points of a string without splitting surrogates. */
-function lastCodePoints(text: string, max: number): string {
-  if (max <= 0) return ''
-  return Array.from(text).slice(-max).join('')
-}
-
-/** Format a model list compactly: show the first few entries and an ellipsis. */
-function formatModelList(models: readonly string[], max = 5): string {
-  const shown = models.slice(0, max)
-  const text = shown.join(', ')
-  return models.length > max ? `${text}…（共 ${models.length} 个）` : text
-}
-
-/** Prefer the fields a human scans for; fall back to the first scalar pairs. */
-function friendlyArgsSummary(name: string, args: string): string {
-  const parsed = parseJsonArgs(args)
-  if (parsed === null) return sliceCodePoints(args, 120)
-  const preferred = [
-    'path', 'file_path', 'file', 'query', 'pattern', 'url', 'command',
-    'name', 'skill', 'description', 'content', 'file_text', 'old_string', 'new_string',
-    'old_str', 'new_str', 'insert_line', 'line', 'offset', 'limit',
-  ]
-  const parts: string[] = []
-  for (const key of preferred) {
-    const value = parsed[key]
-    if (value === undefined || value === null || typeof value === 'object') continue
-    parts.push(`${key}: ${String(value)}`)
-    if (parts.length >= 3) break
-  }
-  if (parts.length === 0) {
-    for (const [key, value] of Object.entries(parsed)) {
-      const text = scalarText(value)
-      if (text !== null) {
-        parts.push(`${key}: ${text}`)
-        if (parts.length >= 3) break
-      }
-    }
-  }
-  const summary = parts.join('  ')
-  return summary === '' ? name : sliceCodePoints(summary, 160)
-}
-
-const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
-const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
-
 export type WorkspaceView = 'detailed' | 'compact'
-
-/** Sliding window of `windowSize` items that keeps `cursor` visible. */
-export function pickerWindowStart(cursor: number, total: number, windowSize = PICKER_WINDOW): number {
-  if (total <= windowSize) return 0
-  const maxStart = Math.max(0, total - windowSize)
-  const start = cursor - Math.floor((windowSize - 1) / 2)
-  return Math.max(0, Math.min(maxStart, start))
-}
 
 export function parseDisconnectPolicy(raw: string): DisconnectPolicyName | undefined {
   const id = raw.trim().toLowerCase()
@@ -2753,1109 +885,6 @@ export function parseWorkspaceView(raw: string): WorkspaceView | undefined {
   if (id === 'detailed' || id === 'detail' || id === 'full' || id === '详细') return 'detailed'
   if (id === 'compact' || id === 'minimal' || id === 'min' || id === '极简') return 'compact'
   return undefined
-}
-
-export function countDiffLines(hunks: readonly ToolDiffHunk[] | undefined): number {
-  if (hunks === undefined || hunks.length === 0) return 0
-  let total = 0
-  for (const hunk of hunks) {
-    const added = hunk.newText === '' ? 0 : hunk.newText.split('\n').length
-    if (hunk.oldText === null) {
-      total += added
-      continue
-    }
-    const removed = hunk.oldText === '' ? 0 : hunk.oldText.split('\n').length
-    total += added + removed
-  }
-  return total
-}
-
-/** Added / removed line counts for a diff (`oldText: null` means a new file). */
-export function countDiffAddDel(hunks: readonly ToolDiffHunk[] | undefined): { add: number; del: number } {
-  const stat = { add: 0, del: 0 }
-  if (hunks === undefined) return stat
-  for (const hunk of hunks) {
-    stat.add += hunk.newText === '' ? 0 : hunk.newText.split('\n').length
-    if (hunk.oldText !== null) {
-      stat.del += hunk.oldText === '' ? 0 : hunk.oldText.split('\n').length
-    }
-  }
-  return stat
-}
-
-/**
- * Git diffstat token, deletions first like `-13 +24`. Zero parts drop out
- * (a new file shows only `+24`); empty when the diff has no counted lines.
- */
-export function diffStatToken(add: number, del: number): string {
-  const parts: string[] = []
-  if (del > 0) parts.push(`-${del}`)
-  if (add > 0) parts.push(`+${add}`)
-  return parts.join(' ')
-}
-
-const READ_TOOL_NAMES = new Set(['read'])
-const TOOL_FLIP_MS = 280
-
-export function toolTargetPath(name: string, args: string, fallback = ''): string {
-  const parsed = parseJsonArgs(args)
-  if (READ_TOOL_NAMES.has(name)) {
-    if (parsed === null) return fallback
-    return firstString(parsed, ['path', 'file_path', 'url']) || fallback
-  }
-  if (DIFF_TOOL_NAMES.has(name)) {
-    if (parsed === null) return fallback
-    return firstString(parsed, ['file_path', 'path']) || fallback
-  }
-  return fallback
-}
-
-/** Path shown on a compact single-file edit summary. */
-export function compactEditPath(item: {
-  name: string
-  args: string
-  summary?: string
-  diff?: readonly { path?: string }[]
-}): string {
-  const fromArgs = toolTargetPath(item.name, item.args)
-  if (fromArgs !== '') return fromArgs
-  const fromDiff = item.diff?.map(hunk => hunk.path ?? '').find(path => path !== '')
-  if (fromDiff !== undefined && fromDiff !== '') return fromDiff
-  const summary = item.summary?.trim() ?? ''
-  return summary
-}
-
-function sameToolPath(left: string, right: string): boolean {
-  if (left === '' || right === '') return false
-  const normalize = (value: string): string => value.replaceAll('\\', '/').replace(/\/+$/u, '')
-  return normalize(left) === normalize(right)
-}
-
-export function countOutputLines(text: string): number {
-  if (text === '') return 0
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  return body === '' ? 0 : body.split('\n').length
-}
-
-function mergeableToolKind(name: string): 'read' | 'edit' | undefined {
-  if (READ_TOOL_NAMES.has(name)) return 'read'
-  if (DIFF_TOOL_NAMES.has(name)) return 'edit'
-  return undefined
-}
-
-/**
- * Consecutive same-path reads (or edits) collapse onto one card.
- * A → B → C → A becomes four cards; A ×5 stays one card with repeats=5.
- */
-export function canMergeToolCall(
-  previous: Extract<Row, { kind: 'tool' }> | undefined,
-  next: { name: string; args: string },
-): previous is Extract<Row, { kind: 'tool' }> {
-  if (previous === undefined) return false
-  const kind = mergeableToolKind(next.name)
-  if (kind === undefined || mergeableToolKind(previous.name) !== kind) return false
-  const previousPath = toolTargetPath(previous.name, previous.args, previous.summary)
-  const nextPath = toolTargetPath(next.name, next.args, previousPath)
-  return sameToolPath(previousPath, nextPath)
-}
-
-export function compactToolGroups(tools: readonly Extract<Row, { kind: 'tool' }>[]): {
-  edits: Extract<Row, { kind: 'tool' }>[]
-  calls: Extract<Row, { kind: 'tool' }>[]
-  failedCalls: number
-} {
-  const edits: Extract<Row, { kind: 'tool' }>[] = []
-  const calls: Extract<Row, { kind: 'tool' }>[] = []
-  for (const tool of tools) {
-    if (DIFF_TOOL_NAMES.has(tool.name) || (tool.diff !== undefined && tool.diff.length > 0)) edits.push(tool)
-    else calls.push(tool)
-  }
-  return {
-    edits,
-    calls,
-    failedCalls: calls.filter(tool => tool.status === 'error').length,
-  }
-}
-
-/**
- * Split compact-view tools into the bursts that belong with each assistant
- * reply: tools after reply N sit with that reply, until the next reply.
- */
-export function compactToolBursts(rows: readonly Row[]): Array<{
-  after: Extract<Row, { kind: 'assistant' }> | undefined
-  groups: ReturnType<typeof compactToolGroups>
-}> {
-  const bursts: Array<{
-    after: Extract<Row, { kind: 'assistant' }> | undefined
-    tools: Extract<Row, { kind: 'tool' }>[]
-  }> = []
-  let current: (typeof bursts)[number] = { after: undefined, tools: [] }
-  bursts.push(current)
-  for (const row of rows) {
-    if (row.kind === 'assistant') {
-      current = { after: row, tools: [] }
-      bursts.push(current)
-      continue
-    }
-    if (row.kind === 'tool') current.tools.push(row)
-  }
-  return bursts
-    .map(burst => ({ after: burst.after, groups: compactToolGroups(burst.tools) }))
-    .filter(burst => burst.groups.calls.length > 0 || burst.groups.edits.length > 0)
-}
-const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task'])
-
-/**
- * Tool calls that already have a dedicated transcript card (goal/change,
- * plan dock, question dialog). Showing them again as raw `get_goal` cards
- * just duplicates chrome.
- */
-const HIDDEN_TOOL_NAMES = new Set(['get_goal'])
-
-const TOOL_TITLE_KEYS = [
-  'edit', 'write', 'str_replace_editor', 'fetch', 'list_files', 'list', 'ls',
-  'find', 'search', 'delete', 'rm', 'rename', 'mv', 'mkdir', 'skills', 'skill',
-  'create_goal', 'update_goal', 'complete_goal', 'clear_goal', 'pause_goal',
-  'resume_goal', 'todo_write', 'todo', 'compact', 'glob', 'grep', 'read',
-  'web_search', 'web_fetch',
-] as const
-
-function toolTitle(name: string): string {
-  if (name === '' || name.startsWith('call-')) return t('card.tool')
-  return t(`toolTitle.${name}`, undefined, name === 'tool' ? t('card.tool') : name)
-}
-const MAX_SUBAGENT_LOGS = 80
-
-const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
-  pending: '○',
-  in_progress: '◐',
-  completed: '●',
-}
-
-/** True while a plan still belongs in the dock (latest incomplete work). */
-export function planIsLive(plan: {
-  active: boolean
-  pending: boolean
-  todos: readonly PlanTodoItem[]
-  planMarkdown?: string
-  archived?: boolean
-}): boolean {
-  if (plan.archived === true) return false
-  if (plan.active || plan.pending) return true
-  if (plan.todos.some(item => item.status !== 'completed')) return true
-  return false
-}
-
-/** Open todos left behind when a turn ends without a completing todo_write. */
-export function planTurnLeftOpen(plan: {
-  todos: readonly PlanTodoItem[]
-}): boolean {
-  return plan.todos.some(item => item.status !== 'completed')
-}
-
-/** Mark leftover in-progress/pending todos as display-stale after turn/end. */
-export function applyTurnEndToPlan<T extends {
-  todos: PlanTodoItem[]
-  turnLeftOpen?: boolean
-}>(plan: T): T {
-  if (!planTurnLeftOpen(plan)) {
-    plan.turnLeftOpen = false
-    return plan
-  }
-  plan.turnLeftOpen = true
-  return plan
-}
-
-/** Follow-up that asks the model to close leftover todos. One per open list. */
-export function planCloseNudgeText(plan: {
-  todos: readonly PlanTodoItem[]
-}): string {
-  const leftover = plan.todos.filter(item => item.status !== 'completed')
-  const lines = leftover.map(item => `- [${item.status}] ${item.content}`)
-  return [t('plan.nudge'), ...lines].join('\n')
-}
-
-export type CardCategory = 'thinking' | 'plan' | 'subagent' | 'reply' | 'tool' | 'question' | 'goal' | 'prompt'
-
-/** Category for jump / search. Assistant replies are not collapsible cards. */
-export function cardCategoryOf(row: { kind: string }): CardCategory | undefined {
-  if (row.kind === 'reasoning' || row.kind === 'streaming-reasoning') return 'thinking'
-  if (row.kind === 'plan') return 'plan'
-  if (row.kind === 'subagent') return 'subagent'
-  if (row.kind === 'assistant') return 'reply'
-  if (row.kind === 'tool') return 'tool'
-  if (row.kind === 'question') return 'question'
-  if (row.kind === 'goal') return 'goal'
-  if (row.kind === 'prompt') return 'prompt'
-  if (row.kind === 'compaction') return 'tool'
-  return undefined
-}
-
-function cardCategoryLabel(category: CardCategory): string {
-  return t(`card.${category}`)
-}
-
-const SEARCHABLE_CATEGORIES: readonly CardCategory[] = ['thinking', 'plan', 'subagent', 'reply']
-
-function parseCardCategoryToken(token: string): CardCategory | undefined {
-  const id = token.trim().toLowerCase()
-  if (id === 'thinking' || id === 'think' || id === '推理' || id === '思考') return 'thinking'
-  if (id === 'plan' || id === '计划') return 'plan'
-  if (id === 'subagent' || id === 'sub' || id === '子代理') return 'subagent'
-  if (id === 'reply' || id === 'assistant' || id === '回复') return 'reply'
-  if (id === 'tool' || id === '工具') return 'tool'
-  if (id === 'question' || id === '提问') return 'question'
-  if (id === 'goal' || id === '目标') return 'goal'
-  if (id === 'prompt' || id === '提示词' || id === '注入') return 'prompt'
-  return undefined
-}
-
-/** Split `/find thinking padAnsi` into an optional category and a query. */
-export function parseFindQuery(raw: string): { category?: CardCategory; query: string } {
-  const text = raw.trim()
-  if (text === '') return { query: '' }
-  const match = /^(\S+)(?:\s+(.*))?$/u.exec(text)
-  if (match === null) return { query: text }
-  const category = parseCardCategoryToken(match[1] ?? '')
-  if (category === undefined) return { query: text }
-  return { category, query: (match[2] ?? '').trim() }
-}
-
-function rowSearchHaystack(row: Row): string {
-  switch (row.kind) {
-    case 'reasoning':
-    case 'assistant':
-    case 'user':
-    case 'system':
-    case 'error':
-    case 'brand':
-      return row.text
-    case 'tool':
-      return `${row.title} ${row.summary} ${row.output} ${row.args}`
-    case 'subagent':
-      return `${row.label} ${row.lastActivity} ${row.logs.map(entry => entry.text).join('\n')}`
-    case 'plan':
-      return `${row.planMarkdown ?? ''} ${row.todos.map(item => item.content).join('\n')}`
-    case 'question':
-      return `${row.title} ${row.summary} ${row.detail ?? ''} ${row.header ?? ''}`
-    case 'goal':
-      return `${row.objective} ${row.blockedReason ?? ''}`
-    case 'compaction':
-      return `${row.summary ?? ''} ${row.error ?? ''}`
-    case 'prompt':
-      return `${row.sources.join(' ')} ${row.text}`
-    default:
-      return ''
-  }
-}
-
-const PROMPT_SOURCE_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
-  { id: 'AGENTS.MD', pattern: /\bAGENTS\.md\b/iu },
-  { id: 'CLAUDE.MD', pattern: /\bCLAUDE\.md\b/iu },
-  { id: 'GEMINI.MD', pattern: /\bGEMINI\.md\b/iu },
-  { id: 'CURSOR.MD', pattern: /\b(?:\.?cursor(?:\/rules)?|CURSOR\.md)\b/iu },
-  { id: 'COPILOT.MD', pattern: /\b(?:COPILOT\.md|\.github\/copilot-instructions)\b/iu },
-  { id: 'WINDSURF.MD', pattern: /\bWINDSURF\.md\b/iu },
-]
-
-const SYSTEM_PRESET_HINT = /you are an ai agent powered by deepseek harness|powered by DeepSeek Harness|harness identity|deployment persona|system prompt/iu
-const SYSTEM_PRESET_LABEL = (): string => t('prompt.systemPreset')
-const CONTEXT_LABEL = (): string => t('prompt.context')
-
-/** Classify one injected prompt blob into display sources. */
-export function promptInjectionSources(text: string, plugin?: string): string[] {
-  const found: string[] = []
-  const seen = new Set<string>()
-  const add = (id: string): void => {
-    if (seen.has(id)) return
-    seen.add(id)
-    found.push(id)
-  }
-  for (const { id, pattern } of PROMPT_SOURCE_PATTERNS) {
-    if (pattern.test(text)) add(id)
-  }
-  const fromTags = text.matchAll(/Additional instructions from:\s*([^\n<]+)/giu)
-  for (const match of fromTags) {
-    const raw = (match[1] ?? '').trim()
-    const file = raw.split(/[\\/]/u).filter(Boolean).at(-1)
-    if (file !== undefined && /\.md$/iu.test(file)) add(file.toUpperCase())
-  }
-  const looksSystem = SYSTEM_PRESET_HINT.test(text)
-    || plugin === 'system-prompt'
-    || plugin === 'dsh-system-prompt'
-  if (looksSystem) add(SYSTEM_PRESET_LABEL())
-  if (found.length === 0) add(CONTEXT_LABEL())
-  const systemIndex = found.indexOf(SYSTEM_PRESET_LABEL())
-  if (systemIndex > 0) {
-    found.splice(systemIndex, 1)
-    found.unshift(SYSTEM_PRESET_LABEL())
-  }
-  return found
-}
-
-export function promptInjectionTitle(sources: readonly string[]): string {
-  return sources.length === 0 ? t('prompt.inject') : t('prompt.injectWith', { sources: sources.join(' ') })
-}
-
-export function isPromptInjectionMessage(sourceKind: string, text: string, plugin?: string): boolean {
-  if (sourceKind === 'user') return false
-  if (sourceKind === 'plugin') return true
-  return /<system-reminder\b/iu.test(text)
-    || SYSTEM_PRESET_HINT.test(text)
-    || promptInjectionSources(text, plugin).some(id => id !== SYSTEM_PRESET_LABEL())
-}
-
-/** Official `/compact` idle-only failures, mapped to a local sentence. */
-export function formatCompactCommandError(text: string): string {
-  const raw = text.trim()
-  if (raw === '') return t('command.failed')
-  if (
-    raw.includes('agent is not idle')
-    || raw.includes('active compaction')
-    || raw.includes('requires an idle agent')
-  ) {
-    return t('compact.busy')
-  }
-  if (raw.includes('No compactable history')) return t('compact.nothing')
-  if (raw.startsWith('Usage: /compact')) return t('compact.usage')
-  if (raw === 'Compaction cancelled.') return t('compact.cancelled')
-  if (raw.includes('could not produce a useful summary')) return t('compact.noSummary')
-  if (raw.includes('history selected for compaction changed')) return t('compact.changed')
-  if (raw.includes('did not finish cleanly')) return t('compact.commit')
-  if (raw.includes('could not be saved')) return t('compact.persistence')
-  return raw
-}
-
-export function compactionHeaderText(row: {
-  status: 'running' | 'ok' | 'error'
-  pruneCount: number
-  prunedTokens: number
-  error?: string
-}): string {
-  const recovered = row.prunedTokens > 0
-    ? t('compact.recoverTokens', { tokens: formatTokens(row.prunedTokens) })
-    : row.pruneCount > 0
-      ? t('compact.pruneChunks', { count: row.pruneCount })
-      : t('compact.prepare')
-  if (row.status === 'running') return t('compact.running', { detail: recovered })
-  if (row.status === 'error') return t('compact.failed', { error: row.error ?? t('quota.unknown') })
-  return t('compact.done', { detail: recovered })
-}
-
-/** Transcript rows matching a `/find` query, newest last. */
-export function matchTranscriptRows(
-  rows: readonly Row[],
-  raw: string,
-): Row[] {
-  const { category, query } = parseFindQuery(raw)
-  const needle = query.toLowerCase()
-  return rows.filter(row => {
-    const kind = cardCategoryOf(row)
-    if (kind === undefined) return false
-    if (category !== undefined && kind !== category) return false
-    if (needle === '') return SEARCHABLE_CATEGORIES.includes(kind) || category !== undefined
-    return rowSearchHaystack(row).toLowerCase().includes(needle)
-  })
-}
-
-/** One-line note under an expanded plan strip. */
-export function planDockNote(plan: {
-  active: boolean
-  pending: boolean
-  todos: readonly PlanTodoItem[]
-  planMarkdown?: string
-  turnLeftOpen?: boolean
-}): string {
-  const running = plan.todos.some(item => item.status === 'in_progress')
-  const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
-  const leftover = plan.todos.filter(item => item.status !== 'completed').length
-  if (plan.turnLeftOpen === true && leftover > 0) {
-    return t('plan.leftOpen', { count: leftover })
-  }
-  if (plan.pending) return t('plan.pendingNext')
-  if (plan.active) return t('plan.planningOnly')
-  if (running) return t('plan.executing')
-  if (allDone) return t('plan.allDone')
-  if (plan.todos.length > 0 || (plan.planMarkdown !== undefined && plan.planMarkdown !== '')) {
-    return t('plan.stillOpen')
-  }
-  return t('plan.closed')
-}
-
-/** Compact per-status counts matching the web plan strip. */
-export function todoProgressLabel(todos: readonly PlanTodoItem[]): string {
-  const done = todos.filter(item => item.status === 'completed').length
-  const active = todos.filter(item => item.status === 'in_progress').length
-  const pending = todos.length - done - active
-  const parts: string[] = []
-  if (done > 0) parts.push(t('plan.todoDone', { count: done }))
-  if (active > 0) parts.push(t('plan.todoActive', { count: active }))
-  if (pending > 0) parts.push(t('plan.todoPending', { count: pending }))
-  return parts.join(' · ')
-}
-
-function todoItemKind(status: PlanTodoItem['status']): DisplayKind {
-  if (status === 'completed') return 'todo-done'
-  if (status === 'in_progress') return 'todo-active'
-  return 'todo-pending'
-}
-
-function planMarkdownFromArgs(value: unknown): string | undefined {
-  const root = typeof value === 'string' ? parseJsonArgs(value) : value
-  if (root === null || typeof root !== 'object' || Array.isArray(root)) return undefined
-  const plan = (root as { plan?: unknown }).plan
-  return typeof plan === 'string' && plan.trim() !== '' ? plan : undefined
-}
-
-/** First markdown heading of an exit_plan_mode plan body. */
-export function planTitleFromMarkdown(markdown: string): string | undefined {
-  const match = /^\s*#\s+(.+)$/mu.exec(markdown)
-  const title = match?.[1]?.trim()
-  return title === undefined || title === '' ? undefined : title
-}
-
-/** Parse a todo_write payload into displayable plan items. */
-export function parsePlanTodos(value: unknown): PlanTodoItem[] {
-  const root = typeof value === 'string' ? parseJsonArgs(value) : value
-  const todos = root !== null && typeof root === 'object' && !Array.isArray(root)
-    ? (root as { todos?: unknown }).todos
-    : Array.isArray(root) ? root : undefined
-  if (!Array.isArray(todos)) return []
-  const out: PlanTodoItem[] = []
-  for (const item of todos) {
-    if (typeof item !== 'object' || item === null) continue
-    const content = typeof (item as { content?: unknown }).content === 'string'
-      ? (item as { content: string }).content.trim()
-      : ''
-    if (content === '') continue
-    const status = (item as { status?: unknown }).status
-    out.push({
-      content,
-      status: status === 'in_progress' || status === 'completed' ? status : 'pending',
-    })
-  }
-  return out
-}
-
-/** Compact todo-list summary: done/total plus the first in-progress task. */
-export function todoSummary(value: unknown): string {
-  const todos = parsePlanTodos(value)
-  if (todos.length === 0) return '计划列表'
-  const done = todos.filter(item => item.status === 'completed').length
-  const active = todos.find(item => item.status === 'in_progress')
-  const extra = todos.filter(item => item.status === 'in_progress').length
-  const head = `${done}/${todos.length} 完成`
-  if (active === undefined) return head
-  return extra > 1 ? `${head} · ${active.content} +${extra - 1}` : `${head} · ${active.content}`
-}
-
-/** Compact ask_user_question summary from tool arguments. */
-export function askSummary(value: unknown): string {
-  const root = typeof value === 'string' ? parseJsonArgs(value) : value
-  const questions = root !== null && typeof root === 'object' && !Array.isArray(root)
-    ? (root as { questions?: unknown }).questions
-    : undefined
-  if (!Array.isArray(questions) || questions.length === 0) return '等待回答'
-  const first = questions[0]
-  const text = typeof first === 'object' && first !== null && typeof (first as { question?: unknown }).question === 'string'
-    ? (first as { question: string }).question
-    : '等待回答'
-  return questions.length > 1 ? `${text}（${questions.length} 题）` : text
-}
-
-/** One-line subagent card header used while collapsed. */
-export function subagentHeaderText(row: Extract<Row, { kind: 'subagent' }>, now = Date.now()): string {
-  const elapsed = Math.max(0, Math.floor(((row.endedAt ?? now) - row.startedAt) / 1000))
-  const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`
-  const state = row.status === 'running'
-    ? '运行中'
-    : row.status === 'ok'
-      ? '完成'
-      : row.status === 'aborted'
-        ? '已中断'
-        : '失败'
-  const activity = row.lastActivity === '' ? '' : ` · ${row.lastActivity}`
-  const id = row.sessionId.slice(0, 8)
-  return `${row.label}  [${id}]  ${state} · ${elapsedLabel}${activity}`
-}
-
-function appendSubagentLog(row: Extract<Row, { kind: 'subagent' }>, entry: SubagentLogEntry): void {
-  row.logs.push(entry)
-  if (row.logs.length > MAX_SUBAGENT_LOGS) row.logs.splice(0, row.logs.length - MAX_SUBAGENT_LOGS)
-  row.lastActivity = entry.text
-}
-
-function planReviewOf(question: AskUserQuestionItem): boolean {
-  return question.intent?.kind === 'plan-review' && question.detail !== undefined && question.detail !== ''
-}
-
-/** Derive the intended file change from a mutation tool's arguments. */
-function diffHunksFromArgs(name: string, argsRaw: string): ToolDiffHunk[] | null {
-  const args = parseJsonArgs(argsRaw)
-  if (args === null) return null
-  if (name === 'edit' || name === 'write') {
-    const path = typeof args.file_path === 'string' ? args.file_path : ''
-    if (path === '') return null
-    if (name === 'edit') {
-      return [{
-        path,
-        oldText: typeof args.old_string === 'string' ? args.old_string : null,
-        newText: typeof args.new_string === 'string' ? args.new_string : '',
-      }]
-    }
-    return [{
-      path,
-      oldText: null,
-      newText: typeof args.content === 'string' ? args.content : '',
-    }]
-  }
-  if (name === 'str_replace_editor') {
-    const path = typeof args.path === 'string' ? args.path : ''
-    const command = typeof args.command === 'string' ? args.command : ''
-    if (path === '') return null
-    if (command === 'create') {
-      return [{ path, oldText: null, newText: typeof args.file_text === 'string' ? args.file_text : '' }]
-    }
-    if (command === 'str_replace') {
-      return [{
-        path,
-        oldText: typeof args.old_str === 'string' ? args.old_str : null,
-        newText: typeof args.new_str === 'string' ? args.new_str : '',
-      }]
-    }
-  }
-  return null
-}
-
-/** One-line friendly tool-call presentation (command / path / arg summary). */
-export function presentToolCall(name: string, args: string): {
-  title: string
-  summary: string
-  command?: string
-  cwd?: string
-  diff?: ToolDiffHunk[]
-} {
-  const parsed = parseJsonArgs(args)
-  if (SHELL_TOOL_NAMES.has(name)) {
-    const command = typeof parsed?.command === 'string' ? parsed.command : sliceCodePoints(args, 80)
-    return {
-      title: name,
-      summary: `$ ${command}`,
-      command,
-      cwd: typeof parsed?.workdir === 'string' ? parsed.workdir : undefined,
-    }
-  }
-  if (DIFF_TOOL_NAMES.has(name)) {
-    const diff = diffHunksFromArgs(name, args)
-    const path = diff?.[0]?.path
-    return {
-      title: toolTitle(name),
-      summary: path ?? friendlyArgsSummary(name, args),
-      ...diff === null || diff === undefined ? {} : { diff },
-    }
-  }
-  if (SUBAGENT_TOOL_NAMES.has(name)) {
-    const description = typeof parsed?.description === 'string' ? parsed.description.trim() : ''
-    return {
-      title: toolTitle(name === 'subagent_fork' ? 'subagent_fork' : 'subagent'),
-      summary: description === '' ? friendlyArgsSummary(name, args) : description,
-    }
-  }
-  if (name === 'todo_write' || name === 'todo') {
-    return { title: toolTitle('todo_write'), summary: todoSummary(parsed) }
-  }
-  if (name === 'ask_user_question') {
-    return { title: toolTitle('ask_user_question'), summary: askSummary(parsed) }
-  }
-  if (name === 'exit_plan_mode') {
-    const plan = typeof parsed?.plan === 'string' ? parsed.plan : ''
-    return { title: toolTitle('exit_plan_mode'), summary: planTitleFromMarkdown(plan) ?? t('plan.waitConfirm') }
-  }
-  if (name === 'update_goal' || name === 'create_goal') {
-    const action = typeof parsed?.action === 'string' ? parsed.action.trim() : ''
-    const objective = typeof parsed?.objective === 'string' ? parsed.objective.trim() : ''
-    const titleKey = name === 'create_goal' || action === 'create' || action === 'set'
-      ? 'create_goal'
-      : action === 'pause' ? 'pause_goal'
-        : action === 'resume' ? 'resume_goal'
-          : action === 'clear' ? 'clear_goal'
-            : action === 'complete' ? 'complete_goal'
-              : 'update_goal'
-    return { title: toolTitle(titleKey), summary: objective || action || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'get_goal') {
-    return { title: toolTitle('get_goal'), summary: friendlyArgsSummary(name, args) }
-  }
-  if (name === 'skill' || name === 'skills') {
-    const skill = typeof parsed?.name === 'string' ? parsed.name.trim()
-      : typeof parsed?.skill === 'string' ? parsed.skill.trim()
-        : typeof parsed?.id === 'string' ? parsed.id.trim()
-          : ''
-    return { title: toolTitle('skill'), summary: skill || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'read') {
-    const path = typeof parsed?.path === 'string' ? parsed.path
-      : typeof parsed?.file_path === 'string' ? parsed.file_path
-        : typeof parsed?.url === 'string' ? parsed.url
-          : ''
-    return { title: toolTitle('read'), summary: path || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'grep') {
-    const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern : ''
-    const path = typeof parsed?.path === 'string' ? parsed.path : ''
-    return { title: toolTitle('grep'), summary: [pattern, path].filter(Boolean).join('  ') || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'glob') {
-    const pattern = typeof parsed?.pattern === 'string' ? parsed.pattern
-      : typeof parsed?.glob_pattern === 'string' ? parsed.glob_pattern
-        : ''
-    return { title: toolTitle('glob'), summary: pattern || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'web_search') {
-    const query = typeof parsed?.query === 'string' ? parsed.query : typeof parsed?.q === 'string' ? parsed.q : ''
-    return { title: toolTitle('web_search'), summary: query || friendlyArgsSummary(name, args) }
-  }
-  if (name === 'web_fetch') {
-    const url = typeof parsed?.url === 'string' ? parsed.url : ''
-    return { title: toolTitle('web_fetch'), summary: url || friendlyArgsSummary(name, args) }
-  }
-  return { title: toolTitle(name), summary: friendlyArgsSummary(name, args) }
-}
-
-/** Validate a tool/result meta payload's structured diff, mirroring the web card. */
-export function diffMetaDiffs(meta: unknown): ToolDiffHunk[] | null {
-  if (typeof meta !== 'object' || meta === null) return null
-  const diffs = (meta as { diffs?: unknown }).diffs
-  if (!Array.isArray(diffs) || diffs.length === 0) return null
-  const out: ToolDiffHunk[] = []
-  for (const hunk of diffs) {
-    if (typeof hunk !== 'object' || hunk === null) return null
-    const { path, oldText, newText } = hunk as Record<string, unknown>
-    if (typeof path !== 'string' || typeof newText !== 'string') return null
-    if (oldText !== null && typeof oldText !== 'string') return null
-    out.push({ path, oldText: oldText as string | null, newText })
-  }
-  return out
-}
-
-/** Split one diff side into content lines (trailing newline is a terminator). */
-function diffContentLines(text: string): string[] {
-  if (text === '') return []
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  return body.split('\n')
-}
-
-/** One rendered diff body line with its display role. */
-interface DiffDisplayLine {
-  kind: DisplayKind
-  text: string
-}
-
-/** Cap one flat diff/body row list to `maxLines` while preserving the final line. */
-function capDisplayLines(lines: readonly DiffDisplayLine[], maxLines: number): DiffDisplayLine[] {
-  const budget = Math.max(1, Math.floor(maxLines))
-  if (lines.length <= budget) return [...lines]
-  const omitted = lines.length - budget + 1
-  const marker: DiffDisplayLine = { kind: 'tool-result', text: `… ${omitted} more line(s) …` }
-  if (budget === 1) return [marker]
-  return [...lines.slice(0, budget - 2), marker, ...lines.slice(-1)]
-}
-
-/** Running / ok / error → ANSI color for the status dot and status word only. */
-export function toolStateColor(status: 'running' | 'ok' | 'error' | undefined): '33' | '32' | '31' {
-  if (status === 'ok') return '32'
-  if (status === 'error') return '31'
-  return '33'
-}
-
-export function toolStateLabel(status: 'running' | 'ok' | 'error' | undefined): string {
-  if (status === 'ok') return 'ok'
-  if (status === 'error') return 'error'
-  return 'running…'
-}
-
-/** Header + SGR spans: default title, dim operand, colored ●. `[ok]` is omitted — the green dot is enough. */
-export function buildToolHeader(input: {
-  focused: boolean
-  expanded: boolean
-  title: string
-  summary: string
-  status?: 'running' | 'ok' | 'error'
-  command?: string
-  signal?: string
-  exitCode?: number
-  spinner?: string
-  flipping?: boolean
-  diffStat?: { add: number; del: number }
-}): { plain: string; segments: TextSegment[] } {
-  const running = input.status === undefined || input.status === 'running'
-  const stateToken = input.status === 'ok' ? '' : `[${toolStateLabel(input.status)}]`
-  const exit = !running && input.command !== undefined
-    ? input.signal !== undefined
-      ? `  [信号 ${input.signal}]`
-      : (input.exitCode ?? 0) !== 0
-        ? `  [退出码 ${input.exitCode}]`
-        : ''
-    : ''
-  const spinner = input.spinner ?? ''
-  const prefix = input.focused ? '▶ ' : '  '
-  const flipping = input.flipping === true
-  const marker = flipping ? '◇' : input.expanded ? '▾' : '▸'
-  const lead = `${prefix}${marker} ● ${input.title}`
-  const summaryText = input.summary === '' ? '' : `  ${input.summary}`
-  const statToken = input.diffStat === undefined ? '' : diffStatToken(input.diffStat.add, input.diffStat.del)
-  const statText = statToken === '' ? '' : `  ${statToken}`
-  const stateGap = stateToken === '' ? '' : '  '
-  const tail = `${stateGap}${stateToken}${exit}${spinner}`
-  const plain = `${lead}${summaryText}${statText}${tail}`
-  const stateCode = toolStateColor(input.status)
-  const dotIndex = lead.indexOf('●')
-  const stateIndex = stateToken === '' ? -1 : lead.length + summaryText.length + statText.length + stateGap.length
-  const segments: TextSegment[] = []
-  if (flipping) {
-    const markerIndex = prefix.length
-    segments.push({ start: markerIndex, end: markerIndex + marker.length, sgr: '36' })
-  }
-  if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
-  if (summaryText.length > 0) {
-    segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: '90' })
-  }
-  if (statToken !== '') {
-    // Git diffstat colors: deletions red, additions green. The token sits
-    // two cells after the summary, deletions before the joining space.
-    const statStart = lead.length + summaryText.length + 2
-    const delEnd = statToken.indexOf(' +')
-    if (statToken.startsWith('-')) {
-      segments.push({
-        start: statStart,
-        end: statStart + (delEnd === -1 ? statToken.length : delEnd),
-        sgr: '31',
-      })
-    }
-    if (delEnd !== -1) {
-      const addStart = statStart + delEnd + 1
-      segments.push({ start: addStart, end: statStart + statToken.length, sgr: '32' })
-    }
-  }
-  if (stateIndex >= 0) {
-    segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
-  } else if (exit !== '') {
-    const exitIndex = lead.length + summaryText.length + statText.length
-    segments.push({ start: exitIndex, end: exitIndex + exit.length, sgr: stateCode })
-  }
-  if (spinner !== '') {
-    const spinnerStart = (stateIndex >= 0 ? stateIndex + stateToken.length + exit.length : lead.length + summaryText.length + statText.length + exit.length)
-    segments.push({
-      start: spinnerStart,
-      end: plain.length,
-      sgr: '90',
-    })
-  }
-  return { plain, segments: segments.filter(segment => segment.end > segment.start) }
-}
-
-/** How many terminal rows a tool body occupies after wrapping. */
-export function wrappedToolBodyLineCount(
-  lines: readonly { text: string }[],
-  width: number,
-): number {
-  const inner = Math.max(1, width - 2)
-  let count = 0
-  for (const line of lines) {
-    count += Math.max(1, wrap(line.text, inner).length)
-  }
-  return count
-}
-
-/**
- * True when the full tool body plus a one-line header fits in the workspace
- * (the rows between the title bar and the input chrome). Oversized bodies
- * open a dedicated inspect overlay instead of dumping into the transcript.
- */
-export function toolBodyFitsWorkspace(bodyLines: number, workspaceRows: number): boolean {
-  return bodyLines + 1 <= Math.max(1, workspaceRows)
-}
-
-/** Flatten hunks into git-style `-`/`+` lines plus the web-compatible footer. */
-export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDisplayLine[] {
-  const rows: DiffDisplayLine[] = []
-  const paths = new Set<string>()
-  let added = 0
-  let removed = 0
-  let prevPath: string | undefined
-  for (const hunk of diffs) {
-    paths.add(hunk.path)
-    rows.push(hunk.path === prevPath
-      ? { kind: 'diff-path', text: '⋯' }
-      : { kind: 'diff-path', text: hunk.path })
-    prevPath = hunk.path
-    if (hunk.oldText !== null) {
-      for (const line of diffContentLines(hunk.oldText)) {
-        rows.push({ kind: 'diff-del', text: `- ${line}` })
-        removed += 1
-      }
-    }
-    for (const line of diffContentLines(hunk.newText)) {
-      rows.push({ kind: 'diff-add', text: `+ ${line}` })
-      added += 1
-    }
-  }
-  rows.push({
-    kind: 'tool-result',
-    text: `└ +${added} -${removed} · ${paths.size} file${paths.size === 1 ? '' : 's'}`,
-  })
-  return capDisplayLines(rows, maxLines)
-}
-
-/** Keys whose multiline strings render as indented content blocks. */
-const LONG_TEXT_KEYS = new Set([
-  'program', 'content', 'file_text', 'new_string', 'old_string',
-  'plan', 'markdown', 'details', 'description', 'text',
-])
-
-const JSON_STRING_CAP = 400
-const JSON_MAX_DEPTH = 16
-const JSON_MAX_ENTRIES = 60
-
-/** Convert any parsed JSON value into readable indented display lines. */
-export function friendlyJsonLines(value: unknown, depth = 0): string[] {
-  const pad = '  '.repeat(depth)
-  if (value === null) return [`${pad}null`]
-  if (typeof value === 'string') {
-    const capped = value.length > JSON_STRING_CAP ? `${value.slice(0, JSON_STRING_CAP)}…` : value
-    return [`${pad}${capped}`]
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return [`${pad}${String(value)}`]
-  }
-  if (depth >= JSON_MAX_DEPTH) {
-    return [`${pad}…`]
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [`${pad}[]`]
-    const shown = value.slice(0, JSON_MAX_ENTRIES)
-    const lines: string[] = []
-    for (const item of shown) {
-      if (item !== null && typeof item === 'object') {
-        lines.push(`${pad}-`)
-        lines.push(...friendlyJsonLines(item, depth + 1))
-      } else {
-        lines.push(`${pad}- ${friendlyJsonLines(item, 0)[0] ?? ''}`)
-      }
-    }
-    if (value.length > shown.length) lines.push(`${pad}… ${value.length - shown.length} more item(s)`)
-    return lines
-  }
-  if (typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-    if (entries.length === 0) return [`${pad}{}`]
-    const shown = entries.slice(0, JSON_MAX_ENTRIES)
-    const lines: string[] = []
-    for (const [key, item] of shown) {
-      if (typeof item === 'string' && item.includes('\n') && LONG_TEXT_KEYS.has(key)) {
-        const contentLines = item.split('\n')
-        lines.push(`${pad}${key}:`)
-        for (const contentLine of contentLines.slice(0, 80)) {
-          lines.push(`${pad}  │ ${contentLine}`)
-        }
-        if (contentLines.length > 80) {
-          lines.push(`${pad}  … ${contentLines.length - 80} more line(s)`)
-        }
-      } else if (item !== null && typeof item === 'object') {
-        lines.push(`${pad}${key}:`)
-        lines.push(...friendlyJsonLines(item, depth + 1))
-      } else {
-        const scalar = friendlyJsonLines(item, 0)[0] ?? ''
-        lines.push(`${pad}${key}: ${scalar}`)
-      }
-    }
-    if (entries.length > shown.length) lines.push(`${pad}… ${entries.length - shown.length} more field(s)`)
-    return lines
-  }
-  return [`${pad}${String(value)}`]
-}
-
-/** Minimal tool-row shape the expanded-body renderer reads. */
-interface ToolBodySource {
-  name?: string
-  diff?: ToolDiffHunk[]
-  command?: string
-  status?: 'running' | 'ok' | 'error'
-  output: string
-  args: string
-}
-
-/** Try to parse a result body as one JSON document, when it looks like one. */
-function parseJsonBody(text: string): unknown | null {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
-  try {
-    return JSON.parse(trimmed) as unknown
-  } catch {
-    return null
-  }
-}
-
-/**
- * The expanded body of one tool card: diffs and shell output keep their
- * dedicated views; every other tool's JSON arguments and JSON result are
- * converted into readable indented content instead of raw JSON text.
- */
-export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDisplayLine[] {
-  const unlimited = !Number.isFinite(maxLines) || maxLines >= Number.MAX_SAFE_INTEGER
-  if (row.diff !== undefined && row.diff.length > 0) {
-    // File-edit diffs are never truncated in the card: omitting hunks would
-    // hide the exact code change the model applied. `maxLines` only governs
-    // shell and generic JSON output bodies (and the inspect overlay).
-    return renderToolDiff(row.diff, unlimited ? Number.MAX_SAFE_INTEGER : maxLines)
-  }
-  if (row.command !== undefined) {
-    const out: DiffDisplayLine[] = []
-    if (row.output !== '') {
-      const text = unlimited ? row.output : truncate(row.output, maxLines)
-      for (const line of text.split('\n')) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    } else if (row.status !== 'running' && row.status !== undefined) {
-      out.push({ kind: 'tool-result', text: '(无输出)' })
-    }
-    return out
-  }
-
-  const specialized = specializedToolBody(row, unlimited ? Number.MAX_SAFE_INTEGER : maxLines)
-  if (specialized !== null) {
-    return unlimited ? specialized : capDisplayLines(specialized, maxLines)
-  }
-
-  const out: DiffDisplayLine[] = []
-  const args = parseJsonArgs(row.args)
-  if (args !== null && Object.keys(args).length > 0) {
-    out.push({ kind: 'diff-path', text: '参数' })
-    for (const line of friendlyJsonLines(args)) {
-      out.push({ kind: 'tool-result', text: line })
-    }
-  }
-  if (row.output !== '') {
-    out.push({ kind: 'diff-path', text: '结果' })
-    const parsed = parseJsonBody(row.output)
-    if (parsed !== null) {
-      for (const line of friendlyJsonLines(parsed)) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    } else {
-      const text = unlimited ? row.output : truncate(row.output, maxLines)
-      for (const line of text.split('\n')) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    }
-  }
-  return unlimited ? out : capDisplayLines(out, maxLines)
-}
-
-interface NamedToolBodySource extends ToolBodySource {
-  name?: string
-}
-
-function specializedToolBody(row: NamedToolBodySource, maxLines = Number.MAX_SAFE_INTEGER): DiffDisplayLine[] | null {
-  const name = row.name ?? ''
-  const args = parseJsonArgs(row.args)
-  const unlimited = !Number.isFinite(maxLines) || maxLines >= Number.MAX_SAFE_INTEGER
-  const take = (text: string, fallback: number): string =>
-    unlimited ? text : truncate(text, Math.min(maxLines, fallback))
-  if (name === 'todo_write' || name === 'todo') {
-    const todos = parsePlanTodos(args ?? row.args)
-    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: todoProgressLabel(todos) || '待办列表' }]
-    if (todos.length === 0) {
-      out.push({ kind: 'tool-result', text: '还没有任务' })
-    } else {
-      for (const item of todos) {
-        out.push({ kind: todoItemKind(item.status), text: `${TODO_STATUS_MARK[item.status]} ${item.content}` })
-      }
-    }
-    return out
-  }
-  if (name === 'exit_plan_mode') {
-    const markdown = planMarkdownFromArgs(args ?? row.args) ?? ''
-    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: planTitleFromMarkdown(markdown) ?? '待审计划' }]
-    if (markdown === '') {
-      out.push({ kind: 'tool-result', text: '计划正文为空' })
-    } else {
-      for (const line of markdown.split('\n')) {
-        out.push({ kind: 'assistant', text: line })
-      }
-    }
-    return out
-  }
-  if (name === 'read' && args !== null) {
-    const path = firstString(args, ['path', 'file_path', 'url'])
-    const out: DiffDisplayLine[] = []
-    if (path !== '') out.push({ kind: 'diff-path', text: path })
-    const offset = typeof args.offset === 'number' ? args.offset : undefined
-    const limit = typeof args.limit === 'number' ? args.limit : undefined
-    if (offset !== undefined || limit !== undefined) {
-      out.push({ kind: 'tool-result', text: `offset ${offset ?? 1}${limit === undefined ? '' : ` · limit ${limit}`}` })
-    }
-    if (row.output !== '') {
-      for (const line of take(row.output, 40).split('\n')) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    } else if (row.status === 'running') {
-      out.push({ kind: 'tool-result', text: '读取中…' })
-    }
-    return out.length > 0 ? out : null
-  }
-  if ((name === 'grep' || name === 'glob') && args !== null) {
-    const pattern = firstString(args, ['pattern', 'glob_pattern', 'query'])
-    const path = firstString(args, ['path', 'glob'])
-    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: [pattern, path].filter(Boolean).join('  ') || name }]
-    if (row.output !== '') {
-      for (const line of take(row.output, 30).split('\n')) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    }
-    return out
-  }
-  if ((name === 'web_search' || name === 'web_fetch') && args !== null) {
-    const query = firstString(args, ['query', 'q', 'url'])
-    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: query || name }]
-    if (row.output !== '') {
-      for (const line of take(row.output, 24).split('\n')) {
-        out.push({ kind: 'assistant', text: line })
-      }
-    }
-    return out
-  }
-  if (name === 'update_goal' || name === 'create_goal' || name === 'get_goal') {
-    const objective = args === null ? '' : firstString(args, ['objective', 'goal'])
-    const action = args === null ? '' : firstString(args, ['action'])
-    const out: DiffDisplayLine[] = []
-    if (action !== '') out.push({ kind: 'diff-path', text: action })
-    if (objective !== '') out.push({ kind: 'assistant', text: objective })
-    if (row.output !== '') {
-      for (const line of take(row.output, 12).split('\n')) {
-        out.push({ kind: 'tool-result', text: line })
-      }
-    }
-    return out.length > 0 ? out : null
-  }
-  return null
-}
-
-/** Recover the shell tools' exit marker, mirroring @deepseek-ai/dsh-shell/render. */
-export function parseExitStatus(text: string): {
-  body: string
-  exitCode?: number
-  signal?: string
-} {
-  const signal = /\n\[killed by signal: ([^\]\n]+)\]$/.exec(text)
-  if (signal?.[1] !== undefined) {
-    return { body: text.slice(0, signal.index), signal: signal[1] }
-  }
-  const exit = /\n\[exit code: (\d+)\]$/.exec(text)
-  if (exit?.[1] !== undefined) {
-    return { body: text.slice(0, exit.index), exitCode: Number(exit[1]) }
-  }
-  return { body: text, exitCode: 0 }
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
@@ -3922,7 +951,7 @@ export class SshTui {
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
   private presetId = 'standard'
-  private presetName = '标准模式'
+  private presetName = t('mode.standard')
   private readonly useAlternateScreen: boolean
   private agentGone = false
   private onboarding: OnboardingState | undefined
@@ -4031,7 +1060,7 @@ export class SshTui {
       ssh: this.paintLink === 'ssh',
     })
     this.pushRow({ kind: 'brand-logo' })
-    this.pushRow({ kind: 'system', text: 'DeepSeek Harness — SSH TUI' })
+    this.pushRow({ kind: 'system', text: t('boot.banner') })
     this.pushRow({ kind: 'system', text: t('boot.help') })
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
       this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
@@ -4045,7 +1074,7 @@ export class SshTui {
     this.bindAgentEvents()
     void this.ensureDisplayHost().catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: `显示通道启动失败: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('boot.displayFailed', { error: errorChain(error) }) })
       this.markDirty()
     })
     if (this.headlessDisplay) {
@@ -4108,12 +1137,12 @@ export class SshTui {
     }).catch(() => {})
     void this.maybeRunOnboarding().catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: `首次配置检查失败: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('onboard.checkFailed', { error: errorChain(error) }) })
       this.markDirty()
     })
     void this.syncSubagentToProvider(this.currentProviderId()).catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: `同步子代理模型失败: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('onboard.syncSubFailed', { error: errorChain(error) }) })
       this.markDirty()
     })
     void this.refreshQuota({ reason: 'start', announce: false }).catch(() => {
@@ -4322,7 +1351,7 @@ export class SshTui {
         const stat = countDiffAddDel(item.diff)
         const token = diffStatToken(stat.add, stat.del)
         const extra = token === ''
-          ? `${countDiffLines(item.diff) || 1} ${getLocale() === 'en' ? 'lines' : '行'}`
+          ? t('compact.lines', { count: countDiffLines(item.diff) || 1 })
           : token
         addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}`, width)), item)
         for (const line of toolBodyLines(item, Number.MAX_SAFE_INTEGER)) {
@@ -4413,7 +1442,7 @@ export class SshTui {
     if (providerUsesLocalOAuth(provider)) {
       this.pushRow({
         kind: 'system',
-        text: `当前是 ${describeProviderRoute(provider).kind}（${provider}），走本机 SuperGrok / X Premium OAuth，无需 API Key。用 /model 切换 Grok 模型和思考强度；换官方或 OpenCode 用 /provider。只有要新增 API Key 提供商时才需要 /setup。`,
+        text: t('onboard.oauthHint', { kind: describeProviderRoute(provider).kind, provider }),
       })
       this.markDirty()
       return
@@ -4443,20 +1472,20 @@ export class SshTui {
       if (stored || existsSync(DSH_ENV_FILE) || this.resume) {
         this.pushRow({
           kind: 'system',
-          text: `当前使用 ${envRef}（环境变量/启动环境文件）。如需更换，随时输入 /setup 重新配置。`,
+          text: t('onboard.envInUse', { env: envRef }),
         })
         this.markDirty()
         return
       }
       this.pushRow({
         kind: 'system',
-        text: `检测到系统已注入 ${envRef}（可能已失效）。首次启动向导将覆盖为你的 Key，保存后重启 TUI 生效。`,
+        text: t('onboard.envStale', { env: envRef }),
       })
       await this.runOnboarding()
       return
     }
     if (stored || this.resume) return
-    this.pushRow({ kind: 'system', text: '首次启动：请先配置提供商和 API Key（随时可输入 /setup 重新配置）。' })
+    this.pushRow({ kind: 'system', text: t('onboard.needSetup') })
     await this.runOnboarding()
   }
 
@@ -5077,10 +2106,14 @@ export class SshTui {
     if (plan === undefined || plan.turnLeftOpen !== true) return
     this.planNudgePending = true
     const text = planCloseNudgeText(plan)
-    this.pushRow({ kind: 'system', text: t('plan.nudgeQueued') })
+    const queued = t('plan.nudgeQueued')
+    this.pushRow({ kind: 'system', text: queued })
+    // Plugin notice, not a user turn: the model still sees the follow-up, but
+    // the workspace only shows the one-line queued hint — not the todo_write
+    // instruction that used to paint as `❯ …`.
     const message = createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'user' },
+      source: { kind: 'plugin', plugin: 'dsh-ssh-tui', form: 'notice', summary: queued },
     })
     try {
       this.agent.followup(message)
@@ -5099,15 +2132,15 @@ export class SshTui {
     const allDone = plan.todos.length > 0 && plan.todos.every(item => item.status === 'completed')
     const leftOpen = plan.turnLeftOpen === true && !allDone && !plan.pending
     const spinner = (plan.pending || ((plan.active || running) && !leftOpen)) ? ` ${this.spinnerFrame()}` : ''
-    const mode = plan.pending ? '切换中'
-      : leftOpen ? '本轮未收尾'
-      : plan.active ? '计划模式'
-      : running ? '计划'
-      : allDone ? '计划完成'
-      : '计划'
+    const mode = plan.pending ? t('plan.switching')
+      : leftOpen ? t('footer.planOpen')
+      : plan.active ? t('footer.planMode')
+      : running ? t('card.plan')
+      : allDone ? t('plan.complete')
+      : t('card.plan')
     const counts = todoProgressLabel(plan.todos)
     const title = planTitleFromMarkdown(plan.planMarkdown ?? '')
-    const summary = title ?? (counts === '' ? '还没有任务' : counts)
+    const summary = title ?? (counts === '' ? t('plan.noTasks') : counts)
     const marker = plan.expanded ? '▾' : '▸'
     const focused = this.focusedRow === plan ? '▶ ' : '  '
     const header = `${focused}${marker} ${mode}${spinner} · ${summary}${plan.expanded || yieldBottom ? '' : t('card.expand')}`
@@ -5123,12 +2156,12 @@ export class SshTui {
         lines.push(`${clipAnsiToWidth(`  ${line}`, width)}\x1b[0m`)
       }
       if (markdown.length > budget) {
-        lines.push(this.styleLine('plan-dock', padToWidth(`   … 还有 ${markdown.length - budget} 行计划`, width)))
+        lines.push(this.styleLine('plan-dock', padToWidth(t('plan.moreLines', { count: markdown.length - budget }), width)))
       }
     }
     if (plan.todos.length === 0) {
       if (plan.planMarkdown === undefined || plan.planMarkdown === '') {
-        lines.push(this.styleLine('todo-pending', padToWidth('   还没有任务列表', width)))
+        lines.push(this.styleLine('todo-pending', padToWidth(t('plan.noTodos'), width)))
       }
     } else {
       for (const item of plan.todos) {
@@ -5175,8 +2208,8 @@ export class SshTui {
   private paintInspectOverlay(width: number, height: number): void {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'inspect') return
-    const header = this.styleLine('system', truncateToWidth(`工具全文 · ${dialog.title}`, width))
-    const hint = this.styleLine('system', truncateToWidth('PgUp/PgDn/滚轮滚动 · Esc 返回会话', width))
+    const header = this.styleLine('system', truncateToWidth(t('tool.inspectTitle', { title: dialog.title }), width))
+    const hint = this.styleLine('system', truncateToWidth(t('tool.inspectHint'), width))
     const divider = this.styleLine('system', repeatToWidth('─', width))
     const bodyBudget = Math.max(1, height - 4)
     const rendered: string[] = []
@@ -5207,7 +2240,7 @@ export class SshTui {
     const pos = rendered.length === 0
       ? '0/0'
       : `${dialog.offset + 1}–${Math.min(rendered.length, dialog.offset + bodyBudget)}/${rendered.length}`
-    const footer = this.styleLine('system', truncateToWidth(`全文 ${pos} · Esc 返回`, width))
+    const footer = this.styleLine('system', truncateToWidth(t('tool.inspectFooter', { pos }), width))
     const paintRows = [header, divider, ...slice, hint, footer]
     this.write(composePaintOutput({
       width,
@@ -5401,7 +2434,10 @@ export class SshTui {
     this.searchHits = hits
     if (hits.length === 0) {
       this.searchIndex = -1
-      this.pushRow({ kind: 'system', text: query === '' ? '没有可搜索的卡片。' : `没有匹配「${query}」的卡片。` })
+      this.pushRow({
+        kind: 'system',
+        text: query === '' ? t('find.none') : t('find.noMatch', { query }),
+      })
       this.markDirty()
       return
     }
@@ -5410,7 +2446,11 @@ export class SshTui {
     const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
     this.pushRow({
       kind: 'system',
-      text: `找到 ${hits.length} 条${query === '' ? '' : `「${query}」`} · 第 ${hits.length}/${hits.length} 条（${where}）。Ctrl+G / Alt+N 下一条，Alt+P 上一条。`,
+      text: t('find.hits', {
+        count: hits.length,
+        query: query === '' ? '' : `「${query}」`,
+        where,
+      }),
     })
     this.revealRow(hit)
   }
@@ -5424,7 +2464,7 @@ export class SshTui {
 
   private stepSearch(delta: number): void {
     if (this.searchHits.length === 0) {
-      this.pushRow({ kind: 'system', text: '还没有搜索结果。用 /find 思考 padAnsi，或 Ctrl+/ 打开搜索。' })
+      this.pushRow({ kind: 'system', text: t('find.empty') })
       this.markDirty()
       return
     }
@@ -5434,7 +2474,12 @@ export class SshTui {
     const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
     this.pushRow({
       kind: 'system',
-      text: `搜索「${this.searchQuery}」· 第 ${this.searchIndex + 1}/${count} 条（${where}）。`,
+      text: t('find.step', {
+        query: this.searchQuery,
+        index: this.searchIndex + 1,
+        total: count,
+        where,
+      }),
     })
     this.revealRow(hit)
   }
@@ -5503,7 +2548,7 @@ export class SshTui {
         const focused = this.focusedRow === row
         const marker = row.expanded ? '▾' : '▸'
         const lines = row.text.split('\n').length
-        const header = `${marker} 已思考 · ${lines} 行${row.expanded ? '' : t('card.expand')}`
+        const header = t('reason.done', { marker, lines }) + (row.expanded ? '' : t('card.expand'))
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
@@ -5568,12 +2613,16 @@ export class SshTui {
         const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, 'system', header, width, styleHeader)
         if (row.expanded) {
-          addDisplay(this.styleLine('system', `  会话 ${row.sessionId} · ${row.provider}${row.local ? '' : ' · 外部进程'}`), row)
+          addDisplay(this.styleLine('system', t('sub.cardSession', {
+            id: row.sessionId,
+            provider: row.provider,
+            external: row.local ? '' : t('sub.external'),
+          })), row)
           if (row.stopReason !== undefined) {
-            addDisplay(this.styleLine('system', `  结束原因：${row.stopReason}`), row)
+            addDisplay(this.styleLine('system', t('sub.stopReason', { reason: row.stopReason })), row)
           }
           if (row.logs.length === 0) {
-            addDisplay(this.styleLine('system', running ? '  等待子代理输出…' : '  没有可见输出'), row)
+            addDisplay(this.styleLine('system', running ? t('sub.cardWait') : t('sub.cardEmpty')), row)
           } else {
             for (const entry of row.logs) {
               const kind: DisplayKind = entry.kind === 'assistant'
@@ -5593,8 +2642,8 @@ export class SshTui {
         if (planIsLive(row) && this.findLivePlanRow() === row) continue
         const counts = todoProgressLabel(row.todos)
         const title = planTitleFromMarkdown(row.planMarkdown ?? '')
-        const summary = title ?? (counts === '' ? '已归档' : counts)
-        const header = `计划 · ${summary}${row.expanded ? '' : t('card.expand')}`
+        const summary = title ?? (counts === '' ? t('plan.archived') : counts)
+        const header = t('plan.header', { summary }) + (row.expanded ? '' : t('card.expand'))
         this.paintCollapsibleHeader(addDisplay, row, 'plan-dock', header, width)
         if (row.expanded) {
           addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`), row)
@@ -5625,8 +2674,8 @@ export class SshTui {
       if (row.kind === 'question') {
         const waiting = row.status === 'waiting'
         const spinner = waiting ? ` ${this.spinnerFrame()}` : ''
-        const state = waiting ? '等待回答' : row.status === 'answered' ? '已回答' : '已取消'
-        const title = row.intent === 'plan-review' ? '计划待审' : '提问用户'
+        const state = waiting ? t('question.waiting') : row.status === 'answered' ? t('question.answered') : t('question.cancelled')
+        const title = row.intent === 'plan-review' ? t('question.planTitle') : t('question.askTitle')
         const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, waiting ? 'tool' : 'system', header, width)
         if (row.expanded) {
@@ -5646,7 +2695,7 @@ export class SshTui {
             }
           }
           addDisplay(this.styleLine('system', waiting
-            ? '  用下方对话框选择，数字/字母选中，Enter 提交，Esc 取消。'
+            ? t('question.dialogHint')
             : `  ${row.summary}`), row)
         }
         continue
@@ -5654,15 +2703,15 @@ export class SshTui {
       if (row.kind === 'goal') {
         const live = row.phase === 'active' || row.phase === 'blocked'
         const spinner = live ? ` ${this.spinnerFrame()}` : ''
-        const phase = row.phase === 'active' ? '进行中'
-          : row.phase === 'paused' ? '已暂停'
-          : row.phase === 'blocked' ? '受阻'
-          : row.phase === 'complete' ? '已完成'
-          : '已清除'
-        const header = `● 目标${spinner} · ${phase} · ${row.objective}${row.expanded ? '' : t('card.expand')}`
+        const phase = row.phase === 'active' ? t('goal.active')
+          : row.phase === 'paused' ? t('goal.paused')
+          : row.phase === 'blocked' ? t('goal.blocked')
+          : row.phase === 'complete' ? t('goal.complete')
+          : t('goal.cleared')
+        const header = t('goal.header', { spinner, phase, objective: row.objective }) + (row.expanded ? '' : t('card.expand'))
         this.paintCollapsibleHeader(addDisplay, row, live ? 'tool' : 'system', header, width)
         if (row.expanded) {
-          addDisplay(this.styleLine('system', '  用 /goal 查看、暂停、恢复或清除当前目标。'), row)
+          addDisplay(this.styleLine('system', t('goal.help')), row)
           if (row.blockedReason !== undefined) {
             for (const wrapped of wrap(row.blockedReason, Math.max(1, width - 2))) {
               addDisplay(this.styleLine('error', `  ${wrapped}`), row)
@@ -5679,10 +2728,10 @@ export class SshTui {
         this.paintCollapsibleHeader(addDisplay, row, running ? 'tool' : row.status === 'error' ? 'error' : 'system', header, width)
         if (row.expanded) {
           addDisplay(this.styleLine('system', running
-            ? '  正在压缩会话上下文，完成后旧工具结果会被摘要替换。'
+            ? t('compact.bodyRunning')
             : row.status === 'error'
-              ? `  ${row.error ?? '压缩失败'}`
-              : '  压缩已写入会话日志，模型下一轮会看到更短的历史。'), row)
+              ? t('compact.bodyError', { error: row.error ?? t('quota.unknown') })
+              : t('compact.bodyDone')), row)
           if (row.summary !== undefined && row.summary !== '') {
             for (const wrapped of wrap(row.summary, Math.max(1, width - 2)).slice(0, 12)) {
               addDisplay(this.styleLine('assistant', `  ${wrapped}`), row)
@@ -5711,7 +2760,8 @@ export class SshTui {
         const elapsed = this.thinkingStartedAt === undefined
           ? 0
           : Math.floor((Date.now() - this.thinkingStartedAt) / 1000)
-        const header = `${marker} 思考中 ${spinner} · ${chars} 字${elapsed > 0 ? ` · ${elapsed}s` : ''}`
+        const header = t('reason.live', { marker, spinner, chars })
+          + (elapsed > 0 ? t('reason.elapsed', { seconds: elapsed }) : '')
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
         addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, block)
@@ -5784,14 +2834,14 @@ export class SshTui {
               }
               const start = pickerWindowStart(ob.providerCursor, options.length)
               const end = Math.min(options.length, start + PICKER_WINDOW)
-              if (start > 0) addDialog(`  ↑ 还有 ${start} 项`)
+              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
               for (let index = start; index < end; index += 1) {
                 const option = options[index]
                 if (option === undefined) continue
                 const focused = index === ob.providerCursor ? '›' : ' '
                 addDialog(` ${focused} ○ ${option.label}${option.detail === '' ? '' : ` — ${option.detail}`}`)
               }
-              if (end < options.length) addDialog(`  ↓ 还有 ${options.length - end} 项`)
+              if (end < options.length) addDialog(`  ${t('picker.moreBelow', { count: options.length - end })}`)
               if (this.input.trim() !== '') addDialog(t('onboard.catalogHint', { count: options.length }))
               addDialog(t('onboard.pickHint'))
               break
@@ -5843,7 +2893,7 @@ export class SshTui {
         const d = this.dialog
         const review = planReviewOf(d.question)
         if (review) {
-          addDialog(`计划待审 ${d.index + 1}/${d.total}${d.question.header === undefined ? '' : ` · ${d.question.header}`}`)
+          addDialog(t('dialog.planReview', { index: d.index + 1, total: d.total }) + (d.question.header === undefined ? '' : ` · ${d.question.header}`))
           addDialog(d.question.question)
           if (d.question.detail !== undefined && d.question.detail !== '') {
             for (const line of renderMarkdownLines(d.question.detail, Math.max(1, width - 2), this.color).slice(0, 16)) {
@@ -5851,7 +2901,7 @@ export class SshTui {
             }
           }
         } else {
-          addDialog(`提问用户 ${d.index + 1}/${d.total}: ${d.question.question}`)
+          addDialog(t('dialog.ask', { index: d.index + 1, total: d.total, question: d.question.question }))
           if (d.question.header !== undefined && d.question.header !== '') addDialog(d.question.header)
           if (d.question.detail !== undefined && d.question.detail !== '') {
             addDialog(truncate(d.question.detail, 6))
@@ -5861,32 +2911,32 @@ export class SshTui {
         const approve = d.question.intent?.approve
         const start = pickerWindowStart(d.cursor, options.length)
         const end = Math.min(options.length, start + PICKER_WINDOW)
-        if (start > 0) addDialog(`  ↑ 还有 ${start} 项`)
+        if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
         for (let index = start; index < end; index += 1) {
           const option = options[index]
           if (option === undefined) continue
           const marker = d.selected.has(index) ? '●' : '○'
           const key = QUESTION_OPTION_KEYS[index] ?? '↕'
           const focused = index === d.cursor ? '›' : ' '
-          const recommended = option.label === approve ? '（推荐）' : ''
+          const recommended = option.label === approve ? t('dialog.recommended') : ''
           const extra = option.description === undefined ? '' : ` — ${option.description}`
           addDialog(` ${focused}${key} ${marker} ${option.label}${recommended}${extra}`)
         }
-        if (end < options.length) addDialog(`  ↓ 还有 ${options.length - end} 项`)
+        if (end < options.length) addDialog(`  ${t('picker.moreBelow', { count: options.length - end })}`)
         if (options.length === 0) {
-          addDialog('  （自由输入：在下方输入后按 Enter）')
+          addDialog(t('dialog.freeform'))
         }
-        addDialog(`  ${d.question.multiSelect === true ? '↑/↓ 或数字/字母切换，Enter 提交' : '↑/↓ 或数字/字母选择，Enter 提交'}，Esc 取消`)
+        addDialog(d.question.multiSelect === true ? t('dialog.multiHint') : t('dialog.singleHint'))
       }
     }
 
     const fitLine = (text: string): string => truncateToWidth(text, Math.max(1, width))
     const headerLines = [
-      this.styleLine('system', fitLine(`DeepSeek Harness — SSH TUI  [${this.presetName}]  ${this.currentSelectionLabel()}`)),
+      this.styleLine('system', fitLine(`${t('boot.banner')}  [${this.presetName}]  ${this.currentSelectionLabel()}`)),
       this.styleLine('system', repeatToWidth('─', width)),
     ]
     if (this.scrollOffset > 0) {
-      headerLines.push(this.styleLine('system', fitLine(`↑ 已回看 ${this.scrollOffset} 行 · PgUp/PgDn/滚轮滚动 · Esc 回到底部`)))
+      headerLines.push(this.styleLine('system', fitLine(t('dialog.scrolled', { count: this.scrollOffset }))))
     }
     this.commandSuggestions = this.dialog === undefined ? this.buildSuggestions() : []
     if (this.suggestionIndex >= this.commandSuggestions.length) {
@@ -6266,33 +3316,33 @@ export class SshTui {
     // on the running spinner until the next repaint trigger.
     const titleSuffix = this.sessionTitle === '' ? '' : ` · ${this.sessionTitle}`
     if (this.completedAt !== 0 && now - this.completedAt < 5000) {
-      this.write(`\x1b]0;dsh ✓ 已完成${titleSuffix}\x07`)
+      this.write(t('title.done', { suffix: titleSuffix }))
       return
     }
     if (this.agent.status === 'running') {
       if (now - this.lastTitleUpdateAt < 800) return
       this.lastTitleUpdateAt = now
       const spinner = SPINNER[Math.floor(now / 800) % SPINNER.length]
-      let detail = '运行中'
+      let detail = t('title.running')
       if (this.dialog?.kind === 'questions') {
-        detail = planReviewOf(this.dialog.question) ? '计划待审' : '等待用户回答'
+        detail = planReviewOf(this.dialog.question) ? t('question.planTitle') : t('title.waitAnswer')
       } else if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
-        detail = '压缩上下文'
+        detail = t('title.compacting')
       } else if (this.activeSubagents.size > 0) {
-        detail = `运行中 · 子代理 ${this.activeSubagents.size}`
+        detail = t('title.subagents', { count: this.activeSubagents.size })
       } else if (this.openToolCalls.size > 0) {
-        detail = `运行中 · 工具 ${this.openToolCalls.size}`
+        detail = t('title.tools', { count: this.openToolCalls.size })
       } else if (this.findLivePlanRow()?.active === true) {
-        detail = '计划模式'
+        detail = t('title.planMode')
       } else {
         const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
-        if (liveGoal?.phase === 'active') detail = '目标进行中'
-        else if (liveGoal?.phase === 'blocked') detail = '目标受阻'
+        if (liveGoal?.phase === 'active') detail = t('footer.goalActive')
+        else if (liveGoal?.phase === 'blocked') detail = t('footer.goalBlocked')
       }
       this.write(`\x1b]0;dsh ${spinner} ${detail}${titleSuffix}\x07`)
       return
     }
-    this.write(`\x1b]0;dsh 待命${titleSuffix}\x07`)
+    this.write(t('title.idle', { suffix: titleSuffix }))
   }
 
   /** Terminal bell on completion (opt out with DSH_TUI_NO_BELL=1). */
@@ -6313,7 +3363,7 @@ export class SshTui {
       && this.activeSubagents.size === 0
     ) {
       this.stalledWarningShown = true
-      this.pushRow({ kind: 'error', text: '模型/工具长时间无响应，可按 Esc 或 Ctrl+C 中断当前轮次。' })
+      this.pushRow({ kind: 'error', text: t('stall.warning') })
       this.markDirty()
       return
     }
@@ -6385,17 +3435,24 @@ export class SshTui {
           .map(block => block.text)
           .join('')
         if (text !== '') {
-          const source = event.data.source as { kind?: string; plugin?: string; form?: string }
+          const source = event.data.source as { kind?: string; plugin?: string; form?: string; summary?: string }
           const sourceKind = source.kind ?? ''
           if (sourceKind === 'user') {
             this.pushRow({ kind: 'user', text: `❯ ${text}` })
+            if (!this.replaying) this.beginWait()
+          } else if (sourceKind === 'plugin' && source.form === 'notice') {
+            const summary = source.summary?.trim() ?? ''
+            // Body stays off the workspace (the model still received it).
+            const last = this.rows.at(-1)
+            const alreadyShown = last?.kind === 'system' && last.text === summary
+            if (summary !== '' && !alreadyShown) this.pushRow({ kind: 'system', text: summary })
             if (!this.replaying) this.beginWait()
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
           } else if (sourceKind === 'plugin' && source.form === 'snapshot') {
             this.pushRow({ kind: 'system', text: text })
           } else {
-            this.pushRow({ kind: 'system', text: `(context) ${text}` })
+            this.pushRow({ kind: 'system', text: t('prompt.contextPrefix', { text }) })
           }
           this.streaming = undefined
           this.streamingReasoning = undefined
@@ -6463,14 +3520,14 @@ export class SshTui {
         this.streaming = undefined
         this.streamingReasoning = undefined
         this.thinkingStartedAt = undefined
-        const interruptedMark = interrupted ? ' ⚠ 已中断' : ''
+        const interruptedMark = interrupted ? t('stream.interrupted') : ''
         if (reasoning !== '') {
           this.pushRow({ kind: 'reasoning', text: `${reasoning}${interruptedMark}`, expanded: reasoningExpanded })
         }
         if (text !== '') {
           this.pushRow({ kind: 'assistant', text: `${text}${interruptedMark}` })
         } else if (interrupted && reasoning === '') {
-          this.pushRow({ kind: 'system', text: '本轮输出已中断，没有可见内容。' })
+          this.pushRow({ kind: 'system', text: t('stream.interruptedEmpty') })
         }
         this.markDirty()
         break
@@ -6648,7 +3705,7 @@ export class SshTui {
             ? `error: ${reason.error.message}`
             : `idle (${reason.kind})`
         if (reason.kind === 'error') {
-          this.pushRow({ kind: 'error', text: `Turn ${event.data.turn} failed: ${reason.error.message}` })
+          this.pushRow({ kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) })
         }
         const livePlan = this.findLivePlanRow()
         if (livePlan !== undefined && reason.kind === 'completed') {
@@ -6715,7 +3772,7 @@ export class SshTui {
   private readonly handleDisposed = ({ agent }: { agent: Agent }): void => {
     if (agent !== this.agent) return
     this.agentGone = true
-    this.pushRow({ kind: 'error', text: 'Agent was disposed; press Ctrl+C to exit.' })
+    this.pushRow({ kind: 'error', text: t('agent.disposed') })
     this.status = 'disposed'
     this.markDirty()
   }
@@ -6730,8 +3787,8 @@ export class SshTui {
       this.pushRow({
         kind: 'system',
         text: active
-          ? '已进入计划模式：先规划、等确认后再改代码。可用 /plan off 退出。'
-          : '已退出计划模式，可以继续执行改动。',
+          ? t('plan.entered')
+          : t('plan.exited'),
       })
       this.markDirty()
       return
@@ -6761,7 +3818,7 @@ export class SshTui {
       return
     }
     if (type === 'session/title-llm-request') {
-      this.pushRow({ kind: 'system', text: '正在用模型生成会话标题…' })
+      this.pushRow({ kind: 'system', text: t('retry.generatingTitle') })
       this.markDirty()
       return
     }
@@ -6770,18 +3827,23 @@ export class SshTui {
       const maxRetries = typeof (data as { maxRetries?: unknown } | undefined)?.maxRetries === 'number' ? (data as { maxRetries: number }).maxRetries : retry
       const delayMs = typeof (data as { delayMs?: unknown } | undefined)?.delayMs === 'number' ? (data as { delayMs: number }).delayMs : 0
       const failure = (data as { failure?: { message?: unknown } } | undefined)?.failure
-      const message = typeof failure?.message === 'string' ? failure.message : '模型请求失败，正在重试'
+      const message = typeof failure?.message === 'string' ? failure.message : t('retry.busy')
       this.llmRetry = { retry, maxRetries, delayMs, message }
       this.pushRow({
         kind: 'system',
-        text: `模型请求失败，${Math.round(delayMs)}ms 后重试 ${retry}/${maxRetries}：${message}`,
+        text: t('retry.progress', {
+          ms: Math.round(delayMs),
+          retry,
+          max: maxRetries,
+          message,
+        }),
       })
       this.markDirty()
       return
     }
     if (type === 'llm/retry-started') {
       if (this.llmRetry !== undefined) {
-        this.pushRow({ kind: 'system', text: `开始第 ${this.llmRetry.retry} 次重试。` })
+        this.pushRow({ kind: 'system', text: t('retry.started', { retry: this.llmRetry.retry }) })
       }
       this.markDirty()
       return
@@ -6795,7 +3857,7 @@ export class SshTui {
       return
     }
     if (type.startsWith('team/')) {
-      this.pushRow({ kind: 'system', text: `[团队] ${type}` })
+      this.pushRow({ kind: 'system', text: t('team.event', { type }) })
       this.markDirty()
     }
   }
@@ -6823,7 +3885,7 @@ export class SshTui {
         prunedTokens: 0,
         expanded: false,
       })
-      this.status = '压缩上下文…'
+      this.status = t('compact.status')
       this.markDirty()
       return
     }
@@ -6861,10 +3923,10 @@ export class SshTui {
       } else {
         this.pushRow({
           kind: 'system',
-          text: error === undefined ? '上下文压缩已完成。' : `上下文压缩失败：${error}`,
+          text: error === undefined ? t('compact.finished') : t('compact.failedNotice', { error }),
         })
       }
-      if (this.status.startsWith('压缩') || this.status.startsWith('compact')) {
+      if (this.status.startsWith(t('compact.short')) || this.status.startsWith('compact')) {
         this.status = this.agent.status === 'running' ? 'running' : 'idle'
       }
       this.idleCompactInFlight = false
@@ -6936,7 +3998,7 @@ export class SshTui {
       } | undefined>
     } | undefined
     if (commands?.execute === undefined) {
-      if (reason === 'user') this.pushRow({ kind: 'error', text: `Unknown command: /compact (try /help)` })
+      if (reason === 'user') this.pushRow({ kind: 'error', text: t('cmd.unknown', { command: 'compact' }) })
       return
     }
     if (this.agent.status === 'running'
@@ -6966,7 +4028,7 @@ export class SshTui {
     void commands.execute(this.agent, '/compact', [], controller.signal).then((execution) => {
       if (execution === undefined) {
         this.idleCompactInFlight = false
-        if (reason === 'user') this.pushRow({ kind: 'error', text: `Unknown command: /compact (try /help)` })
+        if (reason === 'user') this.pushRow({ kind: 'error', text: t('cmd.unknown', { command: 'compact' }) })
         return
       }
       const compactionRunning = (): boolean =>
@@ -6994,7 +4056,7 @@ export class SshTui {
       }
     }).catch((error: unknown) => {
       this.idleCompactInFlight = false
-      this.pushRow({ kind: 'error', text: `/compact failed: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'compact', error: errorChain(error) }) })
     }).finally(() => {
       if (this.commandAbort === controller) this.commandAbort = undefined
       this.markDirty()
@@ -7013,13 +4075,13 @@ export class SshTui {
       })
       this.pushRow({
         kind: 'system',
-        text: wantsActive ? '已请求进入计划模式。' : '已请求退出计划模式。',
+        text: wantsActive ? t('plan.requestOn') : t('plan.requestOff'),
       })
       this.markDirty()
       return
     }
     if (name === 'compact') {
-      this.status = '压缩上下文…'
+      this.status = t('compact.status')
       this.markDirty()
       return
     }
@@ -7065,7 +4127,7 @@ export class SshTui {
     if (kind === 'error') {
       const errText = formatCompactCommandError(this.formatCommandText(text))
       this.pushRow({ kind: 'error', text: errText === '' ? t('command.failed') : errText })
-      if (this.status.startsWith('压缩') || this.status.startsWith('compact')) {
+      if (this.status.startsWith(t('compact.short')) || this.status.startsWith('compact')) {
         this.status = this.agent.status === 'running' ? 'running' : 'idle'
       }
       if (!this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
@@ -7088,14 +4150,14 @@ export class SshTui {
         existing.phase = 'cleared'
         existing.blockedReason = undefined
       } else {
-        this.pushRow({ kind: 'goal', objective: '（已清除）', phase: 'cleared', expanded: false })
+        this.pushRow({ kind: 'goal', objective: t('goal.clearedLabel'), phase: 'cleared', expanded: false })
       }
-      this.pushRow({ kind: 'system', text: '当前目标已清除。' })
+      this.pushRow({ kind: 'system', text: t('goal.clearedNotice') })
       this.markDirty()
       return
     }
     const goal = payload.goal !== null && typeof payload.goal === 'object' ? payload.goal as Record<string, unknown> : {}
-    const objective = typeof goal.objective === 'string' && goal.objective.trim() !== '' ? goal.objective.trim() : '（未命名目标）'
+    const objective = typeof goal.objective === 'string' && goal.objective.trim() !== '' ? goal.objective.trim() : t('goal.unnamed')
     const phase = goal.phase === 'paused' || goal.phase === 'blocked' || goal.phase === 'complete' ? goal.phase : 'active'
     const blocked = goal.blockedReason !== null && typeof goal.blockedReason === 'object'
       ? (goal.blockedReason as { message?: unknown }).message
@@ -7114,10 +4176,10 @@ export class SshTui {
         expanded: false,
       })
     }
-    const notice = phase === 'active' ? '已设置目标'
-      : phase === 'paused' ? '目标已暂停'
-      : phase === 'blocked' ? '目标受阻'
-      : '目标已完成'
+    const notice = phase === 'active' ? t('goal.set')
+      : phase === 'paused' ? t('goal.pausedNotice')
+      : phase === 'blocked' ? t('goal.blockedNotice')
+      : t('goal.doneNotice')
     this.pushRow({ kind: 'system', text: `${notice}：${objective}` })
     this.markDirty()
   }
@@ -7139,12 +4201,12 @@ export class SshTui {
     if (type === 'plan/mode') {
       appendSubagentLog(row, {
         kind: 'system',
-        text: data?.active === true ? '进入计划模式' : '退出计划模式',
+        text: data?.active === true ? t('plan.enterMode') : t('plan.exitMode'),
       })
       return
     }
     if (type.startsWith('team/')) {
-      appendSubagentLog(row, { kind: 'team', text: `[团队] ${type}` })
+      appendSubagentLog(row, { kind: 'team', text: t('team.event', { type }) })
     }
   }
 
@@ -7181,10 +4243,10 @@ export class SshTui {
         break
       }
       case 'turn/end':
-        appendSubagentLog(row, { kind: 'turn', text: `轮次结束（${event.data.reason.kind}）` })
+        appendSubagentLog(row, { kind: 'turn', text: t('sub.turnEnd', { reason: event.data.reason.kind }) })
         break
       case 'approval/asked':
-        appendSubagentLog(row, { kind: 'approval', text: `等待审批：${event.data.toolName}` })
+        appendSubagentLog(row, { kind: 'approval', text: t('sub.approval', { tool: event.data.toolName }) })
         break
       default:
         this.handleSubagentExtensionEvent(row, event)
@@ -7212,9 +4274,9 @@ export class SshTui {
       existing.startedAt = Date.now()
       existing.endedAt = undefined
       existing.stopReason = undefined
-      existing.lastActivity = '已启动'
+      existing.lastActivity = t('sub.started')
       existing.expanded = false
-      appendSubagentLog(existing, { kind: 'system', text: `已启动（${info.provider}${info.local ? '' : '，外部进程'}）` })
+      appendSubagentLog(existing, { kind: 'system', text: t('sub.startedDetail', { provider: info.provider, external: info.local ? '' : t('sub.external') }) })
     } else {
       this.pushRow({
         kind: 'subagent',
@@ -7222,11 +4284,11 @@ export class SshTui {
         runId: String(info.runId),
         provider: info.provider,
         local: info.local,
-        label: `子代理 ${info.provider}`,
+        label: t('sub.label', { provider: info.provider }),
         status: 'running',
         startedAt: Date.now(),
-        lastActivity: '已启动',
-        logs: [{ kind: 'system', text: `已启动（${info.provider}${info.local ? '' : '，外部进程'}）` }],
+        lastActivity: t('sub.started'),
+        logs: [{ kind: 'system', text: t('sub.startedDetail', { provider: info.provider, external: info.local ? '' : t('sub.external') }) }],
         expanded: false,
       })
     }
@@ -7249,7 +4311,7 @@ export class SshTui {
       row.stopReason = info.stopReason
       appendSubagentLog(row, {
         kind: failed ? 'result' : 'assistant',
-        text: `结束（${info.stopReason}）${output === '' ? '' : ` · ${output}`}`,
+        text: t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`),
       })
     } else {
       this.pushRow({
@@ -7258,13 +4320,13 @@ export class SshTui {
         runId: String(info.runId),
         provider: info.provider,
         local: info.local,
-        label: `子代理 ${info.provider}`,
+        label: t('sub.label', { provider: info.provider }),
         status: info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok',
         startedAt: Date.now(),
         endedAt: Date.now(),
         stopReason: info.stopReason,
-        lastActivity: `结束（${info.stopReason}）`,
-        logs: [{ kind: 'system', text: `结束（${info.stopReason}）${output === '' ? '' : ` · ${output}`}` }],
+        lastActivity: t('sub.ended', { reason: info.stopReason }),
+        logs: [{ kind: 'system', text: t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`) }],
         expanded: false,
       })
     }
@@ -7323,10 +4385,31 @@ export class SshTui {
    * 'allow' | 'deny', or undefined when the reviewer is unavailable or its
    * output was unusable (caller falls back to prompt/reject).
    */
+  private latestUserAuthorizationText(agent: ApprovalRequest['agent']): string {
+    const session = (agent as { session?: object }).session ?? this.agent.session
+    const events = sessionEvents(session)
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]
+      if (event?.type !== 'user/message') continue
+      const source = (event.data as { source?: { kind?: string } }).source
+      if (source?.kind !== 'user') continue
+      const text = collectText((event.data as { content?: Parameters<typeof collectText>[0] }).content ?? [])
+      if (text.trim() !== '') return text
+    }
+    for (let i = this.rows.length - 1; i >= 0; i -= 1) {
+      const row = this.rows[i]
+      if (row !== undefined && row.kind === 'user' && row.text.trim() !== '') {
+        return row.text.replace(/^❯\s*/u, '')
+      }
+    }
+    return ''
+  }
+
   private async reviewUnknownWithModel(
     request: ApprovalRequest,
     command: string | undefined,
-  ): Promise<'allow' | 'deny' | undefined> {
+    args: string | undefined,
+  ): Promise<ReviewVerdict | undefined> {
     const llm = this.ctx.get('llm')
     if (llm === undefined) return undefined
     const selection = this.subagentSelection.current
@@ -7335,7 +4418,7 @@ export class SshTui {
     const model = subagentModelMatchesProvider(provider, selection.model)
       ? selection.model
       : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
-    // 最近模型输出/思考（≤2 段）与最新用户消息（≤400 字）
+    // 最近模型输出/思考（≤2 段）与会话日志里最新用户消息（跳过 plugin notice）
     const segments: string[] = []
     for (let i = this.rows.length - 1; i >= 0 && segments.length < 2; i -= 1) {
       const row = this.rows[i]
@@ -7343,14 +4426,7 @@ export class SshTui {
         segments.unshift(row.text)
       }
     }
-    let userText = ''
-    for (let i = this.rows.length - 1; i >= 0; i -= 1) {
-      const row = this.rows[i]
-      if (row !== undefined && row.kind === 'user') {
-        userText = row.text.replace(/^❯\s*/u, '')
-        break
-      }
-    }
+    const userText = this.latestUserAuthorizationText(request.agent)
     const signals = [request.signal, AbortSignal.timeout(15_000)].filter(s => s !== undefined)
     const signal = signals.length > 0 ? AbortSignal.any(signals) : undefined
     const options: GenerateOptions = {
@@ -7361,11 +4437,14 @@ export class SshTui {
           userText,
           segments,
           toolName: request.toolName,
-          command: command ?? `(无命令参数，工具：${request.toolName})`,
+          command: command ?? t('approval.noCommand', { tool: request.toolName }),
+          ...(args === undefined || args.trim() === '' ? {} : { args }),
+          ...(request.reason === undefined || request.reason.trim() === '' ? {} : { reason: request.reason }),
+          ...(this.hostSandboxMode === undefined || this.hostSandboxMode.trim() === '' ? {} : { sandboxMode: this.hostSandboxMode }),
         }) }],
         source: { kind: 'plugin', plugin: 'dsh-ssh-tui' },
       })],
-      system: REVIEW_SYSTEM_PROMPT,
+      system: reviewSystemPrompt(getLocale()),
       maxTokens: 400,
       reasoningEffort: ReasoningEffortId('off'),
       signal,
@@ -7406,7 +4485,7 @@ export class SshTui {
       }),
     })
     this.markDirty()
-    return verdict.approved ? 'allow' : 'deny'
+    return verdict
   }
 
   private recordAutoApproval(
@@ -7424,16 +4503,36 @@ export class SshTui {
     const clipped = Array.from(subject).length > 160
       ? `${Array.from(subject).slice(0, 160).join('')}…`
       : subject
-    this.pushRow({
-      kind: 'system',
-      text: t('approval.decisionRow', {
-        verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
-        command: clipped,
-        risk,
-        reason,
-      }),
+    const rowText = t('approval.decisionRow', {
+      verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+      command: clipped,
+      risk,
+      reason,
     })
+    this.pushRow({ kind: 'system', text: rowText })
     this.markDirty()
+    if (decision === 'deny') this.tellModelApprovalDenied(clipped, reason, rowText)
+  }
+
+  /**
+   * Host ApprovalOutcome cannot carry a reason, so the model only sees
+   * `the user rejected tool "bash"`. Steer a plugin notice with the real
+   * classifier/reviewer reason. Summary matches the workspace decision row
+   * so the handler does not paint the body twice.
+   */
+  private tellModelApprovalDenied(command: string, reason: string, summary: string): void {
+    if (this.replaying || this.agentGone) return
+    const text = t('approval.modelDenied', { command, reason })
+    const message = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'dsh-ssh-tui', form: 'notice', summary },
+    })
+    try {
+      if (this.agent.status === 'running') this.agent.steer(message)
+      else this.agent.followup(message)
+    } catch {
+      // Outcome already settled; a missing notice only loses the extra hint.
+    }
   }
 
   readonly handleApproval = async (
@@ -7454,26 +4553,45 @@ export class SshTui {
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         ...(row === undefined ? {} : { row: { name: row.name, args: row.args, ...(row.command === undefined ? {} : { command: row.command }) } }),
       })
-      const decision = classifyApproval(request.toolName, command)
-      if (decision === 'allow') {
-        this.recordAutoApproval('allow', 'low', request.toolName, command, t('approval.ruleAllow'))
+      const classified = classifyApprovalDetailed({
+        toolName: request.toolName,
+        ...(command === undefined ? {} : { command }),
+        ...(row?.args === undefined || row.args.trim() === '' ? {} : { args: row.args }),
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        workspaceCwd: this.workspaceCwd(),
+      })
+      const ruleReason = t(`approval.reason.${classified.reasonKey}`, undefined, classified.reasonKey)
+      if (classified.decision === 'allow') {
+        this.recordAutoApproval('allow', classified.risk, request.toolName, command, ruleReason)
         return 'allowed-once'
       }
-      if (decision === 'deny') {
-        this.recordAutoApproval('deny', 'high', request.toolName, command, t('approval.ruleDeny'))
+      if (classified.decision === 'deny') {
+        this.recordAutoApproval('deny', classified.risk, request.toolName, command, ruleReason)
         return 'rejected'
       }
       // Unknown shape: the rule table cannot judge it — hand it to the
       // subagent-configured model with compact context (AI review). Without
       // a display there is nobody to fall back on, so unreviewable asks
       // reject and the turn completes instead of stalling.
-      const reviewed = await this.reviewUnknownWithModel(request, command)
-      if (reviewed === 'allow') {
-        this.autoAllowedCount += 1
+      const reviewed = await this.reviewUnknownWithModel(request, command, row?.args)
+      if (reviewed?.approved === true) {
+        this.recordAutoApproval(
+          'allow',
+          reviewed.risk,
+          request.toolName,
+          command,
+          reviewed.reason === '' ? t('approval.reviewApproved') : reviewed.reason,
+        )
         return 'allowed-once'
       }
-      if (reviewed === 'deny') {
-        this.autoDeniedCount += 1
+      if (reviewed !== undefined) {
+        this.recordAutoApproval(
+          'deny',
+          reviewed.risk,
+          request.toolName,
+          command,
+          reviewed.reason === '' ? t('approval.reviewRejected') : reviewed.reason,
+        )
         return 'rejected'
       }
       if (!this.hasLiveDisplay()) {
@@ -7489,8 +4607,8 @@ export class SshTui {
       }
     }
     const agentLabel = request.agent.id === this.agent.id
-      ? '当前会话'
-      : `子代理 ${request.agent.id}`
+      ? t('approval.thisSession')
+      : t('sub.agentLabel', { id: request.agent.id })
     return new Promise<ApprovalOutcome>((resolve) => {
       if (request.signal?.aborted === true) {
         resolve('cancelled')
@@ -7503,8 +4621,12 @@ export class SshTui {
       }
       request.signal?.addEventListener('abort', onAbort, { once: true })
       dialog = this.openConfirm(
-        `允许工具 "${request.toolName}"？（${agentLabel}）${request.reason === undefined ? '' : `\n${request.reason}`}`,
-        'y = 允许一次, n = 拒绝, Esc = 取消',
+        t('approval.prompt', {
+          tool: request.toolName,
+          agent: agentLabel,
+          reason: request.reason === undefined ? '' : `\n${request.reason}`,
+        }),
+        t('approval.hint'),
         (answer) => {
           request.signal?.removeEventListener('abort', onAbort)
           resolve(answer === 'y' ? 'allowed-once' : answer === 'n' ? 'rejected' : 'cancelled')
@@ -7518,7 +4640,7 @@ export class SshTui {
     const answers: AskUserQuestionAnswer['answers'] = []
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined
-      : `子代理 ${request.agent.id}`
+      : t('sub.agentLabel', { id: request.agent.id })
     const cards: Extract<Row, { kind: 'question' }>[] = []
     for (const question of request.questions) {
       const card: Extract<Row, { kind: 'question' }> = {
@@ -7579,13 +4701,13 @@ export class SshTui {
           card.status = 'answered'
           card.summary = answer.custom !== undefined && answer.custom !== ''
             ? answer.custom
-            : answer.selected.join(', ') || '已回答'
+            : answer.selected.join(', ') || t('question.answered')
         }
       }
-      settleCards('answered', '已回答')
+      settleCards('answered', t('question.answered'))
       return { answers }
     } catch (error) {
-      settleCards('cancelled', error instanceof UserQuestionError ? error.message : '已取消')
+      settleCards('cancelled', error instanceof UserQuestionError ? error.message : t('question.cancelled'))
       throw error
     }
   }
@@ -7755,11 +4877,11 @@ export class SshTui {
       await settings.mutate(settingsNamespace('llm-pi-ai'), [
         { op: 'set', path: ['providers', provider, 'models'], value: [...models, modelEntry] },
       ])
-      this.pushRow({ kind: 'system', text: `模型 ${modelId} 已加入提供商 ${provider} 的配置。` })
+      this.pushRow({ kind: 'system', text: t('model.added', { model: modelId, provider }) })
       this.markDirty()
       return true
     } catch (error) {
-      this.pushRow({ kind: 'error', text: `无法把模型 ${modelId} 写入提供商配置：${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('model.addFailed', { model: modelId, error: errorChain(error) }) })
       this.markDirty()
       return false
     }
@@ -7785,10 +4907,14 @@ export class SshTui {
     const currentIndex = unique.findIndex(option => option.id === currentModel && option.id !== '__switch_provider__')
     const answer = await this.askQuestion({
       id: 'model-pick',
-      question: `选择模型（提供商 ${provider} · ${sourceLabel}${unique.length > PICKER_WINDOW ? ` · ${unique.length} 个，↑/↓ 翻看` : ''}）`,
+      question: t('model.pick', {
+        provider,
+        source: sourceLabel,
+        pages: unique.length > PICKER_WINDOW ? t('model.pickPages', { count: unique.length }) : '',
+      }),
       options: unique.map(option => ({
         label: option.label,
-        description: option.id === currentModel ? '当前' : undefined,
+        description: option.id === currentModel ? t('model.current') : undefined,
       })),
     }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
     const picked = answer.selected[0]
@@ -7812,9 +4938,9 @@ export class SshTui {
     add(current)
     for (const info of llm?.listProviders() ?? []) add(info.id, info.name)
     add('xai', 'SuperGrok')
-    add('deepseek-official', 'DeepSeek 官方')
-    add('opencode-go', 'OpenCode Go')
-    add('opencode', 'OpenCode Zen')
+    add('deepseek-official', t('route.deepseek'))
+    add('opencode-go', t('route.go'))
+    add('opencode', t('route.zen'))
     return out
   }
 
@@ -7828,15 +4954,15 @@ export class SshTui {
   private async loadModelOptions(provider: string): Promise<{ options: { id: string; label: string }[]; source: string }> {
     const llm = this.ctx.get('llm')
     let options: { id: string; label: string }[] = []
-    let source = '已配置列表'
+    let source = t('model.configured')
     if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
       const previousStatus = this.status
       try {
-        this.status = `正在从端点获取 ${provider} 的模型列表…`
+        this.status = t('model.fetching', { provider })
         this.markDirty()
         options = await this.discoverEndpointModels(provider)
         if (options.length > 0) {
-          source = '端点实时列表'
+          source = t('model.live')
           try {
             const listed = (await llm?.listModels(provider)) ?? []
             const endpointIds = new Set(options.map(model => model.id))
@@ -7866,7 +4992,7 @@ export class SshTui {
     }
     if (options.length === 0 && providerUsesLocalOAuth(provider)) {
       options = SshTui.XAI_FALLBACK_MODELS.map(option => ({ ...option }))
-      source = 'SuperGrok 目录'
+      source = t('model.xaiCatalog')
     }
     if (options.length === 0) {
       const remembered = this.rememberedRoute(provider)?.model
@@ -7896,18 +5022,18 @@ export class SshTui {
     const providers = this.listSelectableProviders()
     const current = this.currentProviderId()
     if (providers.length === 0) {
-      this.pushRow({ kind: 'error', text: '没有可切换的提供商。用 /setup 先配置一条 API Key 路由。' })
+      this.pushRow({ kind: 'error', text: t('provider.none') })
       this.markDirty()
       return
     }
     const currentIndex = Math.max(0, providers.findIndex(option => option.id === current))
     const pickedAnswer = await this.askQuestion({
       id: 'provider-pick',
-      question: '选择提供商',
+      question: t('provider.pick'),
       options: providers.map(option => ({
         label: option.label,
         description: option.id === current
-          ? `${describeProviderRoute(option.id).kind} · 当前`
+          ? t('provider.currentKind', { kind: describeProviderRoute(option.id).kind })
           : describeProviderRoute(option.id).kind,
       })),
     }, 0, 1, currentIndex)
@@ -8064,13 +5190,13 @@ export class SshTui {
       } catch (error: unknown) {
         this.pushRow({
           kind: 'error',
-          text: `默认选择未能固化：agentDefaultModel 不可用且 settings 写入失败（${errorChain(error)}）。本次切换仅当前会话生效，重启会回退到保存过的提供商。`,
+          text: t('model.persistFailSettings', { error: errorChain(error) }),
         })
         this.markDirty()
         return false
       }
     }
-    this.pushRow({ kind: 'error', text: '默认选择未能固化：settings 服务不可用。本次切换仅当前会话生效。' })
+    this.pushRow({ kind: 'error', text: t('model.persistFailNone') })
     this.markDirty()
     return false
   }
@@ -8114,7 +5240,7 @@ export class SshTui {
     })
     this.pushRow({
       kind: 'system',
-      text: `子代理已跟随提供商 ${provider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
+      text: t('sub.followed', { provider, model: nextModel, sessionOnly: persisted ? '' : t('sub.sessionOnly') }),
     })
   }
 
@@ -8136,7 +5262,7 @@ export class SshTui {
     this.subagentSelection.current = next
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
-      this.pushRow({ kind: 'error', text: '设置服务不可用，子代理选择仅当前会话生效。' })
+      this.pushRow({ kind: 'error', text: t('sub.settingsMissing') })
       this.markDirty()
       return false
     }
@@ -8151,15 +5277,15 @@ export class SshTui {
   }> {
     const llm = this.ctx.get('llm')
     let options: { id: string; label: string }[] = []
-    let source = '已配置列表'
+    let source = t('model.configured')
     if (this.piAiProviderProfile(provider) !== undefined || provider === 'opencode' || provider === 'opencode-go') {
       const previousStatus = this.status
       try {
-        this.status = `正在从端点获取子代理模型列表（${provider}）…`
+        this.status = t('sub.fetchingModels', { provider })
         this.markDirty()
         options = await this.discoverEndpointModels(provider)
         if (options.length > 0) {
-          source = '端点实时列表'
+          source = t('model.live')
           try {
             const listed = (await llm?.listModels(provider)) ?? []
             const endpointIds = new Set(options.map(model => model.id))
@@ -8206,7 +5332,7 @@ export class SshTui {
       })
       this.pushRow({
         kind: 'system',
-        text: `子代理已恢复跟随父会话 ${parentProvider}，模型改为 ${nextModel}${persisted ? '' : '（仅当前会话）'}。`,
+        text: t('sub.followed', { provider: parentProvider, model: nextModel, sessionOnly: persisted ? '' : t('sub.sessionOnly') }),
       })
       this.markDirty()
       return
@@ -8227,9 +5353,10 @@ export class SshTui {
     const persisted = await this.saveSubagentSelection({ ...current, model: selectedId })
     this.pushRow({
       kind: 'system',
-      text: `${current.provider === undefined
-        ? `子代理模型已切换：${selectedId}（提供方跟随父会话 ${provider}）。`
-        : `子代理模型已切换：${selectedId}（提供方 ${provider}）。`}${persisted ? '' : '（仅当前会话）'}`,
+      text: (current.provider === undefined
+        ? t('sub.modelFollow', { model: selectedId, provider })
+        : t('sub.modelPinned', { model: selectedId, provider }))
+        + (persisted ? '' : t('sub.sessionOnly')),
     })
     this.markDirty()
   }
@@ -8527,13 +5654,13 @@ export class SshTui {
   private async runModeCommand(arg = ''): Promise<void> {
     const agentPresets = this.ctx.get('agentPresets')
     if (agentPresets === undefined) {
-      this.pushRow({ kind: 'error', text: 'agentPresets 服务不可用。' })
+      this.pushRow({ kind: 'error', text: t('mode.missingService') })
       this.markDirty()
       return
     }
     const presets = await agentPresets.list()
     if (presets.length === 0) {
-      this.pushRow({ kind: 'error', text: '没有可用的模式（preset）。' })
+      this.pushRow({ kind: 'error', text: t('mode.none') })
       this.markDirty()
       return
     }
@@ -8554,10 +5681,10 @@ export class SshTui {
     if (selected === undefined) {
       const answer = await this.askQuestion({
         id: 'mode-pick',
-        question: '选择模式',
+        question: t('mode.pick'),
         options: presets.map(preset => ({
           label: preset.name ?? preset.id,
-          description: `${preset.id === this.presetId ? '当前 · ' : ''}${preset.description ?? ''}`.trim(),
+          description: `${preset.id === this.presetId ? t('mode.currentPrefix') : ''}${preset.description ?? ''}`.trim(),
         })),
       })
       selected = presets.find(preset => (preset.name ?? preset.id) === answer.selected[0])
@@ -8569,11 +5696,11 @@ export class SshTui {
       await agentPresets.recompose(this.agent.ctx, selected.id)
       this.presetId = selected.id
       this.presetName = selectedName
-      this.pushRow({ kind: 'system', text: `已切换到模式：${selectedName}（当前会话生效）。` })
+      this.pushRow({ kind: 'system', text: t('mode.switched', { name: selectedName }) })
     } else {
       this.pushRow({
         kind: 'system',
-        text: `当前会话已有内容，无法中途切换模式；已记住 ${selectedName}，下次启动生效。`,
+        text: t('mode.remembered', { name: selectedName }),
       })
     }
     await this.ctx.get('settings')?.update(settingsNamespace('agent-presets'), { default: selected.id })
@@ -8584,54 +5711,62 @@ export class SshTui {
   private async runResumeCommand(arg: string, fromLaunch = false): Promise<void> {
     const target = arg.trim()
     if (!fromLaunch && this.agent.status === 'running') {
-      this.pushRow({ kind: 'error', text: '当前轮次运行中，请等待结束或按 Esc 取消后再切换会话。' })
+      this.pushRow({ kind: 'error', text: t('resume.running') })
       this.markDirty()
       return
     }
     if (target !== '') {
       if (target === String(this.agent.id)) {
-        this.pushRow({ kind: 'system', text: '已在当前会话。' })
+        this.pushRow({ kind: 'system', text: t('resume.same') })
         this.markDirty()
         return
       }
       if (this.onSwitchSession === undefined) {
-        this.pushRow({ kind: 'error', text: '会话切换回调不可用，无法 /resume。' })
+        this.pushRow({ kind: 'error', text: t('resume.noCallback') })
         this.markDirty()
         return
       }
-      this.pushRow({ kind: 'system', text: `正在切换到会话 ${target}…` })
+      this.pushRow({ kind: 'system', text: t('resume.switching', { id: target }) })
       this.markDirty()
       await this.onSwitchSession(target)
       return
     }
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) {
-      this.pushRow({ kind: 'error', text: 'sessionPersistence 服务不可用。' })
+      this.pushRow({ kind: 'error', text: t('resume.noPersistence') })
       this.markDirty()
       return
     }
     const inspected = await listResumableSessions(persistence, String(this.agent.id))
     if (inspected.length === 0) {
-      this.pushRow({ kind: 'system', text: '没有可恢复的历史会话（也可以直接 /resume <session-id>）。' })
+      this.pushRow({ kind: 'system', text: t('resume.none') })
       this.markDirty()
       return
     }
+    const labelCount = new Map<string, number>()
+    for (const item of inspected) {
+      labelCount.set(item.label, (labelCount.get(item.label) ?? 0) + 1)
+    }
+    const choices = inspected.map(item => ({
+      item,
+      label: (labelCount.get(item.label) ?? 0) > 1 ? `${item.label} · ${item.id}` : item.label,
+      description: `${item.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(item.updatedAt)} · ${item.cwd}`,
+    }))
     const answer = await this.askQuestion({
       id: 'resume-pick',
-      question: '选择要恢复的历史会话',
-      options: inspected.map(item => ({
-        label: item.label,
-        description: `${item.unreadable === true ? '⚠ 无法读取 · ' : ''}${formatSessionTime(item.updatedAt)} · ${item.cwd}`,
-      })),
+      question: inspected.length > PICKER_WINDOW
+        ? t('resume.pickMany', { count: inspected.length })
+        : t('resume.pick'),
+      options: choices.map(choice => ({ label: choice.label, description: choice.description })),
     })
-    const picked = inspected.find(item => item.label === answer.selected[0])
+    const picked = choices.find(choice => choice.label === answer.selected[0])?.item
     if (picked === undefined) return
     if (this.onSwitchSession === undefined) {
-      this.pushRow({ kind: 'error', text: '会话切换回调不可用，无法 /resume。' })
+      this.pushRow({ kind: 'error', text: t('resume.noCallback') })
       this.markDirty()
       return
     }
-    this.pushRow({ kind: 'system', text: `正在切换到会话 ${picked.id}…` })
+    this.pushRow({ kind: 'system', text: t('resume.switching', { id: picked.id }) })
     this.markDirty()
     await this.onSwitchSession(picked.id)
   }
@@ -8665,7 +5800,7 @@ export class SshTui {
         signal: AbortSignal.timeout(15_000),
       })
     } catch (error) {
-      throw new Error(`无法访问 OpenCode 额度接口：${errorChain(error)}`)
+      throw new Error(t('usage.goFetchFail', { error: errorChain(error) }))
     }
     let payload: unknown
     try {
@@ -8676,12 +5811,12 @@ export class SshTui {
     if (!response.ok) {
       const message = openCodeApiErrorMessage(payload)
       if (response.status === 401) {
-        throw new Error(`OpenCode Go API Key 无效或未授权（401）${message === '' ? '' : `：${message}`}`)
+        throw new Error(t('usage.go401', { detail: message === '' ? '' : `：${message}` }))
       }
       if (response.status === 403) {
-        throw new Error(`当前 Key 未订阅 OpenCode Go，或额度服务不可用（403）${message === '' ? '' : `：${message}`}`)
+        throw new Error(t('usage.go403', { detail: message === '' ? '' : `：${message}` }))
       }
-      throw new Error(`OpenCode Go 额度接口返回 HTTP ${response.status}${message === '' ? '' : `：${message}`}`)
+      throw new Error(t('usage.goHttp', { status: response.status, detail: message === '' ? '' : `：${message}` }))
     }
     return payload
   }
@@ -8691,11 +5826,11 @@ export class SshTui {
     const usage = this.stats.usage
     const billedInput = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
     const tokenLine = billedInput > 0 || usage.outputTokens > 0
-      ? `本会话已记录 token：输入 ${formatTokens(billedInput)} · 输出 ${formatTokens(usage.outputTokens)}（会话统计，非账单金额）`
-      : '本会话尚无 token 用量记录。'
+      ? t('usage.sessionTokens', { input: formatTokens(billedInput), output: formatTokens(usage.outputTokens) })
+      : t('usage.sessionNone')
     return [
-      `OpenCode Zen 按量计费（${source.provider}）`,
-      'Zen 没有固定额度：请求按 API 账单计费，余额与账单请前往 https://opencode.ai/zen 查看。',
+      t('usage.zenHeader', { provider: source.provider }),
+      t('usage.zenBody'),
       tokenLine,
     ].join('\n')
   }
@@ -8703,7 +5838,7 @@ export class SshTui {
   /** /usage and /balance: remaining quota or prepaid balance for the current provider. */
   private async runUsageCommand(): Promise<void> {
     const previousStatus = this.status
-    this.status = '查询额度…'
+    this.status = t('usage.querying')
     this.markDirty()
     try {
       const quota = await this.refreshQuota({ reason: 'command', announce: true })
@@ -8720,11 +5855,11 @@ export class SshTui {
       } else {
         this.pushRow({
           kind: 'system',
-          text: `当前提供商 ${provider} 没有可用的余额或额度接口。DeepSeek 官方走 /user/balance；OpenAI Completions 兼容网关会探测 credit_grants；OpenCode Go 与 SuperGrok 走订阅额度。`,
+          text: t('usage.none', { provider }),
         })
       }
     } catch (error: unknown) {
-      this.pushRow({ kind: 'error', text: `/balance failed: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'balance', error: errorChain(error) }) })
     } finally {
       this.status = previousStatus
       this.markDirty()
@@ -8791,7 +5926,7 @@ export class SshTui {
   private async fetchAccountBalance(provider: string): Promise<AccountBalanceSnapshot | undefined> {
     if (provider === 'deepseek-official' || provider === 'deepseek') {
       const apiKey = await this.resolveCredential('DEEPSEEK_API_KEY')
-      if (apiKey === undefined) throw new Error('未找到 DEEPSEEK_API_KEY')
+      if (apiKey === undefined) throw new Error(t('usage.noDeepseekKey'))
       const section = this.ctx.get('settings')?.get(settingsNamespace('llm-deepseek')) as { baseURL?: unknown } | undefined
       const baseURL = typeof section?.baseURL === 'string' && section.baseURL.trim() !== ''
         ? section.baseURL.trim()
@@ -8810,7 +5945,7 @@ export class SshTui {
       ? profile.apiKeyEnv.trim()
       : `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
     const apiKey = await this.resolveCredential(apiKeyEnv)
-    if (apiKey === undefined) throw new Error(`未找到凭据 ${apiKeyEnv}`)
+    if (apiKey === undefined) throw new Error(t('usage.noCred', { env: apiKeyEnv }))
     const errors: string[] = []
     for (const path of OPENAI_COMPAT_BALANCE_PATHS) {
       const url = joinUrl(baseURL, path)
@@ -8821,18 +5956,18 @@ export class SshTui {
         }, provider)
         const parsed = parseOpenAiCompatibleBalance(payload, provider, path)
         if (parsed !== undefined) return parsed
-        errors.push(`${path}: 返回无法识别`)
+        errors.push(t('usage.pathBad', { path }))
       } catch (error: unknown) {
         errors.push(`${path}: ${errorChain(error)}`)
       }
     }
-    throw new Error(`OpenAI 兼容网关未找到余额接口（${errors.join('；')}）`)
+    throw new Error(t('usage.noGateway', { errors: errors.join(t('list.sep')) }))
   }
 
   private async fetchQuotaSnapshot(provider: string): Promise<QuotaSnapshot | undefined> {
     if (providerUsesLocalOAuth(provider)) {
       const token = await this.resolveSuperGrokToken()
-      if (token === undefined) throw new Error('未找到 SuperGrok OAuth token（~/.grok-bridge/auth.json）')
+      if (token === undefined) throw new Error(t('usage.noGrokToken'))
       const headers = {
         authorization: `Bearer ${token}`,
         accept: 'application/json',
@@ -8858,7 +5993,7 @@ export class SshTui {
     const source = openCodeSourceFor(provider, llmPiAi)
     if (source === null || source.flavor !== 'go') return undefined
     const apiKey = await this.resolveCredential(source.apiKeyEnv)
-    if (apiKey === undefined) throw new Error(`未找到 OpenCode Go 凭据 ${source.apiKeyEnv}`)
+    if (apiKey === undefined) throw new Error(t('usage.noGoCred', { env: source.apiKeyEnv }))
     const payload = await this.fetchOpenCodeGoUsage(apiKey)
     return parseOpenCodeGoQuota(payload, source.provider)
   }
@@ -8872,7 +6007,7 @@ export class SshTui {
     try {
       response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) })
     } catch (error) {
-      throw new Error(`无法访问 ${label} 额度接口：${errorChain(error)}`)
+      throw new Error(t('usage.fetchFail', { label, error: errorChain(error) }))
     }
     let payload: unknown
     try {
@@ -8881,7 +6016,7 @@ export class SshTui {
       payload = undefined
     }
     if (!response.ok) {
-      throw new Error(`${label} 额度接口返回 HTTP ${response.status}`)
+      throw new Error(t('usage.http', { label, status: response.status }))
     }
     return payload
   }
@@ -9342,14 +6477,14 @@ export class SshTui {
             const template = onboardTemplate(state)
             const id = value === '' ? template.defaultId : value
             if (!/^[a-z0-9][a-z0-9-]*$/u.test(id)) {
-              this.pushRow({ kind: 'error', text: 'Provider ID 只能包含小写字母、数字和连字符，且不能以连字符开头。' })
+              this.pushRow({ kind: 'error', text: t('onboard.idInvalid') })
               this.markDirty()
               return
             }
             state.providerId = id
           } else if (state.step === 'key') {
             if (value === '' && state.providerType !== 'catalog') {
-              this.pushRow({ kind: 'error', text: 'API Key 不能为空，请重新输入。' })
+              this.pushRow({ kind: 'error', text: t('onboard.keyEmpty') })
               this.markDirty()
               return
             }
@@ -9360,7 +6495,7 @@ export class SshTui {
               ? template.defaultModels
               : value.split(/[\s,，]+/u).filter(Boolean)
             if (parsed.length === 0) {
-              this.pushRow({ kind: 'error', text: '至少需要一个模型 ID。' })
+              this.pushRow({ kind: 'error', text: t('onboard.needModel') })
               this.markDirty()
               return
             }
@@ -9433,16 +6568,16 @@ export class SshTui {
     const key = state.key
     const baseURL = baseUrl === '' ? template.defaultBaseUrl : baseUrl
     if (baseURL === '' && providerType !== 'catalog') {
-      this.pushRow({ kind: 'error', text: '请先填写 Base URL 再获取模型列表。' })
+      this.pushRow({ kind: 'error', text: t('onboard.needBase') })
       this.markDirty()
       return
     }
     const previousStatus = this.status
-    this.status = '正在从端点获取模型列表…'
+    this.status = t('onboard.fetchingModels')
     this.markDirty()
     try {
       const llm = this.ctx.get('llm')
-      if (llm === undefined) throw new Error('llm 服务不可用')
+      if (llm === undefined) throw new Error(t('onboard.llmMissing'))
       const discovered = await discoverProviderModels(llm, {
         ...(providerType === 'catalog' && state.catalog !== undefined && baseURL === ''
           ? {}
@@ -9461,15 +6596,15 @@ export class SshTui {
       if (!stillCurrent) return
       const ids = [...new Set(discovered.map(model => model.id).filter(id => id.length > 0))]
       if (ids.length === 0) {
-        this.pushRow({ kind: 'error', text: '端点没有返回可用模型，请手动输入模型 ID。' })
+        this.pushRow({ kind: 'error', text: t('onboard.noModels') })
       } else {
         state.models = ids
         this.input = ''
         this.cursor = 0
-        this.pushRow({ kind: 'system', text: `已从端点获取 ${ids.length} 个模型：${formatModelList(ids, 6)}（Enter 确认，也可继续修改）。` })
+        this.pushRow({ kind: 'system', text: t('onboard.fetchedModels', { count: ids.length, list: formatModelList(ids, 6) }) })
       }
     } catch (error) {
-      this.pushRow({ kind: 'error', text: `获取模型列表失败：${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('onboard.fetchFailed', { error: errorChain(error) }) })
     } finally {
       this.status = previousStatus
       this.markDirty()
@@ -9498,12 +6633,12 @@ export class SshTui {
         await this.syncSubagentToProvider('deepseek-official', state.models)
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
-          this.pushRow({ kind: 'system', text: `Base URL 已保存 → ${displayDshPath('settings.yaml')}` })
+          this.pushRow({ kind: 'system', text: t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }) })
         }
         if (saved) {
           this.pushRow({
             kind: 'system',
-            text: `配置完成，已记住 deepseek-official / ${model}。用 /provider 可切回其它已保存的提供商，无需再 /setup。`,
+            text: t('onboard.officialDone', { model }),
           })
         }
       } else {
@@ -9567,13 +6702,13 @@ export class SshTui {
           ...(defaultEffort === undefined ? {} : { reasoning: defaultEffort }),
         }
         if (settings === undefined) {
-          this.pushRow({ kind: 'error', text: '设置服务不可用，自定义提供商未保存。' })
+          this.pushRow({ kind: 'error', text: t('onboard.settingsMissing') })
           saved = false
         } else {
           await settings.mutate(settingsNamespace('llm-pi-ai'), [
             { op: 'set', path: ['providers', state.providerId], value: profile },
           ])
-          this.pushRow({ kind: 'system', text: `提供商 ${state.providerId} 已保存 → ${displayDshPath('settings.yaml')}` })
+          this.pushRow({ kind: 'system', text: t('onboard.providerSaved', { id: state.providerId, path: displayDshPath('settings.yaml') }) })
         }
         // Only store the key when its provider profile actually made it to
         // settings; otherwise the saved key points at an unusable route.
@@ -9593,13 +6728,13 @@ export class SshTui {
           await this.syncSubagentToProvider(state.providerId, state.models)
           this.pushRow({
             kind: 'system',
-            text: `配置完成，已记住 ${state.providerId} / ${model}。其它提供商的模型和 Key 仍保留；用 /provider 切换，下一步请求生效。`,
+            text: t('onboard.customDone', { id: state.providerId, model }),
           })
         }
       }
     } catch (error) {
       saved = false
-      this.pushRow({ kind: 'error', text: `保存配置失败: ${errorChain(error)}` })
+      this.pushRow({ kind: 'error', text: t('onboard.saveFailed', { error: errorChain(error) }) })
     } finally {
       this.onboarding = undefined
       if (this.dialog?.kind === 'onboarding') this.dialog = undefined
@@ -9619,7 +6754,7 @@ export class SshTui {
     const shadowed = shadowing !== undefined && shadowing !== ''
     if (credentials !== undefined && !shadowed) {
       await credentials.set(credentialRef(envRef), key)
-      this.pushRow({ kind: 'system', text: `${envRef} 已保存 → ${displayDshPath('.credentials.yaml')}` })
+      this.pushRow({ kind: 'system', text: t('onboard.credSaved', { env: envRef, path: displayDshPath('.credentials.yaml') }) })
       return
     }
     await this.writeLaunchEnv({ [envRef]: key })
@@ -9627,9 +6762,9 @@ export class SshTui {
       kind: 'system',
       text: shadowed
         ? IS_WINDOWS
-          ? `环境变量 ${envRef} 已存在且优先，已用 setx + env.cmd 覆盖；新开的终端生效。`
-          : `环境变量 ${envRef} 已存在且优先，已写入启动环境覆盖；新开的终端生效。`
-        : `凭据服务不可用，已写入启动环境覆盖 → ${displayDshPath(IS_WINDOWS ? 'env.cmd' : 'env.sh')}`,
+          ? t('onboard.envShadowWin', { env: envRef })
+          : t('onboard.envShadowUnix', { env: envRef })
+        : t('onboard.credMissing', { path: displayDshPath(IS_WINDOWS ? 'env.cmd' : 'env.sh') }),
     })
   }
 
@@ -9748,7 +6883,7 @@ export class SshTui {
       return
     }
     if (this.agent.status === 'running') {
-      this.pushRow({ kind: 'system', text: '已请求取消当前轮次…' })
+      this.pushRow({ kind: 'system', text: t('cancel.esc') })
       this.agent.cancel({ kind: 'user' })
       this.status = 'cancelling…'
       this.markDirty()
@@ -9892,7 +7027,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modelCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/model failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'model', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9902,7 +7037,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.effortCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/effort failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'effort', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9912,7 +7047,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.providerCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/provider failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'provider', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9922,7 +7057,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.submodelCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/submodel failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'submodel', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9932,7 +7067,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.subeffortCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/subeffort failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'subeffort', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9942,7 +7077,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/mode failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'mode', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9953,7 +7088,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/language failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'language', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9963,7 +7098,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/view failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'view', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -9973,7 +7108,7 @@ export class SshTui {
           if (error instanceof UserQuestionError) {
             this.pushRow({ kind: 'system', text: t('help.modeCancel') })
           } else {
-            this.pushRow({ kind: 'error', text: `/disconnect failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -10033,7 +7168,7 @@ export class SshTui {
       case 'balance':
       case 'quota':
         void this.runUsageCommand().catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
           this.markDirty()
         })
         break
@@ -10043,17 +7178,17 @@ export class SshTui {
           const [action, ...ids] = trimmed.split(/\s+/u)
           if (action === 'kill' || action === 'stop') {
             if (ids.length === 0) {
-              this.pushRow({ kind: 'error', text: '/subagents kill <session-id> — 缺少子代理会话 ID' })
+              this.pushRow({ kind: 'error', text: t('sub.killNeedId') })
               break
             }
             const subagents = this.ctx.get('subagents')
             if (subagents === undefined) {
-              this.pushRow({ kind: 'error', text: 'subagents service is unavailable' })
+              this.pushRow({ kind: 'error', text: t('cmd.serviceMissing', { service: 'subagents' }) })
               break
             }
             const targets = ids.map(id => SessionId(id))
             void subagents.drainContinuableChildren(this.agent, targets).then(() => {
-              this.pushRow({ kind: 'system', text: `已请求释放子代理：${ids.join(', ')}` })
+              this.pushRow({ kind: 'system', text: t('sub.killRequested', { ids: ids.join(', ') }) })
               this.markDirty()
             }).catch((error: unknown) => {
               this.pushRow({ kind: 'error', text: `/subagents kill failed: ${errorChain(error)}` })
@@ -10061,17 +7196,24 @@ export class SshTui {
             })
             break
           }
-          this.pushRow({ kind: 'error', text: `/subagents 未知操作 "${action}"（支持 list / kill <id>）` })
+          this.pushRow({ kind: 'error', text: t('sub.unknownAction', { action }) })
           break
         }
         if (this.activeSubagents.size === 0) {
-          this.pushRow({ kind: 'system', text: '当前没有活动的子代理。' })
+          this.pushRow({ kind: 'system', text: t('sub.none') })
         } else {
           const lines = [...this.activeSubagents.entries()].map(([runId, sub]) => {
             const card = this.findSubagentRow(sub.id)
             const label = card?.label ?? sub.id
             const activity = card?.lastActivity ? ` · ${card.lastActivity}` : ''
-            return `▶ ${label}  ${sub.id}（${sub.provider}）运行 ${Math.floor((Date.now() - sub.startedAt) / 1000)}s  [${runId.slice(0, 8)}]${activity}`
+            return t('sub.listLine', {
+              label,
+              id: sub.id,
+              provider: sub.provider,
+              seconds: Math.floor((Date.now() - sub.startedAt) / 1000),
+              run: runId.slice(0, 8),
+              activity,
+            })
           })
           this.pushRow({ kind: 'system', text: t('sub.listHint', { lines: lines.join('\n') }) })
         }
@@ -10080,9 +7222,9 @@ export class SshTui {
       case 'resume':
         void this.runResumeCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: '会话选择已取消。' })
+            this.pushRow({ kind: 'system', text: t('resume.cancelled') })
           } else {
-            this.pushRow({ kind: 'error', text: `/resume failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'resume', error: errorChain(error) }) })
           }
           this.markDirty()
         })
@@ -10093,7 +7235,11 @@ export class SshTui {
           this.pushRow({
             kind: 'system',
             text: this.autoApprovalMode === 'auto'
-              ? t('approval.statusAuto', { allowed: this.autoAllowedCount, denied: this.autoDeniedCount })
+              ? t('approval.statusAuto', {
+                allowed: this.autoAllowedCount,
+                denied: this.autoDeniedCount,
+                reviewed: this.aiReviewCount,
+              })
               : t('approval.statusOff'),
           })
           this.markDirty()
@@ -10109,7 +7255,7 @@ export class SshTui {
         }
         this.autoApprovalMode = next
         void this.mergeUiSettings({ autoApproval: next }).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: `/approval failed: ${errorChain(error)}` })
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'approval', error: errorChain(error) }) })
           this.markDirty()
         })
         this.pushRow({
@@ -10126,7 +7272,7 @@ export class SshTui {
       case 'dialog-test': {
         const questions = this.ctx.get('userQuestions')
         if (questions === undefined) {
-          this.pushRow({ kind: 'error', text: 'userQuestions service is unavailable' })
+          this.pushRow({ kind: 'error', text: t('cmd.serviceMissing', { service: 'userQuestions' }) })
           break
         }
         void questions.ask({
@@ -10138,11 +7284,11 @@ export class SshTui {
           agent: this.agent,
         }).then(
           (answer) => {
-            this.pushRow({ kind: 'system', text: `dialog answer: ${JSON.stringify(answer)}` })
+            this.pushRow({ kind: 'system', text: t('dialog.answer', { json: JSON.stringify(answer) }) })
             this.markDirty()
           },
           (error) => {
-            this.pushRow({ kind: 'error', text: `dialog error: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('dialog.error', { error: errorChain(error) }) })
             this.markDirty()
           },
         )
@@ -10152,7 +7298,7 @@ export class SshTui {
         {
           const commands = this.ctx.get('commands')
           if (commands === undefined) {
-            this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
+            this.pushRow({ kind: 'error', text: t('cmd.unknown', { command }) })
             break
           }
           if (command === 'compact') {
@@ -10164,7 +7310,7 @@ export class SshTui {
           this.commandAbort = controller
           void commands.execute(this.agent, text, [], controller.signal).then((execution) => {
             if (execution === undefined) {
-              this.pushRow({ kind: 'error', text: `Unknown command: /${command} (try /help)` })
+              this.pushRow({ kind: 'error', text: t('cmd.unknown', { command }) })
               return
             }
             // command/run + command/done already paint via handleCommandDone
@@ -10177,7 +7323,7 @@ export class SshTui {
               this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
             }
           }).catch((error: unknown) => {
-            this.pushRow({ kind: 'error', text: `/${command} failed: ${errorChain(error)}` })
+            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
           }).finally(() => {
             if (this.commandAbort === controller) this.commandAbort = undefined
             this.markDirty()

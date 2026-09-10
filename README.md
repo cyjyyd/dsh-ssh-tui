@@ -73,11 +73,12 @@ dsh --profile tui
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
 - 审批、`ask_user_question`、计划模式、子代理进度、`/mode` 模式切换、`/model` 模型切换、
   `/resume` 会话切换、`/disconnect` 断线策略等完整支持；
-- `/approval auto` 自动审批模式（Codex 式）：读类/构建/测试等低风险命令自动放行；
-  `rm -rf`、`sudo`、`curl|sh`、`git push --force` 等危险命令自动**拒绝**并把原因告知模型由其
-  自行调整；规则无法判定的形状交给**子代理模型 AI 复核**（防注入提示词 + 紧凑上下文，
-  输出 risk/authorization 双维度判定）；仍未可判定时接入才询问、断开时自动拒绝——
-  配合 `/disconnect continue` 断线后回合不停摆；
+- `/approval auto` 自动审批模式（Codex 式）：读类/构建/测试、工作区 `edit`/`write`/`read` 自动放行；
+  `rm -rf`、`sudo`、`curl|sh`、`git push --force`、敏感路径只读等危险命令自动**拒绝**，并把原因
+  回给模型由其自行调整；`npm publish`、解释器 `-c`/`-e` 等未识别形状交给**子代理模型 AI 复核**
+  （用户消息 + args/reason/sandbox，英文界面走英文审核员；`authorization=yes` 才放行）；
+  仍未可判定时接入才询问、断开时自动拒绝——配合 `/disconnect continue` 断线后回合不停摆；
+  `/approval status` 另报本轮 AI 复核次数；
 - 每个子代理都是独立可折叠卡片，默认收起，运行中带旋转动画；多个子代理互不混排；
 - 进入计划模式、待审计划、提问用户都会显示对应卡片和底部提示，而不是只塞进系统消息。
 - 工作区底部有 Codex 式「处理中」动画卡：思考里第一个闭合的 `**加粗**` 作为 shimmer
@@ -205,7 +206,7 @@ dsh --profile tui --provider <id>
 dsh --profile tui --no-color
 ```
 
-选择器操作：`1-9` 选择历史会话；`0` / `Enter` 新建；`Esc` 取消退出。
+选择器操作：一页固定 9 条，空筛选时 `1-9` 对应屏幕上每一项，`0` 新建。`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）移动高亮，`Enter` 恢复当前项。输入文字（或 `/` / `Ctrl+F`）按标题、会话 ID、工作目录筛选；`PgUp`/`PgDn` 翻页，`Esc` 先退出筛选再取消。历史列表本身不截断。
 
 ## 交互与快捷键
 
@@ -361,11 +362,18 @@ bash scripts/uninstall.sh work      # 指定 profile
 ```text
 src/index.ts        插件入口：启动选择器、会话创建/恢复/切换、session lock
 src/startup.ts      命令行参数解析（--resume / --new / --model ...）
-src/picker.ts       启动历史会话选择器
+src/picker.ts       启动历史会话选择器（可见页 9 条，列表不截断，可筛选）
 src/session-list.ts 历史会话扫描与标签（共享给 /resume）
 src/session-lock.ts 同会话防双开
 src/update-check.ts npm 最新版提示（不自动升级）
-src/tui.ts          终端渲染、交互、统计、标题/铃声
+src/tui.ts          终端渲染、交互、统计、标题/铃声（SshTui；叶子函数再导出）
+src/paint.ts        增量绘制、SSH 节拍、选择器窗口
+src/term-text.ts    宽度/折行/markdown
+src/footer.ts       底栏、占用环、/status
+src/plan.ts         计划条、待办、/find
+src/tool-present.ts 工具卡、diff
+src/auto-approval.ts 规则初审
+src/approval-reviewer.ts AI 复核提示词与 JSON 解析
 src/i18n/           中英界面字典（/language、DSH_TUI_LANG）
 cordis.patch.yml    dsh bundle patch（仅 insert ssh-tui-startup / ssh-tui）
 scripts/            安装 / 卸载 / 验证脚本

@@ -234,6 +234,36 @@ test('composePaintOutput never writes past the terminal height', () => {
   assert.ok(frame.includes('\x1b[2;1H'))
 })
 
+test('composePaintOutput can keep the cursor hidden for the session picker', () => {
+  const hidden = composePaintOutput({
+    width: 8,
+    height: 3,
+    paintRows: ['one', 'next'],
+    previousRows: ['one', 'two'],
+    sizeChanged: false,
+    chromeChanged: false,
+    chromeStart: 2,
+    cursorRow: 3,
+    cursorColumn: 1,
+    hideCursor: true,
+  })
+  assert.ok(hidden.includes('\x1b[?25l'))
+  assert.equal(hidden.includes('\x1b[?25h'), false)
+  const idle = composePaintOutput({
+    width: 8,
+    height: 3,
+    paintRows: ['one', 'two'],
+    previousRows: ['one', 'two'],
+    sizeChanged: false,
+    chromeChanged: false,
+    chromeStart: 2,
+    cursorRow: 3,
+    cursorColumn: 1,
+    hideCursor: true,
+  })
+  assert.equal(idle, '')
+})
+
 test('isHangupErrno matches dead-TTY write failures', () => {
   assert.equal(isHangupErrno({ code: 'EIO' }), true)
   assert.equal(isHangupErrno({ code: 'EPIPE' }), true)
@@ -589,6 +619,7 @@ test('/approval status reports the live mode instead of toggling it', () => {
   assert.ok(lastSystem().includes('自动审批已开启'))
   tui.runCommand('/approval status')
   assert.ok(lastSystem().includes('自动审批开启'))
+  assert.ok(lastSystem().includes('AI 复核 0 次'))
   tui.runCommand('/approval STATUS')
   assert.ok(lastSystem().includes('自动审批开启'))
   tui.runCommand('/approval on')
@@ -618,7 +649,7 @@ test('/submodel reset follows the parent provider again', async () => {
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(tui.subagentSelection.current.provider, undefined)
   assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('跟随父会话')))
+  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('跟随提供商')))
   assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('仅当前会话')))
 })
 
@@ -2054,9 +2085,24 @@ test('turn/end marks leftover todos as display-stale and asks once to close them
   assert.equal(followups.length, 1)
   assert.ok(String(followups[0].content[0].text).includes('todo_write'))
   assert.ok(String(followups[0].content[0].text).includes('pin the dock'))
+  assert.equal(followups[0].source.kind, 'plugin')
+  assert.equal(followups[0].source.form, 'notice')
+  assert.ok(String(followups[0].source.summary).includes('补一次待办'))
   assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('补一次待办')))
+  assert.equal(tui.rows.some(row => row.kind === 'user' && String(row.text).includes('todo_write')), false)
+  assert.equal(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('todo_write')), false)
   const frame = tui.captureFrame(80, 24)
   assert.ok(frame.some(line => line.includes('本轮未收尾')))
+  assert.equal(frame.some(line => line.includes('todo_write')), false)
+  tui.handleSessionEvent(agent.session, {
+    type: 'user/message',
+    data: {
+      content: followups[0].content,
+      source: followups[0].source,
+    },
+  })
+  assert.equal(tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('补一次待办')).length, 1)
+  assert.equal(tui.rows.some(row => String(row.text).includes('todo_write') && row.kind !== 'plan'), false)
   tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   await new Promise(resolve => queueMicrotask(resolve))
   assert.equal(followups.length, 1)

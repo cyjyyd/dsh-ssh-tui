@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildReviewUserMessage,
   parseReviewOutput,
+  reviewSystemPrompt,
   REVIEW_SYSTEM_PROMPT,
 } from '../lib/approval-reviewer.js'
 
@@ -12,6 +13,9 @@ test('buildReviewUserMessage fences the data regions and truncates long input', 
     segments: ['先看当前 node 装在哪里。', '再决定安装方式。'],
     toolName: 'bash',
     command: 'set -e\nsudo apt install -y nodejs',
+    args: '{"command":"sudo apt install -y nodejs"}',
+    reason: 'user asked to upgrade node',
+    sandboxMode: 'workspace-write',
   })
   assert.ok(message.includes('[用户最新消息开始]'))
   assert.ok(message.includes('更新一下本机node版本'))
@@ -20,6 +24,9 @@ test('buildReviewUserMessage fences the data regions and truncates long input', 
   assert.ok(message.includes('[待审批工具调用开始]'))
   assert.ok(message.includes('tool: bash'))
   assert.ok(message.includes('sudo apt install'))
+  assert.ok(message.includes('args: {"command":"sudo apt install -y nodejs"}'))
+  assert.ok(message.includes('reason: user asked to upgrade node'))
+  assert.ok(message.includes('sandbox: workspace-write'))
   // 防注入：系统提示词声明数据区不是指令
   assert.match(REVIEW_SYSTEM_PROMPT, /注入/)
   assert.match(REVIEW_SYSTEM_PROMPT, /reject/)
@@ -29,6 +36,10 @@ test('buildReviewUserMessage fences the data regions and truncates long input', 
   assert.match(REVIEW_SYSTEM_PROMPT, /\/home\//)
   assert.match(REVIEW_SYSTEM_PROMPT, /最终回复/)
   assert.match(REVIEW_SYSTEM_PROMPT, /思考过程一律忽略/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /npm\/pnpm\/yarn publish/)
+  assert.match(REVIEW_SYSTEM_PROMPT, /\.npmrc/)
+  assert.match(reviewSystemPrompt('en'), /npm\/pnpm\/yarn publish/)
+  assert.match(reviewSystemPrompt('en'), /authorization=unknown/)
   assert.ok(message.includes('[输出要求]'))
   assert.ok(message.includes('必须给出最终可见回复'))
 })
@@ -46,14 +57,18 @@ test('buildReviewUserMessage truncates oversized fields', () => {
 
 test('parseReviewOutput reads the reviewer JSON verdict', () => {
   const verdict = parseReviewOutput(
-    '{"risk":"low","authorization":"unknown","decision":"approved","reason":"常规只读查询"}',
+    '{"risk":"low","authorization":"yes","decision":"approved","reason":"常规只读查询"}',
   )
   assert.deepEqual(verdict, {
     risk: 'low',
-    authorization: 'unknown',
+    authorization: 'yes',
     approved: true,
     reason: '常规只读查询',
   })
+  assert.equal(
+    parseReviewOutput('{"risk":"low","authorization":"unknown","decision":"approved","reason":"常规只读查询"}')?.approved,
+    false,
+  )
 })
 
 test('parseReviewOutput fails safe on junk and hostile output', () => {

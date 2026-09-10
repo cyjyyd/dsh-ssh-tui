@@ -43,7 +43,12 @@ test('/language catalog switches chrome and tool titles', () => {
   assert.equal(presentToolCall('edit', JSON.stringify({ file_path: 'a.ts' })).title, 'edit')
   assert.equal(t('lang.cmd').includes('Chinese') || t('lang.cmd').includes('English'), true)
   assert.equal(t('boot.help').includes('/help'), true)
+  assert.equal(t('plan.nudgeQueued').includes('Asked the model'), true)
+  assert.equal(t('find.empty').includes('/find'), true)
+  assert.equal(t('stall.warning').includes('Esc'), true)
   setLocale('zh')
+  assert.equal(t('plan.nudgeQueued').includes('补一次待办'), true)
+  assert.equal(t('find.empty').includes('/find'), true)
 })
 
 test('colored tool headers keep zh and en titles after the status dot', () => {
@@ -88,6 +93,16 @@ test('colored tool headers keep zh and en titles after the status dot', () => {
     if (prevNoColor === undefined) delete process.env.NO_COLOR
     else process.env.NO_COLOR = prevNoColor
   }
+})
+
+test('zh and en catalogs share every key including the resume picker strings', () => {
+  assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort())
+  assert.equal(zh['resume.pickMany'].includes('{count}'), true)
+  assert.equal(en['resume.pickMany'].includes('{count}'), true)
+  assert.equal(zh['picker.hint'].includes('↑/↓'), true)
+  assert.equal(en['picker.hint'].includes('↑/↓'), true)
+  assert.equal(zh['picker.filter'].includes('{query}'), true)
+  assert.equal(en['picker.filter'].includes('{query}'), true)
 })
 
 test('slash command descriptions are complete and bilingual in zh and en', () => {

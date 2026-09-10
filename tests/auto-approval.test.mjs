@@ -2,12 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   classifyApproval,
+  classifyApprovalDetailed,
   classifyCommand,
   commandFromArgs,
   commandFromApprovalReason,
   commandForApprovalRequest,
   isApprovalStatusArg,
   parseAutoApprovalMode,
+  segments,
 } from '../lib/auto-approval.js'
 
 test('classifyCommand auto-allows low-risk reads, builds, and tests', () => {
@@ -56,20 +58,33 @@ test('classifyCommand auto-rejects dangerous shapes (Codex contract)', () => {
     'mkfs.ext4 /dev/sdb',
     'find . -name "*.tmp" -exec rm {} \\;',
     'find . -name "*.tmp" -delete',
-    'npm publish',
     'shutdown now',
     'reboot',
     'crontab -r',
     'chmod -R 777 /',
     'chown -R root /tmp/x',
-    'python -c "import os; os.system(\'rm -rf /\')"',
-    'python3 -c "print(1)"',
-    'node -e "require(\'fs\').rmSync(\'/\',{recursive:true})"',
-    "bash -c 'rm -rf /tmp/x'",
-    'sh -c "rm -rf /"',
   ]) {
     assert.equal(classifyCommand(command), 'deny', command)
   }
+})
+
+test('classifyCommand asks for interpreter -c/-e instead of a blanket deny', () => {
+  for (const command of [
+    'python -c "print(1)"',
+    'python3 -c "print(1)"',
+    'node -e "console.log(1)"',
+    "bash -c 'ls'",
+    'sh -c "git status"',
+  ]) {
+    assert.equal(classifyCommand(command), 'ask', command)
+  }
+})
+
+test('classifyCommand asks for quoted interpreter payloads even when they mention rm -rf', () => {
+  // The table does not parse the string; AI review sees the payload.
+  assert.equal(classifyCommand('python -c "import os; os.system(\'rm -rf /\')"'), 'ask')
+  assert.equal(classifyCommand("bash -c 'rm -rf /tmp/x'"), 'ask')
+  assert.equal(classifyCommand('sh -c "rm -rf /"'), 'ask')
 })
 
 test('classifyCommand asks for unrecognized shapes, denies mixed danger', () => {
@@ -81,18 +96,31 @@ test('classifyCommand asks for unrecognized shapes, denies mixed danger', () => 
   assert.equal(classifyCommand('sed -i s/a/b/ file'), 'ask')
   assert.equal(classifyCommand('./configure && make'), 'ask')
   assert.equal(classifyCommand(''), 'ask')
+  assert.equal(classifyCommand('npm publish'), 'ask')
+  assert.equal(classifyCommand('npm publish --access public'), 'ask')
   // 安全段与危险段混合：危险优先（自动拒绝而非询问）
   assert.equal(classifyCommand('ls && rm -rf /tmp/x'), 'deny')
   assert.equal(classifyCommand('git status && sudo apt install x'), 'deny')
+  assert.equal(classifyCommand('cp a.ts b.ts;rm -rf /'), 'deny')
   // 重定向到绝对根路径 / home：deny
   assert.equal(classifyCommand('echo x > /etc/hosts'), 'deny')
   assert.equal(classifyCommand('echo x > ~/secret'), 'deny')
-  // 变异命令碰到系统敏感路径：deny（不能靠白名单绕过复核）
+  // 读/写碰到系统敏感路径：deny（不能靠白名单绕过复核）
   assert.equal(classifyCommand('rm /etc/passwd'), 'deny')
   assert.equal(classifyCommand('cp /etc/shadow /tmp/x'), 'deny')
   assert.equal(classifyCommand('mkdir /usr/local/dsh'), 'deny')
+  assert.equal(classifyCommand('cat ~/.ssh/id_rsa'), 'deny')
+  assert.equal(classifyCommand('cat /etc/shadow'), 'deny')
+  assert.equal(classifyCommand('env'), 'ask')
+  assert.equal(classifyCommand('printenv'), 'ask')
   assert.equal(classifyCommand('rm /home/homeserver/silian.txt'), 'allow')
   assert.equal(classifyCommand('cp src/etc/config.ts src/etc/config.bak.ts'), 'allow')
+  assert.equal(classifyCommand('cat /root/dsh-ssh-tui/src/tui.ts'), 'allow')
+})
+
+test('segments skip operators inside quotes', () => {
+  assert.deepEqual(segments("echo 'a && rm -rf /'"), ["echo 'a && rm -rf /'"])
+  assert.deepEqual(segments('cp a.ts b.ts;rm -rf /'), ['cp a.ts b.ts', 'rm -rf /'])
 })
 
 test('classifyApproval gates non-shell tools and passes shell commands through', () => {
@@ -101,6 +129,54 @@ test('classifyApproval gates non-shell tools and passes shell commands through',
   assert.equal(classifyApproval('bash', undefined), 'ask')
   assert.equal(classifyApproval('bash', 'npm test'), 'allow')
   assert.equal(classifyApproval('write', 'anything'), 'ask')
+})
+
+test('classifyApprovalDetailed allows workspace file tools and asks for npm publish', () => {
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'edit',
+    args: JSON.stringify({ file_path: 'src/tui.ts', old_string: 'a', new_string: 'b' }),
+    workspaceCwd: '/root/dsh-ssh-tui',
+  }).decision, 'allow')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'read',
+    args: JSON.stringify({ path: '/root/dsh-ssh-tui/src/tui.ts' }),
+    workspaceCwd: '/root/dsh-ssh-tui',
+  }).decision, 'allow')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'read',
+    args: JSON.stringify({ path: '/etc/passwd' }),
+    workspaceCwd: '/root/dsh-ssh-tui',
+  }).decision, 'deny')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'web_fetch',
+    args: JSON.stringify({ url: 'file:///etc/passwd' }),
+  }).decision, 'deny')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'web_fetch',
+    args: JSON.stringify({ url: 'http://127.0.0.1/secret' }),
+  }).decision, 'deny')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'web_fetch',
+    args: JSON.stringify({ url: 'https://example.com/doc' }),
+  }).decision, 'ask')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'bash',
+    command: 'npm publish',
+    args: JSON.stringify({
+      command: 'npm publish',
+      sandbox_permissions: 'danger-full-access',
+      justification: 'publish 0.5.3',
+    }),
+    reason: 'escalate sandbox to danger-full-access: publish 0.5.3',
+  }).decision, 'ask')
+  assert.equal(classifyApprovalDetailed({
+    toolName: 'bash',
+    args: JSON.stringify({
+      command: 'ls src',
+      sandbox_permissions: 'workspace-write',
+      justification: 'need to list after a sandbox block',
+    }),
+  }).decision, 'allow')
 })
 
 test('commandFromArgs decodes only shell tool args', () => {

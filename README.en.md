@@ -260,9 +260,13 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
 commands (`/find`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/approval`, `/help`, ...) with every command the harness
 registers (`/goal`, `/plan`, `/compact`, `/permission`, `/feedback`, ...).
-`/approval auto` allows low-risk shapes, auto-rejects danger (`rm -rf`,
-`sudo`, `curl|sh`, `git push --force`), and sends unrecognized shapes to
-the subagent-model reviewer (final reply JSON only; thinking is ignored).
+`/approval auto` allows low-risk shapes (reads/builds/tests, workspace
+`edit`/`write`/`read`), auto-rejects danger (`rm -rf`, `sudo`, `curl|sh`,
+`git push --force`, sensitive-path reads) and feeds the reason back to the
+model, and sends unrecognized shapes (`npm publish`, interpreter `-c`/`-e`)
+to the subagent-model reviewer (user message + args/reason/sandbox; English
+UI uses the English reviewer; `authorization=yes` required). `/approval
+status` also reports how many AI reviews ran this session.
 The identity footer row shows a one-cell Braille ring after the
 remaining-quota bar for occupancy of the routed model's context window
 (DSH `contextPressure`, provider-agnostic); green / yellow / red map
@@ -434,9 +438,10 @@ as the default for the next launch. The active mode is shown in the
 header/status line.
 
 `/resume` switches the running TUI to a past session. With no argument it
-opens a picker of recent sessions (excluding subagents), labeled by the user's
-first message with a time/cwd description; `/resume <session-id>` switches
-directly. Switching is refused while a turn is running.
+opens a picker of history sessions (excluding subagents), labeled by the
+persisted title or first user message with a time/cwd description;
+`/resume <session-id>` switches directly. The list is not capped at nine —
+use ↑/↓ to scroll. Switching is refused while a turn is running.
 
 ```sh
 dsh --profile tui --model deepseek-v4-flash
@@ -452,6 +457,13 @@ and resumes directly. `dsh --profile tui --new` explicitly starts fresh
 without the picker. The in-app `/resume` command remains available for
 switching while running.
 
+Picker keys: the visible page is nine rows so `1-9` always map onto every
+on-screen item (`0` starts a new session). `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`)
+move the highlight; `Enter` resumes the focused row. Typing (or `/` /
+`Ctrl+F`) filters by title, session id, or cwd; `PgUp`/`PgDn` page; `Esc`
+first leaves the filter, then cancels. The history list itself is not
+capped.
+
 ## Jump-host / proxied SSH
 
 Each paint is one `stdout.write` of dirty rows only, so a jump host or
@@ -465,6 +477,15 @@ Idle hangup exits the Host. A busy turn keeps it; `--resume` attaches to that
 process. Do not start a second Host.
 
 ## Development
+
+```text
+src/picker.ts             launch history picker (9-row page, uncapped list, filter)
+src/tui.ts                SshTui (re-exports leaf helpers)
+src/paint.ts              incremental paint, SSH cadence, picker window
+src/auto-approval.ts      rule-table first pass
+src/approval-reviewer.ts  AI review prompt and JSON parse
+src/i18n/                 zh/en UI catalogs
+```
 
 ```sh
 npm install
