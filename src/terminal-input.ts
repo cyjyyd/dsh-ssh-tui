@@ -148,11 +148,15 @@ export class TerminalInputGuard {
     const { forward } = this.filter.push(text)
     if (this.filter.pending) {
       if (this.timer !== undefined) clearTimeout(this.timer)
+      // Referenced on purpose: this timer *completes* an operation the caller
+      // started (releasing a held key). Unref'ing it let the event loop drain
+      // with the release still pending — under `node --test` on Node 22 that
+      // cancels every later test in the file, and an embedder that awaits the
+      // guard would lose the keystroke. `stop()` clears it.
       this.timer = setTimeout(() => {
         this.timer = undefined
         this.release()
       }, this.holdMs)
-      this.timer.unref?.()
     }
     if (forward !== '') this.emit(forward)
   }
@@ -415,6 +419,8 @@ export class TerminalInputPump {
         settled = true
         resolve(value)
       }
+      // Referenced for the same reason as the guard's hold: the waiter's whole
+      // job is to settle the probe, and it is cleared by `stop()`/`drain()`.
       const waiter: ReplyWaiter = {
         started: Date.now(),
         settle,
@@ -424,7 +430,6 @@ export class TerminalInputPump {
           settle(undefined)
         }, timeoutMs),
       }
-      waiter.timer.unref?.()
       this.waiters.push(waiter)
       this.lastRequestAt = Date.now()
       try {
@@ -481,6 +486,5 @@ export class TerminalInputPump {
       const held = this.filter.flush()
       if (held !== '') this.options.onInput(held)
     }, this.options.holdMs ?? INPUT_HOLD_MS)
-    this.holdTimer.unref?.()
   }
 }

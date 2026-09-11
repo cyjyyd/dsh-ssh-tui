@@ -83,8 +83,44 @@ async function sessionEvents(home) {
   return events
 }
 
-/** The logs are zstd-compressed; let the CLI's own zstd binary do it. */
+/**
+ * The logs are zstd-compressed. Use the `zstd` binary when the machine has one
+ * (every Linux runner does, Windows runners do not), else Node's own zstd so
+ * the test still runs instead of skipping the platform. `DSH_CONTRACT_NO_ZSTD=1`
+ * exercises the fallback on machines that do have the binary.
+ */
 async function inflate(raw) {
+  if (process.env.DSH_CONTRACT_NO_ZSTD === '1') return inflateWithNode(raw)
+  try {
+    return await inflateWithCli(raw)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    return inflateWithNode(raw)
+  }
+}
+
+/**
+ * Node's own decompressor stops after the first frame, and the host appends one
+ * frame per flush (a real log had three). Split on the frame magic — the only
+ * case this runs in is a machine without the `zstd` binary (the Windows leg).
+ */
+async function inflateWithNode(raw) {
+  const { zstdDecompressSync } = await import('node:zlib')
+  const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const offsets = []
+  for (let index = raw.indexOf(magic); index !== -1; index = raw.indexOf(magic, index + magic.length)) {
+    offsets.push(index)
+  }
+  if (offsets.length <= 1) return zstdDecompressSync(raw).toString('utf8')
+  const parts = []
+  for (let index = 0; index < offsets.length; index += 1) {
+    const end = index + 1 < offsets.length ? offsets[index + 1] : raw.length
+    parts.push(zstdDecompressSync(raw.subarray(offsets[index], end)).toString('utf8'))
+  }
+  return parts.join('')
+}
+
+async function inflateWithCli(raw) {
   const { execFile } = await import('node:child_process')
   return await new Promise((resolve, reject) => {
     const child = execFile('zstd', ['-dc'], { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
