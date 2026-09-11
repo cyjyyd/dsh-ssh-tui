@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
-import { quietTerminalInput } from '../lib/display-sock.js'
+import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
 setLocale('zh')
 
 import {
@@ -3674,6 +3674,22 @@ test('quietTerminalInput turns echo off and drops queued bytes', async () => {
   assert.equal(modes[0], true, 'raw mode first, then read')
   assert.equal(dropped, 7, 'the queued reply is consumed')
   assert.equal(stdin.read(), null, 'the queue is empty afterwards')
+  stdin.destroy()
+})
+
+// Every exit path calls quiet() last, which turns raw mode back on. Handing the
+// shell a raw TTY leaves it without line discipline and echo: the 2026-09-11
+// /exit report, where the only recovery was dropping the SSH connection.
+test('restoreTerminalInput hands the TTY back cooked and paused', async () => {
+  const { PassThrough } = await import('node:stream')
+  const stdin = new PassThrough()
+  stdin.isTTY = true
+  const modes = []
+  stdin.setRawMode = (value) => { modes.push(value); return stdin }
+  stdin.resume()
+  restoreTerminalInput(stdin)
+  assert.deepEqual(modes, [false], 'raw mode is turned off, not on')
+  assert.equal(stdin.isPaused(), true, 'the stream is paused for the shell')
   stdin.destroy()
 })
 

@@ -53,6 +53,7 @@ import {
   isTuiHostProcess,
   quietTerminalInput,
   resolveDshHome,
+  restoreTerminalInput,
   runDisplayRelay,
   spawnDetachedHost,
   waitForDisplaySock,
@@ -72,6 +73,14 @@ export const name = 'ssh-tui'
 
 /** Core services required before the terminal channel can drive an agent. */
 export const inject = ['agents', 'agentDefaultModel']
+
+/**
+ * Grace allowed to the launcher's graceful `appExit` before the process is
+ * forced out. That shutdown only sets `process.exitCode`, and a lingering
+ * event-loop handle (the profile patch watcher) can keep the drain from ever
+ * finishing — with the user's shell still blocked on the foreground process.
+ */
+export const EXIT_FALLBACK_MS = 2_000
 
 /** Plugin config: the session identity and presentation defaults. */
 export interface Config {
@@ -172,9 +181,25 @@ export function apply(ctx: Context, config: Config): void {
       },
       report: message => { process.stderr.write(`${message}\n`) },
       exit: (code) => {
+        // Every exit path funnels through here, and the last thing several of
+        // them do is `quiet()` — which turns raw mode back on to drain a cursor
+        // reply. Hand the TTY back before asking to exit, or the shell returns
+        // with no line discipline and no echo and the user has to drop SSH.
+        restoreTerminalInput()
         const exit = ctx.get('appExit')
-        if (exit !== undefined) exit(code)
-        else process.exit(code)
+        if (exit === undefined) {
+          process.exit(code)
+          return
+        }
+        exit(code)
+        // `appExit` is the launcher's *graceful* shutdown: it disposes the tree,
+        // sets `process.exitCode` and waits for the event loop to drain. A
+        // lingering watcher handle (the profile patch watcher's inotify fd)
+        // keeps that drain from ever happening, so `/exit` left the launcher
+        // alive in front of a shell that never got its prompt back. Bound the
+        // wait; the TTY is already handed back above, so the force is safe.
+        const timer = setTimeout(() => { process.exit(code) }, EXIT_FALLBACK_MS)
+        timer.unref?.()
       },
       messages: {
         connecting: sessionId => t('attach.connecting', { session: sessionId }),

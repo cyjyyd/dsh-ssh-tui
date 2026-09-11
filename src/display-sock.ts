@@ -668,6 +668,30 @@ export function quietTerminalInput(stdin: NodeJS.ReadStream = process.stdin): nu
   return dropped
 }
 
+/**
+ * Hand the TTY back to the shell: cooked mode, echo back, input paused.
+ *
+ * `quietTerminalInput` deliberately leaves raw mode on while a relay is about
+ * to take the terminal, and the relay restores it on its way out — but every
+ * exit path then calls `quiet()` once more to drain a cursor reply still owed,
+ * which turns raw mode back on. Without this the shell comes back with no line
+ * discipline and no echo: the user cannot type, and the only recovery is
+ * dropping the SSH connection. Only local termios calls here — nothing is
+ * written into a link that may already be dead.
+ */
+export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): void {
+  try {
+    stdin.setRawMode?.(false)
+  } catch {
+    // A dead TTY cannot be restored; the kernel will not keep it either.
+  }
+  try {
+    stdin.pause()
+  } catch {
+    // ignore
+  }
+}
+
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
 export function spawnDetachedHost(sessionId: string): SpawnedHost {
   const sock = sessionSockPath(sessionId)
