@@ -58,6 +58,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
+import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
@@ -551,24 +552,6 @@ export interface TuiConfig {
 }
 
 /** Whole-log session figures for the stats line below the input box. */
-interface SessionStats {
-  turns: number
-  steps: number
-  llmMs: number
-  toolMs: number
-  ttftMs: number
-  ttftSteps: number
-  decodeMs: number
-  decodeTokens: number
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
-}
-
-interface UsageSample {
-  turn: number
-  step: number
-  buckets: SessionStats['usage']
-}
-
 interface ConfirmDialog {
   kind: 'confirm'
   prompt: string
@@ -1055,27 +1038,18 @@ export class SshTui {
   private openToolCalls = new Map<string, string>()
   /** Survives result settlement so a card-less result can still be labelled. */
   private toolCallNames = new Map<string, string>()
-  private readonly stats: SessionStats = {
-    turns: 0,
-    steps: 0,
-    llmMs: 0,
-    toolMs: 0,
-    ttftMs: 0,
-    ttftSteps: 0,
-    decodeMs: 0,
-    decodeTokens: 0,
-    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  /** Session totals; the tracker owns the arithmetic (see `stats.ts`). */
+  private readonly statsTracker = new SessionStatsTracker()
+  /** Snapshot of the session totals, for the footer and `/status`. */
+  private get stats(): SessionStatsSnapshot {
+    return this.statsTracker.snapshot()
   }
-  private openStepStats: { turn: number; step: number; startTime: number; firstTokenTime: number | null } | undefined
   /** Attempt whose live `start` frame opened the current token stream. */
   private liveStreamOwner: { attemptId: unknown; turn: number; step: number } | undefined
   /** Live events parked while the (yielding) history replay holds the floor. */
   private replayQueue: Array<{ session: { id: SessionId }; event: SessionEvent }> | undefined
   /** A relay claimed the display while a hangup was still cancelling/flushing. */
   private reattachedDuringHangup = false
-  private readonly pendingToolTimes = new Map<string, number>()
-  private readonly usageByStep = new Map<string, SessionStats['usage']>()
-  private lastStatsTurn: number | null = null
   private scrollOffset = 0
   private readonly clickableRows = new Map<number, CollapsibleBlock>()
   private readonly paintedLinkHitsByRow = new Map<number, ReturnType<typeof paintedLinkHits>>()
@@ -3313,20 +3287,7 @@ export class SshTui {
     const linkChip = formatLinkQualityChip(
       this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color,
     )
-    const statsGroups = footerStatsGroups({
-      turns: this.stats.turns,
-      steps: this.stats.steps,
-      llmMs: this.stats.llmMs,
-      toolMs: this.stats.toolMs,
-      ttftMs: this.stats.ttftMs,
-      ttftSteps: this.stats.ttftSteps,
-      decodeMs: this.stats.decodeMs,
-      decodeTokens: this.stats.decodeTokens,
-      inputTokens: this.stats.usage.inputTokens,
-      outputTokens: this.stats.usage.outputTokens,
-      cacheReadTokens: this.stats.usage.cacheReadTokens,
-      cacheWriteTokens: this.stats.usage.cacheWriteTokens,
-    })
+    const statsGroups = footerStatsGroups(statsRowOf(this.statsTracker.snapshot()))
     const statsPlain = fitFooterStatsLine(
       formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false),
       statsGroups,
@@ -3540,42 +3501,9 @@ export class SshTui {
     return `${provider}/${model}${effort === undefined ? '' : ` (${effort})`} · ${kind}`
   }
 
-  /** Replace one step's usage sample so a repeated report never double counts. */
-  private recordUsage(turn: number, step: number, usage: TokenUsage): void {
-    const key = `${turn}:${step}`
-    const next: SessionStats['usage'] = {
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cacheReadTokens ?? 0,
-      cacheWriteTokens: usage.cacheWriteTokens ?? 0,
-    }
-    const previous = this.usageByStep.get(key)
-    const totals = this.stats.usage
-    this.stats.usage = {
-      inputTokens: totals.inputTokens - (previous?.inputTokens ?? 0) + next.inputTokens,
-      outputTokens: totals.outputTokens - (previous?.outputTokens ?? 0) + next.outputTokens,
-      cacheReadTokens: totals.cacheReadTokens - (previous?.cacheReadTokens ?? 0) + next.cacheReadTokens,
-      cacheWriteTokens: totals.cacheWriteTokens - (previous?.cacheWriteTokens ?? 0) + next.cacheWriteTokens,
-    }
-    this.usageByStep.set(key, next)
-  }
-
   /** Compact session stats groups for the first footer row. */
   private statsText(): string {
-    return footerStatsGroups({
-      turns: this.stats.turns,
-      steps: this.stats.steps,
-      llmMs: this.stats.llmMs,
-      toolMs: this.stats.toolMs,
-      ttftMs: this.stats.ttftMs,
-      ttftSteps: this.stats.ttftSteps,
-      decodeMs: this.stats.decodeMs,
-      decodeTokens: this.stats.decodeTokens,
-      inputTokens: this.stats.usage.inputTokens,
-      outputTokens: this.stats.usage.outputTokens,
-      cacheReadTokens: this.stats.usage.cacheReadTokens,
-      cacheWriteTokens: this.stats.usage.cacheWriteTokens,
-    }).join(' │ ')
+    return footerStatsGroups(statsRowOf(this.statsTracker.snapshot())).join(' │ ')
   }
 
   /** Refresh the terminal window title (throttled while running). */
@@ -3677,15 +3605,11 @@ export class SshTui {
     stepKnown: boolean
   }, statsOnly = false): void {
     const { chunk } = streamed
-    const open = this.openStepStats
-    if (open !== null && open !== undefined
-      && open.turn === streamed.turn && open.step === streamed.step) {
-      if (open.firstTokenTime === null && isTokenDeltaChunk(chunk)) {
-        this.openStepStats = { ...open, firstTokenTime: streamed.time }
-      }
+    if (isTokenDeltaChunk(chunk)) {
+      this.statsTracker.noteFirstToken(streamed.turn, streamed.step, streamed.time)
     }
     if (chunk.type === 'usage' && chunk.usage !== undefined && streamed.stepKnown) {
-      this.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
+      this.statsTracker.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
     }
     if (statsOnly) return
     if (chunk.type === 'text-delta') {
@@ -3731,7 +3655,7 @@ export class SshTui {
     const current = this.liveStreamOwner
     const fallback = current !== undefined && (attemptId === undefined || attemptId === current.attemptId)
       ? current
-      : this.openStepStats
+      : this.statsTracker.currentStep()
     const streamed = streamChunkOf(payload.frame, fallback)
     if (streamed !== undefined) this.applyStreamChunk(streamed)
   }
@@ -3836,29 +3760,19 @@ export class SshTui {
           .filter(block => block.type === 'reasoning')
           .map(block => block.text)
           .join('')
-        const open = this.openStepStats
-        if (open !== undefined && open.turn === event.data.turn && open.step === event.data.step) {
-          this.stats.llmMs += Math.max(0, event.time - open.startTime)
-          // The settlement's own packed stream is authoritative: a retried
-          // step keeps the failed attempt's first token in the live latch, and
-          // spanning both attempts reported a rate ~20x off. 0.1.2 has no
-          // `stream` and still relies on the replayed `assistant/chunk` events
-          // (or the live latch) instead.
-          const firstTokenTime = streamFirstTokenTime((event.data as { stream?: unknown }).stream)
-            ?? open.firstTokenTime
-          if (firstTokenTime !== null && firstTokenTime !== undefined && Number.isFinite(firstTokenTime)) {
-            this.stats.ttftMs += Math.max(0, firstTokenTime - open.startTime)
-            this.stats.ttftSteps += 1
-            const outputTokens = event.data.usage?.outputTokens
-            if (typeof outputTokens === 'number' && Number.isFinite(outputTokens) && outputTokens >= 0) {
-              this.stats.decodeMs += Math.max(0, event.time - firstTokenTime)
-              this.stats.decodeTokens += outputTokens
-            }
-          }
-          this.openStepStats = undefined
-        }
+        // The settlement's own packed stream is authoritative: a retried step
+        // keeps the failed attempt's first token in the live latch, and spanning
+        // both attempts reported a rate ~20x off. 0.1.2 has no `stream` and still
+        // relies on the replayed `assistant/chunk` events (or the live latch).
+        this.statsTracker.settleMessage({
+          turn: event.data.turn,
+          step: event.data.step,
+          time: event.time,
+          firstTokenTime: streamFirstTokenTime((event.data as { stream?: unknown }).stream),
+          outputTokens: event.data.usage?.outputTokens,
+        })
         if (event.data.usage !== undefined) {
-          this.recordUsage(event.data.turn, event.data.step, event.data.usage)
+          this.statsTracker.recordUsage(event.data.turn, event.data.step, event.data.usage)
         }
         const reasoningExpanded = this.streamingReasoning?.expanded ?? false
         const interrupted = event.data.interrupted === true
@@ -3880,7 +3794,7 @@ export class SshTui {
       case 'tool/call': {
         this.openToolCalls.set(String(event.data.callId), event.data.name)
         this.toolCallNames.set(String(event.data.callId), event.data.name)
-        this.pendingToolTimes.set(String(event.data.callId), event.time)
+        this.statsTracker.noteToolStart(String(event.data.callId), event.time)
         if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
           const present = presentToolCall(event.data.name, event.data.arguments)
           const previous = this.findMergeableToolRow({ name: event.data.name, args: event.data.arguments })
@@ -3921,11 +3835,7 @@ export class SshTui {
       }
       case 'tool/result': {
         this.openToolCalls.delete(String(event.data.message.source.callId))
-        const dispatchedAt = this.pendingToolTimes.get(String(event.data.message.source.callId))
-        if (dispatchedAt !== undefined) {
-          this.stats.toolMs += Math.max(0, event.time - dispatchedAt)
-          this.pendingToolTimes.delete(String(event.data.message.source.callId))
-        }
+        this.statsTracker.noteToolEnd(String(event.data.message.source.callId), event.time)
         const callId = String(event.data.message.source.callId)
         const row = this.findToolRowByCallId(callId)
         const output = collectText(event.data.message.content)
@@ -3980,25 +3890,12 @@ export class SshTui {
         break
       }
       case 'step/start': {
-        this.openStepStats = {
-          turn: event.data.turn,
-          step: event.data.step,
-          startTime: event.time,
-          firstTokenTime: null,
-        }
+        this.statsTracker.noteStepStart(event.data.turn, event.data.step, event.time)
         this.markDirty()
         break
       }
       case 'step/end': {
-        if (this.lastStatsTurn !== event.data.turn) {
-          this.stats.turns += 1
-          this.lastStatsTurn = event.data.turn
-        }
-        this.stats.steps += 1
-        this.openStepStats = undefined
-        // Usage accounting is complete for this step; the map only exists to
-        // deduplicate repeated usage reports during the step.
-        this.usageByStep.delete(`${event.data.turn}:${event.data.step}`)
+        this.statsTracker.noteStepEnd(event.data.turn, event.data.step)
         if (!this.replaying) {
           this.quotaStepsSinceRefresh += 1
           const every = quotaRefreshEverySteps(this.quotaSnapshot === undefined
@@ -4029,7 +3926,7 @@ export class SshTui {
         const reason = event.data.reason
         this.openToolCalls.clear()
         this.toolCallNames.clear()
-        this.pendingToolTimes.clear()
+        this.statsTracker.noteTurnEnd()
         this.stalledWarningShown = false
         this.pendingMessages.clear()
         // Aborted/errored turns may close without an assembled
