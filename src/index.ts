@@ -53,7 +53,6 @@ import {
   isTuiHostProcess,
   quietTerminalInput,
   resolveDshHome,
-  restoreTerminalInput,
   runDisplayRelay,
   spawnDetachedHost,
   waitForDisplaySock,
@@ -62,6 +61,7 @@ import {
   createAttacher,
   HOST_START_TIMEOUT_MS,
 } from './attach.js'
+import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
 import { installUiLocale, t } from './i18n/index.js'
@@ -72,13 +72,10 @@ export const name = 'ssh-tui'
 /** Core services required before the terminal channel can drive an agent. */
 export const inject = ['agents', 'agentDefaultModel']
 
-/**
- * Grace allowed to the launcher's graceful `appExit` before the process is
- * forced out. That shutdown only sets `process.exitCode`, and a lingering
- * event-loop handle (the profile patch watcher) can keep the drain from ever
- * finishing — with the user's shell still blocked on the foreground process.
- */
-export const EXIT_FALLBACK_MS = 2_000
+// Re-exported for the bundle's own API; the exit path (and its reasons) live in
+// `launcher-exit.ts` so the picker, `/exit`, the attach recovery and the error
+// paths all hand the terminal back the same way.
+export { EXIT_FALLBACK_MS, createLauncherExit } from './launcher-exit.js'
 
 /** Plugin config: the session identity and presentation defaults. */
 export interface Config {
@@ -155,6 +152,9 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     let inputCapture: { stop(): string } | undefined
+    const exitLauncher = createLauncherExit({
+      appExit: () => ctx.get('appExit'),
+    })
     const attacher = createAttacher({
       relay: (sock, seed, announce) => runDisplayRelay(sock, {
         ...(seed === '' ? {} : { seed }),
@@ -178,27 +178,7 @@ export function apply(ctx: Context, config: Config): void {
         await waitForDisplaySock(spawned.sock, HOST_START_TIMEOUT_MS, spawned.pid, spawned.errFile, spawned.exitWatch)
       },
       report: message => { process.stderr.write(`${message}\n`) },
-      exit: (code) => {
-        // Every exit path funnels through here, and the last thing several of
-        // them do is `quiet()` — which turns raw mode back on to drain a cursor
-        // reply. Hand the TTY back before asking to exit, or the shell returns
-        // with no line discipline and no echo and the user has to drop SSH.
-        restoreTerminalInput()
-        const exit = ctx.get('appExit')
-        if (exit === undefined) {
-          process.exit(code)
-          return
-        }
-        exit(code)
-        // `appExit` is the launcher's *graceful* shutdown: it disposes the tree,
-        // sets `process.exitCode` and waits for the event loop to drain. A
-        // lingering watcher handle (the profile patch watcher's inotify fd)
-        // keeps that drain from ever happening, so `/exit` left the launcher
-        // alive in front of a shell that never got its prompt back. Bound the
-        // wait; the TTY is already handed back above, so the force is safe.
-        const timer = setTimeout(() => { process.exit(code) }, EXIT_FALLBACK_MS)
-        timer.unref?.()
-      },
+      exit: exitLauncher,
       messages: {
         connecting: sessionId => t('attach.connecting', { session: sessionId }),
         recovering: sessionId => t('attach.recovering', { session: sessionId }),
@@ -443,9 +423,7 @@ export function apply(ctx: Context, config: Config): void {
         await start(SessionId(target), true)
       } catch (error: unknown) {
         process.stderr.write(`dsh-ssh-tui: failed to switch to session "${target}": ${errorChain(error)}\n`)
-        const exit = ctx.get('appExit')
-        if (exit !== undefined) exit(1)
-        else process.exit(1)
+        exitLauncher(1)
       } finally {
         switching = false
       }
@@ -458,14 +436,13 @@ export function apply(ctx: Context, config: Config): void {
         const picked = await showSessionPicker(ctx, config.color !== false, pickerAbort.signal)
         if (disposed) return
         if (picked === null) {
-          // Esc from the picker: the launcher hands the TTY back to the shell,
-          // and the picker's own RTT probe may still be owed a cursor reply.
-          // Drain it first, or the shell echoes `^[[17;1R` over the prompt the
-          // user returns to.
+          // Esc from the picker: drain the cursor reply the launcher's probe
+          // may still be owed (or the shell echoes `^[[17;1R` over the prompt),
+          // then leave through the same hand-back-and-exit path `/exit` uses.
+          // `quietTerminalInput` leaves raw mode on, so the restore inside is
+          // what actually gives the user their shell back.
           quietTerminalInput()
-          const exit = ctx.get('appExit')
-          if (exit !== undefined) exit(0)
-          else process.exit(0)
+          exitLauncher(0)
           return
         }
         if (picked.kind === 'attach') {
@@ -496,9 +473,7 @@ export function apply(ctx: Context, config: Config): void {
         ? error.message
         : errorChain(error)
       process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start:\n${detail}\n`)
-      const exit = ctx.get('appExit')
-      if (exit !== undefined) exit(1)
-      else process.exit(1)
+      exitLauncher(1)
     })
 
     return async (): Promise<void> => {
