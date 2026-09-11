@@ -573,7 +573,6 @@ export interface TuiConfig {
   disconnectPolicy?: DisconnectPolicyName
 }
 
-/** Whole-log session figures for the stats line below the input box. */
 type OnboardingProviderType =
   | 'official'
   | 'opencode-go'
@@ -664,7 +663,6 @@ interface OnboardingState {
   resolve(saved: boolean): void
 }
 
-/** Result of one dialog interaction. */
 /** Lifecycle handle for a mounted interactive terminal channel. */
 export interface TuiController {
   dispose(): Promise<void>
@@ -3344,6 +3342,9 @@ export class SshTui {
   }
 
   private buildSuggestions(): CommandSuggestion[] {
+    // Called on every paint: leave the host command service alone unless the
+    // line is actually a slash command.
+    if (!this.input.startsWith('/')) return []
     // The host's commands arrive last (a local name wins the duplicate) and are
     // localized here, where the i18n catalog is already loaded.
     const foreign: CommandSuggestion[] = (this.ctx.get('commands')?.list(this.agent) ?? [])

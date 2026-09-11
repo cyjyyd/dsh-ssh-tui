@@ -99,10 +99,28 @@ export function formatSessionTime(timestamp: number): string {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-/** Whether one durable event is a user-authored message. */
+/**
+ * Whether one durable event is a message put in front of the model.
+ *
+ * Any source counts, not just `kind: 'user'`: cron continuations, goal nudges
+ * and context snapshots are plugin-authored `user/message` events, and a
+ * session carrying one is not a crashed boot. Treating those as "no input"
+ * made a live mid-turn session look blank — and a blank verdict deletes the
+ * session's directory and stops its Host.
+ */
 function isUserMessageEvent(event: unknown): boolean {
-  const candidate = event as { type?: string; data?: { source?: { kind?: string } } }
-  return candidate.type === 'user/message' && candidate.data?.source?.kind === 'user'
+  return (event as { type?: string }).type === 'user/message'
+}
+
+/** A turn that started and never ended: the session is mid-work, never blank. */
+function hasUnfinishedTurn(events: readonly unknown[]): boolean {
+  let open = 0
+  for (const event of events) {
+    const type = (event as { type?: string }).type
+    if (type === 'turn/start') open += 1
+    else if (type === 'turn/end') open -= 1
+  }
+  return open > 0
 }
 
 /**
@@ -158,8 +176,8 @@ function labelFromEvents(events: readonly unknown[]): string | undefined {
  * before doing anything. Such sessions are deleted (never listed as
  * resumable) so crashed launches stop littering the picker with raw ids.
  */
-function isBlankSession(hasUserInput: boolean, hasReply: boolean): boolean {
-  return !hasUserInput && !hasReply
+function isBlankSession(hasUserInput: boolean, hasReply: boolean, unfinishedTurn = false): boolean {
+  return !hasUserInput && !hasReply && !unfinishedTurn
 }
 
 /** Delete one session's on-disk artifacts (log directory), best effort. */
@@ -181,7 +199,12 @@ async function pruneSessionArtifacts(
 const INSPECT_BATCH_SIZE = 30
 
 /** Internal inspection result before display filtering. */
-type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: boolean }
+type InspectedSession = ResumableSession & {
+  hasUserInput: boolean
+  hasReply: boolean
+  /** A turn is still open: the log is mid-work and must never be pruned. */
+  hasUnfinishedTurn?: boolean
+}
 
 /** Incremental listing so a caller can paint before older logs are parsed. */
 export interface ResumableSessionListing {
@@ -221,7 +244,7 @@ export interface ResumableSessionPager {
 export const PICKER_PAGE_SIZE = 9
 
 function toResumable(item: InspectedSession): ResumableSession {
-  const { hasUserInput: _hasUserInput, hasReply: _hasReply, ...rest } = item
+  const { hasUserInput: _hasUserInput, hasReply: _hasReply, hasUnfinishedTurn: _unfinished, ...rest } = item
   return rest
 }
 
@@ -374,15 +397,26 @@ class ResumableSessionSource {
       const batch = this.peek(size)
       const settled = await Promise.all(batch.map(async meta => this.resolve(meta)))
       for (const item of settled) {
-        if (item === undefined) continue
+        if (item === undefined || !this.showable(item)) continue
         this.inspected.push(item)
         added += 1
       }
     }
   }
 
+  /**
+   * Whether a resolved row will actually be shown. A session with a reply but
+   * no input of its own is not a picker row; counting it as one made a page
+   * report rows it never painted (and, when nothing else was left, made the
+   * picker believe the history was empty).
+   */
+  private showable(item: InspectedSession): boolean {
+    return item.hasUserInput || item.unreadable === true
+  }
+
   /** Keep a resolved row in the display list. */
   add(item: InspectedSession): void {
+    if (!this.showable(item)) return
     this.inspected.push(item)
   }
 
@@ -395,7 +429,8 @@ class ResumableSessionSource {
       return inspectedFromIndex(cached)
     }
     const item = await this.inspectCandidate(meta)
-    if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
+    if (item.unreadable !== true
+      && isBlankSession(item.hasUserInput, item.hasReply, item.hasUnfinishedTurn === true)) {
       this.index.delete(String(meta.id))
       this.indexDirty = true
       void pruneSessionArtifacts(this.persistence, meta)
@@ -440,6 +475,7 @@ class ResumableSessionSource {
         cwd: meta.cwd ?? '',
         hasUserInput: inspection.events.some(event => isUserMessageEvent(event)),
         hasReply: sessionHasReply(inspection.events),
+        ...(hasUnfinishedTurn(inspection.events) ? { hasUnfinishedTurn: true } : {}),
       }
     } catch {
       // A corrupt/unsupported log must not make the session vanish from the
@@ -463,7 +499,7 @@ class ResumableSessionSource {
    * unreadable ones (they may still be resumable, so they stay selectable).
    */
   async listing(): Promise<ResumableSession[]> {
-    const resumable = this.inspected.filter(item => item.hasUserInput || item.unreadable === true)
+    const resumable = this.inspected.filter(item => this.showable(item))
     const byId = new Map(resumable.map(item => [item.id, item]))
     for (const host of this.hosts) {
       if (host.sessionId === this.currentId || this.blankLiveIds.has(host.sessionId)) continue
@@ -493,7 +529,11 @@ class ResumableSessionSource {
           unreadableLive = true
         } else {
           const hasInput = inspection.events.some(event => isUserMessageEvent(event))
-          blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
+          blankLive = isBlankSession(
+            hasInput,
+            sessionHasReply(inspection.events),
+            hasUnfinishedTurn(inspection.events),
+          )
           liveHasUserInput = hasInput
           // A Host that is running but absent from the header list still has a
           // log; read its title rather than offering the user a raw uuid.
@@ -566,6 +606,9 @@ export async function openResumableSessionPager(
   const source = await ResumableSessionSource.open(persistence, currentId, options)
   return {
     page: async (size = PICKER_PAGE_SIZE): Promise<ResumableSessionPage> => {
+      // `take` counts only showable rows, so a page that comes back with no
+      // rows is a page the history is exhausted by — never a page whose rows
+      // were filtered out after being counted.
       const wanted = Number.isFinite(size) && size > 0 ? Math.floor(size) : PICKER_PAGE_SIZE
       await source.take(wanted)
       await source.flushIndex()

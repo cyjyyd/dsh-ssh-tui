@@ -28,7 +28,10 @@ interface SessionIndexFile {
   entries: Record<string, SessionIndexEntry>
 }
 
-const INDEX_VERSION = 1
+// 2: `hasUserInput` now counts plugin-authored user messages too, so entries
+// written by version 1 would keep those sessions hidden (and, before the blank
+// rule changed, deletable).
+const INDEX_VERSION = 2
 
 /** First page of recent sessions inspected after the header sketch paints. */
 export const PICKER_PRIORITY_COUNT = 9

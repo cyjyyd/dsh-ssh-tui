@@ -303,6 +303,9 @@ test('pickerWantsMorePage only fires when the user reaches for older sessions', 
   assert.equal(pickerWantsMorePage({ previous: atEnd, next: atEnd, actions: down, more: 0 }), false)
   // Moving inside the loaded rows is not a request.
   assert.equal(pickerWantsMorePage({ previous: idle, next: atEnd, actions: down, more: 5 }), false)
+  // A page the pager could not fill (nothing to show yet) keeps reading.
+  const empty = state([], { cursor: 0 })
+  assert.equal(pickerWantsMorePage({ previous: empty, next: empty, actions: [], more: 5 }), true)
   // Pressing down on the last loaded row is.
   assert.equal(pickerWantsMorePage({ previous: atEnd, next: atEnd, actions: down, more: 5 }), true)
   // Moving up is not.
@@ -322,6 +325,15 @@ test('pickerWantsMorePage only fires when the user reaches for older sessions', 
   assert.equal(pickerWantsMorePage({
     previous: full, next: full, actions: [{ type: 'type', text: 'm' }], more: 5,
   }), false)
+  // …unless the user asks for the end of the matches: that end may be in the
+  // sessions that are not loaded yet.
+  const atMatchesEnd = { ...full, cursor: 8 }
+  assert.equal(pickerWantsMorePage({
+    previous: atMatchesEnd, next: atMatchesEnd, actions: [{ type: 'end' }], more: 5,
+  }), true)
+  assert.equal(pickerWantsMorePage({
+    previous: atMatchesEnd, next: atMatchesEnd, actions: [{ type: 'move', delta: 1 }], more: 5,
+  }), true)
 })
 
 // The first page is read in full before anything is painted: every row on
@@ -424,6 +436,54 @@ test('a placeholder label is held back even when a page carries one', { timeout:
   const painted = io.writes.join('')
   assert.equal(painted.includes('main-session-plain'), false, 'a raw id must not be painted')
   assert.equal(painted.includes('已经有标题'), true, 'the resolved row is painted')
+  abort.abort()
+  await settled
+})
+
+// The pager never returns a short page on purpose, but the picker must not
+// treat an empty one as "no history" while candidates remain: that told the
+// user their history was empty and started a fresh session instead.
+test('an empty first page with history left keeps reading', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const row = session('main-session-later', { label: '后来才读到的会话' })
+  let pages = 0
+  const openPager = async () => ({
+    page: async () => {
+      pages += 1
+      return pages === 1
+        ? { sessions: [], remaining: 5, done: false }
+        : { sessions: [row], remaining: 0, done: true }
+    },
+    complete: async () => [row],
+  })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick(40)
+  assert.ok(pages >= 2, `the picker read on instead of giving up (pages=${pages})`)
+  const painted = io.writes.join('')
+  assert.equal(painted.includes('后来才读到的会话'), true, 'the session that was there all along')
+  assert.equal(painted.includes('没有可恢复的历史会话'), false, 'and it never claimed the history was empty')
+  abort.abort()
+  await settled
+})
+
+test('End while filtering reads on when more sessions are unloaded', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pageOne = Array.from({ length: 9 }, (_, index) => session(`hit-${index}`, { label: `命中 ${index}` }))
+  const pageTwo = [session('hit-older', { label: '更早的命中' })]
+  let pages = 0
+  const openPager = pagerOptions([pageOne, pageTwo], () => { pages += 1 })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  io.type('命中')
+  await tick(30)
+  assert.equal(pages, 1, 'a full page of matches is not deepened by typing alone')
+  io.type('\x1b[F')
+  await tick(30)
+  assert.equal(pages, 2, 'End asks for the end of the matches, wherever it is')
   abort.abort()
   await settled
 })

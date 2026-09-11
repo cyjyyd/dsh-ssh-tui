@@ -151,22 +151,34 @@ export function pickerWantsMorePage(input: {
 }): boolean {
   if (input.more <= 0) return false
   const windowSize = input.windowSize ?? SESSION_PICKER_WINDOW
-  const filtering = input.next.filterActive || input.next.query !== ''
   const nextFiltered = filterResumableSessions(input.next.sessions, input.next.query)
-  if (filtering) return nextFiltered.length < windowSize
-  if (nextFiltered.length === 0) return false
-  const atEnd = input.next.cursor >= nextFiltered.length - 1
-  if (!atEnd) return false
-  const previousFiltered = filterResumableSessions(input.previous.sessions, input.previous.query)
-  const wasAtEnd = previousFiltered.length > 0
-    && input.previous.cursor >= previousFiltered.length - 1
-  const toEnd = input.actions.some(action => action.type === 'end')
+  const filtering = input.next.filterActive || input.next.query !== ''
   const downward = input.actions.some(action =>
-    (action.type === 'move' && action.delta > 0)
+    action.type === 'end'
+    || (action.type === 'move' && action.delta > 0)
     || (action.type === 'page' && action.delta > 0))
-  // End is explicit ("show me the end"); otherwise the keypress only counts when
-  // the cursor was already parked on the last loaded row.
-  return toEnd || (wasAtEnd && downward)
+  const atEnd = (state: Pick<SessionPickerState, 'cursor'>, filtered: readonly ResumableSession[]): boolean =>
+    filtered.length > 0 && state.cursor >= filtered.length - 1
+
+  if (filtering) {
+    // A search has to look past the rows on screen: while it has fewer matches
+    // than fit, keep reading. With a full page of matches it reads on only when
+    // the user asks for more — a press at the end of the matches, or End.
+    if (nextFiltered.length < windowSize) return true
+    return downward && atEnd(input.next, nextFiltered)
+  }
+  if (nextFiltered.length === 0) {
+    // Nothing to show yet (the pager never returns a short page on purpose, so
+    // this is the first load): keep reading instead of pretending history is
+    // over.
+    return true
+  }
+  if (!atEnd(input.next, nextFiltered)) return false
+  const previousFiltered = filterResumableSessions(input.previous.sessions, input.previous.query)
+  const wasAtEnd = atEnd(input.previous, previousFiltered)
+  // End is explicit ("show me the end"); otherwise the keypress only counts
+  // when the cursor was already parked on the last loaded row.
+  return input.actions.some(action => action.type === 'end') || (wasAtEnd && downward)
 }
 
 function resultFor(session: ResumableSession): SessionPickerResult {
@@ -481,7 +493,10 @@ export async function showSessionPicker(
     }) + (more > 0 ? t('picker.countMore', { count: more }) : '')
       + (state.loading === true ? t('picker.loading') : ''), width), '90'))
     if (filtered.length === 0) {
-      const empty = state.loading === true
+      // An empty list with history still unread is "loading", never "there is
+      // nothing": the pager reads on by itself until it has a row or the
+      // history is over.
+      const empty = state.loading === true || more > 0
         ? t('picker.loadingList')
         : state.query === ''
           ? t('picker.noneYet')
@@ -732,8 +747,15 @@ export async function showSessionPicker(
       const first = await pager.page(PICKER_PAGE_SIZE)
       if (done || signal?.aborted) return
       if (first.sessions.length === 0) {
-        cleanup({ kind: 'new' })
-        stdout.write(t('picker.none'))
+        if (first.done) {
+          cleanup({ kind: 'new' })
+          stdout.write(t('picker.none'))
+          return
+        }
+        // Rows exist but none is showable yet: keep reading rather than telling
+        // the user their history is empty (and starting a fresh session).
+        applyPage(first)
+        void loadPage()
         return
       }
       applyPage(first)

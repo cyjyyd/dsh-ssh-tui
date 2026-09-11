@@ -429,8 +429,8 @@ src/tui.ts          终端渲染、交互、标题/铃声（SshTui；叶子函�
 src/paint.ts        增量绘制、SSH 节拍、选择器窗口
 src/term-text.ts    宽度/折行/markdown
 src/footer.ts       底栏、占用环、/status
-src/stats.ts        会话统计（回合/步数、LLM 与工具耗时、TTFT、tok/s、用量去重）
-src/rows.ts         转录行存储与可见窗口（保留上限、工具卡合并、计划行、滚动切片）
+src/stats.ts        会话统计账本（回合/步数、LLM 与工具耗时、TTFT、decode 计数、用量去重）
+src/rows.ts         转录行操作与可见窗口（内存上限、工具卡合并、计划行、滚动切片；行数组仍在 tui.ts）
 src/dialogs.ts      对话框状态机（问题列表/确认/查看覆盖层的按键规则）
 src/commands.ts     斜杠命令目录与补全建议
 src/plan.ts         计划条、待办、/find

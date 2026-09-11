@@ -144,6 +144,108 @@ test('blank sessions are deleted and never listed as resumable', async () => {
   assert.equal(existsSync(join(dir, 'error-kept')), true, 'error-reply session kept')
 })
 
+// A plugin notice (cron continuation, goal nudge, context snapshot) is input
+// too: treating it as "no input" made a live mid-turn session look blank, and a
+// blank verdict deletes the log directory and stops its Host (2026-09-11 class).
+test('a session whose only input is a plugin notice is never blank', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-plugin-notice-'))
+  for (const id of ['plugin-only', 'turn-open']) {
+    mkdirSync(join(dir, id), { recursive: true })
+    writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  }
+  const pluginOnly = readableSession('plugin-only', 700, '检查定时任务')
+  pluginOnly.events = [
+    { type: 'permission/preset', seq: 0, time: 100 },
+    { type: 'turn/start', seq: 1, time: 200, data: { turn: 1 } },
+    {
+      type: 'user/message',
+      seq: 2,
+      time: 300,
+      data: {
+        id: 'm',
+        role: 'user',
+        content: [{ type: 'text', text: '检查定时任务' }],
+        source: { kind: 'plugin', plugin: 'dsh-cron', form: 'notice' },
+      },
+    },
+    { type: 'step/start', seq: 3, time: 400, data: { turn: 1, step: 1 } },
+  ]
+  // A turn that never ended is mid-work, whatever the messages look like.
+  const openTurn = readableSession('turn-open', 600)
+  openTurn.events = [
+    { type: 'permission/preset', seq: 0, time: 100 },
+    { type: 'turn/start', seq: 1, time: 200, data: { turn: 1 } },
+  ]
+  const sessions = new Map([
+    ['plugin-only', pluginOnly],
+    ['turn-open', openTurn],
+  ])
+  const persistence = {
+    list: async () => [header('plugin-only', 700), header('turn-open', 600)],
+    inspect: async (id) => sessions.get(id),
+    locate: (meta) => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.deepEqual(listed.map(item => item.id), ['plugin-only'], 'the notice session is a row')
+  assert.equal(existsSync(join(dir, 'plugin-only')), true, 'a plugin-notice session is kept')
+  // A turn with no message yet is not a picker row (there is nothing to show),
+  // but it is mid-work: the log on disk has to survive either way.
+  assert.equal(existsSync(join(dir, 'turn-open')), true, 'an open turn is never pruned')
+})
+
+test('a live Host mid-turn is not stopped, and its log is not pruned', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-live-midturn-'))
+  mkdirSync(join(dir, 'live-midturn'), { recursive: true })
+  writeFileSync(join(dir, 'live-midturn', 'session.jsonl.zstd'), 'x')
+  const session = readableSession('live-midturn', 800)
+  session.events = [
+    { type: 'permission/preset', seq: 0, time: 100 },
+    { type: 'turn/start', seq: 1, time: 200, data: { turn: 1 } },
+    {
+      type: 'user/message',
+      seq: 2,
+      time: 300,
+      data: {
+        id: 'm',
+        role: 'user',
+        content: [{ type: 'text', text: '继续目标' }],
+        source: { kind: 'plugin', plugin: 'goal' },
+      },
+    },
+    { type: 'step/start', seq: 3, time: 400, data: { turn: 1, step: 1 } },
+  ]
+  const persistence = {
+    list: async () => [header('live-midturn', 800)],
+    inspect: async () => session,
+    locate: () => ({ kind: 'jsonl', path: join(dir, 'live-midturn', 'session.jsonl.zstd') }),
+  }
+  const killed = []
+  const listHosts = async () => [
+    { sessionId: 'live-midturn', lock: { pid: 424242, startedAt: new Date().toISOString(), state: 'running-detached' }, sock: '/tmp/live-midturn.sock' },
+  ]
+  const originalKill = process.kill
+  process.kill = (pid) => { killed.push(pid); return true }
+  try {
+    const listed = await listResumableSessions(persistence, '', listHosts)
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.equal(listed.length, 1)
+    assert.equal(listed[0].id, 'live-midturn')
+    assert.equal(listed[0].attach?.pid, 424242, 'the live Host stays attachable')
+    assert.deepEqual(killed, [], 'a mid-turn Host must never be stopped')
+    assert.equal(existsSync(join(dir, 'live-midturn')), true, 'and its log must never be pruned')
+  } finally {
+    process.kill = originalKill
+  }
+})
+
 test('blank attachable hosts are stopped and kept out of the picker', async () => {
   const blank = readableSession('blank-live', 500)
   blank.events = blank.events.slice(0, 3)
@@ -603,4 +705,61 @@ test('a live host joins the first page even when its header is far down the hist
   const first = await pager.page()
   assert.equal(first.sessions[0].id, 'page-29', 'an attachable host leads the list')
   assert.equal(first.sessions[0].attach?.pid, 77)
+})
+
+/** A session that has a reply but no message of its own: not a picker row. */
+function replyOnlySession(id, createdAt) {
+  const session = readableSession(id, createdAt, `task ${id}`)
+  session.events = [
+    { type: 'permission/preset', seq: 0, time: 100 },
+    { type: 'turn/start', seq: 1, time: 200, data: { turn: 1 } },
+    { type: 'assistant/message', seq: 2, time: 300, data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } } },
+    { type: 'turn/end', seq: 3, time: 400, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  return session
+}
+
+// A page is a page of *rows*: a session the picker cannot show must not eat a
+// slot (that left short pages) and must not be the only thing behind an empty
+// page either (the picker then reported "no history").
+test('a page counts only the rows it can show', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-showable-'))
+  const replyOnly = Array.from({ length: 5 }, (_, index) => `replyonly-${index}`)
+  const real = Array.from({ length: 12 }, (_, index) => `real-${index}`)
+  const ids = [...replyOnly, ...real]
+  const sessions = new Map([
+    ...replyOnly.map((id, index) => [id, replyOnlySession(id, 3000 - index)]),
+    ...real.map((id, index) => [id, readableSession(id, 2000 - index, `标题 ${id}`)]),
+  ])
+  const persistence = {
+    list: async () => ids.map((id, index) => header(id, 3000 - index)),
+    inspect: async id => sessions.get(id),
+    locate: meta => ({ kind: 'jsonl', path: join(dir, `${meta.id}.jsonl`) }),
+  }
+  const pager = await openResumableSessionPager(persistence, '', {
+    listHosts: async () => [],
+    indexPath: join(dir, 'index.json'),
+  })
+  const first = await pager.page()
+  assert.equal(first.sessions.length, PICKER_PAGE_SIZE, 'a full page of real rows')
+  assert.deepEqual(first.sessions.map(item => item.id), real.slice(0, PICKER_PAGE_SIZE))
+})
+
+test('an empty page means the history is over, not that rows were filtered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-empty-'))
+  const ids = Array.from({ length: 4 }, (_, index) => `replyonly-${index}`)
+  const sessions = new Map(ids.map((id, index) => [id, replyOnlySession(id, 1000 - index)]))
+  const persistence = {
+    list: async () => ids.map((id, index) => header(id, 1000 - index)),
+    inspect: async id => sessions.get(id),
+    locate: meta => ({ kind: 'jsonl', path: join(dir, `${meta.id}.jsonl`) }),
+  }
+  const pager = await openResumableSessionPager(persistence, '', {
+    listHosts: async () => [],
+    indexPath: join(dir, 'index.json'),
+  })
+  const page = await pager.page()
+  assert.deepEqual(page.sessions, [], 'nothing to show')
+  assert.equal(page.done, true, 'and nothing left to read either')
+  assert.equal(page.remaining, 0)
 })

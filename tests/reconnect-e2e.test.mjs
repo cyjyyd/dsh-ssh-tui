@@ -154,3 +154,40 @@ test('a reconnect takes the display once, and the old window exits', { timeout: 
   await Promise.all([first, second])
   assert.deepEqual(newWindow.exits, [0], 'closing the session ends the remaining window')
 })
+
+/**
+ * The relay measures the link *before* it says HELLO, so the Host's HELLO grace
+ * has to outlast that measurement. At 3 s a ~600 ms link (probe budget 2.5 s
+ * plus a widened 800 ms window) was reaped as a silent liveness probe: the
+ * launcher saw `host-closed`, called it flapping, and the user could not attach
+ * at all.
+ */
+test('a slow link still claims the display', { timeout: 30_000 }, async t => {
+  const path = await withSession(t, 'main-session-slow-link')
+  const attachLog = []
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => {},
+    onAttach: () => { attachLog.push('attach') },
+  })
+  await host.listen()
+  t.after(() => host.close())
+
+  const terminal = sshTerminal({ rttMs: 600 })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+  })
+  const deadline = Date.now() + 10_000
+  while (attachLog.length === 0 && Date.now() < deadline) await delay(50)
+  assert.deepEqual(attachLog, ['attach'], 'the slow relay must still claim the display')
+  assert.equal(host.attached, true)
+
+  await host.close()
+  const result = await relay
+  assert.equal(['goodbye', 'host-closed'].includes(result.reason), true,
+    `the relay outlived the probe and ended on the Host's terms: ${JSON.stringify(result)}`)
+})

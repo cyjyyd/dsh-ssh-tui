@@ -172,3 +172,41 @@ test('the flat footer row mirrors the snapshot', () => {
     cacheWriteTokens: 0,
   })
 })
+
+test('a settled step cannot settle twice', () => {
+  const stats = new SessionStatsTracker()
+  stats.noteStepStart(1, 1, 1_000)
+  stats.noteFirstToken(1, 1, 1_100)
+  stats.settleMessage({ turn: 1, step: 1, time: 2_000, outputTokens: 25 })
+  // A retry settlement for the same step must not add a second LLM span or a
+  // second TTFT sample: the step it describes is already closed.
+  stats.settleMessage({ turn: 1, step: 1, time: 2_500, outputTokens: 25 })
+  const after = stats.snapshot()
+  assert.equal(after.llmMs, 1_000)
+  assert.equal(after.ttftMs, 100)
+  assert.equal(after.ttftSteps, 1)
+  assert.equal(after.decodeMs, 900)
+})
+
+test('there is no open step before step/start or after step/end', () => {
+  const stats = new SessionStatsTracker()
+  assert.equal(stats.currentStep(), undefined)
+  stats.noteStepStart(4, 2, 1_000)
+  assert.deepEqual(stats.currentStep(), { turn: 4, step: 2 })
+  stats.noteStepEnd(4, 2)
+  assert.equal(stats.currentStep(), undefined, 'a closed step must not attract live chunks')
+})
+
+test('time spans never go negative', () => {
+  const stats = new SessionStatsTracker()
+  stats.noteStepStart(1, 1, 1_000)
+  // A settlement that arrives before its step started, and a tool result that
+  // arrives before its call: both clamp at zero rather than reporting a
+  // negative span into the footer.
+  stats.settleMessage({ turn: 1, step: 1, time: 900, outputTokens: 5 })
+  stats.noteToolStart('call', 2_000)
+  stats.noteToolEnd('call', 1_500)
+  const after = stats.snapshot()
+  assert.equal(after.llmMs, 0)
+  assert.equal(after.toolMs, 0)
+})

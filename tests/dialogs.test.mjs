@@ -18,14 +18,20 @@ import {
 } from '../lib/dialogs.js'
 
 function questionDialog(options, overrides = {}) {
+  const { question: questionOverrides, ...dialogOverrides } = overrides
   return {
     kind: 'questions',
-    question: { id: 'q1', question: 'Pick', ...(options === undefined ? {} : { options }) },
+    question: {
+      id: 'q1',
+      question: 'Pick',
+      ...(options === undefined ? {} : { options }),
+      ...questionOverrides,
+    },
     index: 1,
     total: 1,
     selected: new Set(),
     cursor: 0,
-    ...overrides,
+    ...dialogOverrides,
   }
 }
 
@@ -66,8 +72,7 @@ test('the highlight clamps at both ends of the option list', () => {
 })
 
 test('a multi-select list keeps its own selection while moving', () => {
-  const dialog = questionDialog(OPTIONS, { multiSelect: true, selected: new Set([0]) })
-  dialog.question.multiSelect = true
+  const dialog = questionDialog(OPTIONS, { question: { multiSelect: true }, selected: new Set([0]) })
   moveQuestionCursor(dialog, 1)
   assert.equal(dialog.cursor, 1)
   assert.deepEqual([...dialog.selected], [0], 'moving does not select')
@@ -85,8 +90,7 @@ test('selecting replaces in a single-select list and toggles in a multi-select o
   assert.equal(single.cursor, 2)
   assert.deepEqual([...single.selected], [2])
 
-  const multi = questionDialog(OPTIONS, { multiSelect: true })
-  multi.question.multiSelect = true
+  const multi = questionDialog(OPTIONS, { question: { multiSelect: true } })
   selectQuestionOption(multi, 1)
   assert.deepEqual([...multi.selected], [1])
   selectQuestionOption(multi, 1)
@@ -107,14 +111,12 @@ test('Enter on an unselected single-select list cancels instead of answering', (
 })
 
 test('Enter answers a selected list with the selected labels', () => {
-  const dialog = questionDialog(OPTIONS, { selected: new Set([0, 2]), multiSelect: true })
-  dialog.question.multiSelect = true
+  const dialog = questionDialog(OPTIONS, { question: { multiSelect: true }, selected: new Set([0, 2]) })
   assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['alpha', 'charlie'] })
 })
 
 test('Enter on an empty multi-select list is an empty answer, not a cancel', () => {
-  const dialog = questionDialog(OPTIONS, { multiSelect: true })
-  dialog.question.multiSelect = true
+  const dialog = questionDialog(OPTIONS, { question: { multiSelect: true } })
   assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: [] })
 })
 

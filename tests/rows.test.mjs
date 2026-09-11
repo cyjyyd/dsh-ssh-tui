@@ -108,11 +108,14 @@ test('a replayed merge does not arm the flip animation', () => {
 test('a repeat diff appends only after the first repeat', () => {
   const first = [{ path: 'a.js', lines: ['+1'] }]
   const second = [{ path: 'a.js', lines: ['+2'] }]
+  const third = [{ path: 'a.js', lines: ['+3'] }]
   const previous = toolRow('call-1', { name: 'edit', diff: first, repeats: 1 })
   mergeToolCard(previous, { callId: 'call-2', name: 'edit', args: '{}', title: '', summary: '', diff: second }, 0)
   assert.deepEqual(previous.diff, second, 'the first merge replaces the diff')
-  mergeToolCard(previous, { callId: 'call-3', name: 'edit', args: '{}', title: '', summary: '', diff: second }, 0)
-  assert.deepEqual(previous.diff, [second[0], second[0]], 'later merges stack')
+  mergeToolCard(previous, { callId: 'call-3', name: 'edit', args: '{}', title: '', summary: '', diff: third }, 0)
+  // Distinct payloads, so appending the *new* hunk is distinguishable from
+  // appending the previous one again.
+  assert.deepEqual(previous.diff, [second[0], third[0]], 'later merges stack the newest hunk')
 })
 
 test('the live plan is the newest one that still has work', () => {
@@ -184,18 +187,21 @@ test('scrolling clamps at both ends of the transcript', () => {
 
 test('a reveal scrolls the row into view and is not stored', () => {
   const rows = [1, 2, 3, 4, 5, 6].map(n => ({ id: n }))
-  const target = rows[1]
+  const lines = rows.map(row => `line ${row.id}`)
+  const refs = [...rows]
   const window = windowTranscript({
-    lines: rows.map(row => `line ${row.id}`),
-    refs: rows,
+    lines,
+    refs,
     available: 2,
     scrollOffset: 0,
-    reveal: target,
+    reveal: refs[1],
   })
   assert.equal(window.scrollOffset, 3, 'the third line from the end')
   assert.deepEqual(window.visibleLines, ['line 2', 'line 3'])
-  // The function never mutates the transcript or the caller's offset.
-  assert.equal(rows[1], target)
+  assert.deepEqual(window.visibleRefs, [refs[1], refs[2]], 'the visible window keeps its refs')
+  // Windowing reads the transcript, it never rewrites it.
+  assert.deepEqual(refs, rows)
+  assert.deepEqual(lines, rows.map(row => `line ${row.id}`))
 })
 
 test('an unknown reveal leaves the window where it was', () => {

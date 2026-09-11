@@ -61,3 +61,23 @@ test('a host-only command is filtered like a local one', () => {
   const names = commandSuggestions('/sess', [foreign('sessions'), foreign('model')]).map(command => command.name)
   assert.deepEqual(names, ['sessions'])
 })
+
+test('a prefix matches whatever case the user typed', () => {
+  assert.deepEqual(commandSuggestions('/EXIT', []).map(command => command.name), ['exit'])
+  assert.deepEqual(commandSuggestions('/Diag', []).map(command => command.name), ['diag'])
+})
+
+test('ranking does not depend on which side of the comparison comes first', () => {
+  // 'se-helper' and the local 'setup' start with the prefix; 'x-se-y' only
+  // contains it, so it sorts last whatever order the host listed them in. A
+  // one-sided comparator would order by input order instead.
+  for (const list of [
+    [foreign('x-se-y'), foreign('se-helper')],
+    [foreign('se-helper'), foreign('x-se-y')],
+  ]) {
+    const names = commandSuggestions('/se', list).map(command => command.name)
+    assert.equal(names.at(-1), 'x-se-y', names.join(','))
+    assert.equal(names.includes('se-helper'), true, names.join(','))
+    assert.ok(names.indexOf('setup') < names.indexOf('x-se-y'), names.join(','))
+  }
+})

@@ -47,11 +47,16 @@ const REPLACED_GRACE_MS = 250
 
 /**
  * How long a connection may stay silent before the Host treats it as a
- * liveness probe and drops it. A relay measures the terminal round-trip
- * *before* its HELLO (see `runDisplayRelay`), so this has to cover the whole
- * probe — and it must stay well under the launcher's own attach timeout.
+ * liveness probe and drops it.
+ *
+ * A relay measures the terminal round-trip *before* its HELLO (see
+ * `runDisplayRelay`), and the slow-link path is long: the probe's budget is
+ * RTT_MEASURE_BUDGET_MS (2.5 s) plus one widened 800 ms answer window, so a
+ * ~600 ms link measured 3.1 s end to end. At 3 s the Host reaped such a relay
+ * as a silent probe, the launcher saw `host-closed`, and a slow link could not
+ * attach at all — hence the wider grace.
  */
-const DISPLAY_HELLO_GRACE_MS = 3_000
+const DISPLAY_HELLO_GRACE_MS = 6_000
 
 /**
  * Drop launcher SIGTERM/SIGINT/SIGHUP so closing SSH cannot dispose the tree
