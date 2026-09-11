@@ -379,13 +379,18 @@ test('DisplayHost handles multiple resize events smoothly as window enlarges', a
 // A killed Host leaves its `.sock` file behind. `fs.access` reported that as
 // ready, so the launcher attached to a dead peer and the first reconnect died
 // with `write EPIPE` (and the picker listed it as `可接入`).
-test('a leftover socket file is not a ready channel', async () => {
+test('a channel that is not listening yet is not ready', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-stale-'))
-  const path = join(home, 'stale.sock')
-  // Exactly what a killed Host leaves behind: the directory entry without a
-  // listener (Node unlinks on a clean close, so create the leftover directly).
-  await writeFile(path, '')
-  assert.equal(existsSync(path), true)
+  const path = sessionSockPath('stale', home)
+  if (!isPipePath(path)) {
+    // POSIX only: a Host killed before it could unlink leaves the directory
+    // entry behind (Node unlinks on a clean close, so create it directly).
+    // Windows pipes vanish with their owner, so the equivalent is a name that
+    // nobody is listening on.
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, '')
+    assert.equal(existsSync(path), true)
+  }
   assert.equal(await displaySockExists(path), false, 'an entry without a listener is not ready')
   assert.equal(await probeDisplaySock(path, 200), false)
   // A waiting launcher must not treat that entry as the Host coming up.

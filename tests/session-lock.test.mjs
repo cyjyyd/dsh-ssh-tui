@@ -22,6 +22,7 @@ import {
   sessionLockPath,
   windowsProcessMatchesLock,
 } from '../lib/session-lock.js'
+import { sessionSockPath } from '../lib/display-sock.js'
 
 function readBootId() {
   try {
@@ -95,7 +96,7 @@ async function listenOn(path) {
 test('inspectLiveHost is attachable only while the host pid is alive', async t => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session-attach'
-  const sock = join(home, 'tui-socks', `${sessionId}.sock`)
+  const sock = sessionSockPath(sessionId, home)
   const { mkdir } = await import('node:fs/promises')
   await mkdir(join(home, 'tui-locks'), { recursive: true })
   await mkdir(join(home, 'tui-socks'), { recursive: true })
@@ -330,13 +331,14 @@ test('windowsProcessMatchesLock rules out pid reuse', () => {
 // The picker prioritises attachable hosts, so a leftover socket file with a
 // live-looking pid used to jump to the top of the resume list and then fail
 // with `write EPIPE` on attach. Reachability now decides.
-test('a dead channel makes the lock stale even when a socket file remains', async t => {
+// POSIX only: Windows removes a pipe with its owner, so a leftover entry
+// cannot exist there (the win32-only tests cover the pipe expectations).
+test('a dead channel makes the lock stale even when a socket file remains',
+  { skip: process.platform === 'win32' }, async t => {
   const home = await makeHome(t)
   const sid = 'main-session-stale-channel'
-  const sock = join(home, 'tui-socks', `${sid}.sock`)
-  const server = (await import('node:net')).createServer(() => {})
-  await new Promise(resolve => server.listen(sock, resolve))
-  await new Promise(resolve => server.close(resolve))
+  const sock = sessionSockPath(sid, home)
+  await writeFile(sock, '')
   await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, process.pid, sock))
   assert.equal(await inspectLiveHost(sid, home), undefined, 'a dead peer must not be attachable')
   assert.equal(existsSync(sock), false, 'the leftover socket file is cleaned up')
