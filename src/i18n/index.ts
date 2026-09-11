@@ -26,6 +26,8 @@ export const UI_LOCALE_SCHEMA = z.object({
   view: z.string(),
   disconnect: z.string(),
   autoApproval: z.string(),
+  /** Milliseconds a leftover, finished Host waits before exiting; 0 = never. */
+  idleExit: z.number(),
 })
 
 let current: Locale = resolveLocale()

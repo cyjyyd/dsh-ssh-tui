@@ -157,7 +157,11 @@ dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从�
 忙碌时默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
 `ssh-tui.disconnect: continue`（也可用 `DSH_TUI_DISCONNECT=continue`）则不取消，
 Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线直接退出，不占后台。
-无显示器且空闲超过 6 小时（`DSH_TUI_DETACHED_IDLE_MS`）Host 自行退出。可选：用 tmux 包一层。
+留下的 Host 持有该会话的内核写锁（`session.lock`），而 Web 端打开同一会话时正是被这把锁挡下的
+（`resume failed for session … is already owned by an active write handle`）。所以它**跑完留下来的那一轮后最多再等 1 分钟**
+（`DSH_TUI_IDLE_EXIT_MS`，或 settings.yaml 的 `ssh-tui.idleExit`，毫秒；设 `0`/`off` 恢复旧行为）
+就自行退出并让出锁：这段时间够原窗口重连接入，之后 `--resume` 重新打开已落盘的日志。
+完全没有显示器且一直空闲的兜底仍由 `DSH_TUI_DETACHED_IDLE_MS`（默认 6 小时）负责。可选：用 tmux 包一层。
 
 启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
@@ -459,6 +463,16 @@ npm run build
   不再回显；探测失败会自动补测一次，Host 侧也不会用"未知"覆盖已知测量。
 - **resume 选择器第一批列表出现不认识的会话**：第一轮列表是"骨架"（活着的 Host 只拿会话 id 当标题）。
   现在列表压到标题读出来之后再画：期间显示「正在读取历史会话…」，标题全空时最终列表仍会画出以便选择。
+- **TUI 里进得去、Web 里打不开同一个会话**：会话的写锁（`session.lock`）是内核锁，同时只允许一个写者。
+  SSH 断开时那个还在跑轮的 Host 会留着锁，于是 Web 端打开时报
+  `resume failed for session "…" is already owned by an active write handle`——从 0.5.10 起
+  该 Host 在轮次结束后最多再等 1 分钟就退出并放锁（`DSH_TUI_IDLE_EXIT_MS`/`ssh-tui.idleExit`）。
+  若锁仍被某个 Host 占着，`--resume` 接入它即可正常继续（选择器里那条会话会标「可接入」）。
+- **断线重连后锁被标成「已暂停」/「接入中」，但窗口其实已经关了**：0.5.10 修掉了一个状态机 bug。
+  重连接的 relay 在 hangup 收尾期间 HELLO 后，Host 会记下"这次 hangup 要采纳它"的标记；但 hangup
+  走保留 Host 分支时没有清掉这个标记，于是**下一次真实掉线整个被忽略**：锁仍写着上一个状态
+  （例如「已暂停」），空闲退出计时器也不会武装。现在只要轮次重新开始（说明那场竞争早已结束），
+  标记就会归零，掉线、锁状态与空闲退出都以真实事件为准。
 - **状态栏看不到子代理模型**：0.3.6 起 `sub:<模型>` 只在子代理模型与父模型不同时才拼进身份行，
   而默认子代理模型就是 `deepseek-v4-flash`，父模型也是它时整段消失；0.5.8 起恢复为始终显示，
   并找回提供商前缀与 `/subeffort` 的括号后缀（提供商要先在 `settings.yaml` 的 `ssh-tui-subagent.provider`

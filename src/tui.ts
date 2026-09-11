@@ -713,6 +713,24 @@ const PLUGIN_VERSION = ((): string => {
 })()
 const STALL_WARNING_MS = 60000
 const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
+/**
+ * How long a leftover Host that has finished its work waits, with no display,
+ * for the user to come back before it exits on its own.
+ *
+ * The Host holds the session's kernel write lock (`session.lock`) for its whole
+ * life, and that lock is exactly what makes the browser surface answer
+ * `resume failed for session "…"` (the persistence layer refuses a second
+ * writer). A Host kept alive by a busy SSH drop therefore used to block the same
+ * session in the Web UI for the full {@link DEFAULT_DETACHED_IDLE_MS} (six
+ * hours), long after the turn it stayed behind for had already finished: the
+ * session looked unreachable from both surfaces while an idle process held it.
+ * A minute is enough to notice the drop and reattach; after that the turn has
+ * long been flushed, so `--resume` reopens the same log in a fresh Host.
+ *
+ * `DSH_TUI_IDLE_EXIT_MS` (or `ssh-tui.idleExit` in settings.yaml) overrides it;
+ * `0`/`off` restores the legacy "wait for the six-hour timer" behavior.
+ */
+const DEFAULT_IDLE_EXIT_MS = 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
@@ -973,6 +991,9 @@ export class SshTui {
   private readonly headlessDisplay: boolean
   private disconnectPolicy: DisconnectPolicyName
   private detachedIdleTimer: ReturnType<typeof setTimeout> | undefined
+  /** Armed once an SSH drop left this Host alive with work still running. */
+  private hostKeptAlive = false
+  private idleExitTimer: ReturnType<typeof setTimeout> | undefined
   private displayDetached = false
   private displayHost: DisplayHost | undefined
   private relayColumns: number | undefined
@@ -1342,6 +1363,56 @@ export class SshTui {
     this.detachedIdleTimer.unref?.()
   }
 
+  /**
+   * How long a leftover, finished Host may sit with no display before it exits
+   * and hands the session back. `0` disables the exit (legacy behavior).
+   */
+  private idleExitMs(): number {
+    const raw = Number.parseInt(process.env.DSH_TUI_IDLE_EXIT_MS ?? '', 10)
+    if (Number.isFinite(raw) && raw >= 0) return raw
+    const saved = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    if (saved !== null && typeof saved === 'object' && !Array.isArray(saved)) {
+      const value = (saved as { idleExit?: unknown }).idleExit
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+      const text = String(value ?? '').trim().toLowerCase()
+      if (text === 'off' || text === 'never' || text === 'false') return 0
+      const parsed = Number.parseInt(text, 10)
+      if (Number.isFinite(parsed) && parsed >= 0) return parsed
+    }
+    return DEFAULT_IDLE_EXIT_MS
+  }
+
+  private clearIdleExitTimer(): void {
+    if (this.idleExitTimer !== undefined) clearTimeout(this.idleExitTimer)
+    this.idleExitTimer = undefined
+  }
+
+  /**
+   * Arm the exit for a Host a busy SSH drop left behind. Called when the agent
+   * goes idle — the reason the Host was kept is gone, and every second it stays
+   * is a second its `session.lock` keeps the browser surface from opening the
+   * session (`resume failed for session "…"`). A reattach cancels it.
+   */
+  private armIdleExitTimer(): void {
+    if (!this.headlessDisplay || !this.hostKeptAlive) return
+    const idleMs = this.idleExitMs()
+    if (idleMs <= 0) return
+    this.clearIdleExitTimer()
+    this.idleExitTimer = setTimeout(() => {
+      this.idleExitTimer = undefined
+      if (this.disposed || this.exiting) return
+      if (this.displayHost?.attached === true) return
+      if (this.isBusyForHangupKeepalive()) {
+        this.armIdleExitTimer()
+        return
+      }
+      // Flush + exit, exactly like an idle hangup: the turn already ended, so
+      // nothing is cancelled and the lock goes back to the session store.
+      void this.requestExit(0)
+    }, idleMs)
+    this.idleExitTimer.unref?.()
+  }
+
   private isCompactView(): boolean {
     return this.workspaceView === 'compact'
   }
@@ -1675,6 +1746,7 @@ export class SshTui {
     this.disposed = true
     this.exiting = true
     this.clearDetachedIdleTimer()
+    this.clearIdleExitTimer()
     const dialog = this.dialog
     const queued = this.dialogQueue.splice(0)
     this.dialog = undefined
@@ -1788,6 +1860,12 @@ export class SshTui {
     const keepHost = this.displayHost !== undefined && busy
     if (keepHost) {
       this.hangingUp = false
+      // A relay that arrived while this hangup was unwinding set
+      // `reattachedDuringHangup` so the hangup would honor it. That relay
+      // *cancels* this hangup when it HELLOs, so reaching this keep-host path
+      // means the flag is already cleared above; clearing it here too would be
+      // dead code, and the status handler clears it on the next turn.
+      this.hostKeptAlive = true
       this.armDetachedIdleTimer()
       await this.onHangup?.()
       return
@@ -1955,7 +2033,11 @@ export class SshTui {
     if (this.hangingUp) this.reattachedDuringHangup = true
     this.displayDetached = false
     this.hangingUp = false
+    this.hostKeptAlive = false
     this.clearDetachedIdleTimer()
+    // The user is back: the leftover Host is a live session again, so the
+    // idle exit must not fire out from under the display that just attached.
+    this.clearIdleExitTimer()
     this.lastActivity = Date.now()
     this.stalledWarningShown = false
     this.lastPaintRows = []
@@ -3955,6 +4037,9 @@ export class SshTui {
     if (agent !== this.agent) return
     this.lastActivity = Date.now()
     if (status === 'running') {
+      // Work is running again, so any reattach that raced a former hangup has
+      // long been honored; keeping the flag would swallow the next drop.
+      this.reattachedDuringHangup = false
       this.completionSignaled = false
       this.completedAt = 0
       if (this.waitStartedAt === undefined) this.beginWait()
@@ -3970,6 +4055,13 @@ export class SshTui {
     if (status !== 'running') {
       this.flushPlanCloseNudge()
       this.maybeIdleAutoCompact()
+      // A leftover Host exists only because this turn was still running when
+      // SSH dropped. Now that it settled, give the user a short window to
+      // reattach before exiting and freeing the session's write lock for the
+      // browser surface.
+      this.armIdleExitTimer()
+    } else {
+      this.clearIdleExitTimer()
     }
     this.markDirty()
   }

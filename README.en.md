@@ -126,8 +126,15 @@ A busy hangup pauses the turn by default (cancelled). After attach, send another
 message to continue. `/disconnect continue`, `ssh-tui.disconnect: continue`,
 or `DSH_TUI_DISCONNECT=continue` leaves the turn running in the background;
 approvals and questions wait until a Display attaches. Idle hangup exits
-immediately. With no display and 6h idle (`DSH_TUI_DETACHED_IDLE_MS`) the Host
-exits itself. Optional: wrap the TUI in tmux.
+immediately. A leftover Host holds the session's kernel write lock
+(`session.lock`), which is exactly what makes the Web UI refuse the same session
+(`resume failed for session … is already owned by an active write handle`), so
+once the turn it stayed for has finished it waits at most one more minute
+(`DSH_TUI_IDLE_EXIT_MS`, or `ssh-tui.idleExit` in settings.yaml, in
+milliseconds; `0`/`off` restores the old behavior) and then exits, handing the
+lock back — long enough for the old window to reattach, after which `--resume`
+reopens the flushed log. A Host that never finishes its turn still falls back to
+`DSH_TUI_DETACHED_IDLE_MS` (6h). Optional: wrap the TUI in tmux.
 
 New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows
@@ -250,6 +257,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
   on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
 - Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically — silently, with the TTY kept in raw mode and queued bytes dropped so a stale cursor reply is never echoed as `^[[17;1R`; and a probe that misses its window is retried while the Host keeps the last measurement, so the footer chip does not fall back to four hollow circles.
+- Leftover Host lifetime: the write lock a dropped-but-still-running Host holds is what makes the Web UI refuse the same session (`resume failed for session … is already owned by an active write handle`), and a drop that raced a reattach used to leave the honored-reattach flag set, so the *next* drop was ignored and the session lock kept its stale state. The flag is cleared once a turn runs again, and once the turn the Host stayed for settles it exits within `DSH_TUI_IDLE_EXIT_MS` (default 60s, `0` disables) instead of holding the session for six hours.
 - Subagent route: the identity row always carries `sub:<model>` — the route
   every child inherits — suffixed with the effort when `/subeffort` set one,
   and prefixed with the provider when `settings.yaml` pinned one

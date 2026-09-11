@@ -138,6 +138,7 @@ function fakeDisplayHost() {
   const host = {
     attached: false,
     sendStdout() { return true },
+    sendGoodbye() {},
     close: async () => { host.attached = false },
   }
   return host
