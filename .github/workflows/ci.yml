@@ -9,11 +9,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Dual-stack: package.json pins the newest verified host, 0.1.5-rc.1.
-        # The older leg rewrites every @deepseek-ai/dsh-* devDependency and
-        # resolves from scratch, so each leg installs one coherent host tree
+        # package.json pins the newest verified host, 0.1.5-rc.1 (npm `latest`);
+        # rc.2 is upstream `next`, and 0.1.2-rc.1 is the oldest supported stack.
+        # Every non-default leg rewrites the @deepseek-ai/dsh-* devDependencies
+        # and resolves from scratch, so each leg installs one coherent host tree
         # instead of mixing versions (which needs no legacy-peer-deps).
-        dsh: ["0.1.5-rc.1", "0.1.2-rc.1"]
+        dsh: ["0.1.5-rc.1", "0.1.5-rc.2", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
