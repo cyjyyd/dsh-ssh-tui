@@ -6,11 +6,11 @@
 import { readdir } from 'node:fs/promises'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
-import { displaySockExists, isPipePath, sessionSockPath } from './display-sock.js'
+import { displaySockExists, isPipePath, resolveDshHome, sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
 export type DisconnectPolicy = 'pause' | 'continue'
@@ -42,7 +42,7 @@ export class SessionLockHeldError extends Error {
   }
 }
 
-export function sessionLockPath(sessionId: string, dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')): string {
+export function sessionLockPath(sessionId: string, dshHome = resolveDshHome()): string {
   const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
   return join(dshHome, 'tui-locks', `${safe}.json`)
 }
@@ -132,48 +132,111 @@ export interface WindowsProcessIdentity {
 export const PID_REUSE_SLACK_MS = 5_000
 
 /**
- * Cache of Windows identities so one stale lock costs at most one probe; the
- * short TTL keeps a pid reused twice inside one session from being judged by
- * an identity it no longer has.
+ * Cache of Windows identities so one lock costs at most one probe per window.
+ *
+ * Keyed by pid *and* the lock instance that was inspected: scoping it to the
+ * lock (not just the pid) is what keeps a recycled pid from being judged by an
+ * identity it no longer has — a foreign cached identity applied to a fresh
+ * lock would declare a live Host stale and let a second Host write the same
+ * session. The short TTL bounds the same hazard for repeated inspections of
+ * one lock.
  */
-const WINDOWS_IDENTITY_TTL_MS = 60_000
-const windowsIdentityCache = new Map<number, { identity: WindowsProcessIdentity; at: number }>()
+const WINDOWS_IDENTITY_TTL_MS = 10_000
+const windowsIdentityCache = new Map<number, { identity: WindowsProcessIdentity; at: number; lockKey: string }>()
 
-/**
- * `Get-Process` beats WMI here: it is a single .NET call and reports both the
- * image name (works across users) and the creation time. The script avoids
- * double quotes so Node's CreateProcess quoting stays trivial.
- */
-function queryWindowsProcess(pid: number): WindowsProcessIdentity | undefined {
-  const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; `
-    + `if ($null -eq $p) { 'gone' } else { `
-    + `$st = ''; try { $st = $p.StartTime.ToUniversalTime().ToString('yyyy-MM-dd\\THH\\:mm\\:ss.fff\\Z') } catch {}; `
-    + `$p.ProcessName.ToLower() + [char]9 + $st }`
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-    encoding: 'utf8',
-    timeout: 5_000,
-    windowsHide: true,
-  })
-  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : ''
-  if (result.error !== undefined || stdout === '' || stdout === 'gone') return undefined
-  const [name = '', startedAt = ''] = stdout.split('\t')
-  if (name === '') return undefined
-  const parsed = Date.parse(startedAt)
-  return { name, ...Number.isFinite(parsed) ? { startedAt: parsed } : {} }
+function lockInstanceKey(lock: SessionLockInfo): string {
+  return `${lock.pid}:${lock.startedAt}`
 }
 
-function windowsProcessIdentity(pid: number): WindowsProcessIdentity | undefined {
-  const cached = windowsIdentityCache.get(pid)
-  if (cached !== undefined && Date.now() - cached.at < WINDOWS_IDENTITY_TTL_MS) return cached.identity
-  const identity = queryWindowsProcess(pid)
+/**
+ * Parse the probe's stdout. Everything after the last non-empty line is
+ * ignored (a stray warning banner must not masquerade as the image name), and
+ * an unexpected shape is reported as "unverifiable" rather than as a
+ * mismatch: mistaking noise for a foreign process would steal a live lock.
+ */
+export function parseWindowsProcessIdentity(stdout: string): WindowsProcessIdentity | undefined {
+  // Keep the raw line: the tab between name and timestamp is the shape being
+  // validated, and trimming whitespace off the end would delete it (a trailing
+  // tab means "name known, creation time unreadable", which is still useful).
+  const line = stdout.split('\n')
+    .map(entry => entry.replace(/\r$/u, ''))
+    .reverse()
+    .find(entry => entry.trim() !== '')
+  if (line === undefined || line.trim() === 'gone') return undefined
+  const trimmed = line.trimStart()
+  const tab = trimmed.indexOf('\t')
+  if (tab <= 0) return undefined
+  const name = trimmed.slice(0, tab).trim().toLowerCase()
+  if (!/^[a-z0-9_.-]+$/u.test(name)) return undefined
+  const startedAt = Date.parse(trimmed.slice(tab + 1).trim())
+  return { name, ...Number.isFinite(startedAt) ? { startedAt } : {} }
+}
+
+/** Absolute Windows PowerShell, for hosts where the bare name is not on PATH. */
+function systemPowerShell(): string {
+  const root = process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows'
+  return `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/**
+ * `Get-Process` beats WMI here: it is a single .NET call that reports both the
+ * image name (works across users) and the creation time. The script avoids
+ * double quotes so Node's CreateProcess quoting stays trivial, and formats the
+ * timestamp with the invariant culture so native-digit locales cannot turn it
+ * into NaN.
+ */
+async function queryWindowsProcess(pid: number): Promise<WindowsProcessIdentity | undefined> {
+  const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; `
+    + `if ($null -eq $p) { 'gone' } else { `
+    + `$st = ''; try { $st = $p.StartTime.ToUniversalTime().ToString('yyyy-MM-dd\\THH\\:mm\\:ss.fff\\Z', [System.Globalization.CultureInfo]::InvariantCulture) } catch {}; `
+    + `$p.ProcessName.ToLower() + [char]9 + $st }`
+  for (const exe of ['powershell.exe', systemPowerShell()]) {
+    const stdout = await runPowerShell(exe, script)
+    // `undefined` means the interpreter could not run at all (missing,
+    // blocked, timed out); a readable answer — including `gone` — is final.
+    if (stdout === undefined) continue
+    return parseWindowsProcessIdentity(stdout)
+  }
+  return undefined
+}
+
+/**
+ * Async on purpose: this runs on the TUI's render path (`/resume` lists every
+ * lock), where a synchronous spawn would freeze painting and keystrokes for
+ * the whole probe.
+ */
+function runPowerShell(exe: string, script: string): Promise<string | undefined> {
+  return new Promise(resolve => {
+    execFile(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    }, (error, stdout) => {
+      if (error !== null) {
+        resolve(undefined)
+        return
+      }
+      resolve(typeof stdout === 'string' ? stdout : '')
+    })
+  })
+}
+
+async function windowsProcessIdentity(lock: SessionLockInfo): Promise<WindowsProcessIdentity | undefined> {
+  const key = lockInstanceKey(lock)
+  const cached = windowsIdentityCache.get(lock.pid)
+  if (cached !== undefined && cached.lockKey === key && Date.now() - cached.at < WINDOWS_IDENTITY_TTL_MS) {
+    return cached.identity
+  }
+  const identity = await queryWindowsProcess(lock.pid)
   // Only successful probes are cached: a transient failure must not make the
   // pid look permanently dead for the rest of this process's life.
   if (identity === undefined) {
-    windowsIdentityCache.delete(pid)
+    windowsIdentityCache.delete(lock.pid)
     return undefined
   }
   if (windowsIdentityCache.size > 64) windowsIdentityCache.clear()
-  windowsIdentityCache.set(pid, { identity, at: Date.now() })
+  windowsIdentityCache.set(lock.pid, { identity, at: Date.now(), lockKey: key })
   return identity
 }
 
@@ -205,11 +268,17 @@ export function windowsProcessMatchesLock(
   slackMs: number = PID_REUSE_SLACK_MS,
 ): boolean {
   if (identity === undefined) return true
-  if (identity.name !== '' && expectedName !== '' && identity.name !== expectedName) return false
   const lockStarted = Date.parse(lock.startedAt)
-  if (Number.isFinite(lockStarted) && identity.startedAt !== undefined) {
+  if (identity.startedAt !== undefined && Number.isFinite(lockStarted)) {
+    // The Host existed before it wrote the lock, so a process created after
+    // that cannot be its owner. The timeline answers on its own, which also
+    // covers a Host launched by a different runtime (bun vs node) or a renamed
+    // executable: only a pid the OS recycled can post-date the lock.
     return identity.startedAt <= lockStarted + slackMs
   }
+  // No comparable timeline: the image name is the only signal left, and a
+  // mismatch there is weak enough that "unverifiable" is the safer answer.
+  if (identity.name !== '' && expectedName !== '' && identity.name !== expectedName) return false
   return true
 }
 
@@ -232,13 +301,17 @@ export function windowsProcessMatchesLock(
  *    creation time instead (see {@link windowsProcessMatchesLock}).
  * On platforms where none of this is available the legacy kill(pid, 0)
  * behavior is kept.
+ *
+ * Async because the Windows probe spawns PowerShell, and this runs on the
+ * render path (`/resume` inspects every lock); a synchronous spawn would
+ * freeze painting and keystrokes for the duration of the probe.
  */
-export function lockOwnerIsAlive(lock: SessionLockInfo): boolean {
+export async function lockOwnerIsAlive(lock: SessionLockInfo): Promise<boolean> {
   const pid = lock.pid
   if (!Number.isInteger(pid) || pid <= 0) return false
   if (!processIsAlive(pid)) return false
   if (process.platform === 'win32') {
-    return windowsProcessMatchesLock(lock, windowsProcessIdentity(pid))
+    return windowsProcessMatchesLock(lock, await windowsProcessIdentity(lock))
   }
   if (lock.bootId !== undefined && lock.pidStart !== undefined) {
     return readBootId() === lock.bootId && readProcStarttime(pid) === lock.pidStart
@@ -259,7 +332,7 @@ export function sessionLockDisabled(env: NodeJS.ProcessEnv = process.env): boole
 
 export async function readSessionLock(
   sessionId: string,
-  dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+  dshHome = resolveDshHome(),
 ): Promise<{ path: string; info: SessionLockInfo } | undefined> {
   const path = sessionLockPath(sessionId, dshHome)
   try {
@@ -288,7 +361,7 @@ export async function acquireSessionLock(
     agentStatus?: SessionLockAgentStatus
   } = {},
 ): Promise<{ path: string; info: SessionLockInfo }> {
-  const dshHome = options.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const dshHome = options.dshHome ?? resolveDshHome()
   const path = sessionLockPath(sessionId, dshHome)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const pid = options.pid ?? process.pid
@@ -320,7 +393,7 @@ export async function acquireSessionLock(
         existing = undefined
       }
       const ours = options.pid ?? process.pid
-      if (existing !== undefined && existing.pid !== ours && lockOwnerIsAlive(existing)) {
+      if (existing !== undefined && existing.pid !== ours && await lockOwnerIsAlive(existing)) {
         throw new SessionLockHeldError(existing, path)
       }
       try {
@@ -347,7 +420,7 @@ export type LiveHostKind = 'attachable' | 'zombie'
 
 export async function inspectLiveHost(
   sessionId: string,
-  dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+  dshHome = resolveDshHome(),
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
   const held = await readSessionLock(sessionId, dshHome)
   if (held === undefined) return undefined
@@ -365,7 +438,7 @@ async function inspectHeldLock(
   // Windows removes the pipe when the owning process exits). A reachable pipe
   // also proves the owner is alive, so the pid identity probe can be skipped.
   const sockExists = await displaySockExists(sock)
-  const alive = (isPipePath(sock) && sockExists) || lockOwnerIsAlive(info)
+  const alive = (isPipePath(sock) && sockExists) || await lockOwnerIsAlive(info)
   if (!alive) {
     // Host is gone. A leftover unix socket is not attachable — steal the
     // lock so --resume can reopen from the session log.
@@ -389,7 +462,7 @@ async function inspectHeldLock(
 
 /** Every lock file under `$DSH_HOME/tui-locks` whose Host pid is still alive. */
 export async function listAttachableHosts(
-  dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+  dshHome = resolveDshHome(),
 ): Promise<Array<{ sessionId: string; lock: SessionLockInfo; sock: string }>> {
   let names: string[] = []
   try {

@@ -234,9 +234,10 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   environment variable shadows the store. Agent shell tools automatically use
   PowerShell on Windows (the harness disables bash there).
 - Windows display channel: the Host/Display link is a named pipe
-  (`\\.\pipe\dsh-ssh-tui-<home>-<session>`), not a `.sock` file — a named pipe
-  is the only local socket Windows can listen on, and it is reclaimed when the
-  Host exits. Because `fs.access()` cannot see the pipe namespace, readiness is
+  (`\\.\pipe\dsh-tui-<8-hex DSH_HOME>-<session name>-<8-hex session id>`), not a
+  `.sock` file — a named pipe is the only local socket Windows can listen on,
+  and it is reclaimed when the Host exits. Both digests are part of the name so
+  two homes or two sessions can never share one machine-wide pipe. Because `fs.access()` cannot see the pipe namespace, readiness is
   probed with a real connect, and a Host that exits early is reported at once
   with its stderr (kept in `%USERPROFILE%\.dsh\tui-socks\<session>.err`).
 - Windows session locks: with no `/proc`, a live pid is checked with
@@ -249,9 +250,9 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
   on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
 - Subagent route: the identity row always carries `sub:<model>` — the route
-  every child inherits — prefixed with the provider when `/submodel` pinned one
-  and suffixed with the effort when `/subeffort` set one, e.g.
-  `sub:xai/grok-4.5(xhigh)`.
+  every child inherits — suffixed with the effort when `/subeffort` set one,
+  and prefixed with the provider when `settings.yaml` pinned one
+  (`ssh-tui-subagent.provider`), e.g. `sub:xai/grok-4.5(xhigh)`.
 - Resize: the launcher picker unregisters its own `resize` listener when it
   settles and refuses to paint afterwards, so resizing the window can no longer
   redraw the finished picker over the running TUI (the launcher process keeps

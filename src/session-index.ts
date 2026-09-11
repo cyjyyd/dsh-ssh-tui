@@ -3,6 +3,7 @@
  * session.jsonl.zstd on each launch. Invalidated by file mtime/size.
  */
 
+import { resolveDshHome } from './display-sock.js'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -32,7 +33,7 @@ const INDEX_VERSION = 1
 /** First page of recent sessions inspected after the header sketch paints. */
 export const PICKER_PRIORITY_COUNT = 9
 
-export function sessionIndexPath(dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')): string {
+export function sessionIndexPath(dshHome = resolveDshHome()): string {
   return join(dshHome, 'tui-session-index.json')
 }
 

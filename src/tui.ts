@@ -34,9 +34,11 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   commandAcceptsAttachments,
   forEachSessionEvent,
+  forEachSessionEventAsync,
   isAssistantStreamEvent,
   isTokenDeltaChunk,
   listenHostEvent,
+  REPLAY_YIELD_EVERY,
   sessionEventType,
   sessionEvents,
   settingsNamespace,
@@ -55,7 +57,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
-import { detachFromSshSession, DisplayHost, sessionSockPath } from './display-sock.js'
+import { detachFromSshSession, DisplayHost, resolveDshHome, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
   getLocale,
@@ -286,6 +288,7 @@ export {
   formatLinkQualityChip,
   ignoreFurtherHangupSignals,
   isEscapePrefix,
+  findCursorPositionReply,
   isHangupErrno,
   linkQualityOf,
   linkSignalPips,
@@ -718,7 +721,7 @@ const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
 
 function dshHomeDir(): string {
-  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return resolveDshHome()
 }
 
 function displayDshPath(file: string): string {
@@ -1025,6 +1028,8 @@ export class SshTui {
   private openStepStats: { turn: number; step: number; startTime: number; firstTokenTime: number | null } | undefined
   /** Attempt whose live `start` frame opened the current token stream. */
   private liveStreamOwner: { attemptId: unknown; turn: number; step: number } | undefined
+  /** Live events parked while the (yielding) history replay holds the floor. */
+  private replayQueue: Array<{ session: { id: SessionId }; event: SessionEvent }> | undefined
   private readonly pendingToolTimes = new Map<string, number>()
   private readonly usageByStep = new Map<string, SessionStats['usage']>()
   private lastStatsTurn: number | null = null
@@ -1475,15 +1480,27 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** Replay the durable session log so a resumed session renders its history. */
-  replayHistory(): void {
+  /**
+   * Replay the durable session log so a resumed session renders its history.
+   * Chunked on purpose: a synchronous walk of a long log froze the TUI on the
+   * pre-replay frame, so the relay's RTT frame could not be applied and the
+   * footer sat on `SSH ○○○○` for the whole load.
+   */
+  async replayHistory(): Promise<void> {
+    const parked: Array<{ session: { id: SessionId }; event: SessionEvent }> = []
+    this.replayQueue = parked
     this.replaying = true
     try {
-      forEachSessionEvent(this.agent.session, (event) => {
-        this.handleSessionEvent(this.agent.session, event)
-      })
+      await forEachSessionEventAsync(this.agent.session, (event) => {
+        this.applySessionEvent(this.agent.session, event)
+      }, REPLAY_YIELD_EVERY, () => this.disposed)
     } finally {
       this.replaying = false
+      this.replayQueue = undefined
+    }
+    for (const item of parked) {
+      if (this.disposed) return
+      this.applySessionEvent(item.session, item.event)
     }
     this.streaming = undefined
     this.streamingReasoning = undefined
@@ -3503,6 +3520,7 @@ export class SshTui {
     turn: number
     step: number
     time: number
+    stepKnown: boolean
   }, statsOnly = false): void {
     const { chunk } = streamed
     const open = this.openStepStats
@@ -3512,7 +3530,7 @@ export class SshTui {
         this.openStepStats = { ...open, firstTokenTime: streamed.time }
       }
     }
-    if (chunk.type === 'usage' && chunk.usage !== undefined) {
+    if (chunk.type === 'usage' && chunk.usage !== undefined && streamed.stepKnown) {
       this.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
     }
     if (statsOnly) return
@@ -3549,6 +3567,10 @@ export class SshTui {
       // Live chunk frames carry no turn/step: remember the attempt's step here
       // or every chunk is attributed to step 0 and the stats never match.
       this.liveStreamOwner = owner
+      return
+    }
+    if ((payload.frame as { type?: unknown } | undefined)?.type === 'end') {
+      this.liveStreamOwner = undefined
       return
     }
     const attemptId = streamFrameAttemptId(payload.frame)
@@ -3589,6 +3611,17 @@ export class SshTui {
   }
 
   readonly handleSessionEvent = (session: { id: SessionId }, event: SessionEvent): void => {
+    if (this.replayQueue !== undefined) {
+      // The replay yields between chunks, so live events can arrive mid-load.
+      // Folding them now would interleave newer events under older history;
+      // park them and drain in arrival order once the walk is done.
+      this.replayQueue.push({ session, event })
+      return
+    }
+    this.applySessionEvent(session, event)
+  }
+
+  private applySessionEvent(session: { id: SessionId }, event: SessionEvent): void {
     if (session.id !== this.agent.id) {
       if (this.subagentSessions.has(session.id)) this.handleSubagentSessionEvent(session.id, event)
       return
@@ -3652,12 +3685,14 @@ export class SshTui {
         const open = this.openStepStats
         if (open !== undefined && open.turn === event.data.turn && open.step === event.data.step) {
           this.stats.llmMs += Math.max(0, event.time - open.startTime)
-          // 0.1.5 logs no durable chunks: the settlement's packed stream is the
-          // only record of when the first token arrived (0.1.2 logs deliver it
-          // through the replayed `assistant/chunk` events instead).
-          const firstTokenTime = open.firstTokenTime
-            ?? streamFirstTokenTime((event.data as { stream?: unknown }).stream)
-          if (firstTokenTime !== null && firstTokenTime !== undefined) {
+          // The settlement's own packed stream is authoritative: a retried
+          // step keeps the failed attempt's first token in the live latch, and
+          // spanning both attempts reported a rate ~20x off. 0.1.2 has no
+          // `stream` and still relies on the replayed `assistant/chunk` events
+          // (or the live latch) instead.
+          const firstTokenTime = streamFirstTokenTime((event.data as { stream?: unknown }).stream)
+            ?? open.firstTokenTime
+          if (firstTokenTime !== null && firstTokenTime !== undefined && Number.isFinite(firstTokenTime)) {
             this.stats.ttftMs += Math.max(0, firstTokenTime - open.startTime)
             this.stats.ttftSteps += 1
             const outputTokens = event.data.usage?.outputTokens
@@ -7682,7 +7717,9 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     stopWaiting()
     controller = new SshTui(ctx, agent, config)
     controller.start()
-    controller.replayHistory()
+    // Not awaited: the first frames paint while the (chunked) replay fills the
+    // transcript, and relay RTT/resize frames keep flowing during the load.
+    void controller.replayHistory()
   }
 
   const fail = (failedSessionId: SessionId, error: unknown): void => {

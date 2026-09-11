@@ -164,6 +164,10 @@ export function formatDuration(ms: number): string {
 }
 
 export function formatTokensPerSecond(tokensPerSecond: number): string {
+  // A slow step (a few tokens over tens of seconds) still decoded something;
+  // rounding that to "0 tok/s" reads as a stalled model.
+  if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return '0 tok/s'
+  if (tokensPerSecond < 0.5) return '<1 tok/s'
   return `${Math.round(tokensPerSecond)} tok/s`
 }
 export function providerShortCode(provider: string): string {
@@ -318,11 +322,6 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
   const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
   if (model !== '') parts.push(model)
-  // The subagent route is what every child inherits, so it stays on the line
-  // even when it repeats the parent model (it used to be unconditional before
-  // 0.3.6, which is why hiding it read as a regression).
-  const sub = subagentRouteLabel(input.subModel, input.subProvider, input.subEffort)
-  if (sub !== '') parts.push(sub)
   if (input.balanceText !== undefined && input.balanceText !== '') {
     parts.push(input.balanceText)
   }
@@ -330,6 +329,12 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
     parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
   }
   if (input.contextChip !== undefined && input.contextChip !== '') parts.push(input.contextChip)
+  // The subagent route is what every child inherits, so it is always on the
+  // line again (hiding it when it repeated the parent model read as a
+  // regression) — but it sits after the quota/context chips, which are live
+  // operational signals and should be the last thing a narrow row drops.
+  const sub = subagentRouteLabel(input.subModel, input.subProvider, input.subEffort)
+  if (sub !== '') parts.push(sub)
   if (input.search !== undefined) parts.push(t('footer.search', { index: input.search.index + 1, total: input.search.total }))
   if (input.foldedInput) parts.push(t('footer.inputFolded'))
   else if (input.multiLineInput) parts.push(t('footer.multiLine'))

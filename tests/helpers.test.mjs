@@ -56,6 +56,7 @@ import {
   footerActivity,
   footerIdentityParts,
   footerStatsGroups,
+  formatTokensPerSecond,
   fitFooterStatsLine,
   fitFooterStatusLine,
   dropFooterQuotaPlanName,
@@ -79,6 +80,8 @@ import {
   providerShortCode,
   paintIntervalForRtt,
   parseCursorPositionReply,
+  findCursorPositionReply,
+  probeTerminalRttMs,
   resolvePaintIntervalMs,
   isHangupErrno,
   waitUntilIdleOrTimeout,
@@ -1018,7 +1021,16 @@ test('footer status keeps one activity and drops identity from the right', () =>
     foldedInput: false, multiLineInput: false, queued: 1,
     cwdLabel: '目录:srv',
   })
-  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', 'sub:grok-4.5', `SuperGrok ${formatQuotaBar(82)} 82%`, `${formatContextPressureRing(80)} 400K/500K 80%`, '排队 1'])
+  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', `SuperGrok ${formatQuotaBar(82)} 82%`, `${formatContextPressureRing(80)} 400K/500K 80%`, 'sub:grok-4.5', '排队 1'])
+  // A row too narrow for everything drops the subagent route before the live
+  // quota/context chips: fit exactly up to the context chip and neither
+  // operational signal may disappear.
+  const contextPart = `${formatContextPressureRing(80)} 400K/500K 80%`
+  const uptoContext = identity.slice(0, identity.indexOf(contextPart) + 1)
+  const narrow = fitFooterStatusLine('空闲', identity, displayWidth(`空闲  ${uptoContext.join(' · ')}`))
+  assert.equal(narrow.includes('sub:'), false, narrow)
+  assert.equal(narrow.includes('82%'), true, narrow)
+  assert.equal(narrow.includes('400K/500K'), true, narrow)
   const withBalance = footerIdentityParts({
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
@@ -1409,7 +1421,35 @@ test('writeBootSplash paints banner and status on the first frame', () => {
   assert.match(out, /\x1b\[H/)
 })
 
-test('replayHistory skips assistant chunks and still paints the assembled reply', () => {
+// A synchronous walk of a long log froze the TUI on the pre-replay frame: the
+// relay's RTT frame could not be applied, so the footer sat on `SSH ○○○○` for
+// the whole history load. The replay yields, so frames land while it runs.
+test('replayHistory yields to the event loop while it loads history', async () => {
+  const order = []
+  const total = 500
+  const session = {
+    id: 'main-session',
+    seq: total,
+    eventAt: (seq) => {
+      if (seq === 300) order.push('replay-300')
+      return { type: 'user/message', data: { content: [{ type: 'text', text: `m${seq}` }], source: { kind: 'user' } } }
+    },
+  }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session, cancel() {} }
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  setImmediate(() => { order.push('rtt-frame') })
+  await tui.replayHistory()
+  assert.equal(order.includes('rtt-frame'), true)
+  assert.ok(
+    order.indexOf('rtt-frame') < order.indexOf('replay-300'),
+    `relay frames must land during the replay, got order ${order.join(',')}`,
+  )
+  assert.equal(tui.rows.filter(row => row.kind === 'user').length, total)
+  assert.equal(tui.replaying, false)
+})
+
+test('replayHistory skips assistant chunks and still paints the assembled reply', async () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const events = [
     { type: 'user/message', data: { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } },
@@ -1441,7 +1481,7 @@ test('replayHistory skips assistant chunks and still paints the assembled reply'
     cancel() {},
   }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.replayHistory()
+  await tui.replayHistory()
   const kinds = tui.rows.map(row => row.kind)
   assert.equal(kinds.includes('user'), true)
   assert.equal(kinds.includes('assistant'), true)
@@ -3348,4 +3388,176 @@ test('enlarging window beyond standard sizes does not corrupt frame layout', () 
     // Divider line should be present
     assert.ok(frame.some(line => line.includes('────')))
   }
+})
+
+// A retried step opens a second attempt in the SAME turn/step. The live latch
+// keeps the failed attempt's first token, which stretched the decode window
+// across the retry (a ~20x wrong rate); the settlement's own packed stream is
+// authoritative.
+test('a retried step reports the settled attempt, not the failed one', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const session = agent.session
+  tui.handleSessionEvent(session, { type: 'step/start', time: 1_000, data: { turn: 1, step: 1 } })
+  // Attempt a1 streams a reasoning token, then the provider fails and the host
+  // retries the same step.
+  tui.handleAssistantStream({ agent, frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } })
+  tui.handleAssistantStream({
+    agent,
+    frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 1_050, chunk: { type: 'reasoning-delta', index: 0, text: 'partial' } },
+  })
+  tui.handleAssistantStream({ agent, frame: { type: 'end', attemptId: 'a1', revision: 2 } })
+  tui.handleAssistantStream({ agent, frame: { type: 'start', attemptId: 'a2', revision: 3, turn: 1, step: 1 } })
+  tui.handleAssistantStream({
+    agent,
+    frame: { type: 'chunk', attemptId: 'a2', revision: 3, index: 0, time: 1_800, chunk: { type: 'text-delta', index: 0, text: 'ok' } },
+  })
+  tui.handleSessionEvent(session, {
+    type: 'assistant/message',
+    time: 1_900,
+    data: {
+      turn: 1,
+      step: 1,
+      message: { content: [{ type: 'text', text: 'ok' }] },
+      usage: { inputTokens: 10, outputTokens: 50 },
+      stream: [{ type: 'chunk', time: 1_800, chunk: { type: 'text-delta', index: 0, text: 'ok' } }],
+    },
+  })
+  // a2's window only: 50 tokens over 100 ms, not the 850 ms that spans a1.
+  assert.equal(tui.stats.decodeTokens, 50)
+  assert.equal(tui.stats.decodeMs, 100)
+  assert.match(tui.statsText(), /500 tok\/s/, tui.statsText())
+})
+
+// A durable chunk that carries no turn/step must not file usage under a bogus
+// 0:0 key: step/end never clears that key, so the totals would stay inflated
+// for the rest of the session.
+test('replayed usage without turn/step cannot inflate the totals', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.replaying = true
+  tui.handleSessionEvent(agent.session, {
+    type: 'assistant/chunk',
+    time: 1_000,
+    data: { chunk: { type: 'usage', usage: { inputTokens: 4_000, outputTokens: 900 } } },
+  })
+  tui.replaying = false
+  assert.deepEqual(tui.stats.usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+})
+
+// `streamChunkOf` reports whether turn/step are real; the callers rely on it to
+// keep usage out of the bogus 0:0 bucket.
+test('streamChunkOf marks an unowned chunk as step-unknown', () => {
+  const frame = { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 10, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } }
+  assert.equal(streamChunkOf(frame)?.stepKnown, false)
+  assert.equal(streamChunkOf(frame, { turn: 2, step: 3 })?.stepKnown, true)
+  assert.equal(streamChunkOf(frame, { turn: 2, step: 3 })?.turn, 2)
+  const durable = { type: 'assistant/chunk', time: 10, data: { turn: 2, step: 3, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } } }
+  assert.equal(streamChunkOf(durable)?.stepKnown, true)
+})
+
+// `formatTokensPerSecond` must not round a slow step down to a stalled "0".
+test('a slow decode reports <1 tok/s instead of 0', () => {
+  assert.equal(formatTokensPerSecond(0.2), '<1 tok/s')
+  assert.equal(formatTokensPerSecond(0), '0 tok/s')
+  assert.equal(formatTokensPerSecond(Number.NaN), '0 tok/s')
+  assert.equal(formatTokensPerSecond(42.4), '42 tok/s')
+})
+
+// The mirror of the host's `assistantStreamFirstTokenTime` is only trustworthy
+// while it agrees with the host on the records the host itself produces.
+test('streamFirstTokenTime agrees with the host implementation', async () => {
+  let host
+  try {
+    host = await import('@deepseek-ai/dsh-llm')
+  } catch {
+    return
+  }
+  const reference = host.assistantStreamFirstTokenTime
+  if (typeof reference !== 'function') return
+  let seed = 0x2f6e2b1
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff
+    return seed / 0x7fffffff
+  }
+  const pick = (list) => list[Math.floor(random() * list.length)]
+  const chunk = () => pick([
+    { type: 'block-start', index: 0, blockType: pick(['text', 'reasoning', 'tool-call']) },
+    { type: 'text-delta', index: 0, text: pick(['', 'a', 'hello']) },
+    { type: 'reasoning-delta', index: 0, text: pick(['', 'think']) },
+    { type: 'tool-call-delta', index: 0, id: 'c1', ...(random() < 0.4 ? { name: 'read' } : {}), argumentsDelta: pick(['', '{"a"', ':1}']) },
+    { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } },
+  ])
+  for (let round = 0; round < 400; round += 1) {
+    const records = []
+    const time0 = 1_000 + Math.floor(random() * 1_000)
+    for (let index = 0; index < 5; index += 1) {
+      if (random() < 0.5) {
+        records.push({ type: 'chunk', time: time0 + Math.floor(random() * 500), chunk: chunk() })
+        continue
+      }
+      const kind = pick(['text-chunks', 'reasoning-chunks', 'tool-call-chunks'])
+      const fragments = Array.from({ length: 1 + Math.floor(random() * 3) }, () => pick(['', 'x', 'yy']))
+      records.push({
+        type: kind,
+        time0: time0 + Math.floor(random() * 200),
+        index: 0,
+        dt: Array.from({ length: fragments.length }, () => 1 + Math.floor(random() * 40)),
+        ...(kind === 'tool-call-chunks'
+          ? { id: 'c1', args: fragments, ...(random() < 0.3 ? { name: 'read' } : {}) }
+          : { texts: fragments }),
+      })
+    }
+    assert.equal(
+      streamFirstTokenTime(records),
+      reference(records),
+      `round ${round}: ${JSON.stringify(records)}`,
+    )
+  }
+})
+
+// A CPR that shares its read with focus events, mouse reports or a keystroke
+// used to fail the anchored match, time the probe out, and leave the footer on
+// `SSH ○○○○` for the whole session.
+test('the RTT probe finds a cursor reply inside noisy TTY input', async () => {
+  const { EventEmitter } = await import('node:events')
+  const stdin = new EventEmitter()
+  stdin.isTTY = true
+  const stdout = { isTTY: true, write: () => true }
+  const pending = probeTerminalRttMs(stdin, stdout, 1_000)
+  stdin.emit('data', Buffer.from('\x1b[I\x1b[O'))          // focus in/out
+  stdin.emit('data', Buffer.from('\x1b[<0;10;5M'))          // mouse report
+  stdin.emit('data', Buffer.from('k\x1b[12;34R'))           // keystroke + reply
+  const rtt = await pending
+  assert.equal(typeof rtt, 'number')
+  assert.equal(findCursorPositionReply('\x1b[I\x1b[12;34R')?.column, 34)
+  assert.equal(findCursorPositionReply('\x1b[12;34R')?.row, 12)
+  assert.equal(parseCursorPositionReply('\x1b[12;34R')?.row, 12)
+  assert.equal(parseCursorPositionReply('\x1b[I\x1b[12;34R'), undefined)
+})
+
+test('the RTT probe still gives up on a silent TTY', async () => {
+  const { EventEmitter } = await import('node:events')
+  const stdin = new EventEmitter()
+  stdin.isTTY = true
+  const stdout = { isTTY: true, write: () => true }
+  const rtt = await probeTerminalRttMs(stdin, stdout, 60)
+  assert.equal(rtt, undefined)
+  const notTty = new EventEmitter()
+  notTty.isTTY = false
+  assert.equal(await probeTerminalRttMs(notTty, stdout, 60), undefined)
 })

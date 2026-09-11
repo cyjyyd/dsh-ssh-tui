@@ -19,7 +19,7 @@ import yaml from 'js-yaml'
 
 /** Read the user's `agent-default-model` straight from `$DSH_HOME/settings.yaml`. */
 function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
-  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const home = resolveDshHome()
   try {
     const parsed = yaml.load(readFileSync(join(home, 'settings.yaml'), 'utf8')) as unknown
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
@@ -46,6 +46,7 @@ import {
 } from './session-lock.js'
 import {
   isTuiHostProcess,
+  resolveDshHome,
   runDisplayRelay,
   spawnDetachedHost,
   waitForDisplaySock,

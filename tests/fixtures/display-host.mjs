@@ -14,6 +14,10 @@ const host = new DisplayHost(sessionSockPath(sessionId), {
 })
 await host.listen()
 
+// Watchdog: the parent normally kills this fixture, but a cancelled test run
+// must not leave a detached Host holding the channel name.
+setTimeout(() => { process.exit(0) }, 60_000)
+
 const stop = () => {
   void host.close().then(() => process.exit(0))
 }

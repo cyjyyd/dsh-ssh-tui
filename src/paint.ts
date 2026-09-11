@@ -253,6 +253,24 @@ export function parseCursorPositionReply(text: string): { row: number; column: n
 }
 
 /**
+ * Find a cursor reply inside a noisy buffer.
+ *
+ * The anchored parse above only works when the CPR is the whole chunk. Real
+ * terminals interleave it with focus events, mouse reports, bracketed-paste
+ * marks or keystrokes that raced the probe, and an anchored match then fails
+ * until the probe times out — which is how the footer's link chip ends up
+ * stuck on four hollow circles (`SSH ○○○○`) for a whole session.
+ */
+export function findCursorPositionReply(text: string): { row: number; column: number } | undefined {
+  const match = /\x1b\[(\d+);(\d+)R/u.exec(text)
+  if (match === null) return undefined
+  return { row: Number(match[1]), column: Number(match[2]) }
+}
+
+/** Keep only the tail of a probe buffer so a chatty TTY cannot grow it forever. */
+const PROBE_BUFFER_TAIL = 64
+
+/**
  * Round-trip to the attached terminal via CSI 6n. Returns undefined when the
  * reply never arrives (dumb pipe, blocked DSR). Does not interpret the
  * coordinates — only the elapsed milliseconds matter.
@@ -276,11 +294,12 @@ export async function probeTerminalRttMs(
     }
     const onData = (chunk: Buffer): void => {
       buffer += chunk.toString('utf8')
-      if (parseCursorPositionReply(buffer) !== undefined) {
+      if (findCursorPositionReply(buffer) !== undefined) {
         finish(Math.max(0, Date.now() - started))
         return
       }
-      if (buffer.length > 32 && !buffer.includes('\x1b[')) finish(undefined)
+      if (buffer.length > PROBE_BUFFER_TAIL) buffer = buffer.slice(-PROBE_BUFFER_TAIL)
+      if (buffer.length > 32 && !buffer.includes('\x1b')) finish(undefined)
     }
     const timer = setTimeout(() => finish(undefined), timeoutMs)
     stdin.on('data', onData)

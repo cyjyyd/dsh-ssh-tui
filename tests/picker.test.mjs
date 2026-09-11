@@ -177,38 +177,67 @@ test('pickerStateUnchanged treats loading as part of the frame', () => {
 // session, so a picker that leaves its `resize` listener behind repaints its
 // dead screen over the running TUI on every terminal resize (the "resize
 // flashes the history-session picker" bug).
-test('a settled picker drops its resize listener and cannot repaint', async () => {
-  const stdout = process.stdout
-  const stdin = process.stdin
+//
+// The streams are injected: stubbing the process globals would swallow the
+// node:test reporter's own output (it writes through process.stdout).
+function pickerStreams() {
   const writes = []
-  const saved = {
-    write: stdout.write,
-    stderrWrite: process.stderr.write,
-    setRawMode: stdin.setRawMode,
-    resume: stdin.resume,
-    pause: stdin.pause,
+  const listeners = new Map()
+  const stdout = {
+    columns: 100,
+    rows: 30,
+    write: (chunk) => { writes.push(String(chunk)); return true },
+    on: (event, handler) => { listeners.set(event, [...(listeners.get(event) ?? []), handler]) },
+    removeListener: (event, handler) => {
+      listeners.set(event, (listeners.get(event) ?? []).filter(entry => entry !== handler))
+    },
+    emit: (event) => { for (const handler of listeners.get(event) ?? []) handler() },
+    listenerCount: (event) => (listeners.get(event) ?? []).length,
   }
-  stdout.write = (chunk) => { writes.push(String(chunk)); return true }
-  process.stderr.write = () => true
-  stdin.setRawMode = () => {}
-  stdin.resume = () => {}
-  stdin.pause = () => {}
-  const listenersBefore = stdout.listenerCount('resize')
-  try {
-    // No persistence service: the picker settles immediately with `new`.
-    const result = await showSessionPicker({ get: () => undefined }, false)
-    assert.deepEqual(result, { kind: 'new' })
-    assert.equal(stdout.listenerCount('resize'), listenersBefore, 'resize listener must be removed')
-    const painted = writes.length
-    assert.ok(painted > 0, 'the picker should have painted at least once')
-    stdout.emit('resize')
-    stdout.emit('resize')
-    assert.equal(writes.length, painted, 'a settled picker must never paint again')
-  } finally {
-    stdout.write = saved.write
-    process.stderr.write = saved.stderrWrite
-    stdin.setRawMode = saved.setRawMode
-    stdin.resume = saved.resume
-    stdin.pause = saved.pause
+  const stdin = {
+    isTTY: true,
+    setRawMode: () => {},
+    resume: () => {},
+    pause: () => {},
+    on: () => {},
+    removeListener: () => {},
   }
+  return { stdout, stdin, writes, listeners }
+}
+
+test('a settled picker drops its resize listener and cannot repaint', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  // No persistence service: the picker settles immediately with `new`.
+  const result = await showSessionPicker({ get: () => undefined }, false, undefined, io)
+  assert.deepEqual(result, { kind: 'new' })
+  assert.equal(io.stdout.listenerCount('resize'), 0, 'resize listener must be removed')
+  assert.ok(io.writes.length > 0, 'the picker should have painted at least once')
+  const painted = io.writes.length
+  io.stdout.emit('resize')
+  io.stdout.emit('resize')
+  assert.equal(io.writes.length, painted, 'a settled picker must never paint again')
+})
+
+// The listener must also be present *and working* while the picker is live, and
+// gone on every exit path — the cancel path included.
+test('a live picker repaints on resize and stops after cancel', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  // A loader that never settles keeps the picker live without touching the
+  // real persistence service or the lock directory.
+  const pending = new Promise(() => {})
+  const ctx = { get: (key) => key === 'loader' ? { await: () => pending } : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, io)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(io.stdout.listenerCount('resize'), 1, 'a live picker listens for resize')
+  const before = io.writes.length
+  io.stdout.emit('resize')
+  assert.ok(io.writes.length > before, 'a live picker repaints on resize')
+  abort.abort()
+  await settled
+  assert.equal(io.stdout.listenerCount('resize'), 0, 'cancel removes the resize listener')
+  const after = io.writes.length
+  io.stdout.emit('resize')
+  io.stdout.emit('resize')
+  assert.equal(io.writes.length, after, 'a cancelled picker must never paint again')
 })

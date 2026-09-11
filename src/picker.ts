@@ -372,15 +372,23 @@ export function feedPicker(
  * @param signal - optional abort signal (fiber dispose) to cancel the picker.
  * @returns the selection, or null when cancelled.
  */
-export async function showSessionPicker(ctx: Context, color: boolean, signal?: AbortSignal): Promise<SessionPickerResult> {
+export async function showSessionPicker(
+  ctx: Context,
+  color: boolean,
+  signal?: AbortSignal,
+  /** Injectable for tests; production always drives the real TTY streams. */
+  streams: { stdin?: NodeJS.ReadStream; stdout?: NodeJS.WriteStream } = {},
+): Promise<SessionPickerResult> {
   if (signal?.aborted) return null
 
+  const stdin = streams.stdin ?? process.stdin
+  const stdout = streams.stdout ?? process.stdout
   const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
   const decoder = new StringDecoder('utf8')
-  process.stdin.setRawMode(true)
-  process.stdin.resume()
-  process.stdout.write(`${useAltScreen ? '\x1b[?1049h' : ''}\x1b[?25l`)
+  stdin.setRawMode(true)
+  stdin.resume()
+  stdout.write(`${useAltScreen ? '\x1b[?1049h' : ''}\x1b[?25l`)
 
   const style = (text: string, code: string): string => color ? `\x1b[${code}m${text}\x1b[0m` : text
   let state: SessionPickerState = { sessions: [], query: '', cursor: 0, filterActive: false, loading: true }
@@ -460,8 +468,8 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
 
   const render = (force = false): void => {
     if (done) return
-    const width = Math.max(20, process.stdout.columns || 80)
-    const height = Math.max(12, process.stdout.rows || 24)
+    const width = Math.max(20, stdout.columns || 80)
+    const height = Math.max(12, stdout.rows || 24)
     const paintRows = paintLines(width, height)
     const sizeChanged = force || width !== previousWidth || height !== previousHeight
     const frame = composePaintOutput({
@@ -476,7 +484,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       cursorColumn: 1,
       hideCursor: true,
     })
-    if (frame !== '') process.stdout.write(frame)
+    if (frame !== '') stdout.write(frame)
     previousRows = paintRows
     previousWidth = width
     previousHeight = height
@@ -492,22 +500,26 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       done = true
       if (escapeTimer !== undefined) clearTimeout(escapeTimer)
       signal?.removeEventListener('abort', onAbort)
-      process.stdin.removeListener('data', onData)
-      process.stdout.removeListener('resize', onResize)
+      stdin.removeListener('data', onData)
+      stdout.removeListener('resize', onResize)
       try {
-        process.stdin.setRawMode(false)
+        stdin.setRawMode(false)
       } catch {
         // The stream may already be closed during shutdown; restoring is best-effort.
       }
-      process.stdin.pause()
-      process.stdout.write(`\x1b[0m\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}\n`)
+      stdin.pause()
+      try {
+        stdout.write(`\x1b[0m\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}\n`)
+      } catch {
+        // The TTY may already be gone (EPIPE/ERR_STREAM_DESTROYED).
+      }
       resolve(result)
     }
     const onAbort = (): void => {
       cleanup(null)
     }
     const applyChunk = (text: string): void => {
-      const windowSize = pickerCapacity(Math.max(12, process.stdout.rows || 24))
+      const windowSize = pickerCapacity(Math.max(12, stdout.rows || 24))
       const previous = state
       const step = feedPicker(state, text, windowSize)
       if (step.kind === 'done') {
@@ -560,9 +572,17 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       return
     }
     signal?.addEventListener('abort', onAbort, { once: true })
-    process.stdin.on('data', onData)
-    process.stdout.on('resize', onResize)
-    render(true)
+    try {
+      stdin.on('data', onData)
+      stdout.on('resize', onResize)
+      render(true)
+    } catch (error) {
+      // A dying TTY can throw mid-setup (EPIPE). Without this the listeners
+      // would outlive the picker and repaint it over the TUI, which is the
+      // exact leak this handler pairing exists to prevent.
+      cleanup(null)
+      throw error
+    }
     const applyListing = (listing: { sessions: ResumableSession[]; pending: boolean }): void => {
       if (done) return
       const focusedId = filterResumableSessions(state.sessions, state.query)[state.cursor]?.id
@@ -593,7 +613,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       if (done) return
       if (listing.complete.length === 0 && state.query === '') {
         cleanup({ kind: 'new' })
-        process.stdout.write(t('picker.none'))
+        stdout.write(t('picker.none'))
       }
     }
     void startListing().catch(() => {

@@ -154,8 +154,14 @@ test('sessionErrPath is a real file on both platforms', () => {
     `${sessionSockPath('s', '/tmp/dsh-home', 'linux')}.err`,
   )
   const win = sessionErrPath('s', 'C:\\home\\.dsh', 'win32')
-  assert.equal(win, join('C:\\home\\.dsh', 'tui-socks', 's.err'))
+  assert.equal(win.startsWith(join('C:\\home\\.dsh', 'tui-socks')), true, win)
+  assert.match(win, /s-[0-9a-f]{8}\.err$/u)
   assert.equal(isPipePath(win), false, 'host stderr cannot be captured into a pipe name')
+  // A long id stays inside the Windows path budget, and the digest keeps the
+  // file from becoming a reserved device name.
+  const long = sessionErrPath('x'.repeat(400), 'C:\\home\\.dsh', 'win32')
+  assert.ok(long.length < 120, `${long.length}: ${long}`)
+  assert.match(sessionErrPath('CON', 'C:\\home\\.dsh', 'win32'), /CON-[0-9a-f]{8}\.err$/u)
 })
 
 test('waitForDisplaySock fails fast when the host exits first', async () => {

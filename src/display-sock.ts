@@ -22,6 +22,7 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { access, mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { findCursorPositionReply } from './paint.js'
 import { dirname, join, resolve } from 'node:path'
 
 export const FRAME_STDIN = 1
@@ -33,10 +34,6 @@ export const FRAME_RTT = 6
 
 const MAX_FRAME = 1024 * 1024
 const DSR_PROBE_TIMEOUT_MS = 800
-
-function parseCursorPositionReply(text: string): boolean {
-  return /^\x1b\[\d+;\d+R$/u.test(text)
-}
 
 /** CSI 6n round-trip on this TTY. Must run before stdin is forwarded to the Host. */
 async function probeLocalRttMs(
@@ -58,11 +55,14 @@ async function probeLocalRttMs(
     }
     const onData = (chunk: Buffer): void => {
       buffer += chunk.toString('utf8')
-      if (parseCursorPositionReply(buffer)) {
+      if (findCursorPositionReply(buffer) !== undefined) {
         finish(Math.max(0, Date.now() - started))
         return
       }
-      if (buffer.length > 32 && !buffer.includes('\x1b[')) finish(undefined)
+      // The reply can share a chunk with focus/mouse/keystroke noise, so scan
+      // the buffer instead of requiring it to be the entire read.
+      if (buffer.length > 64) buffer = buffer.slice(-64)
+      if (buffer.length > 32 && !buffer.includes('\x1b')) finish(undefined)
     }
     const timer = setTimeout(() => finish(undefined), timeoutMs)
     stdin.on('data', onData)
@@ -115,8 +115,20 @@ export function isPipePath(path: string): boolean {
   return normalized.startsWith('\\\\.\\pipe\\') || normalized.startsWith('\\\\?\\pipe\\')
 }
 
+/**
+ * `DSH_HOME` the way dsh itself resolves it: a blank value counts as unset, and
+ * the result is absolute. Both matter here because the launcher and the
+ * detached Host compute channel names independently and the Host chdirs into
+ * the session's working directory first — a relative or empty home would give
+ * them two different sockets (or pipe names) and time the launch out.
+ */
+export function resolveDshHome(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+  const configured = env.DSH_HOME?.trim()
+  return resolve(configured !== undefined && configured !== '' ? configured : join(home, '.dsh'))
+}
+
 function defaultDshHome(): string {
-  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return resolveDshHome()
 }
 
 /** Directory holding per-session display runtime state (error logs). */
@@ -131,6 +143,22 @@ export function safeSessionId(sessionId: string): string {
 }
 
 /**
+ * Readable, collision-free short label for one session: a sanitized head plus a
+ * digest of the raw id. The digest is always appended because sanitizing alone
+ * collapses distinct ids (`abc`, `abc.`, `_abc`, `abc..`) into one name, and on
+ * Windows the pipe namespace is machine-wide — the collapsed forms would share
+ * a channel and a relay could attach to the wrong session.
+ */
+function sessionLabel(sessionId: string, maxLength: number): string {
+  const digest = createHash('sha1').update(sessionId).digest('hex').slice(0, 8)
+  const head = safeSessionId(sessionId)
+    .replaceAll(/\.{2,}/gu, '_')
+    .replace(/^[._-]+|[._-]+$/gu, '')
+    .slice(0, Math.max(0, maxLength - digest.length - 1))
+  return `${head === '' ? 'session' : head}-${digest}`
+}
+
+/**
  * Named pipes live in one flat, machine-wide namespace, so the DSH_HOME is
  * folded into the name (two homes must not fight over one session id) and the
  * label is clamped with a digest so long ids stay unique instead of truncated
@@ -139,13 +167,7 @@ export function safeSessionId(sessionId: string): string {
 function windowsPipePath(sessionId: string, dshHome: string): string {
   const homeTag = createHash('sha1').update(resolve(dshHome).toLowerCase()).digest('hex').slice(0, 8)
   const room = WINDOWS_PIPE_MAX - WINDOWS_PIPE_PREFIX.length - 'dsh-tui-'.length - homeTag.length - 1
-  let label = sessionId.replaceAll(/\.{2,}/gu, '_').replace(/^[._-]+|[._-]+$/gu, '')
-  if (label === '' || label === '.') label = 'session'
-  if (label.length > room) {
-    const digest = createHash('sha1').update(label).digest('hex').slice(0, 8)
-    label = `${label.slice(0, room - digest.length - 1)}-${digest}`
-  }
-  return `${WINDOWS_PIPE_PREFIX}dsh-tui-${homeTag}-${label}`
+  return `${WINDOWS_PIPE_PREFIX}dsh-tui-${homeTag}-${sessionLabel(sessionId, room)}`
 }
 
 /**
@@ -158,15 +180,16 @@ export function sessionSockPath(
   dshHome: string = defaultDshHome(),
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const safe = safeSessionId(sessionId)
-  if (platform === 'win32') return windowsPipePath(safe, dshHome)
-  return join(sessionSockDir(dshHome), `${safe}.sock`)
+  if (platform === 'win32') return windowsPipePath(sessionId, dshHome)
+  return join(sessionSockDir(dshHome), `${safeSessionId(sessionId)}.sock`)
 }
 
 /**
  * Host stderr log for one session. POSIX keeps the historical `<sock>.err`
  * next to the socket; a Windows pipe name is not a file path, so the log lives
- * in the `tui-socks` state directory instead.
+ * in the `tui-socks` state directory instead — under the same digested label,
+ * which also keeps long ids inside the Windows path limit and keeps reserved
+ * device names (`CON`, `NUL`, …) from becoming the file stem.
  */
 export function sessionErrPath(
   sessionId: string,
@@ -174,7 +197,7 @@ export function sessionErrPath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   const sock = sessionSockPath(sessionId, dshHome, platform)
-  if (isPipePath(sock)) return join(sessionSockDir(dshHome), `${safeSessionId(sessionId)}.err`)
+  if (isPipePath(sock)) return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 64)}.err`)
   return `${sock}.err`
 }
 
@@ -574,7 +597,11 @@ export function spawnDetachedHost(sessionId: string): SpawnedHost {
     errFd = undefined
   }
   const child = spawn(process.execPath, hostArgvForSession(sessionId), {
-    env: { ...process.env, [TUI_HOST_ENV]: '1' },
+    // DSH_HOME is pinned to the resolved absolute path: the Host chdirs into
+    // the session's working directory before it listens, so an unset, blank or
+    // relative home would otherwise resolve differently there and the two
+    // processes would compute different channel names.
+    env: { ...process.env, [TUI_HOST_ENV]: '1', DSH_HOME: resolveDshHome() },
     detached: true,
     // A detached Host has no console on Windows; hide the console window that
     // would otherwise flash on screen when it is created.
@@ -633,6 +660,13 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       settled = true
       cleanup()
       resolve({ reason })
+    }
+    /** Reject like `finish`, but restore the terminal first. */
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
     }
     const cleanup = (): void => {
       process.stdin.removeListener('data', onStdin)
@@ -694,7 +728,7 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       finish('signal')
     }
     socket.once('error', error => {
-      if (!settled) reject(error)
+      fail(error)
     })
     socket.on('connect', () => {
       void (async () => {
@@ -725,7 +759,7 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
           process.on('SIGHUP', onLocalHangup)
           process.on('SIGTERM', onLocalHangup)
         } catch (error) {
-          reject(error)
+          fail(error)
         }
       })()
     })
@@ -734,7 +768,7 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       try {
         frames = reader.push(chunk)
       } catch (error) {
-        reject(error)
+        fail(error)
         return
       }
       for (const frame of frames) {

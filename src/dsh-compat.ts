@@ -107,6 +107,53 @@ export function forEachSessionEvent(
   for (const event of sessionEvents(host)) visit(event)
 }
 
+/** Events folded between event-loop turns while a long log is replayed. */
+export const REPLAY_YIELD_EVERY = 200
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise(resolve => { setImmediate(resolve) })
+}
+
+/**
+ * {@link forEachSessionEvent} for the resume replay. A synchronous walk of a
+ * large log blocks the loop for its whole duration, which freezes the TUI on
+ * the pre-replay frame: the relay's RTT frame and the render timer cannot run,
+ * so the footer keeps painting `SSH ○○○○` and the transcript never fills in
+ * until the walk ends. Yielding every few hundred events keeps both flowing.
+ *
+ * @param halt - stop early when the TUI was disposed mid-replay.
+ */
+export async function forEachSessionEventAsync(
+  session: object,
+  visit: (event: SessionEvent) => void,
+  yieldEvery = REPLAY_YIELD_EVERY,
+  halt: () => boolean = () => false,
+): Promise<void> {
+  const host = session as {
+    seq?: number
+    eventAt?: (seq: number) => SessionEvent | undefined
+    events?: readonly SessionEvent[]
+    snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly SessionEvent[]
+  }
+  if (typeof host.eventAt === 'function' && typeof host.seq === 'number') {
+    const length = host.seq
+    for (let seq = 0; seq < length; seq += 1) {
+      if (halt()) return
+      const event = host.eventAt(seq)
+      if (event !== undefined) visit(event)
+      if ((seq + 1) % yieldEvery === 0) await yieldToEventLoop()
+    }
+    return
+  }
+  let seen = 0
+  for (const event of sessionEvents(host)) {
+    if (halt()) return
+    visit(event)
+    seen += 1
+    if (seen % yieldEvery === 0) await yieldToEventLoop()
+  }
+}
+
 /** Header fields the picker and resume path actually read. */
 export interface SessionHeaderLike {
   id: string
@@ -294,11 +341,13 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
       name?: unknown
     }
     if (record.type === 'chunk') {
-      if (typeof record.time === 'number' && isTokenDeltaChunk(record.chunk)) return record.time
+      if (typeof record.time === 'number' && Number.isFinite(record.time) && isTokenDeltaChunk(record.chunk)) {
+        return record.time
+      }
       continue
     }
     if (record.type !== 'text-chunks' && record.type !== 'reasoning-chunks' && record.type !== 'tool-call-chunks') continue
-    if (typeof record.time0 !== 'number') continue
+    if (typeof record.time0 !== 'number' || !Number.isFinite(record.time0)) continue
     // A name-bearing tool-call run starts at its first member.
     if (record.type === 'tool-call-chunks' && record.name !== undefined) return record.time0
     const fragments = record.type === 'tool-call-chunks' ? record.args : record.texts
@@ -306,8 +355,10 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
     const dt = Array.isArray(record.dt) ? record.dt : []
     let time = record.time0
     for (let index = 0; index < fragments.length; index++) {
-      if (index > 0) time += typeof dt[index - 1] === 'number' ? dt[index - 1] as number : 0
-      if (fragments[index] !== '') return time
+      if (index > 0 && typeof dt[index - 1] === 'number' && Number.isFinite(dt[index - 1])) {
+        time += dt[index - 1] as number
+      }
+      if (fragments[index] !== '') return Number.isFinite(time) ? time : undefined
     }
   }
   return undefined
@@ -324,6 +375,12 @@ export function streamChunkOf(eventOrFrame: unknown, fallback?: { turn: number; 
   turn: number
   step: number
   time: number
+  /**
+   * False when neither the source nor a fallback carried a real turn/step.
+   * Usage folded under such a chunk would be filed under a bogus key (0:0)
+   * that `step/end` never clears, inflating the session totals forever.
+   */
+  stepKnown: boolean
 } | undefined {
   if (eventOrFrame === null || typeof eventOrFrame !== 'object') return undefined
   const record = eventOrFrame as {
@@ -339,11 +396,13 @@ export function streamChunkOf(eventOrFrame: unknown, fallback?: { turn: number; 
   const turn = record.data?.turn ?? record.turn
   const step = record.data?.step ?? record.step
   const time = record.time
+  const explicit = typeof turn === 'number' && typeof step === 'number'
   return {
     chunk,
-    turn: typeof turn === 'number' ? turn : fallback?.turn ?? 0,
-    step: typeof step === 'number' ? step : fallback?.step ?? 0,
-    time: typeof time === 'number' ? time : 0,
+    turn: explicit ? turn as number : fallback?.turn ?? 0,
+    step: explicit ? step as number : fallback?.step ?? 0,
+    time: typeof time === 'number' && Number.isFinite(time) ? time : 0,
+    stepKnown: explicit || fallback !== undefined,
   }
 }
 

@@ -67,7 +67,8 @@ dsh --profile tui
 - 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
 - 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
   第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧（含 `目录:srv`；点击打印完整工作目录）；
-  身份里始终带 `sub:<子代理模型>`：`/submodel` 显式指定了提供商就带前缀、`/subeffort` 指定了就带括号后缀（如 `sub:xai/grok-4.5(xhigh)`）；
+  身份里始终带 `sub:<子代理模型>`：`/submodel` 选模型、`/subeffort` 选档位（带括号后缀）；提供商前缀只在
+  设置里固定过子代理提供商时出现（如 `sub:xai/grok-4.5(xhigh)`，`settings.yaml` 的 `ssh-tui-subagent.provider`）；
 - 恢复旧会话会切到该会话记录的工作目录；新建会话用启动时的当前目录；
 - 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
@@ -92,9 +93,10 @@ dsh --profile tui
 - DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（已验证 `0.1.2-rc.1` 与 `0.1.5-rc.1`。`0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` 走同一套 handle API + `agent/assistant-stream` 兼容层。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
-- Windows：Host 与显示端之间的本地通道使用命名管道 `\\.\pipe\dsh-ssh-tui-<home>-<会话>`
-  （Windows 只能监听命名管道，不能监听 `.sock` 文件；管道名按 `DSH_HOME` 与会话 id 生成，
-  结束进程即自动回收）。Host 的 stderr 记录在 `%USERPROFILE%\.dsh\tui-socks\<会话>.err`，
+- Windows：Host 与显示端之间的本地通道使用命名管道
+  `\\.\pipe\dsh-tui-<DSH_HOME 摘要 8 位>-<会话名>-<会话摘要 8 位>`（Windows 只能监听命名管道，
+  不能监听 `.sock` 文件；名字里同时带 DSH_HOME 与会话 id 的摘要，所以不同 home、不同会话都不会撞名，
+  结束进程即自动回收）。Host 的 stderr 记录在 `%USERPROFILE%\.dsh\tui-socks\<会话名>-<摘要>.err`，
   会话锁仍在 `%USERPROFILE%\.dsh\tui-locks\`。
 
 ## 部署指南
@@ -406,9 +408,9 @@ npm run build
 - **Windows 报 `dsh-ssh-tui: host display socket did not appear`**：0.5.7 及更早版本把显示通道
   当成 Unix socket（`$DSH_HOME/tui-socks/*.sock`），而 Windows 只能监听 `\\.\pipe\` 命名管道，
   Host 进程绑定失败；旧版本还用 `fs.access()` 判断通道是否就绪，而 Windows 的文件 API 看不到
-  命名管道，所以即使 Host 已经起来也只会等到 15 秒超时。现已修复：Windows 自动改用命名管道
+  命名管道，所以即使 Host 已经起来也只会等到 15 秒超时。0.5.8 起 Windows 自动改用命名管道
   （按 `DSH_HOME` + 会话 id 生成唯一管道名），就绪判断改为真实连接探测，并在 Host 提前退出时
-  立即报错并附带其 stderr。升级到含该修复的版本：`dsh plugin --profile tui add dsh-ssh-tui@latest`。
+  立即报错并附带其 stderr。升级到 0.5.8 即可：`dsh plugin --profile tui add dsh-ssh-tui@latest`。
 - **pnpm 拒绝 git 依赖的构建脚本**：git 安装的插件需要把 pnpm 打印的 key 加入
   profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`。
 - **标题栏或铃声不生效**：确认终端支持 OSC 0 与 BEL；铃声可用
@@ -417,19 +419,20 @@ npm run build
 - **跳板机 / 多层代理 SSH 发画**：每一帧只发脏行，并且拼成一次 `stdout.write`。本机 80 ms；SSH 启动时用 CSI 6n 测往返，按 RTT 选 80/160/250/400 ms。`DSH_TUI_PAINT_MS` 始终优先（40–1000）。统计行最左是 `SSH ●●●○ 90ms`（一格红、两格黄、三格及以上绿）。探测不写进转录。
 - **SSH 断了**：空闲则 flush 后退出（不保活）。忙碌（思考/回复/工具/子代理）则默认取消当前轮次、flush 日志，Host 留下。`/disconnect continue` 则不取消，后台跑完。回来 `--resume` 会接入那个进程（见上文）。不要再开第二份 Host。
 - **提示会话已在 pid 运行 / 可接入**：那份 Host 还活着。用 `--resume` 接入；只有 pid 已死、显示通道也连不上时才删 `$DSH_HOME/tui-locks/` 再从日志恢复。
-  Windows 没有 `/proc`，现已改用 `Get-Process` 核对 pid 的镜像名与创建时间：pid 被系统回收给
+  Windows 没有 `/proc`，0.5.8 起会用 `Get-Process` 核对 pid 的镜像名与创建时间：pid 被系统回收给
   别的进程时会被判定为陈旧并自动接管，不再出现「明明没有 Host 却报 zombie」。
 - **状态栏没有速度指标（`tok/s`）**：第一行统计里的速度只在该轮有模型 token 时出现；只有首字耗时可算
-  时显示 `首字 1.2s`。现已修复两处：实时流的 chunk 帧不带 turn/step，旧版会把它们归到第 0 步
+  时显示 `首字 1.2s`。0.5.8 修复了两处：实时流的 chunk 帧不带 turn/step，旧版会把它们归到第 0 步
   导致速度永远是 0（顺带把 token 数重复计了一次）；`--resume` 重放日志时也不再用实时增量，而是从
   日志里的 `assistant/chunk`（0.1.2）或消息内嵌的打包流（0.1.5）重建首字时间，恢复会话同样显示速度。
 - **状态栏看不到子代理模型**：0.3.6 起 `sub:<模型>` 只在子代理模型与父模型不同时才拼进身份行，
-  而默认子代理模型就是 `deepseek-v4-flash`，父模型也是它时整段消失；现已恢复为始终显示，
-  并找回 `/submodel` 的提供商前缀与 `/subeffort` 的括号后缀。查看或修改：`/status`、`/submodel`、`/subeffort`。
+  而默认子代理模型就是 `deepseek-v4-flash`，父模型也是它时整段消失；0.5.8 起恢复为始终显示，
+  并找回提供商前缀与 `/subeffort` 的括号后缀（提供商要先在 `settings.yaml` 的 `ssh-tui-subagent.provider`
+  里固定过）。查看或修改：`/status`、`/submodel`、`/subeffort`。
 - **缩放终端窗口时整屏闪烁、还闪出历史会话选择器**：启动选择器注册 `resize` 监听时用的是匿名函数，
   退出时却按 `render` 这个引用去注销，于是监听器一直留在中继进程里（中继要活整个会话）。之后每次
   缩放终端，那张已经结束的选择器都会被整屏重画一遍（`\x1b[H\x1b[J` + 整屏内容），紧接着再被 TUI
-  的整屏重画覆盖——看起来就是闪两下并闪出选择器内容。现已改用命名监听器注销，并给已结束的
+  的整屏重画覆盖——看起来就是闪两下并闪出选择器内容。0.5.8 起改用命名监听器注销，并给已结束的
   选择器加 `done` 守卫：结算后再触发 `resize` 一个字节都不会写（有回归测试）。
 
 ## License

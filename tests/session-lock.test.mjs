@@ -14,6 +14,7 @@ import {
   formatLockHeldMessage,
   hostImageName,
   inspectLiveHost,
+  parseWindowsProcessIdentity,
   listAttachableHosts,
   parseSessionLock,
   processIsAlive,
@@ -284,19 +285,31 @@ test('win32: a recycled pid does not keep a dead lock alive',
 test('windowsProcessMatchesLock rules out pid reuse', () => {
   const lock = { pid: 4242, sessionId: 'main-session', startedAt: '2026-09-11T10:00:00.000Z' }
   const at = (iso) => Date.parse(iso)
-  // A different image is someone else's process.
-  assert.equal(windowsProcessMatchesLock(lock, { name: 'svchost', startedAt: at('2026-09-11T09:00:00.000Z') }, 'node'), false)
-  // Created after the lock was written → the pid was recycled.
+  // Created after the lock was written → the pid was recycled, whatever it is.
   assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T10:00:06.000Z') }, 'node'), false)
-  // Created before the lock → this is the Host that wrote it.
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'svchost', startedAt: at('2026-09-11T10:00:06.000Z') }, 'node'), false)
+  // Created before the lock → the Host that wrote it. The timeline wins over
+  // the image name so a Host launched by another runtime (bun vs node) or a
+  // renamed executable is not declared stale.
   assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T09:59:59.000Z') }, 'node'), true)
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'bun', startedAt: at('2026-09-11T09:59:59.000Z') }, 'node'), true)
   // Inside the clock slack → still the Host.
   assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T10:00:02.000Z') }, 'node'), true)
   // Unverifiable answers keep the legacy best-effort behavior.
   assert.equal(windowsProcessMatchesLock(lock, undefined, 'node'), true)
   assert.equal(windowsProcessMatchesLock(lock, { name: 'node' }, 'node'), true)
-  // An empty startedAt cannot date the process; the image name still decides.
+  // Without a usable timeline the image name is the only signal left.
   assert.equal(windowsProcessMatchesLock({ ...lock, startedAt: '' }, { name: 'chrome' }, 'node'), false)
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'chrome' }, 'node'), false)
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'node' }, 'node'), true)
+  // The probe's stdout is parsed defensively: banners and junk must not be
+  // mistaken for a foreign image name (that would steal a live lock).
+  assert.deepEqual(parseWindowsProcessIdentity('node\t2026-09-11T10:00:00.000Z'), { name: 'node', startedAt: at('2026-09-11T10:00:00.000Z') })
+  assert.deepEqual(parseWindowsProcessIdentity('WARNING: something\nnode\t'), { name: 'node' })
+  assert.equal(parseWindowsProcessIdentity('gone'), undefined)
+  assert.equal(parseWindowsProcessIdentity(''), undefined)
+  assert.equal(parseWindowsProcessIdentity('node'), undefined)
+  assert.equal(parseWindowsProcessIdentity('has space\t2026-09-11T10:00:00.000Z'), undefined)
   assert.equal(hostImageName('C:\\Program Files\\nodejs\\node.exe'), 'node')
   assert.equal(hostImageName('/root/bin/dsh'), 'dsh')
 })
