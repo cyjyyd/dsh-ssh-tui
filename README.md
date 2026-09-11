@@ -425,10 +425,14 @@ src/picker.ts       启动历史会话选择器（可见页 9 条，列表不截
 src/session-list.ts 历史会话扫描与标签（共享给 /resume）
 src/session-lock.ts 同会话防双开
 src/update-check.ts npm 最新版提示（不自动升级）
-src/tui.ts          终端渲染、交互、统计、标题/铃声（SshTui；叶子函数再导出）
+src/tui.ts          终端渲染、交互、标题/铃声（SshTui；叶子函数再导出）
 src/paint.ts        增量绘制、SSH 节拍、选择器窗口
 src/term-text.ts    宽度/折行/markdown
 src/footer.ts       底栏、占用环、/status
+src/stats.ts        会话统计（回合/步数、LLM 与工具耗时、TTFT、tok/s、用量去重）
+src/rows.ts         转录行存储与可见窗口（保留上限、工具卡合并、计划行、滚动切片）
+src/dialogs.ts      对话框状态机（问题列表/确认/查看覆盖层的按键规则）
+src/commands.ts     斜杠命令目录与补全建议
 src/plan.ts         计划条、待办、/find
 src/tool-present.ts 工具卡、diff
 src/auto-approval.ts 规则初审

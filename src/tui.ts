@@ -60,6 +60,20 @@ import { formatFooterCwd, formatSessionTime, listResumableSessions } from './ses
 import { collectDiag, formatDiag } from './diag.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import {
+  QUESTION_OPTION_KEYS,
+  confirmAnswer,
+  inspectClosesOn,
+  moveQuestionCursor,
+  optionsLength,
+  questionSubmit,
+  selectQuestionOptionByKey,
+  type ConfirmDialog,
+  type Dialog,
+  type DialogAnswer,
+  type QuestionDialog,
+} from './dialogs.js'
+import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
+import {
   archiveStalePlans,
   boundTranscriptRows,
   findLivePlanRow,
@@ -562,37 +576,6 @@ export interface TuiConfig {
 }
 
 /** Whole-log session figures for the stats line below the input box. */
-interface ConfirmDialog {
-  kind: 'confirm'
-  prompt: string
-  hint: string
-  resolve(value: 'y' | 'n' | 'cancel'): void
-}
-
-interface QuestionDialog {
-  kind: 'questions'
-  question: AskUserQuestionItem
-  index: number
-  total: number
-  selected: Set<number>
-  cursor: number
-  resolve(selection: { selected: string[]; custom?: string }): void
-  reject(error: unknown): void
-}
-
-interface OnboardingDialog {
-  kind: 'onboarding'
-}
-
-interface InspectDialog {
-  kind: 'inspect'
-  title: string
-  lines: DiffDisplayLine[]
-  offset: number
-}
-
-type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog
-
 type OnboardingProviderType =
   | 'official'
   | 'opencode-go'
@@ -684,11 +667,6 @@ interface OnboardingState {
 }
 
 /** Result of one dialog interaction. */
-interface DialogAnswer {
-  selected: string[]
-  custom?: string
-}
-
 /** Lifecycle handle for a mounted interactive terminal channel. */
 export interface TuiController {
   dispose(): Promise<void>
@@ -727,7 +705,6 @@ const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
 const DEFAULT_IDLE_EXIT_MS = 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
 const IS_WINDOWS = process.platform === 'win32'
@@ -876,48 +853,6 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
     ],
   },
 ]
-
-const LOCAL_COMMANDS = [
-  { name: 'help', key: 'cmd.help' },
-  { name: 'model', key: 'cmd.model' },
-  { name: 'effort', key: 'cmd.effort' },
-  { name: 'provider', key: 'cmd.provider' },
-  { name: 'submodel', key: 'cmd.submodel' },
-  { name: 'subeffort', key: 'cmd.subeffort' },
-  { name: 'mode', key: 'cmd.mode' },
-  { name: 'quit', key: 'cmd.quit' },
-  { name: 'exit', key: 'cmd.quit', aliasOf: 'quit' },
-  { name: 'clear', key: 'cmd.clear' },
-  { name: 'status', key: 'cmd.status' },
-  { name: 'diag', key: 'cmd.diag' },
-  { name: 'disconnect', key: 'cmd.disconnect' },
-  { name: 'approval', key: 'cmd.approval' },
-  { name: 'view', key: 'cmd.view' },
-  { name: 'usage', key: 'cmd.usage' },
-  { name: 'balance', key: 'cmd.usage', aliasOf: 'usage' },
-  { name: 'quota', key: 'cmd.usage', aliasOf: 'usage' },
-  { name: 'subagents', key: 'cmd.subagents' },
-  { name: 'resume', key: 'cmd.resume' },
-  { name: 'setup', key: 'cmd.setup' },
-  { name: 'find', key: 'cmd.find' },
-  { name: 'copy', key: 'cmd.copy' },
-  { name: 'language', key: 'cmd.language' },
-  { name: 'lang', key: 'cmd.language', aliasOf: 'language' },
-  { name: 'dialog-test', key: 'cmd.dialog-test' },
-] as const
-
-function commandDescription(name: string, aliasOf?: string): string {
-  if (aliasOf !== undefined) return t('cmd.aliasOf', { name: aliasOf })
-  return t(`cmd.${name}`)
-}
-
-function localizedCommands(): { name: string; description: string; aliasOf?: string }[] {
-  return LOCAL_COMMANDS.map(command => ({
-    name: command.name,
-    description: commandDescription(command.name, 'aliasOf' in command ? command.aliasOf : undefined),
-    ...('aliasOf' in command ? { aliasOf: command.aliasOf } : {}),
-  }))
-}
 
 export type WorkspaceView = 'detailed' | 'compact'
 
@@ -3410,19 +3345,12 @@ export class SshTui {
     this.markDirty()
   }
 
-  private buildSuggestions(): { name: string; description: string; local: boolean }[] {
-    const input = this.input
-    if (!input.startsWith('/')) return []
-    const prefix = input.slice(1).toLowerCase()
-    const local = localizedCommands()
-      .filter(command => command.name !== 'dialog-test' && (prefix !== '' || command.aliasOf === undefined))
-      .map(command => ({ name: command.name, description: command.description, local: true }))
-    const seen = new Set(local.map(command => command.name))
-    const dsh = (this.ctx.get('commands')?.list(this.agent) ?? [])
-      .filter(command => !seen.has(command.name))
+  private buildSuggestions(): CommandSuggestion[] {
+    // The host's commands arrive last (a local name wins the duplicate) and are
+    // localized here, where the i18n catalog is already loaded.
+    const foreign: CommandSuggestion[] = (this.ctx.get('commands')?.list(this.agent) ?? [])
       .map(command => {
-        const descKey = `cmd.${command.name}`
-        const desc = t(descKey, undefined, command.description)
+        const desc = t(`cmd.${command.name}`, undefined, command.description)
         return {
           name: command.name,
           description: commandAcceptsAttachments(command.input)
@@ -3431,16 +3359,7 @@ export class SshTui {
           local: false,
         }
       })
-    const all = [...local, ...dsh]
-    const filtered = prefix === ''
-      ? all
-      : all.filter(command => command.name.startsWith(prefix) || command.name.includes(prefix))
-    if (prefix === '') return filtered
-    return filtered.sort((a, b) => {
-      const aStart = a.name.startsWith(prefix) ? 0 : 1
-      const bStart = b.name.startsWith(prefix) ? 0 : 1
-      return aStart - bStart
-    })
+    return commandSuggestions(this.input, foreign)
   }
 
   private suggestionsVisible(): boolean {
@@ -6531,13 +6450,7 @@ export class SshTui {
   private moveQuestionCursor(delta: number): boolean {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'questions') return false
-    const count = dialog.question.options?.length ?? 0
-    if (count === 0) return false
-    dialog.cursor = Math.max(0, Math.min(count - 1, dialog.cursor + delta))
-    if (dialog.question.multiSelect !== true) {
-      dialog.selected.clear()
-      dialog.selected.add(dialog.cursor)
-    }
+    if (!moveQuestionCursor(dialog, delta)) return false
     this.markDirty()
     return true
   }
@@ -6546,9 +6459,7 @@ export class SshTui {
     const dialog = this.dialog
     if (dialog === undefined) return
     if (dialog.kind === 'inspect') {
-      if (text === '\x1b' || text === '\x03' || text === 'q' || text === 'Q' || text === '\r' || text === '\n') {
-        this.closeInspect()
-      }
+      if (inspectClosesOn(text)) this.closeInspect()
       return
     }
     if (dialog.kind === 'onboarding') {
@@ -6556,39 +6467,26 @@ export class SshTui {
       return
     }
     if (dialog.kind === 'confirm') {
-      if (text === 'y' || text === 'Y') this.closeConfirm('y')
-      else if (text === 'n' || text === 'N') this.closeConfirm('n')
-      else if (text === '\x03' || text === '\x1b') this.closeConfirm('cancel')
+      const answer = confirmAnswer(text)
+      if (answer !== undefined) this.closeConfirm(answer)
       return
     }
-    const key = text.toLowerCase()
-    const index = QUESTION_OPTION_KEYS.indexOf(key)
-    if (index >= 0 && index < (dialog.question.options?.length ?? 0)) {
-      dialog.cursor = index
-      if (dialog.question.multiSelect === true) {
-        if (dialog.selected.has(index)) dialog.selected.delete(index)
-        else dialog.selected.add(index)
-      } else {
-        dialog.selected.clear()
-        dialog.selected.add(index)
-      }
-      this.markDirty()
-    }
+    if (selectQuestionOptionByKey(dialog, text)) this.markDirty()
     if (text === '\r' || text === '\n') {
-      const options = dialog.question.options ?? []
-      const selected = [...dialog.selected].map(index => options[index]?.label).filter((label): label is string => label !== undefined)
-      if (selected.length === 0 && options.length > 0 && dialog.question.multiSelect !== true) {
+      const submit = questionSubmit(dialog, this.input)
+      if (submit.kind === 'reject') {
         // no selection: treat as cancel unless there are no options
         dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
         return
       }
-      if (options.length === 0) {
-        dialog.resolve({ selected: [], custom: this.input })
-        this.input = ''
-        this.cursor = 0
+      if (submit.kind === 'resolve') {
+        dialog.resolve({ selected: submit.selected, ...(submit.custom === undefined ? {} : { custom: submit.custom }) })
+        if (submit.custom !== undefined) {
+          this.input = ''
+          this.cursor = 0
+        }
         return
       }
-      dialog.resolve({ selected })
       return
     }
     if (text === '\x1b' || text === '\x03') {
@@ -7702,11 +7600,6 @@ export class SshTui {
   }
 }
 
-function optionsLength(dialog: Dialog): number {
-  return dialog.kind === 'questions' ? dialog.question.options?.length ?? 0 : 0
-}
-
-/** Escape a string for safe interpolation into a RegExp source. */
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }

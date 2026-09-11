@@ -528,6 +528,10 @@ process. Do not start a second Host.
 src/picker.ts             launch history picker (9-row page, uncapped list, filter)
 src/tui.ts                SshTui (re-exports leaf helpers)
 src/paint.ts              incremental paint, SSH cadence, picker window
+src/stats.ts              session stats (turns/steps, LLM and tool time, TTFT, tok/s)
+src/rows.ts               transcript row storage and the visible window
+src/dialogs.ts            dialog key rules (questions, confirm, inspect overlay)
+src/commands.ts           slash-command catalog and suggestions
 src/auto-approval.ts      rule-table first pass
 src/approval-reviewer.ts  AI review prompt and JSON parse
 src/i18n/                 zh/en UI catalogs
