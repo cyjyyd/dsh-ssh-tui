@@ -3539,7 +3539,9 @@ test('the RTT probe finds a cursor reply inside noisy TTY input', async () => {
   const stdin = new EventEmitter()
   stdin.isTTY = true
   const stdout = { isTTY: true, write: () => true }
-  const pending = probeTerminalRttMs(stdin, stdout, 1_000)
+  // `false`: a local TTY may honestly answer in under a millisecond, and the
+  // SSH floor that rejects an already-in-flight reply is tested separately.
+  const pending = probeTerminalRttMs(stdin, stdout, 1_000, false)
   stdin.emit('data', Buffer.from('\x1b[I\x1b[O'))          // focus in/out
   stdin.emit('data', Buffer.from('\x1b[<0;10;5M'))          // mouse report
   stdin.emit('data', Buffer.from('k\x1b[12;34R'))           // keystroke + reply
@@ -3610,6 +3612,30 @@ test('a reconnect during the hangup window keeps the Host alive', async () => {
   assert.deepEqual(exits, [129])
 })
 
+// Defence in depth: the relay strips cursor replies, but a launcher from an
+// older release may still forward one. It must not become prompt text.
+test('a leaked cursor reply never reaches the prompt', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session', options: {}, status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } }, cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleData(Buffer.from('\x1b[17;1Rab'))
+  assert.equal(tui.input, 'ab', 'the reply is dropped, the typing around it is kept')
+  // A reply split over reads: the first half is held, then swallowed by the
+  // escape state machine instead of typing `[17;1R` digits.
+  tui.handleData(Buffer.from('\x1b[17;1'))
+  assert.equal(tui.input, 'ab', 'a half-arrived reply cannot type either')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.equal(tui.input, 'ab')
+  // And real escape sequences still work.
+  tui.handleData(Buffer.from('cd '))
+  tui.handleData(Buffer.from('\x1b[D'))
+  tui.handleData(Buffer.from('\x1b[D'))
+  assert.equal(tui.cursor, 3, 'arrow keys still move the cursor')
+})
+
 // A reattach whose probe misses its window reports "unknown"; blanking a
 // measurement we already have is what turned the footer chip into four hollow
 // circles after every auto-reconnect.
@@ -3650,6 +3676,9 @@ test('quietTerminalInput turns echo off and drops queued bytes', async () => {
   stdin.destroy()
 })
 
+// The probe samples until two answers agree, so a window the terminal missed is
+// simply retried — the measurement used to be a single request, and one miss
+// left the footer on four hollow circles.
 test('probeTerminalRttMs retries a missed window', async () => {
   const { EventEmitter } = await import('node:events')
   const stdin = new EventEmitter()
@@ -3659,12 +3688,15 @@ test('probeTerminalRttMs retries a missed window', async () => {
     isTTY: true,
     write: () => {
       probes += 1
-      // Answer only the second request: the first window is missed on purpose.
-      if (probes === 2) setTimeout(() => stdin.emit('data', Buffer.from('\x1b[3;4R')), 5)
+      // The first window is missed on purpose; the terminal answers from the
+      // second request on, which is what an occasional lost read looks like.
+      if (probes >= 2) setTimeout(() => stdin.emit('data', Buffer.from('\x1b[3;4R')), 5)
       return true
     },
   }
-  const rtt = await probeTerminalRttMs(stdin, stdout, 40)
-  assert.equal(probes, 2, 'the probe asked twice')
+  const rtt = await probeTerminalRttMs(stdin, stdout, 40, false)
+  // Not an exact count: the sampler stops once two answers agree, so a loaded
+  // machine can need one more round.
+  assert.ok(probes >= 2, `the missed window must be retried, asked ${probes} times`)
   assert.equal(typeof rtt, 'number', 'the retry produced a measurement')
 })

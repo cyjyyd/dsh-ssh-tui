@@ -7,12 +7,12 @@
 
 import { t } from './i18n/index.js'
 import { padAnsiToWidth, truncateToWidth } from './term-text.js'
+import { detectSshSession, RTT_SAMPLE_TIMEOUT_MS, TerminalInputPump } from './terminal-input.js'
 
 const RENDER_INTERVAL_MS = 160
 const LOCAL_PAINT_INTERVAL_MS = 80
 const MIN_PAINT_INTERVAL_MS = 40
 const MAX_PAINT_INTERVAL_MS = 1000
-export const DSR_PROBE_TIMEOUT_MS = 800
 /** Give a running turn this long to settle after cancel before we flush anyway. */
 export const HANGUP_CANCEL_TIMEOUT_MS = 10_000
 
@@ -41,9 +41,7 @@ export function resolvePaintIntervalMs(
 }
 
 /** True when this process is attached to an SSH session (jump host / proxy). */
-export function detectSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)
-}
+export { detectSshSession } from './terminal-input.js'
 
 /** Node errno on a write/close that means the TTY is gone (SSH drop, HUP). */
 export function isHangupErrno(error: unknown): boolean {
@@ -267,76 +265,36 @@ export function findCursorPositionReply(text: string): { row: number; column: nu
   return { row: Number(match[1]), column: Number(match[2]) }
 }
 
-/** Keep only the tail of a probe buffer so a chatty TTY cannot grow it forever. */
-const PROBE_BUFFER_TAIL = 64
-
 /**
  * Round-trip to the attached terminal via CSI 6n. Returns undefined when the
  * reply never arrives (dumb pipe, blocked DSR). Does not interpret the
  * coordinates — only the elapsed milliseconds matter.
+ *
+ * Sampling and plausibility live in `terminal-input.ts`: a single request used
+ * to accept a previous probe's answer (~2 ms) and to report a repaint queue as
+ * the link (~1900 ms on a 50 ms SSH line).
  */
-/** Ask up to `attempts` times, pausing between misses. */
-export async function probeRttWithRetry(
-  run: () => Promise<number | undefined>,
-  attempts = 2,
-  delayMs = 250,
-): Promise<number | undefined> {
-  const tries = Math.max(1, attempts)
-  for (let attempt = 0; attempt < tries; attempt += 1) {
-    const measured = await run()
-    if (measured !== undefined) return measured
-    if (attempt + 1 < tries) await new Promise(resolve => setTimeout(resolve, delayMs))
-  }
-  return undefined
-}
-
 export async function probeTerminalRttMs(
   stdin: NodeJS.ReadStream = process.stdin,
   stdout: NodeJS.WriteStream = process.stdout,
-  timeoutMs = DSR_PROBE_TIMEOUT_MS,
+  timeoutMs = RTT_SAMPLE_TIMEOUT_MS,
+  ssh = detectSshSession(),
 ): Promise<number | undefined> {
   if (!stdin.isTTY || !stdout.isTTY) return undefined
-  // Retried for the same reason the relay does it: a screen that is being
-  // repainted can make the terminal miss the first window, and one miss used to
-  // blank the footer's link chip to four hollow circles.
-  return await probeRttWithRetry(() => probeTerminalRttOnce(stdin, stdout, timeoutMs))
-}
-
-function probeTerminalRttOnce(
-  stdin: NodeJS.ReadStream,
-  stdout: NodeJS.WriteStream,
-  timeoutMs: number,
-): Promise<number | undefined> {
-  return new Promise(resolve => {
-    let buffer = ''
-    let settled = false
-    const started = Date.now()
-    const finish = (value: number | undefined): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      stdin.removeListener('data', onData)
-      resolve(value)
-    }
-    const onData = (chunk: Buffer): void => {
-      buffer += chunk.toString('utf8')
-      if (findCursorPositionReply(buffer) !== undefined) {
-        finish(Math.max(0, Date.now() - started))
-        return
-      }
-      if (buffer.length > PROBE_BUFFER_TAIL) buffer = buffer.slice(-PROBE_BUFFER_TAIL)
-      if (buffer.length > 32 && !buffer.includes('\x1b')) finish(undefined)
-    }
-    const timer = setTimeout(() => finish(undefined), timeoutMs)
-    stdin.on('data', onData)
-    try {
-      stdout.write('\x1b[6n')
-    } catch {
-      finish(undefined)
-    }
+  const pump = new TerminalInputPump({
+    stdin,
+    stdout,
+    onInput: () => {},
+    ssh,
+    sampleTimeoutMs: timeoutMs,
   })
+  pump.start()
+  try {
+    return await pump.measure()
+  } finally {
+    pump.stop()
+  }
 }
-
 
 /** Sliding window of `windowSize` items that keeps `cursor` visible. */
 export function pickerWindowStart(cursor: number, total: number, windowSize = PICKER_WINDOW): number {

@@ -84,6 +84,12 @@ export interface ResumableSession {
   unreadable?: boolean
   /** Live Host that a new SSH can attach to. */
   attach?: { pid: number; sock: string; state?: string }
+  /**
+   * `label` is a placeholder (the raw session id) because the log has not been
+   * inspected yet. The picker holds these back instead of painting an id that
+   * turns into a title two seconds later.
+   */
+  labelPending?: boolean
 }
 
 /** `MM-DD HH:mm` local-time label for session lists. */
@@ -114,6 +120,37 @@ function sessionHasReply(events: readonly unknown[]): boolean {
     if (candidate.type === 'turn/end') return candidate.data?.reason?.kind === 'error'
     return false
   })
+}
+
+/**
+ * The persisted generated title, else the user's first input (trimmed to one
+ * short line). `undefined` means the log carries no name of its own and the
+ * caller's fallback (usually the id) has to stand in.
+ */
+function labelFromEvents(events: readonly unknown[]): string | undefined {
+  const titleEvent = [...events].reverse()
+    .find(event => (event as { type?: string }).type === 'session/title')
+  const title = titleEvent === undefined
+    ? undefined
+    : (titleEvent as unknown as { data?: { title?: string } }).data?.title
+  if (title !== undefined && title !== '') return title
+  const firstUserMessage = events.find(event => isUserMessageEvent(event)) as
+    | { data?: { content?: readonly unknown[] } }
+    | undefined
+  if (firstUserMessage === undefined) return undefined
+  const text = Array.from(
+    (firstUserMessage.data?.content ?? [])
+      .map((block) => {
+        const candidate = block as { type: string; text?: unknown }
+        return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
+      })
+      .join(' ')
+      .replace(/\s+/gu, ' ')
+      .trim(),
+  )
+    .slice(0, 80)
+    .join('')
+  return text === '' ? undefined : text
 }
 
 /**
@@ -259,6 +296,8 @@ export async function listResumableSessionsProgressive(
       cwd: meta.cwd ?? cached?.cwd ?? '',
       hasUserInput: cached?.hasUserInput ?? true,
       hasReply: cached?.hasReply ?? true,
+      // Nothing but the header has been read yet: the label is the id.
+      labelPending: true,
     }
   }
   const sketched = candidates.map(meta => toResumable(sketchFromHeader(meta)))
@@ -277,6 +316,9 @@ export async function listResumableSessionsProgressive(
       updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
       cwd: '',
       attach,
+      // A live Host whose header never made it into the candidate list has no
+      // inspectable label yet either.
+      labelPending: true,
     })
   }
   options.onUpdate?.({ sessions: sketched, pending: true })
@@ -284,28 +326,6 @@ export async function listResumableSessionsProgressive(
   const inspectCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession> => {
     try {
       const inspection = await inspectPersistenceSession(persistence, meta.id)
-      const firstUserMessage = inspection.events.find(event => isUserMessageEvent(event)) as
-        | { data?: { content?: readonly unknown[] } }
-        | undefined
-      const firstUserText = firstUserMessage === undefined
-        ? undefined
-        : Array.from(
-            (firstUserMessage.data?.content ?? [])
-              .map((block) => {
-                const candidate = block as { type: string; text?: unknown }
-                return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
-              })
-              .join(' ')
-              .replace(/\s+/gu, ' ')
-              .trim(),
-          )
-          .slice(0, 80)
-          .join('')
-      const titleEvent = [...inspection.events].reverse()
-        .find(event => (event as { type: string }).type === 'session/title')
-      const title = titleEvent === undefined
-        ? undefined
-        : (titleEvent as unknown as { data: { title: string } }).data.title
       const last = inspection.events.at(-1) as { time?: number } | undefined
       const updatedAt = last?.time ?? meta.createdAt
       return {
@@ -314,14 +334,10 @@ export async function listResumableSessionsProgressive(
         // same `session/title` value, so both surfaces name a session alike
         // and switching between them stays findable. First user input is the
         // fallback for sessions whose title has not been generated yet.
-        label: title !== undefined && title !== ''
-          ? title
-          : firstUserText !== undefined && firstUserText !== ''
-            ? firstUserText
-            : meta.id,
+        label: labelFromEvents(inspection.events) ?? meta.id,
         updatedAt,
         cwd: meta.cwd ?? '',
-        hasUserInput: firstUserMessage !== undefined,
+        hasUserInput: inspection.events.some(event => isUserMessageEvent(event)),
         hasReply: sessionHasReply(inspection.events),
       }
     } catch {
@@ -383,11 +399,15 @@ export async function listResumableSessionsProgressive(
       // boot: stop it, remove its artifacts, and keep it out of the picker.
       let blankLive = false
       let liveHasUserInput = true
+      let liveLabel: string | undefined
       try {
         const inspection = await inspectPersistenceSession(persistence, host.sessionId)
         const hasInput = inspection.events.some(event => isUserMessageEvent(event))
         blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
         liveHasUserInput = hasInput
+        // A Host that is running but absent from the header list still has a
+        // log; read its title rather than offering the user a raw uuid.
+        liveLabel = labelFromEvents(inspection.events)
       } catch {
         blankLive = true
         liveHasUserInput = false
@@ -401,7 +421,7 @@ export async function listResumableSessionsProgressive(
       }
       const injected: InspectedSession = {
         id: host.sessionId,
-        label: host.sessionId,
+        label: liveLabel ?? host.sessionId,
         updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
         cwd: '',
         hasUserInput: liveHasUserInput,
@@ -427,10 +447,35 @@ export async function listResumableSessionsProgressive(
   // Newest page first so the picker can paint before older logs are parsed.
   const priority = candidates.slice(0, Math.max(0, priorityCount))
   const rest = candidates.slice(priority.length)
-  const first = await Promise.all(priority.map(async meta => ({ meta, item: await resolveCandidate(meta) })))
-  for (const { item } of first) {
-    if (item !== undefined) inspected.push(item)
+  // Cache before painting. The index used to be written only at the very end,
+  // so a picker the user closed (or the `/resume` flow that ran while the Host
+  // booted) left the next listing without titles and painted raw ids for the
+  // newest sessions again.
+  const flushIndex = async (): Promise<void> => {
+    if (!indexDirty) return
+    await saveSessionIndex(indexPath, index)
+    indexDirty = false
   }
+  // Paint the first real title as soon as it exists instead of waiting for the
+  // whole newest page. With a cold index that is the difference between a
+  // loading line and a list the user can already pick from.
+  let firstPainted = false
+  const first = await Promise.all(priority.map(async meta => {
+    const item = await resolveCandidate(meta)
+    // Only the picker paints progressively; `/resume` awaits the full list.
+    if (!firstPainted && item !== undefined && rest.length > 0 && options.onUpdate !== undefined) {
+      firstPainted = true
+      inspected.push(item)
+      await flushIndex()
+      await emit(true)
+      return { item, painted: true }
+    }
+    return { item, painted: false }
+  }))
+  for (const { item, painted } of first) {
+    if (item !== undefined && !painted) inspected.push(item)
+  }
+  await flushIndex()
   await emit(rest.length > 0)
 
   for (let offset = 0; offset < rest.length; offset += INSPECT_BATCH_SIZE) {

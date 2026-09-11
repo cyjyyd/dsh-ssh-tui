@@ -15,14 +15,16 @@
  *   4 hello   — either side, payload ignored
  *   5 goodbye — host → relay, then close (user /exit)
  *   6 rtt     — relay → host (u32be milliseconds; 0xffffffff = unknown)
+ *   7 replaced — host → relay, then close (a newer Display took the session)
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import { createHash } from 'node:crypto'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { findCursorPositionReply, probeRttWithRetry } from './paint.js'
+import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
 
 export const FRAME_STDIN = 1
@@ -31,70 +33,25 @@ export const FRAME_RESIZE = 3
 export const FRAME_HELLO = 4
 export const FRAME_GOODBYE = 5
 export const FRAME_RTT = 6
+export const FRAME_REPLACED = 7
 
 const MAX_FRAME = 1024 * 1024
-const DSR_PROBE_TIMEOUT_MS = 800
-
-/** How many times the relay asks the terminal for its cursor position. */
-const RTT_PROBE_ATTEMPTS = 2
-/** Pause before asking again; the reattach repaint has usually settled by then. */
-const RTT_PROBE_RETRY_MS = 250
 
 /**
- * CSI 6n round-trip on this TTY. Must run before stdin is forwarded to the Host.
- * Retries once: a reattach paints the whole screen immediately, and a terminal
- * busy with that flood can miss the first 800 ms window — the Host would then be
- * told "unknown" and the footer chip sat on four hollow circles for the session.
+ * Grace period for a kicked relay to read FRAME_REPLACED before its socket is
+ * torn down. Without the frame the relay only saw `close`, read it as "the
+ * Host is going away", and re-attached — two SSH windows then kicked each
+ * other off the display forever, repainting the whole screen on every lap.
  */
-async function probeLocalRttMs(
-  stdin: NodeJS.ReadStream = process.stdin,
-  stdout: NodeJS.WriteStream = process.stdout,
-  timeoutMs = DSR_PROBE_TIMEOUT_MS,
-): Promise<number | undefined> {
-  if (!stdin.isTTY || !stdout.isTTY) return undefined
-  return await probeRttWithRetry(
-    () => probeLocalRttOnce(stdin, stdout, timeoutMs),
-    RTT_PROBE_ATTEMPTS,
-    RTT_PROBE_RETRY_MS,
-  )
-}
+const REPLACED_GRACE_MS = 250
 
-function probeLocalRttOnce(
-  stdin: NodeJS.ReadStream,
-  stdout: NodeJS.WriteStream,
-  timeoutMs: number,
-): Promise<number | undefined> {
-  return new Promise(resolve => {
-    let buffer = ''
-    let settled = false
-    const started = Date.now()
-    const finish = (value: number | undefined): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      stdin.removeListener('data', onData)
-      resolve(value)
-    }
-    const onData = (chunk: Buffer): void => {
-      buffer += chunk.toString('utf8')
-      if (findCursorPositionReply(buffer) !== undefined) {
-        finish(Math.max(0, Date.now() - started))
-        return
-      }
-      // The reply can share a chunk with focus/mouse/keystroke noise, so scan
-      // the buffer instead of requiring it to be the entire read.
-      if (buffer.length > 64) buffer = buffer.slice(-64)
-      if (buffer.length > 32 && !buffer.includes('\x1b')) finish(undefined)
-    }
-    const timer = setTimeout(() => finish(undefined), timeoutMs)
-    stdin.on('data', onData)
-    try {
-      stdout.write('\x1b[6n')
-    } catch {
-      finish(undefined)
-    }
-  })
-}
+/**
+ * How long a connection may stay silent before the Host treats it as a
+ * liveness probe and drops it. A relay measures the terminal round-trip
+ * *before* its HELLO (see `runDisplayRelay`), so this has to cover the whole
+ * probe — and it must stay well under the launcher's own attach timeout.
+ */
+const DISPLAY_HELLO_GRACE_MS = 3_000
 
 /**
  * Drop launcher SIGTERM/SIGINT/SIGHUP so closing SSH cannot dispose the tree
@@ -317,6 +274,8 @@ export class DisplayHost {
   constructor(
     readonly path: string,
     private readonly handlers: DisplayHostHandlers,
+    /** Test seam: how long a silent connection may wait for its HELLO. */
+    private readonly options: { helloGraceMs?: number } = {},
   ) {}
 
   async listen(): Promise<void> {
@@ -362,10 +321,39 @@ export class DisplayHost {
         const previous = this.socket
         this.socket = undefined
         this.attached = false
+        // Tell the old relay *why* it is being dropped before the socket goes
+        // away. It used to see a bare `close`, report `host-closed`, and retry
+        // the attach — so two SSH windows kicked each other off the display in
+        // a loop, each lap repainting the full screen and leaving the TTY in
+        // cooked mode long enough to echo the replies still in flight.
+        // Flush before reaping: if the relay is slow to read (a stalled event
+        // loop, a paused process) the frame would still be in this socket's
+        // buffer when the backstop below destroys it, and the kicked relay
+        // would see a bare close — the retry this frame exists to prevent.
+        const reap = setTimeout(() => {
+          try {
+            previous.destroy()
+          } catch {
+            // already gone
+          }
+        }, REPLACED_GRACE_MS)
+        reap.unref?.()
         try {
-          previous.destroy()
+          previous.end(encodeFrame(FRAME_REPLACED), () => {
+            clearTimeout(reap)
+            try {
+              previous.destroy()
+            } catch {
+              // already gone
+            }
+          })
         } catch {
-          // ignore
+          clearTimeout(reap)
+          try {
+            previous.destroy()
+          } catch {
+            // already gone
+          }
         }
         // Replacing a Display is not an SSH hangup. The previous socket's
         // `close` handler must not fire onDetach after we already claimed
@@ -418,7 +406,8 @@ export class DisplayHost {
       else dropProbe()
     })
     // A connect() with no HELLO is a liveness probe; do not steal the display.
-    setTimeout(dropProbe, 400)
+    const probeGrace = setTimeout(dropProbe, this.options.helloGraceMs ?? DISPLAY_HELLO_GRACE_MS)
+    probeGrace.unref?.()
   }
 
   sendStdout(bytes: Buffer | string): boolean {
@@ -603,6 +592,58 @@ export interface SpawnedHost {
 }
 
 /**
+ * Keep what the user types while no display exists yet.
+ *
+ * A fresh Host takes a moment to boot; the launcher used to leave stdin flowing
+ * with nobody listening, so every key pressed in that window was dropped. The
+ * capture strips cursor replies (it is the same stream the relay will probe)
+ * and hands the rest to the relay as its `seed`.
+ */
+export function captureTerminalInput(stdin: NodeJS.ReadStream = process.stdin): { stop(): string } {
+  const filter = new TerminalInputFilter()
+  const decoder = new StringDecoder('utf8')
+  let kept = ''
+  const onData = (chunk: Buffer): void => {
+    const text = filter.push(decoder.write(chunk)).forward
+    if (text === '') return
+    kept += text
+    if (kept.length > MAX_CAPTURED_INPUT) kept = kept.slice(-MAX_CAPTURED_INPUT)
+  }
+  try {
+    stdin.setRawMode?.(true)
+    stdin.resume()
+    stdin.on('data', onData)
+  } catch {
+    // A dying TTY cannot be captured; the seed stays empty.
+  }
+  return {
+    stop(): string {
+      try {
+        stdin.removeListener('data', onData)
+        // Pause rather than leave the stream flowing with no listener: bytes
+        // typed between here and the relay's own `resume()` would otherwise be
+        // discarded instead of waiting for it.
+        stdin.pause()
+      } catch {
+        // ignore
+      }
+      const tail = (() => {
+        try {
+          return decoder.end()
+        } catch {
+          return ''
+        }
+      })()
+      const text = filter.flush() + tail
+      return text === '' ? kept : kept + text
+    },
+  }
+}
+
+/** Longest typing burst carried across a Host boot. */
+const MAX_CAPTURED_INPUT = 8 * 1024
+
+/**
  * Keep the terminal quiet while the launcher retries or waits for a Host.
  *
  * Between attempts the TTY is back in cooked mode, so a DSR reply still in
@@ -685,20 +726,48 @@ export async function probeDisplaySock(path: string, timeoutMs = 400): Promise<b
 
 export interface RelayResult {
   /** Host sent goodbye — user exited from the attached session. */
-  reason: 'goodbye' | 'host-closed' | 'signal'
+  reason: 'goodbye' | 'host-closed' | 'signal' | 'replaced'
+}
+
+/** Typing that arrives while the relay is still measuring is kept, then sent. */
+const MAX_PENDING_INPUT = 64 * 1024
+
+/** Terminal and signal sources; injectable so a test can drive the relay. */
+export interface DisplayRelayOptions {
+  stdin?: NodeJS.ReadStream
+  stdout?: NodeJS.WriteStream
+  signals?: Pick<NodeJS.Process, 'on' | 'off' | 'removeListener'>
+  /** Link kind for the RTT probe; defaults to this process's SSH env. */
+  ssh?: boolean
+  /** Typing captured before this relay existed; sent to the Host after HELLO. */
+  seed?: string
 }
 
 /**
  * Turn this process into a Display relay until the Host hangs up or the
  * local TTY dies. Restores the terminal before resolving.
  */
-export async function runDisplayRelay(path: string): Promise<RelayResult> {
+export async function runDisplayRelay(
+  path: string,
+  options: DisplayRelayOptions = {},
+): Promise<RelayResult> {
+  const stdin = options.stdin ?? process.stdin
+  const stdout = options.stdout ?? process.stdout
+  const signals = options.signals ?? process
   const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
   return await new Promise((resolve, reject) => {
     const socket = createConnection(path)
     const reader = new FrameReader()
     let settled = false
+    let live = false
+    const pending: Buffer[] = []
+    let pendingBytes = 0
+    if (options.seed !== undefined && options.seed !== '') {
+      const seed = Buffer.from(options.seed, 'utf8')
+      pending.push(seed)
+      pendingBytes += seed.length
+    }
     const finish = (reason: RelayResult['reason']): void => {
       if (settled) return
       settled = true
@@ -713,14 +782,15 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       reject(error)
     }
     const cleanup = (): void => {
-      process.stdin.removeListener('data', onStdin)
-      process.stdout.removeListener('resize', onResize)
-      process.stdin.removeListener('end', onLocalHangup)
-      process.stdin.removeListener('close', onLocalHangup)
-      process.removeListener('SIGHUP', onLocalHangup)
-      process.removeListener('SIGTERM', onLocalHangup)
+      pump.stop()
+      stdout.removeListener('resize', onResize)
+      stdin.removeListener('end', onLocalHangup)
+      stdin.removeListener('close', onLocalHangup)
+      stdin.removeListener('error', onLocalHangup)
+      signals.removeListener('SIGHUP', onLocalHangup)
+      signals.removeListener('SIGTERM', onLocalHangup)
       try {
-        process.stdin.setRawMode(false)
+        stdin.setRawMode(false)
       } catch {
         // ignore
       }
@@ -728,35 +798,61 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
         clearTimeout(resizeTimer)
         resizeTimer = undefined
       }
-      process.stdout.off('resize', onResize)
+      stdout.off('resize', onResize)
       if (process.platform !== 'win32') {
-        process.off('SIGWINCH', onResize)
+        signals.off('SIGWINCH', onResize)
       }
       try {
-        process.stdin.pause()
+        stdin.pause()
       } catch {
         // ignore
       }
       try {
-        process.stdout.write('\x1b]0;\x07')
-        process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-        process.stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}`)
+        stdout.write('\x1b]0;\x07')
+        stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
+        stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}`)
       } catch {
         // TTY may already be gone
       }
       socket.destroy()
     }
-    const onStdin = (chunk: Buffer): void => {
+    /**
+     * Keystrokes typed while the relay was still measuring used to be dropped
+     * on the floor: the probe owned the only stdin listener and the forwarder
+     * was attached afterwards. Hold them (bounded) and flush on HELLO.
+     */
+    const deliver = (text: string): void => {
+      if (text === '') return
+      const bytes = Buffer.from(text, 'utf8')
+      if (!live) {
+        pending.push(bytes)
+        pendingBytes += bytes.length
+        while (pendingBytes > MAX_PENDING_INPUT && pending.length > 1) {
+          pendingBytes -= pending.shift()?.length ?? 0
+        }
+        return
+      }
       try {
-        socket.write(encodeFrame(FRAME_STDIN, chunk))
+        socket.write(encodeFrame(FRAME_STDIN, bytes))
       } catch {
         finish('host-closed')
       }
     }
+    const pump = new TerminalInputPump({
+      stdin,
+      stdout,
+      onInput: deliver,
+      ...(options.ssh === undefined ? {} : { ssh: options.ssh }),
+      // Only while the boot splash is up: the TUI is not painted yet, so a
+      // diagnostic line cannot garble a live screen.
+      ...(process.env.DSH_TUI_DEBUG === '1'
+        ? { debug: (message: string) => { process.stderr.write(`dsh-ssh-tui: ${message}\n`) } }
+        : {}),
+    })
     let resizeTimer: NodeJS.Timeout | undefined
     const sendResize = (): void => {
       try {
-        socket.write(encodeResize(process.stdout.columns || 80, process.stdout.rows || 24))
+        socket.write(encodeResize(stdout.columns || 80, stdout.rows || 24))
       } catch {
         finish('host-closed')
       }
@@ -777,31 +873,53 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
     socket.on('connect', () => {
       void (async () => {
         try {
-          process.stdin.setRawMode(true)
-          process.stdin.resume()
-          const columns = process.stdout.columns || 80
-          const rows = process.stdout.rows || 24
+          stdin.setRawMode(true)
+          stdin.resume()
+          // Subscribed before the first await: an EOF that lands during the
+          // probe (SSH dropped while the TTY was quiet) used to be missed
+          // entirely, and the launcher then stayed alive with a dead TTY —
+          // the zombie that fought the next window for the display.
+          stdin.on('end', onLocalHangup)
+          stdin.on('close', onLocalHangup)
+          // A PTY can report EIO instead of a clean EOF; without this the
+          // launcher dies on an unhandled 'error' event instead of resolving.
+          stdin.on('error', onLocalHangup)
+          signals.on('SIGHUP', onLocalHangup)
+          signals.on('SIGTERM', onLocalHangup)
+          // A TTY that is already gone (this launcher started after the SSH
+          // session ended) never fires `end` again; without this the relay
+          // would sit on a dead channel as another zombie.
+          if (stdin.readableEnded === true || stdin.destroyed === true) {
+            finish('signal')
+            return
+          }
+          pump.start()
+          // Measure *before* HELLO: the Host answers a HELLO with a full
+          // repaint, and a request queued behind that burst measures the
+          // repaint (1900 ms) instead of the link (50 ms).
+          const rtt = await pump.measure()
+          if (settled) return
+          const columns = stdout.columns || 80
+          const rows = stdout.rows || 24
           socket.write(Buffer.concat([
             encodeFrame(FRAME_HELLO),
             encodeResize(columns, rows),
+            encodeRtt(rtt),
           ]))
-          const rtt = await probeLocalRttMs()
-          if (settled) return
-          try {
-            socket.write(encodeRtt(rtt))
-          } catch {
-            finish('host-closed')
-            return
+          live = true
+          for (const chunk of pending.splice(0)) {
+            try {
+              socket.write(encodeFrame(FRAME_STDIN, chunk))
+            } catch {
+              finish('host-closed')
+              return
+            }
           }
-          process.stdin.on('data', onStdin)
-          process.stdin.on('end', onLocalHangup)
-          process.stdin.on('close', onLocalHangup)
-          process.stdout.on('resize', onResize)
+          pendingBytes = 0
+          stdout.on('resize', onResize)
           if (process.platform !== 'win32') {
-            process.on('SIGWINCH', onResize)
+            signals.on('SIGWINCH', onResize)
           }
-          process.on('SIGHUP', onLocalHangup)
-          process.on('SIGTERM', onLocalHangup)
         } catch (error) {
           fail(error)
         }
@@ -818,13 +936,18 @@ export async function runDisplayRelay(path: string): Promise<RelayResult> {
       for (const frame of frames) {
         if (frame.type === FRAME_STDOUT) {
           try {
-            process.stdout.write(frame.payload)
+            stdout.write(frame.payload)
           } catch {
             finish('signal')
             return
           }
         } else if (frame.type === FRAME_GOODBYE) {
           finish('goodbye')
+          return
+        } else if (frame.type === FRAME_REPLACED) {
+          // A newer Display owns this session now. Caller exits quietly; the
+          // retry it used to trigger is what made two windows fight.
+          finish('replaced')
           return
         }
       }

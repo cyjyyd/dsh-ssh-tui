@@ -173,6 +173,17 @@ test('pickerStateUnchanged treats loading as part of the frame', () => {
   assert.equal(pickerStateUnchanged(idle, loading), false)
 })
 
+test('pickerStateUnchanged treats the pending-label count as part of the frame', () => {
+  const sessions = [session('a')]
+  const idle = state(sessions)
+  // The loading line says how many titles are still missing; a repaint that
+  // only changes that number still has to happen.
+  const held = state(sessions, { loading: true, pendingLabels: 3 })
+  assert.equal(pickerStateUnchanged(idle, held), false)
+  assert.equal(pickerStateUnchanged(held, state(sessions, { loading: true, pendingLabels: 4 })), false)
+  assert.equal(pickerStateUnchanged(held, state(sessions, { loading: true, pendingLabels: 3 })), true)
+})
+
 // The launcher keeps owning the TTY as the display relay for the whole
 // session, so a picker that leaves its `resize` listener behind repaints its
 // dead screen over the running TUI on every terminal resize (the "resize
@@ -247,13 +258,19 @@ test('a live picker repaints on resize and stops after cancel', { timeout: 5_000
   assert.equal(io.writes.length, after, 'a cancelled picker must never paint again')
 })
 
-// The first listing is a header sketch: a live Host appears under its raw
-// session id until its log is inspected. Painting that frame is how an
-// unrecognisable "session I did not ask for" jumped into the list, so the
-// entries are held until titles exist.
+// The first listing is a header sketch: an entry whose log has not been read is
+// labelled with its raw id, and painting that frame is how an unrecognisable
+// "session I did not ask for" jumped into the list. The lister marks those
+// entries, and the picker holds them until their real title exists.
 test('the picker holds the list until session titles load', { timeout: 5_000 }, async () => {
   const io = pickerStreams()
-  const sketch = [{ id: 'main-session-16531619', label: 'main-session-16531619', updatedAt: 1, cwd: '' }]
+  const sketch = [{
+    id: 'main-session-16531619',
+    label: 'main-session-16531619',
+    updatedAt: 1,
+    cwd: '',
+    labelPending: true,
+  }]
   const titled = [{ id: 'main-session-16531619', label: '兼容0.1.5并修光标漂移', updatedAt: 1, cwd: '/root' }]
   const listSessions = async (_persistence, _current, { onUpdate }) => {
     onUpdate({ sessions: sketch, pending: true })
@@ -267,10 +284,32 @@ test('the picker holds the list until session titles load', { timeout: 5_000 }, 
   await new Promise(resolve => setTimeout(resolve, 10))
   const firstFrame = io.writes.join('')
   assert.equal(firstFrame.includes('main-session-16531619'), false, 'raw ids must not be painted')
-  assert.equal(firstFrame.includes('正在读取历史会话'), true, 'the loading line holds the spot')
+  assert.equal(firstFrame.includes('正在读取会话标题'), true, 'the loading line holds the spot')
   await new Promise(resolve => setTimeout(resolve, 60))
   const withTitles = io.writes.join('')
   assert.equal(withTitles.includes('兼容0.1.5并修光标漂移'), true, 'titles replace the sketch')
+  abort.abort()
+  await settled
+})
+
+// Entries that already carry a cached title must not wait for the sketch pass:
+// the index is what makes the first frame instant.
+test('a cached title is painted with the first listing', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const cached = [{ id: 'main-session-cached', label: '缓存标题', updatedAt: 1, cwd: '/root' }]
+  const pending = [{ id: 'main-session-later', label: 'main-session-later', updatedAt: 2, cwd: '', labelPending: true }]
+  const listSessions = async (_persistence, _current, { onUpdate }) => {
+    onUpdate({ sessions: [...cached, ...pending], pending: true })
+    await new Promise(resolve => setTimeout(resolve, 60))
+    return { sessions: cached, pending: false, complete: cached }
+  }
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  await new Promise(resolve => setTimeout(resolve, 15))
+  const firstFrame = io.writes.join('')
+  assert.equal(firstFrame.includes('缓存标题'), true, 'a cached title paints immediately')
+  assert.equal(firstFrame.includes('main-session-later'), false, 'an unresolved id stays hidden')
   abort.abort()
   await settled
 })
@@ -285,6 +324,48 @@ test('an untitled history is painted by the final listing', { timeout: 5_000 }, 
   const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
   await new Promise(resolve => setTimeout(resolve, 40))
   assert.equal(io.writes.join('').includes('main-session-plain'), true)
+  abort.abort()
+  await settled
+})
+
+// The loading line is the only thing on screen while every entry is still an
+// id; it has to say what it is waiting for.
+test('the loading line counts the titles still being read', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pending = [{ id: 'main-session-9f1c', label: 'main-session-9f1c', updatedAt: 1, cwd: '', labelPending: true }]
+  const listSessions = async (_persistence, _current, { onUpdate }) => {
+    onUpdate({ sessions: pending, pending: true })
+    await new Promise(resolve => setTimeout(resolve, 40))
+    return { sessions: pending, pending: false, complete: pending }
+  }
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  await new Promise(resolve => setTimeout(resolve, 15))
+  const painted = io.writes.join('')
+  assert.equal(painted.includes('正在读取会话标题（1 个）'), true, `expected the pending count, got: ${painted.slice(-200)}`)
+  assert.equal(painted.includes('main-session-9f1c'), false)
+  await new Promise(resolve => setTimeout(resolve, 60))
+  abort.abort()
+  await settled
+})
+
+// A session that never gets a title still has to be selectable; the final
+// listing is painted in full even though the entry is still marked pending.
+test('the final listing paints an entry that never resolves', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const stuck = [{ id: 'main-session-stuck', label: 'main-session-stuck', updatedAt: 1, cwd: '', labelPending: true }]
+  const listSessions = async (_persistence, _current, { onUpdate }) => {
+    onUpdate({ sessions: stuck, pending: true })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    return { sessions: stuck, pending: false, complete: stuck }
+  }
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(io.writes.join('').includes('main-session-stuck'), true,
+    'a permanently untitled session must appear from the final listing')
   abort.abort()
   await settled
 })

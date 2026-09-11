@@ -321,3 +321,96 @@ test('enterSessionCwd switches into an absolute existing directory', () => {
   assert.equal(relative.changed, false)
   assert.match(relative.error ?? '', /不是绝对路径/)
 })
+
+// The picker's first frame is a header sketch; entries it cannot name yet are
+// marked instead of being labelled with their raw id. The consumer side is
+// tested in picker.test.mjs, but if the lister stops marking them the picker
+// happily paints uuids again — so assert the producer here.
+test('the first listing marks entries whose label is still an id', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pending-'))
+  const indexPath = join(dir, 'index.json')
+  for (const id of ['cold-one', 'cold-two']) {
+    mkdirSync(join(dir, id), { recursive: true })
+    writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  }
+  const sessions = new Map([
+    ['cold-one', readableSession('cold-one', 900, '冷启动第一条')],
+    ['cold-two', readableSession('cold-two', 800, '冷启动第二条')],
+  ])
+  const persistence = {
+    list: async () => [header('cold-one', 900), header('cold-two', 800)],
+    inspect: async id => sessions.get(id),
+    locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+  const frames = []
+  await listResumableSessionsProgressive(persistence, '', {
+    onUpdate: listing => frames.push(listing),
+    listHosts: async () => [],
+    indexPath,
+    priorityCount: 1,
+  })
+  assert.ok(frames.length >= 2, 'the sketch is painted before the later batches')
+  const sketch = frames[0]
+  assert.equal(sketch.pending, true)
+  assert.equal(sketch.sessions.every(session => session.labelPending === true), true,
+    'nothing has been inspected yet, so every label is a placeholder')
+  assert.equal(sketch.sessions.some(session => session.label === session.id), true,
+    'the placeholder really is the id (that is why it must not be painted)')
+  const last = frames.at(-1)
+  assert.equal(last.pending, false)
+  assert.equal(last.sessions.every(session => session.labelPending !== true), true,
+    'the final listing carries real titles')
+  assert.deepEqual(last.sessions.map(session => session.label).sort(), ['冷启动第一条', '冷启动第二条'])
+})
+
+// The index used to be written only after every log had been inspected, so a
+// picker the user closed early left the next run without titles (raw ids
+// again). It is flushed as soon as a title exists, and that title is painted
+// without waiting for the rest of the newest page.
+test('a title is cached and painted as soon as it resolves', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-flush-'))
+  const indexPath = join(dir, 'index.json')
+  const ids = ['page-fast', 'page-slow-a', 'page-slow-b', 'page-rest']
+  for (const id of ids) {
+    mkdirSync(join(dir, id), { recursive: true })
+    writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  }
+  const sessions = new Map(ids.map((id, index) => [id, readableSession(id, 900 - index, `标题 ${id}`)]))
+  const slowResolved = []
+  const persistence = {
+    list: async () => ids.map((id, index) => header(id, 900 - index)),
+    inspect: async (id) => {
+      if (id === 'page-slow-a' || id === 'page-slow-b') {
+        await new Promise(resolve => setTimeout(resolve, 150))
+        slowResolved.push(id)
+      }
+      return sessions.get(id)
+    },
+    locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+  const frames = []
+  await listResumableSessionsProgressive(persistence, '', {
+    onUpdate: listing => frames.push({
+      ...listing,
+      slowResolved: slowResolved.length,
+      // Read the index *while the frame is painted*: it also gets written at
+      // the very end, which would make a "was it cached early?" check useless.
+      indexAtPaint: existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : undefined,
+    }),
+    listHosts: async () => [],
+    indexPath,
+    priorityCount: 3,
+  })
+  const titled = frames.find(frame => frame.sessions.some(session => session.labelPending !== true))
+  assert.notEqual(titled, undefined, 'a titled frame was painted')
+  assert.equal(titled.slowResolved, 0, 'the fast title is painted before the slow logs finish')
+  assert.equal(titled.sessions.length, 1, 'only the resolved entry is in that frame')
+  assert.notEqual(titled.indexAtPaint, undefined, 'the index is already written by that frame')
+  assert.equal(titled.indexAtPaint.includes('标题 page-fast'), true)
+})

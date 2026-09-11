@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatSessionTime, listResumableSessionsProgressive, type ResumableSession } from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
 import { truncateToWidth } from './term-text.js'
+import { TerminalInputGuard } from './terminal-input.js'
 import { t } from './i18n/index.js'
 
 /** What the launch picker decided. */
@@ -44,6 +45,8 @@ export interface SessionPickerState {
   filterActive: boolean
   /** Older logs are still being inspected in the background. */
   loading?: boolean
+  /** Entries held back because their label is still the raw session id. */
+  pendingLabels?: number
 }
 
 /** One key / control action against {@link SessionPickerState}. */
@@ -118,6 +121,7 @@ export function pickerStateUnchanged(previous: SessionPickerState, next: Session
     && previous.filterActive === next.filterActive
     && previous.sessions === next.sessions
     && previous.loading === next.loading
+    && previous.pendingLabels === next.pendingLabels
 }
 
 function resultFor(session: ResumableSession): SessionPickerResult {
@@ -402,8 +406,6 @@ export async function showSessionPicker(
   let previousRows: string[] = []
   let previousWidth = 0
   let previousHeight = 0
-  /** Whether a listing with titles has been painted at least once. */
-  let listPainted = false
   /**
    * Settled pickers must never paint again: the launcher process keeps owning
    * the TTY as the display relay, so a leaked frame would overwrite the TUI on
@@ -431,7 +433,9 @@ export async function showSessionPicker(
     }) + (state.loading === true ? t('picker.loading') : ''), width), '90'))
     if (filtered.length === 0) {
       const empty = state.loading === true
-        ? t('picker.loadingList')
+        ? state.pendingLabels !== undefined && state.pendingLabels > 0
+          ? t('picker.readingTitles', { count: state.pendingLabels })
+          : t('picker.loadingList')
         : state.query === ''
           ? t('picker.noneYet')
           : t('picker.noMatch', { query: state.query })
@@ -503,11 +507,15 @@ export async function showSessionPicker(
 
   return new Promise<SessionPickerResult>((resolve) => {
     let escapeBuffer = ''
+    // A cursor reply that outlived its probe would otherwise be typed into the
+    // filter as `[17;1R` and empty the list with a query nobody wrote.
+    const inputGuard = new TerminalInputGuard(text => handleKeys(text))
     let escapeTimer: ReturnType<typeof setTimeout> | undefined
     const cleanup = (result: SessionPickerResult): void => {
       if (done) return
       done = true
       if (escapeTimer !== undefined) clearTimeout(escapeTimer)
+      inputGuard.stop()
       signal?.removeEventListener('abort', onAbort)
       stdin.removeListener('data', onData)
       stdout.removeListener('resize', onResize)
@@ -542,7 +550,12 @@ export async function showSessionPicker(
       render()
     }
     const onData = (chunk: Buffer): void => {
-      const combined = escapeBuffer + decoder.write(chunk)
+      const decoded = decoder.write(chunk)
+      if (decoded !== '') inputGuard.push(decoded)
+    }
+    /** One decoded read, replies already removed. */
+    const handleKeys = (text: string): void => {
+      const combined = escapeBuffer + text
       escapeBuffer = ''
       if (escapeTimer !== undefined) {
         clearTimeout(escapeTimer)
@@ -597,20 +610,24 @@ export async function showSessionPicker(
       final = false,
     ): void => {
       if (done) return
-      // The first listing is a header sketch: a live Host is labelled with its
-      // raw session id until its log has been inspected, and painting that
-      // frame makes the user pick an id they cannot recognise (it reads as "a
-      // session I did not ask for" jumping into the list). Hold the entries —
-      // the loading line keeps the spot — until titles exist, but always paint
-      // the final listing so an all-untitled history stays selectable.
-      if (!listPainted && !final && !listing.sessions.some(session => session.label !== session.id)) return
-      listPainted = true
+      // The first listing is a header sketch: a session whose log has not been
+      // inspected yet is labelled with its raw id, and painting that frame makes
+      // the user pick an id they cannot recognise — which then turns into a
+      // title two seconds later. Hold those entries back (the loading line
+      // keeps the spot) and show them once their real label exists. The final
+      // listing is painted in full: a session that still has no title never
+      // will, and staying invisible would be worse than showing its id.
+      const ready = final
+        ? listing.sessions
+        : listing.sessions.filter(session => session.labelPending !== true)
+      const held = listing.sessions.length - ready.length
       const focusedId = filterResumableSessions(state.sessions, state.query)[state.cursor]?.id
-      const nextFiltered = filterResumableSessions(listing.sessions, state.query)
+      const nextFiltered = filterResumableSessions(ready, state.query)
       state = {
         ...state,
-        sessions: listing.sessions,
-        loading: listing.pending,
+        sessions: ready,
+        loading: listing.pending || held > 0,
+        pendingLabels: held,
         cursor: retainCursor(focusedId, nextFiltered, state.cursor),
       }
       render()

@@ -33,18 +33,9 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
 }
 import { showSessionPicker } from './picker.js'
 
-/** A relay that dies this soon after connecting reached a Host that was leaving. */
-export const ATTACH_RECOVERY_WINDOW_MS = 5_000
-/** How long to let a mid-dispose Host finish before starting a fresh one. */
-const ATTACH_RECOVERY_WAIT_MS = 3_000
-
-/** True when a relay error means the peer vanished rather than a real fault. */
-export function attachPeerVanished(error: unknown, elapsedMs: number): boolean {
-  if (elapsedMs >= ATTACH_RECOVERY_WINDOW_MS) return false
-  const code = (error as NodeJS.ErrnoException | undefined)?.code
-  if (code === undefined) return false
-  return code === 'EPIPE' || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ERR_STREAM_DESTROYED'
-}
+// The attach/recovery state machine (and its constants) live in attach.ts so
+// they can be driven by tests; re-exported here for the bundle's own API.
+export { ATTACH_RECOVERY_WINDOW_MS, attachPeerVanished } from './attach.js'
 import { writeBootSplash } from './paint.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
@@ -58,6 +49,7 @@ import {
   type SessionLockInfo,
 } from './session-lock.js'
 import {
+  captureTerminalInput,
   isTuiHostProcess,
   quietTerminalInput,
   resolveDshHome,
@@ -65,6 +57,12 @@ import {
   spawnDetachedHost,
   waitForDisplaySock,
 } from './display-sock.js'
+import {
+  ATTACH_RECOVERY_WINDOW_MS,
+  attachPeerVanished,
+  createAttacher,
+  HOST_START_TIMEOUT_MS,
+} from './attach.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
 import { installUiLocale, t } from './i18n/index.js'
@@ -149,73 +147,44 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    const attachExisting = async (sessionId: string, sock: string, recover = true): Promise<void> => {
-      process.stderr.write(`${t('attach.connecting', { session: sessionId })}\n`)
-      const startedAt = Date.now()
-      let result: { reason: 'goodbye' | 'host-closed' | 'signal' }
-      try {
-        result = await runDisplayRelay(sock)
-      } catch (error) {
-        if (!recover || !attachPeerVanished(error, Date.now() - startedAt)) throw error
-        await recoverAttach(sessionId)
-        return
-      }
-      if (recover && result.reason === 'host-closed' && Date.now() - startedAt < ATTACH_RECOVERY_WINDOW_MS) {
-        // Accepted, then closed with no goodbye: the Host we reached was on
-        // its way out. A second manual attempt used to be the only way in.
-        quietTerminalInput()
-        await recoverAttach(sessionId)
-        return
-      }
-      const exit = ctx.get('appExit')
-      if (exit !== undefined) exit(0)
-      else process.exit(0)
-    }
+    let inputCapture: { stop(): string } | undefined
+    const attacher = createAttacher({
+      relay: (sock, seed) => runDisplayRelay(sock, seed === '' ? {} : { seed }),
+      quiet: () => { quietTerminalInput() },
+      beginCapture: () => { inputCapture = captureTerminalInput() },
+      endCapture: () => {
+        const capture = inputCapture
+        inputCapture = undefined
+        return capture?.stop() ?? ''
+      },
+      inspectLiveHost: async (sessionId) => {
+        if (sessionLockDisabled()) return undefined
+        const live = await inspectLiveHost(sessionId)
+        if (live === undefined) return undefined
+        return { kind: live.kind, sock: live.sock, pid: live.lock.pid }
+      },
+      spawnHost: sessionId => spawnDetachedHost(sessionId),
+      waitForDisplaySock: async spawned => {
+        await waitForDisplaySock(spawned.sock, HOST_START_TIMEOUT_MS, spawned.pid, spawned.errFile, spawned.exitWatch)
+      },
+      report: message => { process.stderr.write(`${message}\n`) },
+      exit: (code) => {
+        const exit = ctx.get('appExit')
+        if (exit !== undefined) exit(code)
+        else process.exit(code)
+      },
+      messages: {
+        connecting: sessionId => t('attach.connecting', { session: sessionId }),
+        recovering: sessionId => t('attach.recovering', { session: sessionId }),
+        replaced: sessionId => t('attach.replaced', { session: sessionId }),
+        flapping: sessionId => t('attach.flapping', { session: sessionId }),
+        zombie: (sessionId, pid) => t('attach.zombie', { session: sessionId, pid }),
+      },
+      debug: process.env.DSH_TUI_DEBUG === '1',
+    })
+    const attachExisting = attacher.attachExisting
+    const spawnHostAndRelay = attacher.attachOrSpawn
 
-    /**
-     * Wait out a Host that was mid-dispose, then take the normal path again.
-     *
-     * The wait keys on the lock disappearing instead of on "attachable": a
-     * dying Host still accepts TCP/pipe connections for a moment (that is
-     * exactly how the first attempt failed), and re-attaching to it or racing
-     * it for the session lock only produces a second failure.
-     */
-    const recoverAttach = async (sessionId: string): Promise<void> => {
-      // Transparent by default: the retry is part of a normal reconnect, and a
-      // status line here only adds noise (and rows) to the screen the user is
-      // about to get back. DSH_TUI_DEBUG=1 keeps it for troubleshooting.
-      if (process.env.DSH_TUI_DEBUG === '1') {
-        process.stderr.write(`${t('attach.recovering', { session: sessionId })}\n`)
-      }
-      const deadline = Date.now() + ATTACH_RECOVERY_WAIT_MS
-      for (;;) {
-        const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
-        if (live === undefined || Date.now() >= deadline) break
-        await new Promise(resolve => setTimeout(resolve, 150))
-      }
-      await spawnHostAndRelay(sessionId, false)
-    }
-
-    const spawnHostAndRelay = async (sessionId: string, recover = true): Promise<void> => {
-      const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
-      if (live?.kind === 'attachable') {
-        await attachExisting(sessionId, live.sock, recover)
-        return
-      }
-      if (live?.kind === 'zombie') {
-        throw new Error(t('attach.zombie', { session: sessionId, pid: live.lock.pid }))
-      }
-      const spawned = spawnDetachedHost(sessionId)
-      // The Host boots with the TTY in cooked mode: quiet it first so a reply
-      // still in flight (or a keystroke) cannot be echoed over the boot splash.
-      quietTerminalInput()
-      try {
-        await waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile, spawned.exitWatch)
-      } finally {
-        spawned.exitWatch.dispose()
-      }
-      await attachExisting(sessionId, spawned.sock, recover)
-    }
     // An explicit in-process change (/setup or /model) wins over launch-time
     // CLI overrides for every session created or resumed later in this process.
     let liveSelection: ModelSelection | undefined

@@ -141,6 +141,19 @@ dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从�
 `$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在
 下次启动时核对 pid，已死则自动从日志接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
 
+一个会话同时只有一块屏幕：新窗口接入时 Host 会通知旧窗口「你已被接管」（`FRAME_REPLACED`），
+旧窗口退出，不会两个窗口互相抢显示。
+
+链路探测（`CSI 6n`，终端回 `CSI row;col R`）做了三层防护：Host 收到 HELLO 之前就先测（不把
+整屏重绘的时间算成链路）；每次重问前等链路安静**一整个应答窗口**（350ms，超时后放宽到
+800ms），这样「上一个请求的回复」必然已经落地并被丢掉；采样取中位数，并丢掉比中位数快 4
+倍以上的（那是别人请求的回复，相对判定所以 `ssh localhost` 的 2ms 链路照样算得出来）。
+代价是每次接入多约 0.4–0.6 秒探测时间，换来的是 50ms 链路不再出现 2ms / 1900ms 的跳变。
+
+这些回复也不可能再进输入框：relay 整条 stdin 管道常驻过滤（含跨 read 拆分的），Host 键
+处理前再过滤一次；连 Host 启动那几百毫秒里敲的键也会被暂存、接入后补发，不再被丢掉。
+`DSH_TUI_DEBUG=1` 时会打印每次采样与丢弃原因。
+
 忙碌时默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
 `ssh-tui.disconnect: continue`（也可用 `DSH_TUI_DISCONNECT=continue`）则不取消，
 Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线直接退出，不占后台。
@@ -346,6 +359,8 @@ web 端与 TUI 共用同一份设置。`/model` 换提供商后**下一步请求
 
 ```bash
 bash scripts/verify.sh              # 检查 profile 组合与 CLI 语法
+npm test                            # 单元 + 集成（含重连接管、选择器首帧）
+python3 scripts/pty-acceptance.py   # 真 PTY：模拟 40ms SSH 链路 + 滞留的光标回复
 ```
 
 或手动：
@@ -354,6 +369,12 @@ bash scripts/verify.sh              # 检查 profile 组合与 CLI 语法
 dsh --profile tui --dump-config | grep -A12 'id: ssh-tui'
 dsh --profile tui --help
 ```
+
+`pty-acceptance.py` 用真 PTY 跑一遍接入：终端像 SSH 客户端那样隔一个 RTT 才回
+`CSI 6n`，并且有两条「上一个 launcher 发出、仍在路上」的滞留回复（一条已在队列里，一条
+落在探测窗口中间），按键在探测还没结束时就敲下去。脚本检查输入是否原样（且只送一次）
+送达 Host、测得的 RTT 是否接近模拟值、屏幕上有没有被回显的 `^[[17;1R`。第一个参数可改
+模拟延迟（秒）：`python3 scripts/pty-acceptance.py 0.12`。
 
 ## 卸载
 

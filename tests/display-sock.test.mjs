@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createConnection, createServer } from 'node:net'
 import {
+  captureTerminalInput,
   detachFromSshSession,
   DisplayHost,
   displaySockExists,
@@ -408,4 +409,41 @@ test('a channel that is not listening yet is not ready', async () => {
   assert.equal(await displaySockExists(path), true)
   await host.close()
   await rm(home, { recursive: true, force: true })
+})
+
+// While a fresh Host boots there is no relay, and stdin used to be flowing with
+// nobody listening: every keystroke in that window was lost.
+test('captureTerminalInput keeps typing and drops cursor replies', async () => {
+  const { PassThrough } = await import('node:stream')
+  const stdin = new PassThrough()
+  stdin.isTTY = true
+  stdin.setRawMode = () => stdin
+  const capture = captureTerminalInput(stdin)
+  stdin.write('ls')
+  stdin.write('\x1b[17;1R')          // a reply left over from a dead launcher
+  stdin.write(' -la\r')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const seed = capture.stop()
+  assert.equal(seed, 'ls -la\r', 'the reply is stripped, the typing is kept')
+  // After stop() the stream is paused, not left flowing with nobody reading:
+  // a byte typed before the relay resumes has to still be there for it.
+  stdin.write('x')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(String(stdin.read()), 'x', 'nothing is dropped in the handoff')
+  stdin.destroy()
+})
+
+test('captureTerminalInput keeps the last burst when the buffer is full', async () => {
+  const { PassThrough } = await import('node:stream')
+  const stdin = new PassThrough()
+  stdin.isTTY = true
+  stdin.setRawMode = () => stdin
+  const capture = captureTerminalInput(stdin)
+  stdin.write('a'.repeat(9_000))
+  stdin.write('tail')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const seed = capture.stop()
+  assert.equal(seed.endsWith('tail'), true, 'the newest typing survives')
+  assert.ok(seed.length <= 8 * 1024, `captured ${seed.length} characters`)
+  stdin.destroy()
 })

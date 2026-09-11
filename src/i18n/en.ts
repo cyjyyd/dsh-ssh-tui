@@ -493,6 +493,7 @@ export const en: Record<string, string> = {
   'picker.noMatch': 'No sessions match "{query}"',
   'picker.loading': ' · loading older sessions…',
   'picker.loadingList': 'Loading history sessions…',
+  'picker.readingTitles': 'Reading session titles ({count})…',
   'picker.noneYet': 'No resumable history sessions',
   'history.folded': '↑ earlier history folded — scroll up to load',
   'picker.moreAbove': '↑ {count} more',
@@ -550,6 +551,8 @@ export const en: Record<string, string> = {
   'disconnect.idleExit': 'No display for {hours}h; Host is exiting.',
   'attach.connecting': 'Attaching to session {session}…',
   'attach.recovering': 'The background Host is finishing up; retrying to attach {session}…',
+  'attach.replaced': 'Session {session} is now displayed in another terminal; closing this window.',
+  'attach.flapping': 'The display for session {session} keeps being taken over; automatic reconnect stopped. Attach again when the other window is idle.',
   'attach.zombie': 'Session {session} pid {pid} is alive but the display socket is unreachable. If that process is dead, --resume from the log; do not start a second Host.',
 
   'usage.querying': 'checking quota…',

@@ -151,6 +151,7 @@ import {
   waitUntilIdleOrTimeout,
   type PaintLinkKind,
 } from './paint.js'
+import { TerminalInputGuard } from './terminal-input.js'
 import {
   contextPressureAlertText,
   contextPressureRingColor,
@@ -1050,6 +1051,12 @@ export class SshTui {
   private streamingReasoning: { kind: 'streaming-reasoning'; expanded: boolean } | undefined
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Cursor-position replies removed from the relay's stdin stream. A launcher
+   * from an older release (or a reply that raced its own probe) would otherwise
+   * type `[17;1R` into the prompt or cancel a dialog with a bare ESC.
+   */
+  private readonly inputGuard = new TerminalInputGuard(text => this.handleInputText(text))
   private thinkingStartedAt: number | undefined
   private waitStartedAt: number | undefined
   private completionSignaled = false
@@ -1627,6 +1634,7 @@ export class SshTui {
     this.renderTimer = undefined
     if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
     this.escapeTimer = undefined
+    this.inputGuard.stop()
     process.stdin.removeListener('data', this.handleData)
     process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
@@ -6237,7 +6245,12 @@ export class SshTui {
   // ── keyboard ────────────────────────────────────────────────────────────
 
   private readonly handleData = (chunk: Buffer): void => {
-    const text = this.decoder.write(chunk)
+    const decoded = this.decoder.write(chunk)
+    if (decoded === '') return
+    this.inputGuard.push(decoded)
+  }
+
+  private handleInputText(text: string): void {
     const combined = this.escapeBuffer + text
     this.escapeBuffer = ''
     if (this.escapeTimer !== undefined) {
