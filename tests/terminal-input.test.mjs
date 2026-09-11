@@ -467,6 +467,33 @@ test('a replaced relay reports it instead of re-attaching', { timeout: 10_000 },
   assert.equal(host.sawHello, true)
 })
 
+// The kicked window's link is usually the dead one (that is why the user is
+// resuming in another window), so anything it writes sits in that connection
+// and is flushed onto the terminal when the link comes back: the user sees
+// escape bytes and "taken over by another terminal" over the top of the new
+// session. A replaced relay must therefore write nothing at all.
+test('a replaced relay leaves its terminal untouched', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-replaced-silent')
+  const server = createServer(() => {})
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_HELLO) socket.write(encodeFrame(FRAME_REPLACED))
+  })
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  const terminal = scriptedTerminal({ replyDelayMs: 5 })
+  const result = await runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: false,
+  })
+  assert.equal(result.reason, 'replaced')
+  const written = terminal.stdout.text
+  assert.equal(written.includes('\x1b[?1049l'), false, 'no alt-screen exit on a replaced relay')
+  assert.equal(written.includes('\x1b[2J'), false, 'no screen clear on a replaced relay')
+  assert.equal(written.includes('\x1b[?1000l'), false, 'no mouse-mode reset on a replaced relay')
+})
+
 // Two SSH windows on one session used to kick each other off the display in a
 // loop: the loser saw a bare `close`, reported `host-closed`, and re-attached.
 test('a newer Display is told it replaced the old one', { timeout: 10_000 }, async t => {

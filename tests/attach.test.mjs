@@ -58,8 +58,17 @@ test('a kick from a newer display is an exit, not a retry', async () => {
   await h.attacher.attachExisting('main-session', 'sock-a')
   assert.deepEqual(h.exits, [0], 'the replaced launcher exits quietly')
   assert.deepEqual(h.spawned, [], 'and must never start another Host')
-  assert.equal(h.reports.some(line => line.startsWith('replaced')), true)
   assert.equal(h.attacher.recoveries, 0, 'a replacement is not a recovery')
+  // Silence is the point: this window's link is usually the dead one, so
+  // anything written here is flushed onto that terminal when it comes back.
+  assert.deepEqual(h.reports, [], 'a kicked launcher writes nothing to its own terminal')
+})
+
+test('a kicked launcher reports only under DSH_TUI_DEBUG=1', async () => {
+  const h = harness({ relays: [{ reason: 'replaced' }], debug: true })
+  await h.attacher.attachExisting('main-session', 'sock-a')
+  assert.deepEqual(h.exits, [0])
+  assert.equal(h.reports.some(line => line.startsWith('replaced')), true)
 })
 
 test('a goodbye exits without respawning', async () => {

@@ -150,7 +150,12 @@ export function createAttacher(deps: AttacherDeps): Attacher {
     recover = true,
     seed = '',
   ): Promise<void> => {
-    deps.report(deps.messages.connecting(sessionId))
+    // Status lines go to the terminal, and a leftover launcher's terminal is
+    // usually a *dead* link: whatever lands there sits in the connection and is
+    // flushed onto the screen the moment that link comes back — the stray text
+    // the user sees when they resume in a new window. Keep them for
+    // `DSH_TUI_DEBUG=1`, where the user asked for diagnostics.
+    if (deps.debug === true) deps.report(deps.messages.connecting(sessionId))
     // Always before a relay: the previous one restored cooked mode on its way
     // out, and a cursor reply still in flight is *echoed* there as `^[[17;1R`
     // over the screen. The error path below used to skip this and leave the
@@ -169,7 +174,13 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       // A newer Display claimed this session — the user opened another window
       // on it, or this launcher outlived an SSH drop. Exit instead of
       // re-attaching: that retry is what started the fight.
-      deps.report(deps.messages.replaced(sessionId))
+      //
+      // No message either. This window no longer owns any screen, and the link
+      // is usually the dead one (that is why the user is resuming elsewhere):
+      // anything written here sits in the connection and is flushed onto that
+      // terminal when it comes back — the leak the user sees on entry. The
+      // takeover is already visible where it matters, in the new window.
+      if (deps.debug === true) deps.report(deps.messages.replaced(sessionId))
       deps.exit(0)
       return
     }

@@ -761,6 +761,13 @@ export async function runDisplayRelay(
     const reader = new FrameReader()
     let settled = false
     let live = false
+    // Set when the Host tells us a newer Display took this session over. The
+    // terminal restore below is the one write that must NOT happen then: this
+    // relay no longer owns any screen, and if the link is dead (window killed,
+    // laptop asleep, network dropped) those escape bytes sit in the connection
+    // and are flushed onto that user's terminal the moment it comes back — the
+    // "character leak on entry" line, exactly when they resumed in a new window.
+    let replaced = false
     const pending: Buffer[] = []
     let pendingBytes = 0
     if (options.seed !== undefined && options.seed !== '') {
@@ -807,6 +814,7 @@ export async function runDisplayRelay(
       } catch {
         // ignore
       }
+      if (replaced) return
       try {
         stdout.write('\x1b]0;\x07')
         stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
@@ -946,7 +954,9 @@ export async function runDisplayRelay(
           return
         } else if (frame.type === FRAME_REPLACED) {
           // A newer Display owns this session now. Caller exits quietly; the
-          // retry it used to trigger is what made two windows fight.
+          // retry it used to trigger is what made two windows fight. Nothing is
+          // written back to this link either — see `replaced`.
+          replaced = true
           finish('replaced')
           return
         }
