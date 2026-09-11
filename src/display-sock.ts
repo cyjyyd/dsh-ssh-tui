@@ -741,6 +741,12 @@ export interface DisplayRelayOptions {
   ssh?: boolean
   /** Typing captured before this relay existed; sent to the Host after HELLO. */
   seed?: string
+  /**
+   * The waiting status line currently on screen, if the launcher announced one.
+   * It is erased here — after the measurement, before the Host's first paint —
+   * so the picker's screen does not sit frozen while the probe runs.
+   */
+  announce?: boolean
 }
 
 /**
@@ -915,6 +921,13 @@ export async function runDisplayRelay(
             encodeRtt(rtt),
           ]))
           live = true
+          if (options.announce === true) {
+            try {
+              stdout.write('\r\x1b[2K')
+            } catch {
+              // The TTY may already be gone.
+            }
+          }
           for (const chunk of pending.splice(0)) {
             try {
               socket.write(encodeFrame(FRAME_STDIN, chunk))

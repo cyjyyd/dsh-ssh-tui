@@ -149,7 +149,10 @@ export function apply(ctx: Context, config: Config): void {
 
     let inputCapture: { stop(): string } | undefined
     const attacher = createAttacher({
-      relay: (sock, seed) => runDisplayRelay(sock, seed === '' ? {} : { seed }),
+      relay: (sock, seed, announce) => runDisplayRelay(sock, {
+        ...(seed === '' ? {} : { seed }),
+        ...(announce ? { announce: true } : {}),
+      }),
       quiet: () => { quietTerminalInput() },
       beginCapture: () => { inputCapture = captureTerminalInput() },
       endCapture: () => {
@@ -432,6 +435,11 @@ export function apply(ctx: Context, config: Config): void {
         const picked = await showSessionPicker(ctx, config.color !== false, pickerAbort.signal)
         if (disposed) return
         if (picked === null) {
+          // Esc from the picker: the launcher hands the TTY back to the shell,
+          // and the picker's own RTT probe may still be owed a cursor reply.
+          // Drain it first, or the shell echoes `^[[17;1R` over the prompt the
+          // user returns to.
+          quietTerminalInput()
           const exit = ctx.get('appExit')
           if (exit !== undefined) exit(0)
           else process.exit(0)

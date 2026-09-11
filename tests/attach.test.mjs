@@ -62,6 +62,16 @@ test('a kick from a newer display is an exit, not a retry', async () => {
   // Silence is the point: this window's link is usually the dead one, so
   // anything written here is flushed onto that terminal when it comes back.
   assert.deepEqual(h.reports, [], 'a kicked launcher writes nothing to its own terminal')
+  // And the reply its probe is still owed is swallowed before the TTY goes back
+  // to the shell, which would otherwise echo `^[[17;1R` over the prompt.
+  assert.equal(h.events.at(-1), 'quiet', 'the TTY is quieted again before exiting')
+})
+
+test('a goodbye also drains the probe reply before handing the TTY back', async () => {
+  const h = harness({ relays: [{ reason: 'goodbye' }] })
+  await h.attacher.attachExisting('main-session', 'sock-a')
+  assert.deepEqual(h.exits, [0])
+  assert.equal(h.events.at(-1), 'quiet', 'the shell must not echo a late cursor reply')
 })
 
 test('a kicked launcher reports only under DSH_TUI_DEBUG=1', async () => {

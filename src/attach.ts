@@ -51,8 +51,11 @@ export interface SpawnedDisplayHost {
 
 /** Everything the state machine touches; the bundle entry supplies the real ones. */
 export interface AttacherDeps {
-  /** Run one relay; `seed` is typing captured while no display existed. */
-  relay(sock: string, seed: string): Promise<{ reason: RelayReason }>
+  /**
+   * Run one relay; `seed` is typing captured while no display existed, and
+   * `announce` asks it to erase the status line before the first paint.
+   */
+  relay(sock: string, seed: string, announce: boolean): Promise<{ reason: RelayReason }>
   /** Keep the TTY in raw mode and drop what is queued (stale replies, keys). */
   quiet(): void
   /**
@@ -66,8 +69,11 @@ export interface AttacherDeps {
   inspectLiveHost(sessionId: string): Promise<LiveHost | undefined>
   spawnHost(sessionId: string): SpawnedDisplayHost
   waitForDisplaySock(spawned: SpawnedDisplayHost): Promise<void>
-  /** One already-formatted status line for stderr. */
-  report(message: string): void
+  /**
+   * One already-formatted status line for stderr. `transient` marks a line the
+   * relay will erase before the first paint (see `DisplayRelayOptions.announce`).
+   */
+  report(message: string, transient?: boolean): void
   exit(code: number): void
   /** `t(...)` for the two state machine messages. */
   messages: {
@@ -85,7 +91,18 @@ export interface AttacherDeps {
 }
 
 export interface Attacher {
-  attachExisting(sessionId: string, sock: string, recover?: boolean): Promise<void>
+  /**
+   * Attach to one Host channel. `announce` writes the "attaching" status line
+   * for a user waiting on their own terminal; it is off for automatic retries
+   * and takeovers, whose terminal may be a dead link that would later flush
+   * whatever was written into it.
+   */
+  attachExisting(
+    sessionId: string,
+    sock: string,
+    recover?: boolean,
+    options?: { announce?: boolean; seed?: string },
+  ): Promise<void>
   /** Attach to a live Host on this session, or spawn a fresh one and attach. */
   attachOrSpawn(sessionId: string, recover?: boolean): Promise<void>
   /** Recoveries recorded in the current burst window (tests). */
@@ -111,7 +128,8 @@ export function createAttacher(deps: AttacherDeps): Attacher {
   const spawnHostAndRelay = async (sessionId: string, recover: boolean): Promise<void> => {
     const live = deps.locksDisabled?.() === true ? undefined : await deps.inspectLiveHost(sessionId)
     if (live?.kind === 'attachable') {
-      await attachExisting(sessionId, live.sock, recover)
+      // The user asked for this session and is waiting: say so.
+      await attachExisting(sessionId, live.sock, recover, { announce: true })
       return
     }
     if (live?.kind === 'zombie') {
@@ -128,13 +146,17 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       spawned.exitWatch.dispose()
     }
     const seed = deps.endCapture?.() ?? ''
-    await attachExisting(sessionId, spawned.sock, recover, seed)
+    await attachExisting(sessionId, spawned.sock, recover, { announce: true, seed })
   }
 
   /** Wait out a Host that was mid-dispose, then take the normal path again. */
   const recoverAttach = async (sessionId: string): Promise<void> => {
     if (!recoveryAllowed()) throw new Error(deps.messages.flapping(sessionId))
     if (deps.debug === true) deps.report(deps.messages.recovering(sessionId))
+    // Between attempts the TTY is back in cooked mode: without this, a cursor
+    // reply still owed to the relay that just ended is echoed as `^[[17;1R`
+    // for the whole (up to 3s) wait.
+    deps.quiet()
     const deadline = now() + ATTACH_RECOVERY_WAIT_MS
     for (;;) {
       const live = deps.locksDisabled?.() === true ? undefined : await deps.inspectLiveHost(sessionId)
@@ -148,14 +170,16 @@ export function createAttacher(deps: AttacherDeps): Attacher {
     sessionId: string,
     sock: string,
     recover = true,
-    seed = '',
+    options: { announce?: boolean; seed?: string } = {},
   ): Promise<void> => {
-    // Status lines go to the terminal, and a leftover launcher's terminal is
-    // usually a *dead* link: whatever lands there sits in the connection and is
-    // flushed onto the screen the moment that link comes back — the stray text
-    // the user sees when they resume in a new window. Keep them for
-    // `DSH_TUI_DEBUG=1`, where the user asked for diagnostics.
-    if (deps.debug === true) deps.report(deps.messages.connecting(sessionId))
+    const announce = options.announce === true
+    const seed = options.seed ?? ''
+    // The status line is for a user who is waiting on their own terminal (boot
+    // and picker attaches). Automatic retries and takeovers stay silent: their
+    // terminal is usually a *dead* link, and anything written there sits in the
+    // connection until that link comes back — the stray text the user sees when
+    // they resume in a new window. `DSH_TUI_DEBUG=1` prints it either way.
+    if (announce || deps.debug === true) deps.report(deps.messages.connecting(sessionId), announce)
     // Always before a relay: the previous one restored cooked mode on its way
     // out, and a cursor reply still in flight is *echoed* there as `^[[17;1R`
     // over the screen. The error path below used to skip this and leave the
@@ -164,7 +188,7 @@ export function createAttacher(deps: AttacherDeps): Attacher {
     const startedAt = now()
     let result: { reason: RelayReason }
     try {
-      result = await deps.relay(sock, seed)
+      result = await deps.relay(sock, seed, announce)
     } catch (error) {
       if (!recover || !attachPeerVanished(error, now() - startedAt)) throw error
       await recoverAttach(sessionId)
@@ -181,6 +205,12 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       // terminal when it comes back — the leak the user sees on entry. The
       // takeover is already visible where it matters, in the new window.
       if (deps.debug === true) deps.report(deps.messages.replaced(sessionId))
+      // Swallow whatever the probe is still owed. This path exits right after
+      // the RTT measurement, so the terminal's cursor replies can still be in
+      // flight; a launcher that exits with them queued hands the TTY back to
+      // the shell, which echoes them as `^[[17;1R` — the garbage the user sees
+      // on top of the shell prompt right after a launch.
+      deps.quiet()
       deps.exit(0)
       return
     }
@@ -190,6 +220,7 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       await recoverAttach(sessionId)
       return
     }
+    deps.quiet()
     deps.exit(0)
   }
 

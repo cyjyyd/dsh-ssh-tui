@@ -472,6 +472,29 @@ test('a replaced relay reports it instead of re-attaching', { timeout: 10_000 },
 // and is flushed onto the terminal when the link comes back: the user sees
 // escape bytes and "taken over by another terminal" over the top of the new
 // session. A replaced relay must therefore write nothing at all.
+// The launcher prints "attaching…" while it waits for a live Host; the relay
+// erases that line right before the Host's first paint, so the picker's screen
+// does not sit frozen for the whole measurement.
+test('an announced relay erases the status line before the first paint', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-announce')
+  const server = createServer(() => {})
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_HELLO) socket.write(encodeFrame(FRAME_GOODBYE))
+  })
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  const terminal = scriptedTerminal({ replyDelayMs: 5 })
+  const result = await runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: false,
+    announce: true,
+  })
+  assert.equal(result.reason, 'goodbye')
+  assert.equal(terminal.stdout.text.includes('\r\x1b[2K'), true, 'the waiting line is erased')
+})
+
 test('a replaced relay leaves its terminal untouched', { timeout: 10_000 }, async t => {
   const { path } = await listenOn(t, 'relay-replaced-silent')
   const server = createServer(() => {})
