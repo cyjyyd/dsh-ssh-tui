@@ -254,7 +254,6 @@ import {
 } from './plan.js'
 import {
   buildToolHeader,
-  canMergeToolCall,
   compactEditPath,
   compactToolBursts,
   compactToolGroups,
@@ -274,7 +273,6 @@ import {
   toolBodyFitsWorkspace,
   toolBodyLines,
   toolTitle,
-  TOOL_FLIP_MS,
   wrappedToolBodyLineCount,
 } from './tool-present.js'
 

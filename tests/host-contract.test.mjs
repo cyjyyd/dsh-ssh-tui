@@ -8,7 +8,10 @@
  * HTTP, then assert the durable shapes this plugin renders and accounts from:
  *
  *   - `assistant/message`: `stream` frames (chunk/text-chunks), `usage`
- *     counters, and the `eventAt`/`seq` envelope used for TTFT and tok/s;
+ *     counters, and the `eventAt`/`seq` envelope used for TTFT and tok/s —
+ *     except on 0.1.2, which keeps the chunks as separate `assistant/chunk`
+ *     and `text-chunks` events (that is the replay path the plugin reads
+ *     there, and the log is `session.jsonl.zstd` instead of `session.v3…`);
  *   - the session event stream (`turn`/`step` framing) that `--resume` replays;
  *   - the settings API surface this plugin installs its section through.
  *
@@ -27,6 +30,10 @@ import { installSettingsSection, settingsNamespace } from '../lib/dsh-compat.js'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+/** The host line this checkout installed (the CI matrix changes it). */
+const DSH_VERSION = require('@deepseek-ai/dsh/package.json').version
+/** 0.1.2 writes `session.jsonl.zstd` and keeps chunks as their own events. */
+const LEGACY_CHUNK_LOG = DSH_VERSION.startsWith('0.1.2')
 
 /** Run one headless turn against `baseURL` and return what the host logged. */
 async function runHeadlessTurn({ baseURL, prompt, home }) {
@@ -58,7 +65,8 @@ async function sessionEvents(home) {
     for (const id of await readdir(join(root, project))) {
       const dir = join(root, project, id)
       const names = await readdir(dir)
-      const log = names.find(name => name.startsWith('session.v3.jsonl'))
+      // 0.1.5 writes session.v3.jsonl.zstd, 0.1.2 writes session.jsonl.zstd.
+      const log = names.find(name => /^session(\.v\d+)?\.jsonl/u.test(name))
       if (log === undefined) continue
       const raw = await readFile(join(dir, log))
       const text = await inflate(raw)
@@ -119,13 +127,30 @@ test('the host streams a reply with the durable shapes this plugin renders', { t
     assert.equal(typeof data.usage[field], 'number', `assistant/message.usage.${field} must stay a number`)
   }
 
-  // The packed stream is what TTFT and tok/s are reconstructed from on replay.
-  assert.equal(Array.isArray(data.stream), true, 'assistant/message.stream must stay an array')
-  const kinds = data.stream.map(frame => frame?.type)
-  assert.equal(kinds.includes('chunk'), true, 'the stream keeps chunk frames')
-  const chunk = data.stream.find(frame => frame?.type === 'chunk')
-  assert.equal(typeof chunk.time, 'number', 'chunk frames carry a timestamp')
-  assert.equal(typeof chunk.chunk?.type, 'string', 'chunk payloads stay discriminated by type')
+  if (LEGACY_CHUNK_LOG) {
+    // 0.1.2: the chunks are their own durable events. `assistant/chunk` frames
+    // the block boundaries, `text-chunks` packs the token deltas that TTFT and
+    // tok/s are rebuilt from on `--resume`.
+    assert.equal(data.stream, undefined, '0.1.2 keeps chunks out of assistant/message')
+    const chunks = events.filter(event => event.type === 'assistant/chunk')
+    assert.ok(chunks.length > 0, '0.1.2 logs assistant/chunk events')
+    assert.equal(typeof chunks[0].seq, 'number')
+    assert.equal(typeof chunks[0].time, 'number')
+    assert.equal(typeof chunks[0].data.chunk?.type, 'string', 'chunk payloads stay discriminated by type')
+    const packed = events.find(event => event.type === 'text-chunks')
+    assert.ok(packed !== undefined, '0.1.2 logs text-chunks events')
+    assert.equal(typeof packed.seq0, 'number')
+    assert.equal(typeof packed.time0, 'number')
+    assert.equal(Array.isArray(packed.data.texts), true, 'text-chunks keeps the delta texts')
+  } else {
+    // 0.1.5+: one packed `stream` on the settled message.
+    assert.equal(Array.isArray(data.stream), true, 'assistant/message.stream must stay an array')
+    const kinds = data.stream.map(frame => frame?.type)
+    assert.equal(kinds.includes('chunk'), true, 'the stream keeps chunk frames')
+    const chunk = data.stream.find(frame => frame?.type === 'chunk')
+    assert.equal(typeof chunk.time, 'number', 'chunk frames carry a timestamp')
+    assert.equal(typeof chunk.chunk?.type, 'string', 'chunk payloads stay discriminated by type')
+  }
 
   // Turn/step framing is what groups rows and attributes stats.
   const turnStart = events.find(event => event.type === 'turn/start')

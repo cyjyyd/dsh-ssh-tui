@@ -20,14 +20,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Pin @deepseek-ai/dsh-* devDependencies to ${{ matrix.dsh }}
+      - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
         if: matrix.dsh != '0.1.5-rc.1'
         run: |
           node -e "
             const fs = require('node:fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            // The CLI itself is '@deepseek-ai/dsh' (no trailing dash). Missing it
+            // left every leg on the newest CLI: a caret prerelease range such as
+            // '^0.1.5-rc.1' resolves to the 'latest' tag (rc.1), not to the
+            // highest satisfying version (rc.2) — so the rc.2 leg ran rc.1 and
+            // the 0.1.2 leg ran a mixed tree.
+            const hostPackage = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
             for (const name of Object.keys(pkg.devDependencies)) {
-              if (name.startsWith('@deepseek-ai/dsh-')) pkg.devDependencies[name] = '${{ matrix.dsh }}';
+              if (hostPackage(name)) pkg.devDependencies[name] = '${{ matrix.dsh }}';
             }
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "

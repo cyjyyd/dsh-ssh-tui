@@ -59,8 +59,6 @@ import {
   waitForDisplaySock,
 } from './display-sock.js'
 import {
-  ATTACH_RECOVERY_WINDOW_MS,
-  attachPeerVanished,
   createAttacher,
   HOST_START_TIMEOUT_MS,
 } from './attach.js'
