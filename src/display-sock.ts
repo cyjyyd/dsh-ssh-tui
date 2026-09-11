@@ -22,7 +22,7 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { findCursorPositionReply } from './paint.js'
+import { findCursorPositionReply, probeRttWithRetry } from './paint.js'
 import { dirname, join, resolve } from 'node:path'
 
 export const FRAME_STDIN = 1
@@ -35,14 +35,36 @@ export const FRAME_RTT = 6
 const MAX_FRAME = 1024 * 1024
 const DSR_PROBE_TIMEOUT_MS = 800
 
-/** CSI 6n round-trip on this TTY. Must run before stdin is forwarded to the Host. */
+/** How many times the relay asks the terminal for its cursor position. */
+const RTT_PROBE_ATTEMPTS = 2
+/** Pause before asking again; the reattach repaint has usually settled by then. */
+const RTT_PROBE_RETRY_MS = 250
+
+/**
+ * CSI 6n round-trip on this TTY. Must run before stdin is forwarded to the Host.
+ * Retries once: a reattach paints the whole screen immediately, and a terminal
+ * busy with that flood can miss the first 800 ms window — the Host would then be
+ * told "unknown" and the footer chip sat on four hollow circles for the session.
+ */
 async function probeLocalRttMs(
   stdin: NodeJS.ReadStream = process.stdin,
   stdout: NodeJS.WriteStream = process.stdout,
   timeoutMs = DSR_PROBE_TIMEOUT_MS,
 ): Promise<number | undefined> {
   if (!stdin.isTTY || !stdout.isTTY) return undefined
-  return await new Promise(resolve => {
+  return await probeRttWithRetry(
+    () => probeLocalRttOnce(stdin, stdout, timeoutMs),
+    RTT_PROBE_ATTEMPTS,
+    RTT_PROBE_RETRY_MS,
+  )
+}
+
+function probeLocalRttOnce(
+  stdin: NodeJS.ReadStream,
+  stdout: NodeJS.WriteStream,
+  timeoutMs: number,
+): Promise<number | undefined> {
+  return new Promise(resolve => {
     let buffer = ''
     let settled = false
     const started = Date.now()
@@ -578,6 +600,31 @@ export interface SpawnedHost {
   errFile?: string
   /** Exit watch so a Host that dies before listening is reported at once. */
   exitWatch: HostExitWatch
+}
+
+/**
+ * Keep the terminal quiet while the launcher retries or waits for a Host.
+ *
+ * Between attempts the TTY is back in cooked mode, so a DSR reply still in
+ * flight from the previous probe is echoed to the screen as `^[[17;1R`-style
+ * garbage. Raw mode plus a drain swallows those bytes instead: they are either
+ * stale replies or keys typed before any display existed, and neither should
+ * reach the shell.
+ */
+export function quietTerminalInput(stdin: NodeJS.ReadStream = process.stdin): number {
+  let dropped = 0
+  try {
+    stdin.setRawMode?.(true)
+    stdin.resume()
+    for (;;) {
+      const chunk = stdin.read() as Buffer | null
+      if (chunk === null) break
+      dropped += chunk.length
+    }
+  } catch {
+    // A dying TTY cannot be quieted; nothing to do.
+  }
+  return dropped
 }
 
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */

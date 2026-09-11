@@ -59,6 +59,7 @@ import {
 } from './session-lock.js'
 import {
   isTuiHostProcess,
+  quietTerminalInput,
   resolveDshHome,
   runDisplayRelay,
   spawnDetachedHost,
@@ -162,6 +163,7 @@ export function apply(ctx: Context, config: Config): void {
       if (recover && result.reason === 'host-closed' && Date.now() - startedAt < ATTACH_RECOVERY_WINDOW_MS) {
         // Accepted, then closed with no goodbye: the Host we reached was on
         // its way out. A second manual attempt used to be the only way in.
+        quietTerminalInput()
         await recoverAttach(sessionId)
         return
       }
@@ -171,16 +173,24 @@ export function apply(ctx: Context, config: Config): void {
     }
 
     /**
-     * Give a Host that was mid-dispose a moment to finish (its lock and socket
-     * disappear), then take the normal path again: attach to whatever is left,
-     * or start a fresh Host from the session log.
+     * Wait out a Host that was mid-dispose, then take the normal path again.
+     *
+     * The wait keys on the lock disappearing instead of on "attachable": a
+     * dying Host still accepts TCP/pipe connections for a moment (that is
+     * exactly how the first attempt failed), and re-attaching to it or racing
+     * it for the session lock only produces a second failure.
      */
     const recoverAttach = async (sessionId: string): Promise<void> => {
-      process.stderr.write(`${t('attach.recovering', { session: sessionId })}\n`)
+      // Transparent by default: the retry is part of a normal reconnect, and a
+      // status line here only adds noise (and rows) to the screen the user is
+      // about to get back. DSH_TUI_DEBUG=1 keeps it for troubleshooting.
+      if (process.env.DSH_TUI_DEBUG === '1') {
+        process.stderr.write(`${t('attach.recovering', { session: sessionId })}\n`)
+      }
       const deadline = Date.now() + ATTACH_RECOVERY_WAIT_MS
-      while (Date.now() < deadline) {
+      for (;;) {
         const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
-        if (live === undefined || live.kind === 'attachable') break
+        if (live === undefined || Date.now() >= deadline) break
         await new Promise(resolve => setTimeout(resolve, 150))
       }
       await spawnHostAndRelay(sessionId, false)
@@ -196,6 +206,9 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(t('attach.zombie', { session: sessionId, pid: live.lock.pid }))
       }
       const spawned = spawnDetachedHost(sessionId)
+      // The Host boots with the TTY in cooked mode: quiet it first so a reply
+      // still in flight (or a keystroke) cannot be echoed over the boot splash.
+      quietTerminalInput()
       try {
         await waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile, spawned.exitWatch)
       } finally {

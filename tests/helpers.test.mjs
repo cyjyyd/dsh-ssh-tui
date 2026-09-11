@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
+import { quietTerminalInput } from '../lib/display-sock.js'
 setLocale('zh')
 
 import {
@@ -3607,4 +3608,63 @@ test('a reconnect during the hangup window keeps the Host alive', async () => {
   tui.displayDetached = true
   await tui.handleHangup()
   assert.deepEqual(exits, [129])
+})
+
+// A reattach whose probe misses its window reports "unknown"; blanking a
+// measurement we already have is what turned the footer chip into four hollow
+// circles after every auto-reconnect.
+test('the link chip keeps its measurement when a reattach cannot re-measure', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session', options: {}, status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } }, cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.applyProbedRtt(90)
+  assert.equal(tui.paintProbed, true)
+  assert.equal(tui.paintRttMs, 90)
+  tui.applyProbedRtt(undefined)
+  assert.equal(tui.paintProbed, true, 'a known link stays known')
+  assert.equal(tui.paintRttMs, 90)
+  tui.applyProbedRtt(40)
+  assert.equal(tui.paintRttMs, 40, 'a fresh measurement wins')
+  // A link that was never measured still reports unknown.
+  const fresh = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  fresh.applyProbedRtt(undefined)
+  assert.equal(fresh.paintProbed, false)
+})
+
+// Between attempts the TTY is cooked again and an in-flight DSR reply is echoed
+// as `^[[17;1R` garbage; raw mode plus a drain swallows it.
+test('quietTerminalInput turns echo off and drops queued bytes', async () => {
+  const { PassThrough } = await import('node:stream')
+  const stdin = new PassThrough()
+  stdin.isTTY = true
+  const modes = []
+  stdin.setRawMode = (value) => { modes.push(value); return stdin }
+  stdin.write('\x1b[17;1R')
+  const dropped = quietTerminalInput(stdin)
+  assert.equal(modes[0], true, 'raw mode first, then read')
+  assert.equal(dropped, 7, 'the queued reply is consumed')
+  assert.equal(stdin.read(), null, 'the queue is empty afterwards')
+  stdin.destroy()
+})
+
+test('probeTerminalRttMs retries a missed window', async () => {
+  const { EventEmitter } = await import('node:events')
+  const stdin = new EventEmitter()
+  stdin.isTTY = true
+  let probes = 0
+  const stdout = {
+    isTTY: true,
+    write: () => {
+      probes += 1
+      // Answer only the second request: the first window is missed on purpose.
+      if (probes === 2) setTimeout(() => stdin.emit('data', Buffer.from('\x1b[3;4R')), 5)
+      return true
+    },
+  }
+  const rtt = await probeTerminalRttMs(stdin, stdout, 40)
+  assert.equal(probes, 2, 'the probe asked twice')
+  assert.equal(typeof rtt, 'number', 'the retry produced a measurement')
 })

@@ -1968,6 +1968,10 @@ export class SshTui {
   applyProbedRtt(rttMs: number | undefined): void {
     const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
     this.paintLink = 'ssh'
+    // A reattach whose probe missed its window reports "unknown"; the link has
+    // not changed, so dropping a measurement we already have just blanks the
+    // footer chip to four hollow circles. Keep it (the next attach re-measures).
+    if (rttMs === undefined && this.paintProbed && this.paintRttMs !== undefined) return
     this.paintProbed = rttMs !== undefined
     this.paintRttMs = rttMs
     if (!(Number.isFinite(envOverride) && envOverride > 0)) {

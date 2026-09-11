@@ -275,13 +275,39 @@ const PROBE_BUFFER_TAIL = 64
  * reply never arrives (dumb pipe, blocked DSR). Does not interpret the
  * coordinates — only the elapsed milliseconds matter.
  */
+/** Ask up to `attempts` times, pausing between misses. */
+export async function probeRttWithRetry(
+  run: () => Promise<number | undefined>,
+  attempts = 2,
+  delayMs = 250,
+): Promise<number | undefined> {
+  const tries = Math.max(1, attempts)
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    const measured = await run()
+    if (measured !== undefined) return measured
+    if (attempt + 1 < tries) await new Promise(resolve => setTimeout(resolve, delayMs))
+  }
+  return undefined
+}
+
 export async function probeTerminalRttMs(
   stdin: NodeJS.ReadStream = process.stdin,
   stdout: NodeJS.WriteStream = process.stdout,
   timeoutMs = DSR_PROBE_TIMEOUT_MS,
 ): Promise<number | undefined> {
   if (!stdin.isTTY || !stdout.isTTY) return undefined
-  return await new Promise(resolve => {
+  // Retried for the same reason the relay does it: a screen that is being
+  // repainted can make the terminal miss the first window, and one miss used to
+  // blank the footer's link chip to four hollow circles.
+  return await probeRttWithRetry(() => probeTerminalRttOnce(stdin, stdout, timeoutMs))
+}
+
+function probeTerminalRttOnce(
+  stdin: NodeJS.ReadStream,
+  stdout: NodeJS.WriteStream,
+  timeoutMs: number,
+): Promise<number | undefined> {
+  return new Promise(resolve => {
     let buffer = ''
     let settled = false
     const started = Date.now()

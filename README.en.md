@@ -249,7 +249,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   when a session is replayed on `--resume` — from the durable `assistant/chunk`
   events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
   on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
-- Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically; and the picker holds its list until session titles are inspected, so raw session ids never appear in the first frame.
+- Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically — silently, with the TTY kept in raw mode and queued bytes dropped so a stale cursor reply is never echoed as `^[[17;1R`; and a probe that misses its window is retried while the Host keeps the last measurement, so the footer chip does not fall back to four hollow circles.
 - Subagent route: the identity row always carries `sub:<model>` — the route
   every child inherits — suffixed with the effort when `/subeffort` set one,
   and prefixed with the provider when `settings.yaml` pinned one
