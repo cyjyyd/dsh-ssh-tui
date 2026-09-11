@@ -57,7 +57,8 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
-import { detachFromSshSession, DisplayHost, resolveDshHome, sessionSockPath } from './display-sock.js'
+import { collectDiag, formatDiag } from './diag.js'
+import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
   getLocale,
@@ -743,6 +744,23 @@ function dshHomeDir(): string {
   return resolveDshHome()
 }
 
+/**
+ * Version of the host packages this process booted from, for `/diag`. Resolved
+ * from the running plugin's own tree, so it reports what is actually loaded
+ * rather than what is installed elsewhere.
+ */
+function hostDshVersion(): string {
+  for (const id of ['@deepseek-ai/dsh-agent/package.json', '@deepseek-ai/dsh/package.json']) {
+    try {
+      const parsed = createRequire(import.meta.url)(id) as { version?: unknown }
+      if (typeof parsed.version === 'string') return parsed.version
+    } catch {
+      // try the next candidate
+    }
+  }
+  return 'unknown'
+}
+
 function displayDshPath(file: string): string {
   const home = dshHomeDir()
   if (IS_WINDOWS) {
@@ -879,6 +897,7 @@ const LOCAL_COMMANDS = [
   { name: 'exit', key: 'cmd.quit', aliasOf: 'quit' },
   { name: 'clear', key: 'cmd.clear' },
   { name: 'status', key: 'cmd.status' },
+  { name: 'diag', key: 'cmd.diag' },
   { name: 'disconnect', key: 'cmd.disconnect' },
   { name: 'approval', key: 'cmd.approval' },
   { name: 'view', key: 'cmd.view' },
@@ -1777,6 +1796,28 @@ export class SshTui {
     const host = this.displayHost
     this.displayHost = undefined
     if (host !== undefined) await host.close()
+  }
+
+  /**
+   * `/diag`: collect the local facts about this session's channel, lock, and
+   * Host, then print the decision chain. Everything is local; nothing is sent
+   * anywhere (see the privacy note in the README).
+   */
+  private async runDiagCommand(): Promise<void> {
+    const snapshot = await collectDiag({
+      sessionId: String(this.agent.id),
+      pluginVersion: PLUGIN_VERSION,
+      hostVersion: hostDshVersion(),
+      hostProcess: isTuiHostProcess(),
+      link: {
+        kind: this.paintLink === 'ssh' ? 'ssh' : 'local',
+        ...(this.paintRttMs === undefined ? {} : { rttMs: this.paintRttMs }),
+        probeState: this.paintProbed ? 'measured' : this.paintLink === 'ssh' ? 'unknown' : 'unprobed',
+      },
+      ...(this.paintIntervalMs === undefined ? {} : { paintIntervalMs: this.paintIntervalMs }),
+    })
+    this.pushRow({ kind: 'system', text: formatDiag(snapshot).join('\n') })
+    this.markDirty()
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
@@ -7525,6 +7566,12 @@ export class SshTui {
           })
           this.pushRow({ kind: 'system', text: lines.join('\n') })
         }
+        break
+      case 'diag':
+        void this.runDiagCommand().catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.markDirty()
+        })
         break
       case 'usage':
       case 'balance':

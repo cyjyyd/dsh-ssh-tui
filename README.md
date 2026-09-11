@@ -263,7 +263,7 @@ dsh --profile tui --no-color
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
 斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
-`/status`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
+`/status`、`/diag`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
 `ssh-tui.view`。极简对齐 Codex：藏思考，按「回复 → 已调用 N 个工具 → 已编辑 N 个文件 →
@@ -463,6 +463,12 @@ npm run build
   不再回显；探测失败会自动补测一次，Host 侧也不会用"未知"覆盖已知测量。
 - **resume 选择器第一批列表出现不认识的会话**：第一轮列表是"骨架"（活着的 Host 只拿会话 id 当标题）。
   现在列表压到标题读出来之后再画：期间显示「正在读取历史会话…」，标题全空时最终列表仍会画出以便选择。
+- **要给支持者一份可读的排障信息**：在会话里敲 `/diag`。它只读本地信息、不外传，输出
+  插件/dsh/node 版本、平台、会话 id、当前进程是启动器还是后台 Host、`DSH_HOME`、显示通道地址与
+  可连接性（含"残留 socket 文件"判定）、Host 的 pid/身份核对/锁状态/agent 状态、锁文件路径、
+  链路 RTT 与绘制间隔、会话日志格式与大小、本机其它会话的锁，最后是**判定链**——例如
+  "会接入后台 Host（pid N），不要另起第二个窗口"、"pid 被回收成别的程序"、
+  "通道上留着不响应的 socket 文件，这正是第一次接 EPIPE 的来源"。报 issue 时贴这段即可。
 - **TUI 里进得去、Web 里打不开同一个会话**：会话的写锁（`session.lock`）是内核锁，同时只允许一个写者。
   SSH 断开时那个还在跑轮的 Host 会留着锁，于是 Web 端打开时报
   `resume failed for session "…" is already owned by an active write handle`——从 0.5.10 起

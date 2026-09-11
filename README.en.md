@@ -257,6 +257,14 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
   on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
 - Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically — silently, with the TTY kept in raw mode and queued bytes dropped so a stale cursor reply is never echoed as `^[[17;1R`; and a probe that misses its window is retried while the Host keeps the last measurement, so the footer chip does not fall back to four hollow circles.
+- Reporting a problem: `/diag` prints a local, read-only snapshot — plugin/dsh/node
+  versions, platform, session id, whether this process is the launcher or the detached
+  Host, `DSH_HOME`, the display channel address and whether it answers (including the
+  leftover-socket-file verdict), the Host pid/identity/lock state, the lock file path, link
+  RTT and paint interval, the session log format and size, other locks on the machine, and
+  a **verdict chain** ("attaches to the leftover Host (pid N), do not open a second
+  window", "the pid was recycled", "a leftover socket file that does not answer — the
+  source of the first-attach EPIPE"). Nothing leaves the machine; paste it into an issue.
 - Leftover Host lifetime: the write lock a dropped-but-still-running Host holds is what makes the Web UI refuse the same session (`resume failed for session … is already owned by an active write handle`), and a drop that raced a reattach used to leave the honored-reattach flag set, so the *next* drop was ignored and the session lock kept its stale state. The flag is cleared once a turn runs again, and once the turn the Host stayed for settles it exits within `DSH_TUI_IDLE_EXIT_MS` (default 60s, `0` disables) instead of holding the session for six hours.
 - Subagent route: the identity row always carries `sub:<model>` — the route
   every child inherits — suffixed with the effort when `/subeffort` set one,
