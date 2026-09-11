@@ -59,6 +59,16 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
+import {
+  archiveStalePlans,
+  boundTranscriptRows,
+  findLivePlanRow,
+  findMergeableToolRow,
+  findToolRowByCallId,
+  mergeToolCard,
+  planShouldDefaultExpand,
+  windowTranscript,
+} from './rows.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
 import {
   applySavedLocale,
@@ -720,7 +730,6 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 const QUESTION_OPTION_KEYS = '123456789abcdefghijklmnopqrstuvwxyz'
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
-const MAX_TRANSCRIPT_ROWS = 5000
 const IS_WINDOWS = process.platform === 'win32'
 
 function dshHomeDir(): string {
@@ -2114,52 +2123,28 @@ export class SshTui {
       diff?: ToolDiffHunk[]
     },
   ): void {
-    const ids = previous.mergedCallIds ?? [previous.callId]
-    if (!ids.includes(previous.callId)) ids.push(previous.callId)
-    if (!ids.includes(next.callId)) ids.push(next.callId)
-    previous.mergedCallIds = ids
-    previous.callId = next.callId
-    previous.name = next.name
-    previous.args = next.args
-    if (next.title !== '') previous.title = next.title
-    if (next.summary !== '') previous.summary = next.summary
-    if (next.diff !== undefined && next.diff.length > 0) {
-      previous.diff = (previous.repeats ?? 1) > 1 && previous.diff !== undefined && previous.diff.length > 0
-        ? [...previous.diff, ...next.diff]
-        : next.diff
-    }
-    previous.status = 'running'
-    previous.output = ''
-    previous.exitCode = undefined
-    previous.signal = undefined
-    previous.repeats = (previous.repeats ?? 1) + 1
-    if (!this.replaying) previous.flipUntil = Date.now() + TOOL_FLIP_MS
+    mergeToolCard(previous, next, Date.now(), this.replaying)
   }
 
   private findToolRowByCallId(callId: string): Extract<Row, { kind: 'tool' }> | undefined {
-    return this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
-      candidate.kind === 'tool'
-      && (candidate.callId === callId || candidate.mergedCallIds?.includes(callId) === true))
+    return findToolRowByCallId(this.rows, callId)
   }
 
   private findMergeableToolRow(next: { name: string; args: string }): Extract<Row, { kind: 'tool' }> | undefined {
-    const previous = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'tool' }> =>
-      candidate.kind === 'tool')
-    return canMergeToolCall(previous, next) ? previous : undefined
+    return findMergeableToolRow(this.rows, next)
   }
 
   /** Append one transcript row, bounding memory on long sessions. */
   private pushRow(row: Row): void {
     this.rows.push(row)
-    if (this.rows.length > MAX_TRANSCRIPT_ROWS) {
-      const removed = this.rows.length - MAX_TRANSCRIPT_ROWS
-      if (this.focusedRow !== null
-        && this.focusedRow.kind !== 'streaming-reasoning'
-        && this.rows.indexOf(this.focusedRow) < removed) {
-        this.focusedRow = null
-      }
-      this.rows.splice(0, removed)
-    }
+    // Locate the focused card before trimming: after the splice every surviving
+    // index shifts down and a stale index would clear the focus by accident.
+    const focusedIndex = this.focusedRow === null || this.focusedRow.kind === 'streaming-reasoning'
+      ? undefined
+      : this.rows.indexOf(this.focusedRow)
+    const removed = boundTranscriptRows(this.rows)
+    if (removed === 0) return
+    if (focusedIndex !== undefined && focusedIndex < removed) this.focusedRow = null
   }
 
   /** The transcript rows that support per-row expand/collapse. */
@@ -2242,32 +2227,18 @@ export class SshTui {
     }
   }
 
-  private planShouldDefaultExpand(plan: Extract<Row, { kind: 'plan' }>): boolean {
-    return plan.active === true
-      || plan.pending === true
-      || plan.todos.some(item => item.status === 'in_progress')
-  }
-
   private findSubagentRow(sessionId: string): Extract<Row, { kind: 'subagent' }> | undefined {
     return this.rows.findLast((row): row is Extract<Row, { kind: 'subagent' }> =>
       row.kind === 'subagent' && row.sessionId === sessionId)
   }
 
   private findLivePlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
-    return this.rows.findLast((row): row is Extract<Row, { kind: 'plan' }> =>
-      row.kind === 'plan' && planIsLive(row))
+    return findLivePlanRow(this.rows)
   }
 
   /** Older / finished plans stay in the scrolling transcript. */
   private archiveStalePlans(keep?: Extract<Row, { kind: 'plan' }>): void {
-    for (const row of this.rows) {
-      if (row.kind !== 'plan' || row === keep) continue
-      if (row.archived === true) continue
-      row.archived = true
-      row.active = false
-      row.pending = false
-      row.expanded = false
-    }
+    archiveStalePlans(this.rows, keep)
   }
 
   private upsertPlanRow(patch: Partial<Extract<Row, { kind: 'plan' }>>): Extract<Row, { kind: 'plan' }> {
@@ -2285,7 +2256,7 @@ export class SshTui {
       if (!planIsLive(existing)) {
         existing.archived = true
         existing.expanded = false
-      } else if (patch.expanded === undefined && this.planShouldDefaultExpand(existing)) {
+      } else if (patch.expanded === undefined && planShouldDefaultExpand(existing)) {
         existing.expanded = true
       }
       this.archiveStalePlans(planIsLive(existing) ? existing : undefined)
@@ -2297,19 +2268,16 @@ export class SshTui {
       existing.pending = false
       existing.expanded = false
     }
+    const active = patch.active ?? false
+    const pending = patch.pending ?? false
+    const todos = patch.todos ?? []
     const row: Extract<Row, { kind: 'plan' }> = {
       kind: 'plan',
-      active: patch.active ?? false,
-      pending: patch.pending ?? false,
-      todos: patch.todos ?? [],
+      active,
+      pending,
+      todos,
       ...(patch.planMarkdown === undefined ? {} : { planMarkdown: patch.planMarkdown }),
-      expanded: this.planShouldDefaultExpand({
-        kind: 'plan',
-        active: patch.active ?? false,
-        pending: patch.pending ?? false,
-        todos: patch.todos ?? [],
-        expanded: false,
-      }),
+      expanded: planShouldDefaultExpand({ active, pending, todos }),
       archived: false,
     }
     this.pushRow(row)
@@ -3248,27 +3216,18 @@ export class SshTui {
     const inputDivider = this.styleLine('system', repeatToWidth('─', width))
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
     const available = Math.max(0, height - reserved - dialogLines.length)
-    const maxOffset = Math.max(0, display.length - available)
-    const reveal = this.pendingReveal
-    if (reveal !== undefined) {
-      this.pendingReveal = undefined
-      const first = displayRefs.findIndex(ref => ref === reveal)
-      if (first !== -1) {
-        let last = first
-        while (last + 1 < displayRefs.length && displayRefs[last + 1] === reveal) last += 1
-        const span = last - first + 1
-        this.scrollOffset = Math.max(0, display.length - available - first)
-      }
-    }
-    if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset
-    const start = Math.max(0, display.length - available - this.scrollOffset)
-    const visible = display.slice(start, start + available)
-    const visibleRefs = displayRefs.slice(start, start + available)
-    const padding = Math.max(0, available - visible.length)
-    for (let index = 0; index < padding; index++) {
-      visible.unshift('')
-      visibleRefs.unshift(undefined)
-    }
+    const window = windowTranscript({
+      lines: display,
+      refs: displayRefs,
+      available,
+      scrollOffset: this.scrollOffset,
+      reveal: this.pendingReveal,
+    })
+    this.pendingReveal = undefined
+    this.scrollOffset = window.scrollOffset
+    const start = window.start
+    const visible = window.visibleLines
+    const visibleRefs = window.visibleRefs
     this.clickableRows.clear()
     this.paintedLinkHitsByRow.clear()
     for (let index = 0; index < visibleRefs.length; index++) {
