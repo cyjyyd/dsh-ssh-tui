@@ -326,6 +326,22 @@ export async function listResumableSessionsProgressive(
   const inspectCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession> => {
     try {
       const inspection = await inspectPersistenceSession(persistence, meta.id)
+      // A `detached` slice (the writer is in this process and has not
+      // materialized the artifact yet) or an empty one is an unreadable log,
+      // never a blank session. Calling it blank made a listing delete a live
+      // session's directory; keep it visible and let resume report the truth.
+      if (inspection.eventState === 'detached' || inspection.events.length === 0) {
+        const cached = index.get(String(meta.id))
+        return {
+          id: meta.id,
+          label: cached?.label && cached.label !== '' ? cached.label : meta.id,
+          updatedAt: cached?.updatedAt ?? meta.createdAt,
+          cwd: meta.cwd ?? cached?.cwd ?? '',
+          hasUserInput: cached?.hasUserInput ?? false,
+          hasReply: cached?.hasReply ?? false,
+          unreadable: true,
+        }
+      }
       const last = inspection.events.at(-1) as { time?: number } | undefined
       const updatedAt = last?.time ?? meta.createdAt
       return {
@@ -397,20 +413,30 @@ export async function listResumableSessionsProgressive(
       }
       // A live Host whose session never saw input nor a reply is a crashed
       // boot: stop it, remove its artifacts, and keep it out of the picker.
+      // Only a positively read, materialized blank log counts. A failed or
+      // detached read is unknown — acting on it (SIGTERM + prune) removed a
+      // live session's directory before.
       let blankLive = false
-      let liveHasUserInput = true
+      let unreadableLive = false
+      let liveHasUserInput = false
       let liveLabel: string | undefined
       try {
         const inspection = await inspectPersistenceSession(persistence, host.sessionId)
-        const hasInput = inspection.events.some(event => isUserMessageEvent(event))
-        blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
-        liveHasUserInput = hasInput
-        // A Host that is running but absent from the header list still has a
-        // log; read its title rather than offering the user a raw uuid.
-        liveLabel = labelFromEvents(inspection.events)
+        const materialized = inspection.eventState !== 'detached' && inspection.events.length > 0
+        if (!materialized) {
+          unreadableLive = true
+        } else {
+          const hasInput = inspection.events.some(event => isUserMessageEvent(event))
+          blankLive = isBlankSession(hasInput, sessionHasReply(inspection.events))
+          liveHasUserInput = hasInput
+          // A Host that is running but absent from the header list still has a
+          // log; read its title rather than offering the user a raw uuid.
+          liveLabel = labelFromEvents(inspection.events)
+        }
       } catch {
-        blankLive = true
-        liveHasUserInput = false
+        // A read failure is not evidence of a blank boot either: keep the live
+        // Host attachable instead of killing it and pruning its log.
+        unreadableLive = true
       }
       if (blankLive) {
         blankLiveIds.add(host.sessionId)
@@ -424,8 +450,9 @@ export async function listResumableSessionsProgressive(
         label: liveLabel ?? host.sessionId,
         updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
         cwd: '',
-        hasUserInput: liveHasUserInput,
+        hasUserInput: liveHasUserInput || unreadableLive,
         hasReply: true,
+        ...(unreadableLive ? { unreadable: true } : {}),
         attach,
       }
       extraLive.set(host.sessionId, injected)

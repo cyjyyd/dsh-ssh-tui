@@ -393,8 +393,16 @@ export async function acquireSessionLock(
         existing = undefined
       }
       const ours = options.pid ?? process.pid
-      if (existing !== undefined && existing.pid !== ours && await lockOwnerIsAlive(existing)) {
-        throw new SessionLockHeldError(existing, path)
+      if (existing !== undefined && existing.pid !== ours) {
+        // An answering display is a live owner even when the recorded pid
+        // identity cannot be verified (a lock written inside another pid
+        // namespace, or a recycled pid): stealing it starts a second Host that
+        // dies on the session write handle.
+        const sock = existing.sock ?? sessionSockPath(existing.sessionId, dshHome)
+        const answered = await displaySockExists(sock)
+        if (answered || await lockOwnerIsAlive(existing)) {
+          throw new SessionLockHeldError(existing, path)
+        }
       }
       try {
         await unlink(path)
@@ -433,12 +441,15 @@ async function inspectHeldLock(
   dshHome: string,
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
   const sock = info.sock ?? sessionSockPath(info.sessionId, dshHome)
-  // A Windows named pipe is not a filesystem entry: fs.access() can never see
-  // it, so liveness must be probed with a connect (and it needs no unlink —
-  // Windows removes the pipe when the owning process exits). A reachable pipe
-  // also proves the owner is alive, so the pid identity probe can be skipped.
-  const sockExists = await displaySockExists(sock)
-  const alive = (isPipePath(sock) && sockExists) || await lockOwnerIsAlive(info)
+  // `displaySockExists` is a real connect probe on every platform (a leftover
+  // file never answers), so an answering channel proves that a Host owns this
+  // session right now — stronger evidence than the recorded pid identity,
+  // which cannot be verified across pid namespaces and can be recycled.
+  // Declaring an answering Host stale used to report "no live process", delete
+  // its lock and socket, and leave the next Host dying on the session write
+  // handle ("already owned by an active write handle").
+  const sockAnswers = await displaySockExists(sock)
+  const alive = sockAnswers || await lockOwnerIsAlive(info)
   if (!alive) {
     // Host is gone. A leftover unix socket is not attachable — steal the
     // lock so --resume can reopen from the session log, and remove the dead
@@ -459,7 +470,7 @@ async function inspectHeldLock(
     }
     return undefined
   }
-  if (!sockExists) return { kind: 'zombie', lock: info, path, sock }
+  if (!sockAnswers) return { kind: 'zombie', lock: info, path, sock }
   return { kind: 'attachable', lock: info, path, sock }
 }
 

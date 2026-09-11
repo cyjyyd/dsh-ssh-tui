@@ -166,6 +166,78 @@ test('blank attachable hosts are stopped and kept out of the picker', async () =
   }
 })
 
+test('a live host whose log cannot be read is kept, never killed or pruned', async () => {
+  const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-live-unreadable-'))
+  const id = 'live-unreadable'
+  mkdirSync(join(dir, id), { recursive: true })
+  writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  const persistence = {
+    list: async () => [],
+    inspect: async () => { throw new Error('corrupt session log: seq gap') },
+    locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+  const killed = []
+  const originalKill = process.kill
+  process.kill = (pid, signal) => { killed.push(pid); return true }
+  try {
+    const listed = await listResumableSessions(persistence, '', async () => [
+      { sessionId: id, lock: { pid: 424242, startedAt: new Date().toISOString(), state: 'running-detached' }, sock: '/tmp/nope.sock' },
+    ])
+    assert.deepEqual(listed.map(item => item.id), [id])
+    assert.equal(listed[0].unreadable, true)
+    assert.equal(listed[0].attach?.pid, 424242)
+    assert.deepEqual(killed, [], 'a read failure is not evidence of a blank boot')
+    assert.equal(existsSync(join(dir, id)), true, 'nothing may be pruned on a failed read')
+  } finally {
+    process.kill = originalKill
+  }
+})
+
+test('a detached read is unreadable, not blank: the log is not pruned', async () => {
+  const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-detached-'))
+  const id = 'detached-live'
+  mkdirSync(join(dir, id), { recursive: true })
+  writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
+  const persistence = {
+    list: async () => [header(id, 500)],
+    inspect: async () => ({ events: [], eventState: 'detached', meta: header(id, 500) }),
+    locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  await new Promise(resolve => setTimeout(resolve, 60)) // 删除是 best-effort 异步
+  assert.deepEqual(listed.map(item => item.id), [id])
+  assert.equal(listed[0].unreadable, true)
+  assert.equal(existsSync(join(dir, id)), true, 'an unmaterialized read must not delete artifacts')
+})
+
+test('a read handle without read() is unreadable, not blank', async () => {
+  const id = 'no-read-api'
+  const persistence = {
+    list: async () => [header(id, 500)],
+    open: async () => ({ header: header(id, 500) }),
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  assert.deepEqual(listed.map(item => item.id), [id])
+  assert.equal(listed[0].unreadable, true)
+})
+
+test('an inspect() result without an events array is unreadable, not blank', async () => {
+  const id = 'no-events-field'
+  const persistence = {
+    list: async () => [header(id, 500)],
+    inspect: async () => ({ meta: header(id, 500) }),
+  }
+  const listed = await listResumableSessions(persistence, '', async () => [])
+  assert.deepEqual(listed.map(item => item.id), [id])
+  assert.equal(listed[0].unreadable, true)
+})
+
 test('picker label prefers the persisted title so web and TUI agree', async () => {
   const withTitle = readableSession('titled', 400)
   withTitle.events.splice(5, 0, { type: 'session/title', seq: 6, time: 400, data: { title: '生成标题：修复绘制残留' } })

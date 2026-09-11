@@ -168,6 +168,13 @@ export interface SessionInspectionLike {
   events: readonly unknown[]
   meta?: SessionHeaderLike
   header?: SessionHeaderLike
+  /**
+   * Backend state for the slice. `detached` means the backend never
+   * materialized a physical artifact (the writer is in this process and has
+   * not flushed yet), so `events: []` says nothing about whether the session
+   * is blank. Callers must not delete artifacts on a `detached` read.
+   */
+  eventState?: string
 }
 
 function asHeader(value: unknown): SessionHeaderLike | undefined {
@@ -214,23 +221,44 @@ export async function inspectPersistenceSession(
   }
   if (typeof host.inspect === 'function') {
     const inspection = await host.inspect(id)
-    const events = (inspection as { events?: readonly unknown[] } | undefined)?.events ?? []
-    return { events, meta: asHeader(inspection), header: asHeader(inspection) }
+    const events = (inspection as { events?: readonly unknown[] } | undefined)?.events
+    if (!Array.isArray(events)) {
+      // Reporting an absent log as an empty one used to look like a blank
+      // session, and the picker deleted the session's artifacts on that
+      // verdict. An unreadable log stays visible instead.
+      throw new Error('dsh-session-persistence: inspect() returned no readable event log')
+    }
+    const state = (inspection as { eventState?: unknown } | undefined)?.eventState
+    return {
+      events,
+      meta: asHeader(inspection),
+      header: asHeader(inspection),
+      ...(typeof state === 'string' ? { eventState: state } : {}),
+    }
   }
   if (typeof host.open !== 'function') {
     throw new Error('dsh-session-persistence: neither inspect nor open is available')
   }
   const handle = await host.open(id, 'read') as {
     header?: SessionHeaderLike
-    read?: (offset?: number, length?: number) => Promise<{ events?: readonly unknown[] }>
+    read?: (offset?: number, length?: number) => Promise<{ events?: readonly unknown[]; eventState?: string }>
     close?: () => Promise<void>
   }
   try {
-    const slice = typeof handle.read === 'function' ? await handle.read() : { events: [] }
+    if (typeof handle.read !== 'function') {
+      // The old fallback answered `{ events: [] }` here: a compat gap turned
+      // into "this session is blank" and the picker pruned a live log.
+      throw new Error('dsh-session-persistence: read handle exposes no read(); refusing to report an empty log')
+    }
+    const slice = await handle.read()
+    if (slice === null || typeof slice !== 'object' || !Array.isArray(slice.events)) {
+      throw new Error('dsh-session-persistence: read handle returned no readable event log')
+    }
     return {
-      events: slice.events ?? [],
+      events: slice.events,
       header: handle.header,
       meta: handle.header,
+      ...(typeof slice.eventState === 'string' ? { eventState: slice.eventState } : {}),
     }
   } finally {
     if (typeof handle.close === 'function') {

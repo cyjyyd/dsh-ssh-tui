@@ -217,14 +217,48 @@ test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posi
   await rm(sock)
   assert.equal((await inspectLiveHost(sid, home))?.kind, 'zombie', 'alive Host without socket stays zombie')
 
-  // same pid but a foreign boot identity (recycled pid / cross-namespace) → stale.
+  // A foreign boot identity alone must not kill an answering Host: the channel
+  // is live proof. Judging it stale made the picker report "no live process",
+  // delete the lock and socket, and the next Host died on the session write
+  // handle ("already owned by an active write handle").
   const server2 = await listenOn(sock)
   t.after(() => new Promise(resolve => server2.close(resolve)))
   await writeFile(lockPath, lockJson(sid, host.pid, sock, {
     bootId: '00000000-0000-0000-0000-000000000000', pidStart: '1',
   }))
-  assert.equal(await inspectLiveHost(sid, home), undefined, 'foreign identity must be stolen')
+  assert.equal(
+    (await inspectLiveHost(sid, home))?.kind,
+    'attachable',
+    'an answering channel wins over an unverifiable identity',
+  )
+  assert.equal(existsSync(lockPath), true, 'the live lock is kept')
+  await new Promise(resolve => server2.close(resolve))
+
+  // With nothing answering, the same foreign identity is stale: steal the lock
+  // and remove the dead directory entry.
+  await writeFile(sock, '')
+  assert.equal(await inspectLiveHost(sid, home), undefined, 'foreign identity with a dead channel is stolen')
   assert.equal(existsSync(sock), false, 'stale socket removed too')
+})
+
+test('acquire does not steal a lock whose display still answers', posixOnly, async t => {
+  const home = await makeHome(t)
+  const sid = 'main-session-answering'
+  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  const host = spawnHost(sid)
+  t.after(() => host.kill('SIGKILL'))
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const server = await listenOn(sock)
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  // The recorded identity cannot be verified, but the channel answers.
+  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, host.pid, sock, {
+    bootId: '00000000-0000-0000-0000-000000000000', pidStart: '1',
+  }))
+  await assert.rejects(
+    () => acquireSessionLock(sid, { pid: process.pid, dshHome: home }),
+    error => error instanceof SessionLockHeldError && error.lock.pid === host.pid,
+    'a live channel must block acquisition even when the identity cannot be verified',
+  )
 })
 
 test('acquire steals a stale old-format lock and records identity on the new lock', posixOnly, async t => {
