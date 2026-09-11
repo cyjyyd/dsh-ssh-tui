@@ -369,9 +369,18 @@ async function listenOn(t, sessionId) {
 }
 
 /** Collect stdin frames and answer the handshake like a real Host. */
-function fakeHost(server, onFrame) {
+function fakeHost(server, onFrame, t) {
   const state = { sawHello: false, stdin: [], socket: undefined }
+  const open = new Set()
+  // A real Host hangs up every connection when it exits; a fake one that leaves
+  // its sockets open keeps the test process (and so `npm test`) alive after the
+  // last assertion — `server.close()` alone waits for open sockets forever.
+  t?.after(() => {
+    for (const socket of open) socket.destroy()
+  })
   server.on('connection', socket => {
+    open.add(socket)
+    socket.on('close', () => open.delete(socket))
     const reader = new FrameReader()
     socket.on('data', chunk => {
       let frames
@@ -397,7 +406,7 @@ function fakeHost(server, onFrame) {
 test('the relay filters replies end to end and never loses a keystroke', { timeout: 10_000 }, async t => {
   const { path } = await listenOn(t, 'relay-filter')
   const server = createServer(() => {})
-  const host = fakeHost(server)
+  const host = fakeHost(server, undefined, t)
   await new Promise(resolve => server.listen(path, resolve))
   t.after(() => server.close())
 
@@ -430,7 +439,7 @@ test('the relay filters replies end to end and never loses a keystroke', { timeo
 test('typing captured before the relay existed reaches the Host', { timeout: 10_000 }, async t => {
   const { path } = await listenOn(t, 'relay-seed')
   const server = createServer(() => {})
-  const host = fakeHost(server)
+  const host = fakeHost(server, undefined, t)
   await new Promise(resolve => server.listen(path, resolve))
   t.after(() => server.close())
   const terminal = scriptedTerminal({ replyDelayMs: 5 })
@@ -453,7 +462,7 @@ test('a replaced relay reports it instead of re-attaching', { timeout: 10_000 },
   const server = createServer(() => {})
   const host = fakeHost(server, (frame, socket) => {
     if (frame.type === FRAME_HELLO) socket.write(encodeFrame(FRAME_REPLACED))
-  })
+  }, t)
   await new Promise(resolve => server.listen(path, resolve))
   t.after(() => server.close())
   const terminal = scriptedTerminal({ replyDelayMs: 5 })
@@ -465,6 +474,16 @@ test('a replaced relay reports it instead of re-attaching', { timeout: 10_000 },
   })
   assert.equal(result.reason, 'replaced')
   assert.equal(host.sawHello, true)
+  // …and it hangs up. A relay that returns while its socket is still open keeps
+  // the launcher's event loop alive after the last frame (the `npm test` hang
+  // this assertion was born from), even though it must not write a byte.
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the replaced relay left its display link open')), 1_000)
+    host.socket.once('close', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
 })
 
 // The kicked window's link is usually the dead one (that is why the user is
@@ -480,7 +499,7 @@ test('an announced relay erases the status line before the first paint', { timeo
   const server = createServer(() => {})
   const host = fakeHost(server, (frame, socket) => {
     if (frame.type === FRAME_HELLO) socket.write(encodeFrame(FRAME_GOODBYE))
-  })
+  }, t)
   await new Promise(resolve => server.listen(path, resolve))
   t.after(() => server.close())
   const terminal = scriptedTerminal({ replyDelayMs: 5 })
@@ -500,7 +519,7 @@ test('a replaced relay leaves its terminal untouched', { timeout: 10_000 }, asyn
   const server = createServer(() => {})
   const host = fakeHost(server, (frame, socket) => {
     if (frame.type === FRAME_HELLO) socket.write(encodeFrame(FRAME_REPLACED))
-  })
+  }, t)
   await new Promise(resolve => server.listen(path, resolve))
   t.after(() => server.close())
   const terminal = scriptedTerminal({ replyDelayMs: 5 })

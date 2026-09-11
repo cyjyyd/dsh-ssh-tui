@@ -844,13 +844,19 @@ export async function runDisplayRelay(
       } catch {
         // ignore
       }
-      if (replaced) return
-      try {
-        stdout.write('\x1b]0;\x07')
-        stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-        stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}`)
-      } catch {
-        // TTY may already be gone
+      // A replaced relay still has to release its end of the display link: the
+      // terminal restore below is what must be skipped (the link is usually
+      // dead and those bytes would surface later), not the close. Leaving the
+      // socket open keeps a live handle on a finished relay — an embedder that
+      // awaits the relay then waits forever for the event loop to drain.
+      if (!replaced) {
+        try {
+          stdout.write('\x1b]0;\x07')
+          stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
+          stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}`)
+        } catch {
+          // TTY may already be gone
+        }
       }
       socket.destroy()
     }

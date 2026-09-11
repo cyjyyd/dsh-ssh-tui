@@ -363,8 +363,9 @@ web 端与 TUI 共用同一份设置。`/model` 换提供商后**下一步请求
 
 ```bash
 bash scripts/verify.sh              # 检查 profile 组合与 CLI 语法
-npm test                            # 单元 + 集成（含重连接管、选择器首帧）
+npm test                            # 单元 + 集成（含屏幕网格护栏、重连接管、选择器首帧）
 python3 scripts/pty-acceptance.py   # 真 PTY：模拟 40ms SSH 链路 + 滞留的光标回复
+node scripts/tui-probe.mjs          # 真 PTY：真 dsh --profile tui 走一遍启动/缩放//diag/打字//exit
 ```
 
 或手动：
@@ -379,6 +380,22 @@ dsh --profile tui --help
 落在探测窗口中间），按键在探测还没结束时就敲下去。脚本检查输入是否原样（且只送一次）
 送达 Host、测得的 RTT 是否接近模拟值、屏幕上有没有被回显的 `^[[17;1R`。第一个参数可改
 模拟延迟（秒）：`python3 scripts/pty-acceptance.py 0.12`。
+
+`tui-probe.mjs` 直接用真 PTY 驱动 `dsh --profile tui`：等启动横幅与空闲状态、缩放窗口后
+断言刚才那一帧不是已结束的选择器的重绘、跑 `/diag` 并检查判定链、打字是否上屏、`/exit`
+是否把终端（含备用屏）交还。`npm test` 里的屏幕级用例用 `@xterm/headless` 断言**屏幕网格**
+（残留行、越界寻址、光标越界、缩放风暴、选择器交还备用屏、footer 链路芯片），探针补的是
+只在真宿主上才存在的部分。跑探针请用一次性 home，避免碰到真实会话：
+
+```bash
+H=$(mktemp -d); mkdir -p "$H/sessions" "$H/tui-locks" "$H/tui-socks"
+ln -s ~/.dsh/profiles "$H/profiles"; cp ~/.dsh/settings.yaml ~/.dsh/.credentials.yaml "$H/"
+PROBE_HOME=$H node scripts/tui-probe.mjs           # 自建会话，退出时删掉
+PROBE_HOME=$H node scripts/tui-probe.mjs --session <id>   # 只读式驱动已存在会话，绝不删除
+```
+
+探针拒绝在 `sessions/`、`tui-locks/`、`tui-socks/` 分居两处（含符号链接）的 home 上运行——
+那种布局会让 Host 持有真实会话的写锁却对用户的选择器不可见（2026-09-11 事故形态）。
 
 ## 卸载
 
