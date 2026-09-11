@@ -19,7 +19,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
-import { access, mkdir, readFile, unlink } from 'node:fs/promises'
+import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { findCursorPositionReply } from './paint.js'
@@ -457,21 +457,18 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * True once something is listening on the display channel.
+ * True once a Host is actually accepting on the display channel.
  *
- * `fs.access(path, F_OK)` cannot see a Windows named pipe (it goes through
- * GetFileAttributesW, which does not resolve the pipe namespace), so pipes are
- * checked with a real connect. The Host deliberately treats a connect without
- * HELLO as a liveness probe and drops it without stealing the display.
+ * Always a real connect, never a filesystem check: a leftover `.sock` file
+ * (killed Host, or one that is mid-dispose) is a directory entry, not a peer,
+ * and `fs.access()` used to report it as ready — the launcher then wrote HELLO
+ * into a dead socket and the first reconnect after a drop died with
+ * `write EPIPE`. Windows pipes additionally cannot be seen by `fs.access` at
+ * all. The Host treats a connect without HELLO as a liveness probe and drops
+ * it without stealing the display.
  */
 export async function displaySockExists(path: string, timeoutMs = 250): Promise<boolean> {
-  if (isPipePath(path)) return await probeDisplaySock(path, timeoutMs)
-  try {
-    await access(path, fsConstants.F_OK)
-    return true
-  } catch {
-    return false
-  }
+  return await probeDisplaySock(path, timeoutMs)
 }
 
 /** Watches a freshly spawned Host so a crash is reported immediately. */

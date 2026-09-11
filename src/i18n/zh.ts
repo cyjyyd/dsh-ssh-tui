@@ -549,6 +549,7 @@ export const zh: Record<string, string> = {
   'disconnect.unknown': '未知策略 "{id}"。可用 pause 或 continue。',
   'disconnect.idleExit': '无显示器空闲超过 {hours} 小时，Host 自行退出。',
   'attach.connecting': '正在接入会话 {session}…',
+  'attach.recovering': '后台会话正在收尾，稍候自动重试接入 {session}…',
   'attach.zombie': '会话 {session} 的进程 pid {pid} 还在，但显示通道连不上。确认该进程已死再 --resume；不要再开第二份 Host。',
 
   'usage.querying': '查询额度…',

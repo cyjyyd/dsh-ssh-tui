@@ -372,17 +372,24 @@ export function feedPicker(
  * @param signal - optional abort signal (fiber dispose) to cancel the picker.
  * @returns the selection, or null when cancelled.
  */
+/** Injection seams for tests; production uses the TTY and the session index. */
+export interface SessionPickerOptions {
+  stdin?: NodeJS.ReadStream
+  stdout?: NodeJS.WriteStream
+  listSessions?: typeof listResumableSessionsProgressive
+}
+
 export async function showSessionPicker(
   ctx: Context,
   color: boolean,
   signal?: AbortSignal,
-  /** Injectable for tests; production always drives the real TTY streams. */
-  streams: { stdin?: NodeJS.ReadStream; stdout?: NodeJS.WriteStream } = {},
+  options: SessionPickerOptions = {},
 ): Promise<SessionPickerResult> {
   if (signal?.aborted) return null
 
-  const stdin = streams.stdin ?? process.stdin
-  const stdout = streams.stdout ?? process.stdout
+  const stdin = options.stdin ?? process.stdin
+  const stdout = options.stdout ?? process.stdout
+  const listSessions = options.listSessions ?? listResumableSessionsProgressive
   const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
   const decoder = new StringDecoder('utf8')
@@ -395,6 +402,8 @@ export async function showSessionPicker(
   let previousRows: string[] = []
   let previousWidth = 0
   let previousHeight = 0
+  /** Whether a listing with titles has been painted at least once. */
+  let listPainted = false
   /**
    * Settled pickers must never paint again: the launcher process keeps owning
    * the TTY as the display relay, so a leaked frame would overwrite the TUI on
@@ -583,8 +592,19 @@ export async function showSessionPicker(
       cleanup(null)
       throw error
     }
-    const applyListing = (listing: { sessions: ResumableSession[]; pending: boolean }): void => {
+    const applyListing = (
+      listing: { sessions: ResumableSession[]; pending: boolean },
+      final = false,
+    ): void => {
       if (done) return
+      // The first listing is a header sketch: a live Host is labelled with its
+      // raw session id until its log has been inspected, and painting that
+      // frame makes the user pick an id they cannot recognise (it reads as "a
+      // session I did not ask for" jumping into the list). Hold the entries —
+      // the loading line keeps the spot — until titles exist, but always paint
+      // the final listing so an all-untitled history stays selectable.
+      if (!listPainted && !final && !listing.sessions.some(session => session.label !== session.id)) return
+      listPainted = true
       const focusedId = filterResumableSessions(state.sessions, state.query)[state.cursor]?.id
       const nextFiltered = filterResumableSessions(listing.sessions, state.query)
       state = {
@@ -607,14 +627,16 @@ export async function showSessionPicker(
         cleanup({ kind: 'new' })
         return
       }
-      const listing = await listResumableSessionsProgressive(persistence, '', {
+      const listing = await listSessions(persistence, '', {
         onUpdate: applyListing,
       })
       if (done) return
       if (listing.complete.length === 0 && state.query === '') {
         cleanup({ kind: 'new' })
         stdout.write(t('picker.none'))
+        return
       }
+      applyListing({ sessions: listing.complete, pending: false }, true)
     }
     void startListing().catch(() => {
       if (!done) cleanup({ kind: 'new' })

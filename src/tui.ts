@@ -1030,6 +1030,8 @@ export class SshTui {
   private liveStreamOwner: { attemptId: unknown; turn: number; step: number } | undefined
   /** Live events parked while the (yielding) history replay holds the floor. */
   private replayQueue: Array<{ session: { id: SessionId }; event: SessionEvent }> | undefined
+  /** A relay claimed the display while a hangup was still cancelling/flushing. */
+  private reattachedDuringHangup = false
   private readonly pendingToolTimes = new Map<string, number>()
   private readonly usageByStep = new Map<string, SessionStats['usage']>()
   private lastStatsTurn: number | null = null
@@ -1747,6 +1749,7 @@ export class SshTui {
   async handleHangup(): Promise<void> {
     if (this.hangingUp || this.disposed) return
     this.hangingUp = true
+    this.reattachedDuringHangup = false
     ignoreFurtherHangupSignals()
     this.detachDisplay()
     const busy = this.isBusyForHangupKeepalive()
@@ -1763,6 +1766,17 @@ export class SshTui {
       )
     }
     await this.flushSession()
+    // A relay can reattach while the cancel/flush above was in flight — the
+    // common case is a user reconnecting the moment the link drops. Deciding
+    // from the snapshot taken at the start would dispose (or exit) the Host
+    // under the display the user just got back, and the launcher would report
+    // `write EPIPE` for an attach that had already succeeded.
+    if (this.reattachedDuringHangup) {
+      this.reattachedDuringHangup = false
+      this.hangingUp = false
+      this.clearDetachedIdleTimer()
+      return
+    }
     const keepHost = this.displayHost !== undefined && busy
     if (keepHost) {
       this.hangingUp = false
@@ -1926,6 +1940,11 @@ export class SshTui {
 
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
+    // A relay that HELLOs while a hangup is still unwinding must be honored by
+    // that hangup: the snapshot taken at the drop would otherwise dispose (or
+    // exit) the Host under the display the user just got back, and the
+    // launcher reports `write EPIPE` for an attach that had already succeeded.
+    if (this.hangingUp) this.reattachedDuringHangup = true
     this.displayDetached = false
     this.hangingUp = false
     this.clearDetachedIdleTimer()

@@ -549,6 +549,7 @@ export const en: Record<string, string> = {
   'disconnect.unknown': 'Unknown policy "{id}". Use pause or continue.',
   'disconnect.idleExit': 'No display for {hours}h; Host is exiting.',
   'attach.connecting': 'Attaching to session {session}…',
+  'attach.recovering': 'The background Host is finishing up; retrying to attach {session}…',
   'attach.zombie': 'Session {session} pid {pid} is alive but the display socket is unreachable. If that process is dead, --resume from the log; do not start a second Host.',
 
   'usage.querying': 'checking quota…',

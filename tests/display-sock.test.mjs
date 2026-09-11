@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { createConnection } from 'node:net'
+import { createConnection, createServer } from 'node:net'
 import {
   detachFromSshSession,
   DisplayHost,
@@ -21,6 +22,7 @@ import {
   FRAME_RTT,
   hostArgvForSession,
   isPipePath,
+  probeDisplaySock,
   sessionErrPath,
   sessionSockPath,
   waitForDisplaySock,
@@ -370,6 +372,35 @@ test('DisplayHost handles multiple resize events smoothly as window enlarges', a
   assert.equal(detaches.length, 0)
   assert.deepEqual(resizes, [[80, 24], [120, 40], [160, 60], [200, 80]])
   client.destroy()
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+// A killed Host leaves its `.sock` file behind. `fs.access` reported that as
+// ready, so the launcher attached to a dead peer and the first reconnect died
+// with `write EPIPE` (and the picker listed it as `可接入`).
+test('a leftover socket file is not a ready channel', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-stale-'))
+  const path = join(home, 'stale.sock')
+  // Exactly what a killed Host leaves behind: the directory entry without a
+  // listener (Node unlinks on a clean close, so create the leftover directly).
+  await writeFile(path, '')
+  assert.equal(existsSync(path), true)
+  assert.equal(await displaySockExists(path), false, 'an entry without a listener is not ready')
+  assert.equal(await probeDisplaySock(path, 200), false)
+  // A waiting launcher must not treat that entry as the Host coming up.
+  const waiting = waitForDisplaySock(path, 1_500, process.pid)
+  const early = await Promise.race([
+    waiting.then(() => 'ready'),
+    new Promise(resolve => setTimeout(() => resolve('still-waiting'), 400)),
+  ])
+  assert.equal(early, 'still-waiting')
+  const host = new DisplayHost(path, {
+    onStdin: () => {}, onResize: () => {}, onDetach: () => {}, onAttach: () => {},
+  })
+  await host.listen()
+  await waiting
+  assert.equal(await displaySockExists(path), true)
   await host.close()
   await rm(home, { recursive: true, force: true })
 })

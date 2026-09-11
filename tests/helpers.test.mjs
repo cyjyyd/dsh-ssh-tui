@@ -3561,3 +3561,50 @@ test('the RTT probe still gives up on a silent TTY', async () => {
   notTty.isTTY = false
   assert.equal(await probeTerminalRttMs(notTty, stdout, 60), undefined)
 })
+
+// The Host used to decide its fate from a snapshot taken when the link died,
+// so a reconnect that landed while it was cancelling/flushing got disposed
+// under it (the launcher saw `write EPIPE`).
+test('a reconnect during the hangup window keeps the Host alive', async () => {
+  let releaseFlush
+  const flushing = new Promise(resolve => { releaseFlush = resolve })
+  const exits = []
+  const ctx = {
+    get: (key) => key === 'sessions'
+      ? { flush: () => flushing }
+      : key === 'appExit' ? (code) => { exits.push(code) } : undefined,
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const host = { attached: false, close: async () => {}, sendStdout: () => true, sendGoodbye: () => {} }
+  tui.displayHost = host
+  tui.displayDetached = true          // the link already dropped
+  const hangup = tui.handleHangup()
+  // A relay HELLOs while the hangup is still flushing: this is what
+  // DisplayHost.claim() calls on the Host side.
+  const originalWrite = process.stdout.write
+  process.stdout.write = () => true
+  try {
+    host.attached = true
+    tui.attachRelayDisplay()
+  } finally {
+    process.stdout.write = originalWrite
+  }
+  releaseFlush()
+  await hangup
+  assert.deepEqual(exits, [], 'an attached display must not be exited')
+  assert.equal(tui.exited, undefined)
+  assert.equal(host.attached, true)
+  // And once the display is gone again, an idle hangup still exits as before.
+  host.attached = false
+  tui.displayDetached = true
+  await tui.handleHangup()
+  assert.deepEqual(exits, [129])
+})

@@ -32,6 +32,19 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
+
+/** A relay that dies this soon after connecting reached a Host that was leaving. */
+export const ATTACH_RECOVERY_WINDOW_MS = 5_000
+/** How long to let a mid-dispose Host finish before starting a fresh one. */
+const ATTACH_RECOVERY_WAIT_MS = 3_000
+
+/** True when a relay error means the peer vanished rather than a real fault. */
+export function attachPeerVanished(error: unknown, elapsedMs: number): boolean {
+  if (elapsedMs >= ATTACH_RECOVERY_WINDOW_MS) return false
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  if (code === undefined) return false
+  return code === 'EPIPE' || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ERR_STREAM_DESTROYED'
+}
 import { writeBootSplash } from './paint.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
@@ -135,18 +148,48 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    const attachExisting = async (sessionId: string, sock: string): Promise<void> => {
+    const attachExisting = async (sessionId: string, sock: string, recover = true): Promise<void> => {
       process.stderr.write(`${t('attach.connecting', { session: sessionId })}\n`)
-      const result = await runDisplayRelay(sock)
+      const startedAt = Date.now()
+      let result: { reason: 'goodbye' | 'host-closed' | 'signal' }
+      try {
+        result = await runDisplayRelay(sock)
+      } catch (error) {
+        if (!recover || !attachPeerVanished(error, Date.now() - startedAt)) throw error
+        await recoverAttach(sessionId)
+        return
+      }
+      if (recover && result.reason === 'host-closed' && Date.now() - startedAt < ATTACH_RECOVERY_WINDOW_MS) {
+        // Accepted, then closed with no goodbye: the Host we reached was on
+        // its way out. A second manual attempt used to be the only way in.
+        await recoverAttach(sessionId)
+        return
+      }
       const exit = ctx.get('appExit')
-      if (exit !== undefined) exit(result.reason === 'goodbye' ? 0 : 0)
+      if (exit !== undefined) exit(0)
       else process.exit(0)
     }
 
-    const spawnHostAndRelay = async (sessionId: string): Promise<void> => {
+    /**
+     * Give a Host that was mid-dispose a moment to finish (its lock and socket
+     * disappear), then take the normal path again: attach to whatever is left,
+     * or start a fresh Host from the session log.
+     */
+    const recoverAttach = async (sessionId: string): Promise<void> => {
+      process.stderr.write(`${t('attach.recovering', { session: sessionId })}\n`)
+      const deadline = Date.now() + ATTACH_RECOVERY_WAIT_MS
+      while (Date.now() < deadline) {
+        const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
+        if (live === undefined || live.kind === 'attachable') break
+        await new Promise(resolve => setTimeout(resolve, 150))
+      }
+      await spawnHostAndRelay(sessionId, false)
+    }
+
+    const spawnHostAndRelay = async (sessionId: string, recover = true): Promise<void> => {
       const live = sessionLockDisabled() ? undefined : await inspectLiveHost(sessionId)
       if (live?.kind === 'attachable') {
-        await attachExisting(sessionId, live.sock)
+        await attachExisting(sessionId, live.sock, recover)
         return
       }
       if (live?.kind === 'zombie') {
@@ -158,7 +201,7 @@ export function apply(ctx: Context, config: Config): void {
       } finally {
         spawned.exitWatch.dispose()
       }
-      await attachExisting(sessionId, spawned.sock)
+      await attachExisting(sessionId, spawned.sock, recover)
     }
     // An explicit in-process change (/setup or /model) wins over launch-time
     // CLI overrides for every session created or resumed later in this process.

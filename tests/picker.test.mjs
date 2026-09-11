@@ -194,15 +194,20 @@ function pickerStreams() {
     emit: (event) => { for (const handler of listeners.get(event) ?? []) handler() },
     listenerCount: (event) => (listeners.get(event) ?? []).length,
   }
+  const stdinHandlers = []
   const stdin = {
     isTTY: true,
     setRawMode: () => {},
     resume: () => {},
     pause: () => {},
-    on: () => {},
-    removeListener: () => {},
+    on: (event, handler) => { if (event === 'data') stdinHandlers.push(handler) },
+    removeListener: (event, handler) => {
+      const at = stdinHandlers.indexOf(handler)
+      if (event === 'data' && at >= 0) stdinHandlers.splice(at, 1)
+    },
   }
-  return { stdout, stdin, writes, listeners }
+  const type = (text) => { for (const handler of [...stdinHandlers]) handler(Buffer.from(text)) }
+  return { stdout, stdin, writes, listeners, type }
 }
 
 test('a settled picker drops its resize listener and cannot repaint', { timeout: 5_000 }, async () => {
@@ -240,4 +245,46 @@ test('a live picker repaints on resize and stops after cancel', { timeout: 5_000
   io.stdout.emit('resize')
   io.stdout.emit('resize')
   assert.equal(io.writes.length, after, 'a cancelled picker must never paint again')
+})
+
+// The first listing is a header sketch: a live Host appears under its raw
+// session id until its log is inspected. Painting that frame is how an
+// unrecognisable "session I did not ask for" jumped into the list, so the
+// entries are held until titles exist.
+test('the picker holds the list until session titles load', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const sketch = [{ id: 'main-session-16531619', label: 'main-session-16531619', updatedAt: 1, cwd: '' }]
+  const titled = [{ id: 'main-session-16531619', label: '兼容0.1.5并修光标漂移', updatedAt: 1, cwd: '/root' }]
+  const listSessions = async (_persistence, _current, { onUpdate }) => {
+    onUpdate({ sessions: sketch, pending: true })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    onUpdate({ sessions: titled, pending: false })
+    return { sessions: titled, pending: false, complete: titled }
+  }
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  const firstFrame = io.writes.join('')
+  assert.equal(firstFrame.includes('main-session-16531619'), false, 'raw ids must not be painted')
+  assert.equal(firstFrame.includes('正在读取历史会话'), true, 'the loading line holds the spot')
+  await new Promise(resolve => setTimeout(resolve, 60))
+  const withTitles = io.writes.join('')
+  assert.equal(withTitles.includes('兼容0.1.5并修光标漂移'), true, 'titles replace the sketch')
+  abort.abort()
+  await settled
+})
+
+// Even when nothing has a title the picker must still become usable.
+test('an untitled history is painted by the final listing', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const only = [{ id: 'main-session-plain', label: 'main-session-plain', updatedAt: 1, cwd: '' }]
+  const listSessions = async () => ({ sessions: only, pending: false, complete: only })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(io.writes.join('').includes('main-session-plain'), true)
+  abort.abort()
+  await settled
 })

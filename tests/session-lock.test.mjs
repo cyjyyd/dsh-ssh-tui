@@ -83,7 +83,16 @@ test('acquireSessionLock steals a stale lock and blocks a live one', async () =>
   await releaseSessionLock(stolen.path)
 })
 
-test('inspectLiveHost is attachable only while the host pid is alive', async () => {
+
+/** Bind a real unix socket so the reachability probe sees a live channel. */
+async function listenOn(path) {
+  const { createServer } = await import('node:net')
+  const server = createServer(() => {})
+  await new Promise(resolve => server.listen(path, resolve))
+  return server
+}
+
+test('inspectLiveHost is attachable only while the host pid is alive', async t => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session-attach'
   const sock = join(home, 'tui-socks', `${sessionId}.sock`)
@@ -99,7 +108,8 @@ test('inspectLiveHost is attachable only while the host pid is alive', async () 
     sock,
     state: 'paused',
   }, null, 2)}\n`)
-  await writeFile(sock, '')
+  const server = await listenOn(sock)
+  t.after(() => new Promise(resolve => server.close(resolve)))
   const live = await inspectLiveHost(sessionId, home)
   assert.equal(live?.kind, 'attachable')
   assert.equal(live?.sock, sock)
@@ -178,7 +188,8 @@ test('old-format lock: alive pid that is not the Host is stolen, a genuine Host 
   t.after(() => host.kill('SIGKILL'))
   await new Promise(resolve => setTimeout(resolve, 300))
   const hostSock = join(home, 'tui-socks', `${hostSid}.sock`)
-  await writeFile(hostSock, '')
+  const hostServer = await listenOn(hostSock)
+  t.after(() => new Promise(resolve => hostServer.close(resolve)))
   await writeFile(join(home, 'tui-locks', `${hostSid}.json`), lockJson(hostSid, host.pid, hostSock))
   assert.equal((await inspectLiveHost(hostSid, home))?.kind, 'attachable')
   const { rm } = await import('node:fs/promises')
@@ -195,7 +206,8 @@ test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posi
   const sock = join(home, 'tui-socks', `${sid}.sock`)
   const lockPath = join(home, 'tui-locks', `${sid}.json`)
 
-  await writeFile(sock, '')
+  const server = await listenOn(sock)
+  t.after(() => new Promise(resolve => server.close(resolve)))
   await writeFile(lockPath, lockJson(sid, host.pid, sock, {
     bootId, pidStart: procStarttimeOf(host.pid),
   }))
@@ -205,7 +217,8 @@ test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posi
   assert.equal((await inspectLiveHost(sid, home))?.kind, 'zombie', 'alive Host without socket stays zombie')
 
   // same pid but a foreign boot identity (recycled pid / cross-namespace) → stale.
-  await writeFile(sock, '')
+  const server2 = await listenOn(sock)
+  t.after(() => new Promise(resolve => server2.close(resolve)))
   await writeFile(lockPath, lockJson(sid, host.pid, sock, {
     bootId: '00000000-0000-0000-0000-000000000000', pidStart: '1',
   }))
@@ -312,4 +325,20 @@ test('windowsProcessMatchesLock rules out pid reuse', () => {
   assert.equal(parseWindowsProcessIdentity('has space\t2026-09-11T10:00:00.000Z'), undefined)
   assert.equal(hostImageName('C:\\Program Files\\nodejs\\node.exe'), 'node')
   assert.equal(hostImageName('/root/bin/dsh'), 'dsh')
+})
+
+// The picker prioritises attachable hosts, so a leftover socket file with a
+// live-looking pid used to jump to the top of the resume list and then fail
+// with `write EPIPE` on attach. Reachability now decides.
+test('a dead channel makes the lock stale even when a socket file remains', async t => {
+  const home = await makeHome(t)
+  const sid = 'main-session-stale-channel'
+  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  const server = (await import('node:net')).createServer(() => {})
+  await new Promise(resolve => server.listen(sock, resolve))
+  await new Promise(resolve => server.close(resolve))
+  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, process.pid, sock))
+  assert.equal(await inspectLiveHost(sid, home), undefined, 'a dead peer must not be attachable')
+  assert.equal(existsSync(sock), false, 'the leftover socket file is cleaned up')
+  assert.equal(existsSync(join(home, 'tui-locks', `${sid}.json`)), false, 'and so is the lock')
 })

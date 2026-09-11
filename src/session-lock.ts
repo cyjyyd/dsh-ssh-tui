@@ -441,8 +441,11 @@ async function inspectHeldLock(
   const alive = (isPipePath(sock) && sockExists) || await lockOwnerIsAlive(info)
   if (!alive) {
     // Host is gone. A leftover unix socket is not attachable — steal the
-    // lock so --resume can reopen from the session log.
-    if (sockExists && !isPipePath(sock)) {
+    // lock so --resume can reopen from the session log, and remove the dead
+    // directory entry: the reachability probe cannot report it as ready, so
+    // it is cleaned by path (a Windows pipe is not a file entry and is
+    // already reclaimed by the OS).
+    if (!isPipePath(sock)) {
       try {
         await unlink(sock)
       } catch {
