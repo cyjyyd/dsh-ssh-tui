@@ -12,12 +12,14 @@ import {
   SessionLockHeldError,
   acquireSessionLock,
   formatLockHeldMessage,
+  hostImageName,
   inspectLiveHost,
   listAttachableHosts,
   parseSessionLock,
   processIsAlive,
   releaseSessionLock,
   sessionLockPath,
+  windowsProcessMatchesLock,
 } from '../lib/session-lock.js'
 
 function readBootId() {
@@ -244,4 +246,57 @@ test('real-world pid-5 leftovers are classified stale', posixOnly, async t => {
       lockJson(sid, 5, join(home, 'tui-socks', `${sid}.sock`)))
     assert.equal(await inspectLiveHost(sid, home), undefined, `${sid} must be stolen`)
   }
+})
+
+// On Windows the display channel is a named pipe: fs.access() can never see
+// it, and a reachable live Host must still be classified attachable.
+test('win32: a live host pipe is attachable, a closed one is a zombie',
+  { skip: process.platform !== 'win32' }, async t => {
+    const home = await makeHome(t)
+    const sid = 'main-session-pipe'
+    const { DisplayHost, sessionSockPath } = await import('../lib/display-sock.js')
+    const sock = sessionSockPath(sid, home)
+    const host = new DisplayHost(sock, {
+      onStdin: () => {}, onResize: () => {}, onDetach: () => {}, onAttach: () => {},
+    })
+    await host.listen()
+    await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, process.pid, sock))
+    assert.equal((await inspectLiveHost(sid, home))?.kind, 'attachable')
+    await host.close()
+    assert.equal((await inspectLiveHost(sid, home))?.kind, 'zombie')
+  })
+
+test('win32: a recycled pid does not keep a dead lock alive',
+  { skip: process.platform !== 'win32' }, async t => {
+    const home = await makeHome(t)
+    const sid = 'main-session-recycled'
+    // This test process is alive, but the lock says it was written a minute
+    // before the process started — exactly what pid reuse looks like. Without
+    // the identity probe that reads as a live-but-silent Host ("zombie") and
+    // blocks --resume until the lock is deleted by hand.
+    await writeFile(join(home, 'tui-locks', `${sid}.json`),
+      lockJson(sid, process.pid, join(home, 'tui-socks', `${sid}.sock`),
+        { startedAt: new Date(Date.now() - 60_000).toISOString() }))
+    assert.equal(await inspectLiveHost(sid, home), undefined)
+  })
+
+// The Windows probe itself only runs there; its decision table is portable.
+test('windowsProcessMatchesLock rules out pid reuse', () => {
+  const lock = { pid: 4242, sessionId: 'main-session', startedAt: '2026-09-11T10:00:00.000Z' }
+  const at = (iso) => Date.parse(iso)
+  // A different image is someone else's process.
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'svchost', startedAt: at('2026-09-11T09:00:00.000Z') }, 'node'), false)
+  // Created after the lock was written → the pid was recycled.
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T10:00:06.000Z') }, 'node'), false)
+  // Created before the lock → this is the Host that wrote it.
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T09:59:59.000Z') }, 'node'), true)
+  // Inside the clock slack → still the Host.
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'node', startedAt: at('2026-09-11T10:00:02.000Z') }, 'node'), true)
+  // Unverifiable answers keep the legacy best-effort behavior.
+  assert.equal(windowsProcessMatchesLock(lock, undefined, 'node'), true)
+  assert.equal(windowsProcessMatchesLock(lock, { name: 'node' }, 'node'), true)
+  // An empty startedAt cannot date the process; the image name still decides.
+  assert.equal(windowsProcessMatchesLock({ ...lock, startedAt: '' }, { name: 'chrome' }, 'node'), false)
+  assert.equal(hostImageName('C:\\Program Files\\nodejs\\node.exe'), 'node')
+  assert.equal(hostImageName('/root/bin/dsh'), 'dsh')
 })

@@ -252,7 +252,10 @@ export interface FooterStatusInput {
   provider: string
   parentModel: string
   subModel: string
-  subDiffers: boolean
+  /** Explicit `/submodel` provider override; undefined means "inherit parent". */
+  subProvider?: string
+  /** Explicit `/subeffort` override for subagent children. */
+  subEffort?: string
   quotaCode?: string
   quotaPercent?: number
   contextChip?: string
@@ -294,6 +297,20 @@ export function formatQuotaBar(remainingPercent: number, width = 8): string {
   return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
 }
 
+/**
+ * `sub:<model>` chip for the identity row, mirroring the pre-0.3.6 footer:
+ * an explicit `/submodel` provider is prefixed (`sub:xai/grok-4.5`) and an
+ * explicit `/subeffort` is appended in parentheses (`sub:grok-4.5(xhigh)`).
+ * An inherited provider stays implicit — it is the parent's route.
+ */
+export function subagentRouteLabel(model: string, provider?: string, effort?: string): string {
+  const id = model.trim()
+  if (id === '') return ''
+  const suffix = effort === undefined || effort.trim() === '' ? '' : `(${effort.trim()})`
+  const route = provider === undefined || provider.trim() === '' ? id : `${provider.trim()}/${id}`
+  return `sub:${route}${suffix}`
+}
+
 export function footerIdentityParts(input: FooterStatusInput): string[] {
   const parts: string[] = []
   if (input.compactView === true) parts.push(`[${t('view.footerCompact')}]`)
@@ -301,7 +318,11 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
   const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
   if (model !== '') parts.push(model)
-  if (input.subDiffers) parts.push(`sub:${input.subModel}`)
+  // The subagent route is what every child inherits, so it stays on the line
+  // even when it repeats the parent model (it used to be unconditional before
+  // 0.3.6, which is why hiding it read as a regression).
+  const sub = subagentRouteLabel(input.subModel, input.subProvider, input.subEffort)
+  if (sub !== '') parts.push(sub)
   if (input.balanceText !== undefined && input.balanceText !== '') {
     parts.push(input.balanceText)
   }

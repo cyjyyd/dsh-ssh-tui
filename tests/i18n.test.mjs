@@ -27,7 +27,7 @@ test('/language catalog switches chrome and tool titles', () => {
   assert.equal(footerActivity({
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'x', provider: 'xai', parentModel: 'x', subModel: 'x', subDiffers: false,
+    idleMs: 0, model: 'x', provider: 'xai', parentModel: 'x', subModel: 'x',
     foldedInput: false, multiLineInput: false, queued: 0,
   }).text, '空闲')
   assert.equal(presentToolCall('edit', JSON.stringify({ file_path: 'a.ts' })).title, '编辑')
@@ -37,7 +37,7 @@ test('/language catalog switches chrome and tool titles', () => {
   assert.equal(footerActivity({
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'x', provider: 'xai', parentModel: 'x', subModel: 'x', subDiffers: false,
+    idleMs: 0, model: 'x', provider: 'xai', parentModel: 'x', subModel: 'x',
     foldedInput: false, multiLineInput: false, queued: 0,
   }).text, 'idle')
   assert.equal(presentToolCall('edit', JSON.stringify({ file_path: 'a.ts' })).title, 'edit')

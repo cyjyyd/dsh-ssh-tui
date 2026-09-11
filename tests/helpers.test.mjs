@@ -60,6 +60,7 @@ import {
   fitFooterStatusLine,
   dropFooterQuotaPlanName,
   formatFooterQuota,
+  subagentRouteLabel,
   formatFooterBalance,
   formatCompactCommandError,
   formatContextPressureChip,
@@ -90,8 +91,12 @@ import {
   commandAcceptsAttachments,
   forEachSessionEvent,
   inspectPersistenceSession,
+  isTokenDeltaChunk,
   listPersistenceHeaders,
   streamChunkOf,
+  streamFirstTokenTime,
+  streamFrameAttemptId,
+  streamFrameOwner,
   writeBootSplash,
   fmtElapsedCompact,
   waitCardCopy,
@@ -999,7 +1004,7 @@ test('footer status keeps one activity and drops identity from the right', () =>
     running: true, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
     idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    parentModel: 'grok-4.6', subModel: 'grok-4.5',
     quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
   })
   assert.equal(activity.text, '子代理 2')
@@ -1007,7 +1012,7 @@ test('footer status keeps one activity and drops identity from the right', () =>
     running: true, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
     idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    parentModel: 'grok-4.6', subModel: 'grok-4.5',
     quotaCode: 'SuperGrok', quotaPercent: 82,
     contextChip: `${formatContextPressureRing(80)} 400K/500K 80%`,
     foldedInput: false, multiLineInput: false, queued: 1,
@@ -1018,14 +1023,46 @@ test('footer status keeps one activity and drops identity from the right', () =>
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
     idleMs: 0, model: 'deepseek-v4-flash', provider: 'deepseek-official',
-    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash', subDiffers: false,
+    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash', subEffort: 'max',
     balanceText: '余额 86.42 CNY', foldedInput: false, multiLineInput: false, queued: 0,
   })
   assert.ok(withBalance.includes('余额 86.42 CNY'))
+  // The subagent route keeps its effort suffix and never disappears just
+  // because the child model matches the parent model.
+  assert.equal(withBalance.includes('sub:deepseek-v4-flash(max)'), true, withBalance.join(' · '))
   const line = fitFooterStatusLine('子代理 2', identity, 28)
   assert.match(line, /^子代理 2/)
   assert.equal(line.includes('排队'), false)
   assert.ok(displayWidth(line) <= 28)
+})
+
+test('footer keeps the subagent route visible when it repeats the parent model', () => {
+  // Before 0.3.6 the identity row always carried `sub:<model>`; hiding it
+  // whenever the child model equaled the parent model made the subagent route
+  // look like it had disappeared.
+  const equal = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'deepseek-v4-flash', effort: 'max', provider: 'deepseek-official',
+    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash',
+    foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.equal(equal.includes('sub:deepseek-v4-flash'), true, equal.join(' · '))
+  const explicit = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'deepseek-v4-flash', provider: 'deepseek-official',
+    parentModel: 'deepseek-v4-flash', subModel: 'grok-4.5', subProvider: 'xai', subEffort: 'xhigh',
+    foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.equal(explicit.includes('sub:xai/grok-4.5(xhigh)'), true, explicit.join(' · '))
+  // An inherited provider stays implicit; only `/submodel` routes are prefixed.
+  assert.equal(subagentRouteLabel('grok-4.5'), 'sub:grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai'), 'sub:xai/grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', 'xhigh'), 'sub:xai/grok-4.5(xhigh)')
+  assert.equal(subagentRouteLabel('grok-4.5', undefined, 'high'), 'sub:grok-4.5(high)')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:xai/grok-4.5')
+  assert.equal(subagentRouteLabel(''), '')
 })
 
 test('narrow footer drops the quota plan name before the remaining bar', () => {
@@ -1033,7 +1070,7 @@ test('narrow footer drops the quota plan name before the remaining bar', () => {
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
     idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.5', subDiffers: true,
+    parentModel: 'grok-4.6', subModel: 'grok-4.5',
     quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
   })
   assert.equal(identity.includes(formatFooterQuota(82, 'SuperGrok')), true)
@@ -1083,7 +1120,7 @@ test('context pressure ring is one cell and fills clockwise', () => {
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
     idleMs: 0, model: 'grok-4.6', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.6', subDiffers: false,
+    parentModel: 'grok-4.6', subModel: 'grok-4.6',
     quotaCode: 'SuperGrok', quotaPercent: 82,
     contextChip: formatContextPressureChip(view),
     foldedInput: false, multiLineInput: false, queued: 0,
@@ -1482,6 +1519,165 @@ test('live assistant-stream frames paint tokens that 0.1.5 no longer logs', () =
     },
   })
   assert.equal(tui.streaming?.text.includes('streamed-live'), true)
+})
+
+test('streamChunkOf takes the live attempt step from its owner', () => {
+  // Real 0.1.5 chunk frames carry no turn/step: without the fallback every
+  // chunk lands on step 0, so TTFT/decode never match the open step and the
+  // footer silently loses tok/s (and usage de-duplication keys collide).
+  const frame = {
+    type: 'chunk',
+    attemptId: 'a1',
+    revision: 1,
+    index: 0,
+    time: 1_200,
+    chunk: { type: 'text-delta', index: 0, text: 'ok' },
+  }
+  assert.equal(streamChunkOf(frame)?.turn, 0)
+  assert.equal(streamChunkOf(frame)?.step, 0)
+  const owner = streamFrameOwner({ type: 'start', attemptId: 'a1', revision: 1, turn: 4, step: 2 })
+  assert.deepEqual(owner, { attemptId: 'a1', turn: 4, step: 2 })
+  const streamed = streamChunkOf(frame, owner)
+  assert.equal(streamed?.turn, 4)
+  assert.equal(streamed?.step, 2)
+  assert.equal(streamed?.time, 1_200)
+  // Durable assistant/chunk events keep their own turn/step, owner or not.
+  const durable = streamChunkOf({ type: 'assistant/chunk', time: 5, data: { turn: 9, step: 3, chunk: { type: 'text-delta', text: 'x' } } }, owner)
+  assert.equal(durable?.turn, 9)
+  assert.equal(durable?.step, 3)
+  assert.equal(streamFrameOwner({ type: 'chunk', attemptId: 'a1' }), undefined)
+  assert.equal(streamFrameAttemptId({ type: 'chunk', attemptId: 'a1' }), 'a1')
+  assert.equal(streamFrameAttemptId({ type: 'end', attemptId: 'a1' }), 'a1')
+  assert.equal(streamFrameAttemptId({ type: 'start', attemptId: 'a1' }), undefined)
+})
+
+test('isTokenDeltaChunk matches the host notion of a first token', () => {
+  assert.equal(isTokenDeltaChunk({ type: 'text-delta', text: 'x' }), true)
+  assert.equal(isTokenDeltaChunk({ type: 'reasoning-delta', text: 'x' }), true)
+  assert.equal(isTokenDeltaChunk({ type: 'tool-call-delta', argumentsDelta: '{' }), true)
+  assert.equal(isTokenDeltaChunk({ type: 'tool-call-delta', name: 'read' }), true)
+  assert.equal(isTokenDeltaChunk({ type: 'text-delta', text: '' }), false)
+  assert.equal(isTokenDeltaChunk({ type: 'tool-call-delta', argumentsDelta: '' }), false)
+  assert.equal(isTokenDeltaChunk({ type: 'usage' }), false)
+  assert.equal(isTokenDeltaChunk({ type: 'block-start', blockType: 'text' }), false)
+  assert.equal(isTokenDeltaChunk(undefined), false)
+})
+
+test('streamFirstTokenTime reads 0.1.5 packed durable streams', () => {
+  const stream = [
+    { type: 'chunk', time: 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+    { type: 'reasoning-chunks', time0: 1_100, index: 0, dt: [10, 10], texts: ['', 'think', 'ing'] },
+    { type: 'chunk', time: 1_250, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } } },
+    { type: 'text-chunks', time0: 1_300, index: 1, dt: [5], texts: ['ok'] },
+  ]
+  // First non-empty reasoning fragment: time0 + dt[0].
+  assert.equal(streamFirstTokenTime(stream), 1_110)
+  // A name-bearing tool-call run starts at its first member.
+  assert.equal(streamFirstTokenTime([
+    { type: 'tool-call-chunks', time0: 900, index: 0, dt: [], id: 'c1', name: 'read', args: [] },
+  ]), 900)
+  assert.equal(streamFirstTokenTime([{ type: 'text-chunks', time0: 5, index: 0, dt: [], texts: [''] }]), undefined)
+  assert.equal(streamFirstTokenTime(undefined), undefined)
+})
+
+test('live chunks stay on the open step so the footer keeps tok/s', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const session = agent.session
+  tui.handleSessionEvent(session, { type: 'step/start', time: 1_000, data: { turn: 1, step: 1 } })
+  // Exactly what a 0.1.5 host emits: `start` owns the step, chunks carry none.
+  tui.handleAssistantStream({ agent, frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } })
+  tui.handleAssistantStream({
+    agent,
+    frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 1_050, chunk: { type: 'reasoning-delta', index: 0, text: 'hmm' } },
+  })
+  tui.handleAssistantStream({
+    agent,
+    frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 1, time: 1_100, chunk: { type: 'text-delta', index: 1, text: 'ok' } },
+  })
+  tui.handleAssistantStream({
+    agent,
+    frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 2, time: 1_150, chunk: { type: 'usage', usage: { inputTokens: 10, outputTokens: 40 } } },
+  })
+  tui.handleSessionEvent(session, {
+    type: 'assistant/message',
+    time: 1_600,
+    data: {
+      turn: 1,
+      step: 1,
+      message: { content: [{ type: 'text', text: 'ok' }] },
+      usage: { inputTokens: 10, outputTokens: 40 },
+    },
+  })
+  const stats = tui.statsText()
+  // The reasoning delta opens the clock at 1050: 40 tokens over 550 ms.
+  assert.match(stats, /73 tok\/s/, stats)
+  assert.equal(tui.stats.decodeTokens, 40)
+  // The live usage chunk and the durable settlement share the step key, so the
+  // totals are not counted twice.
+  assert.equal(tui.stats.usage.outputTokens, 40)
+  assert.equal(tui.stats.usage.inputTokens, 10)
+})
+
+test('resumed sessions rebuild tok/s from replayed chunks and packed streams', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const session = agent.session
+  tui.replaying = true
+  try {
+    // 0.1.2 log: durable chunks carry the first token time.
+    tui.handleSessionEvent(session, { type: 'step/start', time: 2_000, data: { turn: 1, step: 1 } })
+    tui.handleSessionEvent(session, {
+      type: 'assistant/chunk',
+      time: 2_100,
+      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hi' } },
+    })
+    tui.handleSessionEvent(session, {
+      type: 'assistant/message',
+      time: 2_600,
+      data: {
+        turn: 1, step: 1,
+        message: { content: [{ type: 'text', text: 'hi' }] },
+        usage: { inputTokens: 5, outputTokens: 30 },
+      },
+    })
+    assert.match(tui.statsText(), /60 tok\/s/, tui.statsText())
+    // 0.1.5 log: no durable chunks, the packed settlement stream is the record.
+    tui.handleSessionEvent(session, { type: 'step/start', time: 3_000, data: { turn: 1, step: 2 } })
+    tui.handleSessionEvent(session, {
+      type: 'assistant/message',
+      time: 3_500,
+      data: {
+        turn: 1, step: 2,
+        message: { content: [{ type: 'text', text: 'ok' }] },
+        usage: { inputTokens: 6, outputTokens: 25 },
+        stream: [
+          { type: 'chunk', time: 3_100, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
+          { type: 'text-chunks', time0: 3_200, index: 0, dt: [0], texts: ['ok'] },
+        ],
+      },
+    })
+    // Cumulative: 30/0.5s + 25/0.3s tokens over 0.8s.
+    assert.match(tui.statsText(), /69 tok\/s/, tui.statsText())
+    assert.equal(tui.stats.decodeTokens, 55)
+    assert.equal(tui.stats.ttftSteps, 2)
+  } finally {
+    tui.replaying = false
+  }
 })
 
 test('forEachSessionEvent walks eventAt without snapshotting', () => {

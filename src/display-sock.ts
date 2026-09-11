@@ -1,6 +1,12 @@
 /**
- * Length-prefixed unix-socket frames between a leftover Host and a new
+ * Length-prefixed local-socket frames between a leftover Host and a new
  * Display relay. Binary on purpose: paint bytes are raw ANSI, not JSON.
+ *
+ * Transport: an AF_UNIX socket at `$DSH_HOME/tui-socks/<id>.sock` on POSIX,
+ * and a named pipe at `\\.\pipe\dsh-tui-<home>-<id>` on Windows. Node requires
+ * the `\\.\pipe\` form there — a plain file path cannot be listened on — and
+ * `fs.access()` cannot see pipes, so channel liveness always goes through
+ * `displaySockExists()` instead of a raw filesystem check.
  *
  * Frame: u32be length | u8 type | payload
  *   1 stdin   — relay → host (key bytes)
@@ -10,12 +16,13 @@
  *   5 goodbye — host → relay, then close (user /exit)
  *   6 rtt     — relay → host (u32be milliseconds; 0xffffffff = unknown)
  */
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { access, mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -92,12 +99,83 @@ export function isTuiHostProcess(env: NodeJS.ProcessEnv = process.env): boolean 
   return env[TUI_HOST_ENV] === '1' || env[TUI_HOST_ENV] === 'true'
 }
 
+/**
+ * Windows named-pipe namespace. Node's `net` passes the string straight to
+ * CreateNamedPipeW/CreateFileW, and those require this prefix — a drive-letter
+ * path fails with ENOENT/EACCES and the Host never listens.
+ */
+export const WINDOWS_PIPE_PREFIX = '\\\\.\\pipe\\'
+
+/** Windows rejects pipe names longer than 256 chars; leave generous headroom. */
+const WINDOWS_PIPE_MAX = 200
+
+/** True for a Windows named-pipe address (`\\.\pipe\x`, `\\?\pipe\x`, `//./pipe/x`). */
+export function isPipePath(path: string): boolean {
+  const normalized = path.replaceAll('/', '\\').toLowerCase()
+  return normalized.startsWith('\\\\.\\pipe\\') || normalized.startsWith('\\\\?\\pipe\\')
+}
+
+function defaultDshHome(): string {
+  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
+}
+
+/** Directory holding per-session display runtime state (error logs). */
+export function sessionSockDir(dshHome: string = defaultDshHome()): string {
+  return join(dshHome, 'tui-socks')
+}
+
+/** Filesystem/pipe-safe form of a session id, as used for locks and channels. */
+export function safeSessionId(sessionId: string): string {
+  const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
+  return safe === '' ? 'session' : safe
+}
+
+/**
+ * Named pipes live in one flat, machine-wide namespace, so the DSH_HOME is
+ * folded into the name (two homes must not fight over one session id) and the
+ * label is clamped with a digest so long ids stay unique instead of truncated
+ * into collisions.
+ */
+function windowsPipePath(sessionId: string, dshHome: string): string {
+  const homeTag = createHash('sha1').update(resolve(dshHome).toLowerCase()).digest('hex').slice(0, 8)
+  const room = WINDOWS_PIPE_MAX - WINDOWS_PIPE_PREFIX.length - 'dsh-tui-'.length - homeTag.length - 1
+  let label = sessionId.replaceAll(/\.{2,}/gu, '_').replace(/^[._-]+|[._-]+$/gu, '')
+  if (label === '' || label === '.') label = 'session'
+  if (label.length > room) {
+    const digest = createHash('sha1').update(label).digest('hex').slice(0, 8)
+    label = `${label.slice(0, room - digest.length - 1)}-${digest}`
+  }
+  return `${WINDOWS_PIPE_PREFIX}dsh-tui-${homeTag}-${label}`
+}
+
+/**
+ * Address of the per-session display channel: a filesystem path on POSIX, a
+ * named pipe on Windows. `platform` is injectable so the Windows shape stays
+ * testable from a POSIX test run.
+ */
 export function sessionSockPath(
   sessionId: string,
-  dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+  dshHome: string = defaultDshHome(),
+  platform: NodeJS.Platform = process.platform,
 ): string {
-  const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
-  return join(dshHome, 'tui-socks', `${safe}.sock`)
+  const safe = safeSessionId(sessionId)
+  if (platform === 'win32') return windowsPipePath(safe, dshHome)
+  return join(sessionSockDir(dshHome), `${safe}.sock`)
+}
+
+/**
+ * Host stderr log for one session. POSIX keeps the historical `<sock>.err`
+ * next to the socket; a Windows pipe name is not a file path, so the log lives
+ * in the `tui-socks` state directory instead.
+ */
+export function sessionErrPath(
+  sessionId: string,
+  dshHome: string = defaultDshHome(),
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const sock = sessionSockPath(sessionId, dshHome, platform)
+  if (isPipePath(sock)) return join(sessionSockDir(dshHome), `${safeSessionId(sessionId)}.err`)
+  return `${sock}.err`
 }
 
 export function encodeFrame(type: number, payload: Buffer = Buffer.alloc(0)): Buffer {
@@ -167,6 +245,21 @@ export interface DisplayHostHandlers {
 }
 
 /**
+ * Turn a raw listen() errno into an actionable message. Windows pipe failures
+ * are opaque (`ENOENT` for a bad name, `EACCES`/`EADDRINUSE` for a pipe that a
+ * live Host already owns), so name the likely cause.
+ */
+function wrapListenError(error: NodeJS.ErrnoException, path: string, pipe: boolean): Error {
+  const code = error.code ?? error.message
+  const hint = pipe && (code === 'EADDRINUSE' || code === 'EACCES' || code === 'EPERM')
+    ? ' (another dsh-ssh-tui host may already own this session)'
+    : ''
+  const wrapped = new Error(`dsh-ssh-tui: cannot listen on display socket ${path} (${code})${hint}`)
+  ;(wrapped as NodeJS.ErrnoException).code = error.code
+  return wrapped
+}
+
+/**
  * Host-side listener. At most one Display is attached; a new hello kicks the
  * previous relay so two SSH windows cannot both drive the session.
  */
@@ -182,20 +275,31 @@ export class DisplayHost {
   ) {}
 
   async listen(): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
-    try {
-      await unlink(this.path)
-    } catch {
-      // missing is fine
+    const pipe = isPipePath(this.path)
+    if (!pipe) {
+      // Pipes are not files: they need no directory, cannot be unlinked, and
+      // vanish with the owning process.
+      await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
+      try {
+        await unlink(this.path)
+      } catch {
+        // missing is fine
+      }
     }
     await new Promise<void>((resolve, reject) => {
       const server = createServer(socket => this.accept(socket))
-      server.once('error', reject)
-      server.listen(this.path, () => {
-        server.removeListener('error', reject)
+      const onError = (error: NodeJS.ErrnoException): void => {
+        server.removeListener('listening', onListening)
+        reject(wrapListenError(error, this.path, pipe))
+      }
+      const onListening = (): void => {
+        server.removeListener('error', onError)
         this.server = server
         resolve()
-      })
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(this.path)
     })
   }
 
@@ -309,10 +413,12 @@ export class DisplayHost {
       }
       server.close(() => resolve())
     })
-    try {
-      await unlink(this.path)
-    } catch {
-      // ignore
+    if (!isPipePath(this.path)) {
+      try {
+        await unlink(this.path)
+      } catch {
+        // ignore
+      }
     }
   }
 }
@@ -327,46 +433,101 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * True once something is listening on the display channel.
+ *
+ * `fs.access(path, F_OK)` cannot see a Windows named pipe (it goes through
+ * GetFileAttributesW, which does not resolve the pipe namespace), so pipes are
+ * checked with a real connect. The Host deliberately treats a connect without
+ * HELLO as a liveness probe and drops it without stealing the display.
+ */
+export async function displaySockExists(path: string, timeoutMs = 250): Promise<boolean> {
+  if (isPipePath(path)) return await probeDisplaySock(path, timeoutMs)
+  try {
+    await access(path, fsConstants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Watches a freshly spawned Host so a crash is reported immediately. */
+export interface HostExitWatch {
+  /** Resolves with the exit code (or null when killed) once the Host exits. */
+  readonly exited: Promise<number | null>
+  /** Stop watching; call once the channel is confirmed up. */
+  dispose(): void
+}
+
+function watchHostExit(child: ChildProcess): HostExitWatch {
+  let settle: (code: number | null) => void = () => {}
+  const exited = new Promise<number | null>(resolve => { settle = resolve })
+  const onExit = (code: number | null): void => { settle(code) }
+  const onError = (): void => { settle(null) }
+  child.once('exit', onExit)
+  child.once('error', onError)
+  return {
+    exited,
+    dispose(): void {
+      child.removeListener('exit', onExit)
+      child.removeListener('error', onError)
+    },
+  }
+}
+
 export async function waitForDisplaySock(
   path: string,
   timeoutMs = 15_000,
   pid?: number,
   errFile?: string,
+  exitWatch?: HostExitWatch,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
+  const readDetail = async (): Promise<string> => {
+    if (errFile === undefined) return ''
     try {
-      await access(path, fsConstants.F_OK)
+      const detail = (await readFile(errFile, 'utf8')).trim()
+      await unlink(errFile)
+      return detail
+    } catch {
+      return ''
+    }
+  }
+  const exitedWith = (detail: string): Error => {
+    const suffix = detail !== '' ? `:\n${detail}` : ''
+    return new Error(`dsh-ssh-tui: host process pid ${pid ?? '?'} exited before display socket appeared${suffix}`)
+  }
+  const deadline = Date.now() + timeoutMs
+  let hostExited = false
+  let hostExitCode: number | null = null
+  if (exitWatch !== undefined) {
+    void exitWatch.exited.then(code => {
+      hostExited = true
+      hostExitCode = code
+    })
+  }
+  while (Date.now() < deadline) {
+    if (await displaySockExists(path)) {
       if (errFile !== undefined) {
         try { await unlink(errFile) } catch { /* ignore */ }
       }
       return
-    } catch {
-      if (pid !== undefined && !isPidAlive(pid)) {
-        let detail = ''
-        if (errFile !== undefined) {
-          try {
-            detail = (await readFile(errFile, 'utf8')).trim()
-            await unlink(errFile)
-          } catch {
-            detail = ''
-          }
-        }
-        const suffix = detail !== '' ? `:\n${detail}` : ''
-        throw new Error(`dsh-ssh-tui: host process pid ${pid} exited before display socket appeared${suffix}`)
-      }
-      await new Promise(resolve => setTimeout(resolve, 50))
     }
-  }
-  let detail = ''
-  if (errFile !== undefined) {
-    try {
-      detail = (await readFile(errFile, 'utf8')).trim()
-      await unlink(errFile)
-    } catch {
-      detail = ''
+    if (hostExited) {
+      // The pid may still answer kill(pid, 0) on Windows while the handle is
+      // open, so trust the exit event: fail fast instead of waiting 15s.
+      const detail = await readDetail()
+      const reason = hostExitCode === null ? '' : ` (exit code ${hostExitCode})`
+      const suffix = detail !== '' ? `:\n${detail}` : ''
+      throw new Error(
+        `dsh-ssh-tui: host process pid ${pid ?? '?'} exited before display socket appeared${reason}${suffix}`,
+      )
     }
+    if (pid !== undefined && !isPidAlive(pid)) {
+      throw exitedWith(await readDetail())
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
   }
+  const detail = await readDetail()
   const suffix = detail !== '' ? `:\n${detail}` : ''
   throw new Error(`dsh-ssh-tui: host display socket did not appear: ${path}${suffix}`)
 }
@@ -389,13 +550,25 @@ export function hostArgvForSession(sessionId: string, argv = process.argv.slice(
   return filtered
 }
 
+export interface SpawnedHost {
+  pid: number
+  /** Channel address: a socket file on POSIX, a named pipe on Windows. */
+  sock: string
+  /** Host stderr log; present when it could be opened. */
+  errFile?: string
+  /** Exit watch so a Host that dies before listening is reported at once. */
+  exitWatch: HostExitWatch
+}
+
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
-export function spawnDetachedHost(sessionId: string): { pid: number; sock: string; errFile?: string } {
+export function spawnDetachedHost(sessionId: string): SpawnedHost {
   const sock = sessionSockPath(sessionId)
-  const errFile = `${sock}.err`
+  // On Windows the channel is a pipe name, which is not a file path: the log
+  // must live in the state directory next to the locks instead.
+  const errFile = sessionErrPath(sessionId)
   let errFd: number | undefined
   try {
-    mkdirSync(dirname(sock), { recursive: true, mode: 0o700 })
+    mkdirSync(dirname(errFile), { recursive: true, mode: 0o700 })
     errFd = openSync(errFile, 'w')
   } catch {
     errFd = undefined
@@ -403,14 +576,18 @@ export function spawnDetachedHost(sessionId: string): { pid: number; sock: strin
   const child = spawn(process.execPath, hostArgvForSession(sessionId), {
     env: { ...process.env, [TUI_HOST_ENV]: '1' },
     detached: true,
+    // A detached Host has no console on Windows; hide the console window that
+    // would otherwise flash on screen when it is created.
+    windowsHide: true,
     stdio: ['ignore', 'ignore', errFd ?? 'ignore'],
   })
   if (errFd !== undefined) {
     try { closeSync(errFd) } catch { /* ignore */ }
   }
   if (child.pid === undefined) throw new Error('dsh-ssh-tui: failed to spawn host process')
+  const exitWatch = watchHostExit(child)
   child.unref()
-  return { pid: child.pid, sock, ...errFd !== undefined ? { errFile } : {} }
+  return { pid: child.pid, sock, exitWatch, ...errFd !== undefined ? { errFile } : {} }
 }
 
 export async function probeDisplaySock(path: string, timeoutMs = 400): Promise<boolean> {

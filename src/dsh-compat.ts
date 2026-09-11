@@ -222,11 +222,104 @@ export function commandAcceptsAttachments(input: unknown): boolean {
 export interface StreamChunkLike {
   type: string
   text?: string
+  /** `tool-call-delta` argument fragment. */
+  argumentsDelta?: string
+  /** `tool-call-delta` tool name, present on the first fragment. */
+  name?: string
   usage?: { inputTokens?: number; outputTokens?: number }
 }
 
-/** Durable `assistant/chunk` payload, or a live stream frame's inner chunk. */
-export function streamChunkOf(eventOrFrame: unknown): {
+/**
+ * Whether one chunk carries the model's first output token, matching the host's
+ * own `isTokenDelta`: a non-empty text/reasoning fragment, or a tool-call
+ * fragment (name-bearing deltas included). Thinking-first models therefore
+ * start the latency clock on their first reasoning token, not on the first
+ * visible answer token.
+ */
+export function isTokenDeltaChunk(chunk: unknown): boolean {
+  if (chunk === null || typeof chunk !== 'object') return false
+  const record = chunk as { type?: unknown; text?: unknown; argumentsDelta?: unknown; name?: unknown }
+  if (record.type === 'text-delta' || record.type === 'reasoning-delta') {
+    return typeof record.text === 'string' && record.text !== ''
+  }
+  if (record.type === 'tool-call-delta') {
+    return (typeof record.argumentsDelta === 'string' && record.argumentsDelta !== '') || record.name !== undefined
+  }
+  return false
+}
+
+/**
+ * Turn/step of a live `agent/assistant-stream` `start` frame. The chunk frames
+ * this opens carry no turn/step at all, so callers must remember them or every
+ * live chunk is attributed to step 0 (which silently disabled TTFT, decode
+ * speed, and usage de-duplication).
+ */
+export function streamFrameOwner(frame: unknown): { attemptId: unknown; turn: number; step: number } | undefined {
+  if (frame === null || typeof frame !== 'object') return undefined
+  const record = frame as { type?: unknown; attemptId?: unknown; turn?: unknown; step?: unknown }
+  if (record.type !== 'start') return undefined
+  return {
+    attemptId: record.attemptId,
+    turn: typeof record.turn === 'number' ? record.turn : 0,
+    step: typeof record.step === 'number' ? record.step : 0,
+  }
+}
+
+/** Attempt id of a live chunk/end frame, used to match it to its `start`. */
+export function streamFrameAttemptId(frame: unknown): unknown {
+  if (frame === null || typeof frame !== 'object') return undefined
+  const record = frame as { type?: unknown; attemptId?: unknown }
+  if (record.type !== 'chunk' && record.type !== 'end') return undefined
+  return record.attemptId
+}
+
+/**
+ * First token time inside a durable compact assistant stream
+ * (`assistant/message.stream`). Mirrors the host's
+ * `assistantStreamFirstTokenTime`: packed delta runs place member `i` at
+ * `time0 + dt[0..i-1]`, raw chunk records carry their own time.
+ */
+export function streamFirstTokenTime(stream: unknown): number | undefined {
+  if (!Array.isArray(stream)) return undefined
+  for (const entry of stream) {
+    if (entry === null || typeof entry !== 'object') continue
+    const record = entry as {
+      type?: unknown
+      time?: unknown
+      chunk?: unknown
+      time0?: unknown
+      dt?: unknown
+      texts?: unknown
+      args?: unknown
+      name?: unknown
+    }
+    if (record.type === 'chunk') {
+      if (typeof record.time === 'number' && isTokenDeltaChunk(record.chunk)) return record.time
+      continue
+    }
+    if (record.type !== 'text-chunks' && record.type !== 'reasoning-chunks' && record.type !== 'tool-call-chunks') continue
+    if (typeof record.time0 !== 'number') continue
+    // A name-bearing tool-call run starts at its first member.
+    if (record.type === 'tool-call-chunks' && record.name !== undefined) return record.time0
+    const fragments = record.type === 'tool-call-chunks' ? record.args : record.texts
+    if (!Array.isArray(fragments)) continue
+    const dt = Array.isArray(record.dt) ? record.dt : []
+    let time = record.time0
+    for (let index = 0; index < fragments.length; index++) {
+      if (index > 0) time += typeof dt[index - 1] === 'number' ? dt[index - 1] as number : 0
+      if (fragments[index] !== '') return time
+    }
+  }
+  return undefined
+}
+
+/**
+ * Durable `assistant/chunk` payload, or a live stream frame's inner chunk.
+ *
+ * `fallback` supplies the turn/step for live chunk frames, which do not carry
+ * them (see {@link streamFrameOwner}).
+ */
+export function streamChunkOf(eventOrFrame: unknown, fallback?: { turn: number; step: number }): {
   chunk: StreamChunkLike
   turn: number
   step: number
@@ -248,8 +341,8 @@ export function streamChunkOf(eventOrFrame: unknown): {
   const time = record.time
   return {
     chunk,
-    turn: typeof turn === 'number' ? turn : 0,
-    step: typeof step === 'number' ? step : 0,
+    turn: typeof turn === 'number' ? turn : fallback?.turn ?? 0,
+    step: typeof step === 'number' ? step : fallback?.step ?? 0,
     time: typeof time === 'number' ? time : 0,
   }
 }

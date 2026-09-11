@@ -3,13 +3,14 @@
  * Stale locks (dead pid) are stolen. A live lock with a reachable display
  * socket is an attach target, not a hard failure.
  */
-import { access, readdir } from 'node:fs/promises'
+import { readdir } from 'node:fs/promises'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
-import { constants as fsConstants, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
-import { sessionSockPath } from './display-sock.js'
+import { displaySockExists, isPipePath, sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
 export type DisconnectPolicy = 'pause' | 'continue'
@@ -119,6 +120,99 @@ function readProcCmdline(pid: number): string | undefined {
   }
 }
 
+/** Slice of a Windows process identity needed to rule out pid reuse. */
+export interface WindowsProcessIdentity {
+  /** Executable name without `.exe`, lowercased (`node`). */
+  name: string
+  /** Process creation time in epoch milliseconds, when readable. */
+  startedAt?: number
+}
+
+/** Clock/resolution slack when comparing a creation time with the lock write. */
+export const PID_REUSE_SLACK_MS = 5_000
+
+/**
+ * Cache of Windows identities so one stale lock costs at most one probe; the
+ * short TTL keeps a pid reused twice inside one session from being judged by
+ * an identity it no longer has.
+ */
+const WINDOWS_IDENTITY_TTL_MS = 60_000
+const windowsIdentityCache = new Map<number, { identity: WindowsProcessIdentity; at: number }>()
+
+/**
+ * `Get-Process` beats WMI here: it is a single .NET call and reports both the
+ * image name (works across users) and the creation time. The script avoids
+ * double quotes so Node's CreateProcess quoting stays trivial.
+ */
+function queryWindowsProcess(pid: number): WindowsProcessIdentity | undefined {
+  const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; `
+    + `if ($null -eq $p) { 'gone' } else { `
+    + `$st = ''; try { $st = $p.StartTime.ToUniversalTime().ToString('yyyy-MM-dd\\THH\\:mm\\:ss.fff\\Z') } catch {}; `
+    + `$p.ProcessName.ToLower() + [char]9 + $st }`
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    windowsHide: true,
+  })
+  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : ''
+  if (result.error !== undefined || stdout === '' || stdout === 'gone') return undefined
+  const [name = '', startedAt = ''] = stdout.split('\t')
+  if (name === '') return undefined
+  const parsed = Date.parse(startedAt)
+  return { name, ...Number.isFinite(parsed) ? { startedAt: parsed } : {} }
+}
+
+function windowsProcessIdentity(pid: number): WindowsProcessIdentity | undefined {
+  const cached = windowsIdentityCache.get(pid)
+  if (cached !== undefined && Date.now() - cached.at < WINDOWS_IDENTITY_TTL_MS) return cached.identity
+  const identity = queryWindowsProcess(pid)
+  // Only successful probes are cached: a transient failure must not make the
+  // pid look permanently dead for the rest of this process's life.
+  if (identity === undefined) {
+    windowsIdentityCache.delete(pid)
+    return undefined
+  }
+  if (windowsIdentityCache.size > 64) windowsIdentityCache.clear()
+  windowsIdentityCache.set(pid, { identity, at: Date.now() })
+  return identity
+}
+
+/** Image name this Host runs as (`node` / `dsh`), without `.exe`. */
+export function hostImageName(execPath = process.execPath): string {
+  // Split on both separators: the Windows probe's answer is compared on any
+  // platform, and tests may feed a Windows-style path from POSIX.
+  const file = execPath.split(/[\\/]/u).pop() ?? execPath
+  return file.replace(/\.exe$/iu, '').toLowerCase()
+}
+
+/**
+ * Decide whether a live Windows pid can still be the lock's Host.
+ *
+ * Windows recycles pids aggressively, and without procfs an unrelated process
+ * inheriting the recorded pid used to look like a permanent live-but-silent
+ * Host ("zombie"), which blocked `--resume` until the lock was deleted by
+ * hand. Two facts rule reuse out:
+ *  - the Host always runs this same executable, so a different image name is
+ *    someone else's process;
+ *  - the Host existed before it wrote the lock, so a process created after the
+ *    lock was written cannot be its owner.
+ * An unverifiable process keeps the legacy best-effort answer (alive).
+ */
+export function windowsProcessMatchesLock(
+  lock: SessionLockInfo,
+  identity: WindowsProcessIdentity | undefined,
+  expectedName: string = hostImageName(),
+  slackMs: number = PID_REUSE_SLACK_MS,
+): boolean {
+  if (identity === undefined) return true
+  if (identity.name !== '' && expectedName !== '' && identity.name !== expectedName) return false
+  const lockStarted = Date.parse(lock.startedAt)
+  if (Number.isFinite(lockStarted) && identity.startedAt !== undefined) {
+    return identity.startedAt <= lockStarted + slackMs
+  }
+  return true
+}
+
 /**
  * True when `pid` is genuinely the Host process that wrote `lock`.
  *
@@ -133,18 +227,24 @@ function readProcCmdline(pid: number): string | undefined {
  *    boot, so a recycled or cross-namespace pid fails the check;
  *  - older locks fall back to `/proc/<pid>/cmdline`: the detached Host is
  *    always launched with `--resume=<sessionId>` in argv, so any other
- *    process (kernel threads have an empty cmdline) is proven stale.
- * On platforms without procfs the legacy kill(pid, 0) behavior is kept.
+ *    process (kernel threads have an empty cmdline) is proven stale;
+ *  - Windows has neither: a `Get-Process` probe supplies the image name and
+ *    creation time instead (see {@link windowsProcessMatchesLock}).
+ * On platforms where none of this is available the legacy kill(pid, 0)
+ * behavior is kept.
  */
 export function lockOwnerIsAlive(lock: SessionLockInfo): boolean {
   const pid = lock.pid
   if (!Number.isInteger(pid) || pid <= 0) return false
   if (!processIsAlive(pid)) return false
+  if (process.platform === 'win32') {
+    return windowsProcessMatchesLock(lock, windowsProcessIdentity(pid))
+  }
   if (lock.bootId !== undefined && lock.pidStart !== undefined) {
     return readBootId() === lock.bootId && readProcStarttime(pid) === lock.pidStart
   }
   const cmdline = readProcCmdline(pid)
-  if (cmdline === undefined) return true // no /proc (win32/darwin): legacy best-effort
+  if (cmdline === undefined) return true // no /proc (darwin): legacy best-effort
   return cmdline.includes(`--resume=${lock.sessionId}`)
 }
 
@@ -260,18 +360,16 @@ async function inspectHeldLock(
   dshHome: string,
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
   const sock = info.sock ?? sessionSockPath(info.sessionId, dshHome)
-  const alive = lockOwnerIsAlive(info)
-  let sockExists = false
-  try {
-    await access(sock, fsConstants.F_OK)
-    sockExists = true
-  } catch {
-    sockExists = false
-  }
+  // A Windows named pipe is not a filesystem entry: fs.access() can never see
+  // it, so liveness must be probed with a connect (and it needs no unlink —
+  // Windows removes the pipe when the owning process exits). A reachable pipe
+  // also proves the owner is alive, so the pid identity probe can be skipped.
+  const sockExists = await displaySockExists(sock)
+  const alive = (isPipePath(sock) && sockExists) || lockOwnerIsAlive(info)
   if (!alive) {
     // Host is gone. A leftover unix socket is not attachable — steal the
     // lock so --resume can reopen from the session log.
-    if (sockExists) {
+    if (sockExists && !isPipePath(sock)) {
       try {
         await unlink(sock)
       } catch {

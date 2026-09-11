@@ -35,11 +35,15 @@ import {
   commandAcceptsAttachments,
   forEachSessionEvent,
   isAssistantStreamEvent,
+  isTokenDeltaChunk,
   listenHostEvent,
   sessionEventType,
   sessionEvents,
   settingsNamespace,
   streamChunkOf,
+  streamFirstTokenTime,
+  streamFrameAttemptId,
+  streamFrameOwner,
   type StreamChunkLike,
 } from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
@@ -328,6 +332,7 @@ export {
   providerShortCode,
   providerUsesLocalOAuth,
   shouldIdleAutoCompact,
+  subagentRouteLabel,
   type ContextPressureSample,
   type ContextPressureView,
   type FooterActivityKind,
@@ -365,12 +370,16 @@ export {
   commandAcceptsAttachments,
   forEachSessionEvent,
   isAssistantStreamEvent,
+  isTokenDeltaChunk,
   listPersistenceHeaders,
   inspectPersistenceSession,
   sessionEventType,
   sessionEvents,
   settingsNamespace,
   streamChunkOf,
+  streamFirstTokenTime,
+  streamFrameAttemptId,
+  streamFrameOwner,
 } from './dsh-compat.js'
 export {
   applyTurnEndToPlan,
@@ -1014,6 +1023,8 @@ export class SshTui {
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
   }
   private openStepStats: { turn: number; step: number; startTime: number; firstTokenTime: number | null } | undefined
+  /** Attempt whose live `start` frame opened the current token stream. */
+  private liveStreamOwner: { attemptId: unknown; turn: number; step: number } | undefined
   private readonly pendingToolTimes = new Map<string, number>()
   private readonly usageByStep = new Map<string, SessionStats['usage']>()
   private lastStatsTurn: number | null = null
@@ -3189,7 +3200,8 @@ export class SshTui {
       provider,
       parentModel,
       subModel: sub.model,
-      subDiffers: sub.model !== parentModel,
+      ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+      ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
         ? {}
         : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
@@ -3491,20 +3503,19 @@ export class SshTui {
     turn: number
     step: number
     time: number
-  }): void {
+  }, statsOnly = false): void {
     const { chunk } = streamed
     const open = this.openStepStats
     if (open !== null && open !== undefined
       && open.turn === streamed.turn && open.step === streamed.step) {
-      if (open.firstTokenTime === null
-        && chunk.type === 'text-delta'
-        && chunk.text !== '') {
+      if (open.firstTokenTime === null && isTokenDeltaChunk(chunk)) {
         this.openStepStats = { ...open, firstTokenTime: streamed.time }
       }
     }
     if (chunk.type === 'usage' && chunk.usage !== undefined) {
       this.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
     }
+    if (statsOnly) return
     if (chunk.type === 'text-delta') {
       this.streaming ??= { text: '', reasoning: '' }
       this.streaming.text += chunk.text ?? ''
@@ -3533,7 +3544,19 @@ export class SshTui {
     if (this.replaying) return
     this.lastActivity = Date.now()
     this.refreshContextPressure()
-    const streamed = streamChunkOf(payload.frame)
+    const owner = streamFrameOwner(payload.frame)
+    if (owner !== undefined) {
+      // Live chunk frames carry no turn/step: remember the attempt's step here
+      // or every chunk is attributed to step 0 and the stats never match.
+      this.liveStreamOwner = owner
+      return
+    }
+    const attemptId = streamFrameAttemptId(payload.frame)
+    const current = this.liveStreamOwner
+    const fallback = current !== undefined && (attemptId === undefined || attemptId === current.attemptId)
+      ? current
+      : this.openStepStats
+    const streamed = streamChunkOf(payload.frame, fallback)
     if (streamed !== undefined) this.applyStreamChunk(streamed)
   }
 
@@ -3571,7 +3594,13 @@ export class SshTui {
       return
     }
     this.lastActivity = Date.now()
-    if (this.replaying && isAssistantStreamEvent(event)) return
+    if (this.replaying && isAssistantStreamEvent(event)) {
+      // Replay skips the in-progress row, but durable chunks still carry the
+      // timing the footer needs: a resumed session must keep TTFT and tok/s.
+      const streamed = streamChunkOf(event)
+      if (streamed !== undefined) this.applyStreamChunk(streamed, true)
+      return
+    }
     if (!this.replaying) this.refreshContextPressure()
     const eventType = sessionEventType(event)
     if (eventType === 'assistant/chunk') {
@@ -3623,12 +3652,17 @@ export class SshTui {
         const open = this.openStepStats
         if (open !== undefined && open.turn === event.data.turn && open.step === event.data.step) {
           this.stats.llmMs += Math.max(0, event.time - open.startTime)
-          if (open.firstTokenTime !== null) {
-            this.stats.ttftMs += Math.max(0, open.firstTokenTime - open.startTime)
+          // 0.1.5 logs no durable chunks: the settlement's packed stream is the
+          // only record of when the first token arrived (0.1.2 logs deliver it
+          // through the replayed `assistant/chunk` events instead).
+          const firstTokenTime = open.firstTokenTime
+            ?? streamFirstTokenTime((event.data as { stream?: unknown }).stream)
+          if (firstTokenTime !== null && firstTokenTime !== undefined) {
+            this.stats.ttftMs += Math.max(0, firstTokenTime - open.startTime)
             this.stats.ttftSteps += 1
             const outputTokens = event.data.usage?.outputTokens
             if (typeof outputTokens === 'number' && Number.isFinite(outputTokens) && outputTokens >= 0) {
-              this.stats.decodeMs += Math.max(0, event.time - open.firstTokenTime)
+              this.stats.decodeMs += Math.max(0, event.time - firstTokenTime)
               this.stats.decodeTokens += outputTokens
             }
           }

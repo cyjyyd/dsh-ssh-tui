@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   actionsForInput,
+  showSessionPicker,
   clampPickerCursor,
   feedPicker,
   filterResumableSessions,
@@ -170,4 +171,44 @@ test('pickerStateUnchanged treats loading as part of the frame', () => {
   const loading = state(sessions, { loading: true })
   assert.equal(pickerStateUnchanged(idle, idle), true)
   assert.equal(pickerStateUnchanged(idle, loading), false)
+})
+
+// The launcher keeps owning the TTY as the display relay for the whole
+// session, so a picker that leaves its `resize` listener behind repaints its
+// dead screen over the running TUI on every terminal resize (the "resize
+// flashes the history-session picker" bug).
+test('a settled picker drops its resize listener and cannot repaint', async () => {
+  const stdout = process.stdout
+  const stdin = process.stdin
+  const writes = []
+  const saved = {
+    write: stdout.write,
+    stderrWrite: process.stderr.write,
+    setRawMode: stdin.setRawMode,
+    resume: stdin.resume,
+    pause: stdin.pause,
+  }
+  stdout.write = (chunk) => { writes.push(String(chunk)); return true }
+  process.stderr.write = () => true
+  stdin.setRawMode = () => {}
+  stdin.resume = () => {}
+  stdin.pause = () => {}
+  const listenersBefore = stdout.listenerCount('resize')
+  try {
+    // No persistence service: the picker settles immediately with `new`.
+    const result = await showSessionPicker({ get: () => undefined }, false)
+    assert.deepEqual(result, { kind: 'new' })
+    assert.equal(stdout.listenerCount('resize'), listenersBefore, 'resize listener must be removed')
+    const painted = writes.length
+    assert.ok(painted > 0, 'the picker should have painted at least once')
+    stdout.emit('resize')
+    stdout.emit('resize')
+    assert.equal(writes.length, painted, 'a settled picker must never paint again')
+  } finally {
+    stdout.write = saved.write
+    process.stderr.write = saved.stderrWrite
+    stdin.setRawMode = saved.setRawMode
+    stdin.resume = saved.resume
+    stdin.pause = saved.pause
+  }
 })

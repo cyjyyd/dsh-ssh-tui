@@ -72,8 +72,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/*.test.mjs",
-    "clean": "rm -rf lib",
+    "test": "npm run build && node --test \"tests/*.test.mjs\"",
+    "clean": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
     "prepare": "npm run build",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck",

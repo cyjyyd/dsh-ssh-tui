@@ -33,4 +33,19 @@ jobs:
           rm -f package-lock.json
       - run: npm install --no-audit --no-fund
       - run: npx tsc -p tsconfig.json --noEmit
-      - run: node --test tests/*.test.mjs
+      - run: node --test "tests/*.test.mjs"
+  # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
+  # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
+  # path only gets real coverage on a Windows runner.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -p tsconfig.json --noEmit
+      # Node expands the quoted glob itself: PowerShell does not glob for
+      # native commands, and this keeps the step identical on both shells.
+      - run: node --test "tests/*.test.mjs"

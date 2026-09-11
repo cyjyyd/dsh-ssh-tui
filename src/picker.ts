@@ -387,6 +387,12 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
   let previousRows: string[] = []
   let previousWidth = 0
   let previousHeight = 0
+  /**
+   * Settled pickers must never paint again: the launcher process keeps owning
+   * the TTY as the display relay, so a leaked frame would overwrite the TUI on
+   * every later terminal resize.
+   */
+  let done = false
 
   const paintLines = (width: number, height: number): string[] => {
     const windowSize = pickerCapacity(height)
@@ -453,6 +459,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
   }
 
   const render = (force = false): void => {
+    if (done) return
     const width = Math.max(20, process.stdout.columns || 80)
     const height = Math.max(12, process.stdout.rows || 24)
     const paintRows = paintLines(width, height)
@@ -474,9 +481,10 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
     previousWidth = width
     previousHeight = height
   }
+  /** Named so cleanup() can remove this exact listener, not a look-alike. */
+  const onResize = (): void => { render(true) }
 
   return new Promise<SessionPickerResult>((resolve) => {
-    let done = false
     let escapeBuffer = ''
     let escapeTimer: ReturnType<typeof setTimeout> | undefined
     const cleanup = (result: SessionPickerResult): void => {
@@ -485,7 +493,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
       if (escapeTimer !== undefined) clearTimeout(escapeTimer)
       signal?.removeEventListener('abort', onAbort)
       process.stdin.removeListener('data', onData)
-      process.stdout.removeListener('resize', render)
+      process.stdout.removeListener('resize', onResize)
       try {
         process.stdin.setRawMode(false)
       } catch {
@@ -553,7 +561,7 @@ export async function showSessionPicker(ctx: Context, color: boolean, signal?: A
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     process.stdin.on('data', onData)
-    process.stdout.on('resize', () => { render(true) })
+    process.stdout.on('resize', onResize)
     render(true)
     const applyListing = (listing: { sessions: ResumableSession[]; pending: boolean }): void => {
       if (done) return

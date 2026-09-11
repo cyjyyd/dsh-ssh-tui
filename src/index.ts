@@ -47,7 +47,6 @@ import {
 import {
   isTuiHostProcess,
   runDisplayRelay,
-  sessionSockPath,
   spawnDetachedHost,
   waitForDisplaySock,
 } from './display-sock.js'
@@ -153,7 +152,11 @@ export function apply(ctx: Context, config: Config): void {
         throw new Error(t('attach.zombie', { session: sessionId, pid: live.lock.pid }))
       }
       const spawned = spawnDetachedHost(sessionId)
-      await waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile)
+      try {
+        await waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile, spawned.exitWatch)
+      } finally {
+        spawned.exitWatch.dispose()
+      }
       await attachExisting(sessionId, spawned.sock)
     }
     // An explicit in-process change (/setup or /model) wins over launch-time

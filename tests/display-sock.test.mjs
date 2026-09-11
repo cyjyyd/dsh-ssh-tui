@@ -1,12 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createConnection } from 'node:net'
 import {
   detachFromSshSession,
   DisplayHost,
+  displaySockExists,
   FRAME_HELLO,
   FRAME_STDIN,
   FRAME_STDOUT,
@@ -19,6 +20,8 @@ import {
   decodeRtt,
   FRAME_RTT,
   hostArgvForSession,
+  isPipePath,
+  sessionErrPath,
   sessionSockPath,
   waitForDisplaySock,
 } from '../lib/display-sock.js'
@@ -89,9 +92,110 @@ test('hostArgvForSession pins --resume=id and drops picker flags', () => {
 
 test('sessionSockPath sanitizes ids next to the lock dir', () => {
   assert.equal(
-    sessionSockPath('main-session/../evil id', '/tmp/dsh-home'),
+    sessionSockPath('main-session/../evil id', '/tmp/dsh-home', 'linux'),
     join('/tmp/dsh-home', 'tui-socks', 'main-session_.._evil_id.sock'),
   )
+})
+
+test('sessionSockPath uses a named pipe on win32', () => {
+  const path = sessionSockPath('main-session/../evil id', 'C:\\Users\\me\\.dsh', 'win32')
+  // Node only accepts \\.\pipe\... on Windows; a drive-letter path fails to bind.
+  assert.ok(isPipePath(path), path)
+  assert.ok(path.startsWith('\\\\.\\pipe\\dsh-tui-'), path)
+  assert.ok(!path.includes('/'), 'pipe names are backslash-only')
+  assert.ok(!path.includes('..'), 'no parent-directory sequence in the flat pipe namespace')
+  assert.ok(path.length <= 200, `pipe name too long: ${path.length}`)
+  // Two DSH_HOMEs, or two sessions, must never share one machine-wide pipe.
+  assert.notEqual(path, sessionSockPath('main-session/../evil id', 'C:\\other\\.dsh', 'win32'))
+  assert.notEqual(path, sessionSockPath('other-session', 'C:\\Users\\me\\.dsh', 'win32'))
+  // Host and relay are separate processes: the name must be deterministic.
+  assert.equal(path, sessionSockPath('main-session/../evil id', 'C:\\Users\\me\\.dsh', 'win32'))
+})
+
+test('sessionSockPath keeps long ids in-limit and distinct on win32', () => {
+  const long = 'x'.repeat(400)
+  const a = sessionSockPath(`${long}-a`, 'C:\\home\\.dsh', 'win32')
+  const b = sessionSockPath(`${long}-b`, 'C:\\home\\.dsh', 'win32')
+  assert.ok(a.length <= 200, `pipe name too long: ${a.length}`)
+  assert.ok(b.length <= 200, `pipe name too long: ${b.length}`)
+  assert.notEqual(a, b, 'truncation must not collapse distinct sessions')
+})
+
+test('isPipePath recognizes Windows pipe spellings only', () => {
+  assert.equal(isPipePath('\\\\.\\pipe\\dsh-tui-x'), true)
+  assert.equal(isPipePath('//./pipe/dsh-tui-x'), true)
+  assert.equal(isPipePath('\\\\?\\pipe\\dsh-tui-x'), true)
+  assert.equal(isPipePath(join(tmpdir(), 'tui-socks', 'x.sock')), false)
+  assert.equal(isPipePath('/tmp/tui-socks/x.sock'), false)
+})
+
+// On Windows fs.access() is what used to make startup time out: it returns
+// ENOENT for a live pipe. A pipe-shaped path must therefore be probed with a
+// connect, never treated as a file — a plain file that merely looks like a pipe
+// must not count as a ready channel.
+test('displaySockExists connect-probes pipe-shaped paths', { skip: process.platform === 'win32' }, async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const cwd = process.cwd()
+  process.chdir(home)
+  try {
+    const pipeish = '\\\\.\\pipe\\dsh-tui-fake'
+    await writeFile(pipeish, '')
+    assert.equal(await displaySockExists(pipeish), false, 'a regular file is not a listening pipe')
+  } finally {
+    process.chdir(cwd)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('sessionErrPath is a real file on both platforms', () => {
+  // POSIX keeps the historical <sock>.err next to the socket.
+  assert.equal(
+    sessionErrPath('s', '/tmp/dsh-home', 'linux'),
+    `${sessionSockPath('s', '/tmp/dsh-home', 'linux')}.err`,
+  )
+  const win = sessionErrPath('s', 'C:\\home\\.dsh', 'win32')
+  assert.equal(win, join('C:\\home\\.dsh', 'tui-socks', 's.err'))
+  assert.equal(isPipePath(win), false, 'host stderr cannot be captured into a pipe name')
+})
+
+test('waitForDisplaySock fails fast when the host exits first', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const sock = sessionSockPath('exit-watch', home)
+  const errFile = sessionErrPath('exit-watch', home)
+  await mkdir(dirname(errFile), { recursive: true })
+  await writeFile(errFile, 'host boom\n')
+  const exitWatch = { exited: Promise.resolve(3), dispose: () => {} }
+  const started = Date.now()
+  await assert.rejects(
+    () => waitForDisplaySock(sock, 5_000, process.pid, errFile, exitWatch),
+    error => error instanceof Error
+      && error.message.includes('exited before display socket appeared')
+      && error.message.includes('exit code 3')
+      && error.message.includes('host boom'),
+  )
+  assert.ok(Date.now() - started < 3_000, 'a dead host must not burn the whole timeout')
+  await rm(home, { recursive: true, force: true })
+})
+
+test('waitForDisplaySock sees a listening host, including over a win32 pipe', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  // sessionSockPath resolves to a named pipe on Windows: this asserts that the
+  // readiness check is a connect probe there, not fs.access (which never sees
+  // a pipe and used to produce "host display socket did not appear").
+  const path = sessionSockPath('ready-session', home)
+  assert.equal(await displaySockExists(path), false)
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => {},
+    onAttach: () => {},
+  })
+  await host.listen()
+  await waitForDisplaySock(path, 3_000, process.pid)
+  assert.equal(await displaySockExists(path), true)
+  await host.close()
+  assert.equal(await displaySockExists(path), false)
+  await rm(home, { recursive: true, force: true })
 })
 
 test('waitForDisplaySock reports host stderr when the pid dies first', async () => {
@@ -125,7 +229,7 @@ test('parseSessionLock keeps sock and paused state', () => {
 
 test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
-  const path = join(home, 'tui-socks', 's.sock')
+  const path = sessionSockPath('probe', home)
   const attaches = []
   const detaches = []
   const host = new DisplayHost(path, {
@@ -152,7 +256,7 @@ test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () =>
 
 test('DisplayHost delivers HELLO then RESIZE from one chunk', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
-  const path = join(home, 'tui-socks', 's.sock')
+  const path = sessionSockPath('hello-resize', home)
   const resizes = []
   const attaches = []
   const host = new DisplayHost(path, {
@@ -181,7 +285,7 @@ test('DisplayHost delivers HELLO then RESIZE from one chunk', async () => {
 
 test('DisplayHost claims HELLO and kicks the previous relay', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
-  const path = join(home, 'tui-socks', 's.sock')
+  const path = sessionSockPath('kick', home)
   const stdin = []
   const detaches = []
   const attaches = []
@@ -228,7 +332,7 @@ test('DisplayHost claims HELLO and kicks the previous relay', async () => {
 
 test('DisplayHost handles multiple resize events smoothly as window enlarges', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
-  const path = join(home, 'tui-socks', 'resize.sock')
+  const path = sessionSockPath('resize', home)
   const resizes = []
   const attaches = []
   const detaches = []
