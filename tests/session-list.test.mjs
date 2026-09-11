@@ -11,6 +11,8 @@ import {
   formatFooterCwd,
   listResumableSessions,
   listResumableSessionsProgressive,
+  openResumableSessionPager,
+  PICKER_PAGE_SIZE,
   sessionCwdLabel,
 } from '../lib/session-list.js'
 
@@ -485,4 +487,120 @@ test('a title is cached and painted as soon as it resolves', async () => {
   assert.equal(titled.sessions.length, 1, 'only the resolved entry is in that frame')
   assert.notEqual(titled.indexAtPaint, undefined, 'the index is already written by that frame')
   assert.equal(titled.indexAtPaint.includes('标题 page-fast'), true)
+})
+
+// ── lazy paging ─────────────────────────────────────────────────────────────
+//
+// The picker reads one page up front and paints it only when every row has a
+// real title; older sessions are read on demand. A full scan before the first
+// frame is what made a large history feel like a hang.
+
+function pagerFor(ids, { indexPath, labels = {}, hosts = async () => [] } = {}) {
+  const persistence = {
+    list: async () => ids.map((id, index) => header(id, 2000 - index)),
+    inspect: async (id) => {
+      if (labels[id] === null) {
+        return { meta: header(id, 2000 - ids.indexOf(id)), events: [{ type: 'permission/preset', seq: 0, time: 100, data: {} }] }
+      }
+      return readableSession(id, 2000 - ids.indexOf(id), labels[id] ?? `标题 ${id}`)
+    },
+  }
+  return openResumableSessionPager(persistence, '', { listHosts: hosts, indexPath })
+}
+
+test('the first page is steady and counts what it left unread', async () => {
+  const ids = Array.from({ length: 25 }, (_, index) => `page-${index}`)
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-'))
+  const pager = await pagerFor(ids, { indexPath: join(dir, 'index.json') })
+
+  const first = await pager.page()
+  assert.equal(first.sessions.length, PICKER_PAGE_SIZE)
+  assert.equal(first.done, false)
+  assert.equal(first.remaining, ids.length - PICKER_PAGE_SIZE)
+  assert.equal(first.sessions.every(item => item.labelPending !== true), true,
+    'a page never carries a placeholder label')
+  assert.equal(first.sessions.every(item => item.label.startsWith('标题 ')), true)
+  assert.deepEqual(first.sessions.map(item => item.id), ids.slice(0, PICKER_PAGE_SIZE))
+})
+
+test('a later page appends older sessions to the same list', async () => {
+  const ids = Array.from({ length: 25 }, (_, index) => `page-${index}`)
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-'))
+  const pager = await pagerFor(ids, { indexPath: join(dir, 'index.json') })
+
+  await pager.page()
+  const second = await pager.page()
+  assert.equal(second.sessions.length, PICKER_PAGE_SIZE * 2)
+  assert.deepEqual(second.sessions.map(item => item.id), ids.slice(0, PICKER_PAGE_SIZE * 2))
+  assert.equal(second.remaining, ids.length - PICKER_PAGE_SIZE * 2)
+
+  const last = await pager.page()
+  assert.equal(last.sessions.length, 25)
+  assert.equal(last.done, true)
+  assert.equal(last.remaining, 0)
+})
+
+test('blank sessions do not consume a page', async () => {
+  const blanks = Array.from({ length: 6 }, (_, index) => `blank-${index}`)
+  const real = Array.from({ length: 9 }, (_, index) => `real-${index}`)
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-'))
+  const pager = await pagerFor([...blanks, ...real], {
+    indexPath: join(dir, 'index.json'),
+    labels: Object.fromEntries(blanks.map(id => [id, null])),
+  })
+  const page = await pager.page()
+  assert.equal(page.sessions.length, PICKER_PAGE_SIZE, 'a page of real rows, blanks skipped')
+  assert.deepEqual(page.sessions.map(item => item.id), real)
+})
+
+test('the index is flushed as soon as the first page is read', async () => {
+  const { readFileSync, existsSync, writeFileSync, mkdirSync } = await import('node:fs')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-index-'))
+  const indexPath = join(dir, 'index.json')
+  // The cache is keyed by the log's fingerprint, so the fake persistence has to
+  // point at a real file for the page to have something to cache.
+  mkdirSync(join(dir, 'flushed-a'), { recursive: true })
+  writeFileSync(join(dir, 'flushed-a', 'session.jsonl.zstd'), 'x')
+  const persistence = {
+    list: async () => [header('flushed-a', 500)],
+    inspect: async () => readableSession('flushed-a', 500, '缓存标题'),
+    locate: () => ({ kind: 'jsonl', path: join(dir, 'flushed-a', 'session.jsonl.zstd') }),
+  }
+  const pager = await openResumableSessionPager(persistence, '', {
+    listHosts: async () => [],
+    indexPath,
+  })
+  assert.equal(existsSync(indexPath), false, 'nothing is written before the first page')
+  const page = await pager.page()
+  assert.equal(page.sessions[0].label, '缓存标题')
+  assert.equal(existsSync(indexPath), true)
+  assert.equal(readFileSync(indexPath, 'utf8').includes('缓存标题'), true)
+})
+
+test('complete() reads everything the eager listing would', async () => {
+  const ids = Array.from({ length: 21 }, (_, index) => `all-${index}`)
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-'))
+  const pager = await pagerFor(ids, { indexPath: join(dir, 'index.json') })
+  const complete = await pager.complete()
+  assert.equal(complete.length, ids.length)
+
+  const eager = await listResumableSessions({
+    list: async () => ids.map((id, index) => header(id, 2000 - index)),
+    inspect: async id => readableSession(id, 2000 - ids.indexOf(id), `标题 ${id}`),
+  }, '', async () => [])
+  assert.deepEqual(complete.map(item => item.id), eager.map(item => item.id))
+})
+
+test('a live host joins the first page even when its header is far down the history', async () => {
+  const ids = Array.from({ length: 30 }, (_, index) => `page-${index}`)
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-host-'))
+  const hosts = async () => [{
+    sessionId: 'page-29',
+    lock: { pid: 77, sessionId: 'page-29', startedAt: '2026-09-04T00:00:00.000Z', state: 'running-detached' },
+    sock: '/tmp/page-29.sock',
+  }]
+  const pager = await pagerFor(ids, { indexPath: join(dir, 'index.json'), hosts })
+  const first = await pager.page()
+  assert.equal(first.sessions[0].id, 'page-29', 'an attachable host leads the list')
+  assert.equal(first.sessions[0].attach?.pid, 77)
 })

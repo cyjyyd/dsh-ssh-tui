@@ -3,15 +3,24 @@
  * TUI mounts, so launching without an explicit session id lands on a choice
  * instead of a fresh main screen.
  *
- * The list itself is not capped. The visible page is always nine rows so
- * digits 1-9 map onto every on-screen item. Arrow keys move a highlight,
- * typing filters by title / id / cwd, and Enter confirms the focused row.
+ * Reading is lazy. The first page is inspected up front and only then painted,
+ * so nothing on screen is a raw id waiting to turn into a title; older sessions
+ * are read only when the user reaches for them — pressing past the last row, or
+ * filtering, which has to look deeper than the rows on screen. The visible page
+ * is always nine rows so digits 1-9 map onto every on-screen item.
  */
 
 import { StringDecoder } from 'node:string_decoder'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { formatSessionTime, listResumableSessionsProgressive, type ResumableSession } from './session-list.js'
+import {
+  formatSessionTime,
+  openResumableSessionPager,
+  PICKER_PAGE_SIZE,
+  type ResumableSession,
+  type ResumableSessionPage,
+  type ResumableSessionPager,
+} from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
 import { truncateToWidth } from './term-text.js'
 import { TerminalInputGuard } from './terminal-input.js'
@@ -43,10 +52,10 @@ export interface SessionPickerState {
    * shortcuts. Set automatically by the first letter, or by `/` / Ctrl+F.
    */
   filterActive: boolean
-  /** Older logs are still being inspected in the background. */
+  /** A page is being read right now (the first one, or a lazy load). */
   loading?: boolean
-  /** Entries held back because their label is still the raw session id. */
-  pendingLabels?: number
+  /** Sessions in history that have not been read yet. */
+  more?: number
 }
 
 /** One key / control action against {@link SessionPickerState}. */
@@ -121,7 +130,43 @@ export function pickerStateUnchanged(previous: SessionPickerState, next: Session
     && previous.filterActive === next.filterActive
     && previous.sessions === next.sessions
     && previous.loading === next.loading
-    && previous.pendingLabels === next.pendingLabels
+    && previous.more === next.more
+}
+
+/**
+ * Whether this input asked for sessions the picker has not read yet.
+ *
+ * Older history is read lazily, so the trigger matters: while filtering, a page
+ * that leaves fewer matches than fit on screen is deepened (a search has to look
+ * past the rows on screen); otherwise the user has to press past the last loaded
+ * row — pressing Down at the end, PageDown, or End — before older sessions are
+ * read.
+ */
+export function pickerWantsMorePage(input: {
+  previous: Pick<SessionPickerState, 'sessions' | 'cursor' | 'query' | 'filterActive'>
+  next: Pick<SessionPickerState, 'sessions' | 'cursor' | 'query' | 'filterActive'>
+  actions: readonly SessionPickerAction[]
+  more: number
+  windowSize?: number
+}): boolean {
+  if (input.more <= 0) return false
+  const windowSize = input.windowSize ?? SESSION_PICKER_WINDOW
+  const filtering = input.next.filterActive || input.next.query !== ''
+  const nextFiltered = filterResumableSessions(input.next.sessions, input.next.query)
+  if (filtering) return nextFiltered.length < windowSize
+  if (nextFiltered.length === 0) return false
+  const atEnd = input.next.cursor >= nextFiltered.length - 1
+  if (!atEnd) return false
+  const previousFiltered = filterResumableSessions(input.previous.sessions, input.previous.query)
+  const wasAtEnd = previousFiltered.length > 0
+    && input.previous.cursor >= previousFiltered.length - 1
+  const toEnd = input.actions.some(action => action.type === 'end')
+  const downward = input.actions.some(action =>
+    (action.type === 'move' && action.delta > 0)
+    || (action.type === 'page' && action.delta > 0))
+  // End is explicit ("show me the end"); otherwise the keypress only counts when
+  // the cursor was already parked on the last loaded row.
+  return toEnd || (wasAtEnd && downward)
 }
 
 function resultFor(session: ResumableSession): SessionPickerResult {
@@ -356,10 +401,12 @@ export function feedPicker(
   state: SessionPickerState,
   text: string,
   windowSize = SESSION_PICKER_WINDOW,
+  onAction?: (action: SessionPickerAction) => void,
 ): SessionPickerStep {
   let current = state
   for (const unit of splitPickerInput(text)) {
     for (const action of actionsForInput(unit, current)) {
+      onAction?.(action)
       const step = stepPicker(current, action, windowSize)
       if (step.kind === 'done') return step
       current = step.state
@@ -380,7 +427,7 @@ export function feedPicker(
 export interface SessionPickerOptions {
   stdin?: NodeJS.ReadStream
   stdout?: NodeJS.WriteStream
-  listSessions?: typeof listResumableSessionsProgressive
+  openPager?: typeof openResumableSessionPager
 }
 
 export async function showSessionPicker(
@@ -393,7 +440,7 @@ export async function showSessionPicker(
 
   const stdin = options.stdin ?? process.stdin
   const stdout = options.stdout ?? process.stdout
-  const listSessions = options.listSessions ?? listResumableSessionsProgressive
+  const openPager = options.openPager ?? openResumableSessionPager
   const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
   const decoder = new StringDecoder('utf8')
@@ -427,15 +474,15 @@ export async function showSessionPicker(
       ? t('picker.filterHint')
       : t('picker.filter', { query: state.query === '' ? '▌' : `${state.query}▌` })
     lines.push(style(truncateToWidth(filterLine, width), filtering ? '36' : '90'))
+    const more = state.more ?? 0
     lines.push(style(truncateToWidth(t('picker.count', {
       shown: filtered.length,
       total: state.sessions.length,
-    }) + (state.loading === true ? t('picker.loading') : ''), width), '90'))
+    }) + (more > 0 ? t('picker.countMore', { count: more }) : '')
+      + (state.loading === true ? t('picker.loading') : ''), width), '90'))
     if (filtered.length === 0) {
       const empty = state.loading === true
-        ? state.pendingLabels !== undefined && state.pendingLabels > 0
-          ? t('picker.readingTitles', { count: state.pendingLabels })
-          : t('picker.loadingList')
+        ? t('picker.loadingList')
         : state.query === ''
           ? t('picker.noneYet')
           : t('picker.noMatch', { query: state.query })
@@ -469,6 +516,10 @@ export async function showSessionPicker(
       }
       if (end < filtered.length) {
         lines.push(style(truncateToWidth(t('picker.moreBelow', { count: filtered.length - end }), width), '90'))
+      } else if (more > 0) {
+        // Everything read is on screen: say how to reach the rest instead of
+        // reading it now. Filtering looks deeper on its own (see `pump`).
+        lines.push(style(truncateToWidth(t('picker.loadMore', { count: more }), width), '90'))
       }
     }
     lines.push('')
@@ -506,6 +557,8 @@ export async function showSessionPicker(
   const onResize = (): void => { render(true) }
 
   return new Promise<SessionPickerResult>((resolve) => {
+    let pager: ResumableSessionPager | undefined
+    let pageInFlight = false
     let escapeBuffer = ''
     // A cursor reply that outlived its probe would otherwise be typed into the
     // filter as `[17;1R` and empty the list with a query nobody wrote.
@@ -538,7 +591,8 @@ export async function showSessionPicker(
     const applyChunk = (text: string): void => {
       const windowSize = pickerCapacity(Math.max(12, stdout.rows || 24))
       const previous = state
-      const step = feedPicker(state, text, windowSize)
+      const actions: SessionPickerAction[] = []
+      const step = feedPicker(state, text, windowSize, action => actions.push(action))
       if (step.kind === 'done') {
         cleanup(step.result)
         return
@@ -546,8 +600,12 @@ export async function showSessionPicker(
       state = step.state
       if (done) return
       // Held ↑/↓ at the ends used to ED2-clear the whole screen every repeat.
-      if (pickerStateUnchanged(previous, state)) return
+      if (pickerStateUnchanged(previous, state)) {
+        pump(actions, previous)
+        return
+      }
       render()
+      pump(actions, previous)
     }
     const onData = (chunk: Buffer): void => {
       const decoded = decoder.write(chunk)
@@ -605,32 +663,54 @@ export async function showSessionPicker(
       cleanup(null)
       throw error
     }
-    const applyListing = (
-      listing: { sessions: ResumableSession[]; pending: boolean },
-      final = false,
-    ): void => {
-      if (done) return
-      // The first listing is a header sketch: a session whose log has not been
-      // inspected yet is labelled with its raw id, and painting that frame makes
-      // the user pick an id they cannot recognise — which then turns into a
-      // title two seconds later. Hold those entries back (the loading line
-      // keeps the spot) and show them once their real label exists. The final
-      // listing is painted in full: a session that still has no title never
-      // will, and staying invisible would be worse than showing its id.
-      const ready = final
-        ? listing.sessions
-        : listing.sessions.filter(session => session.labelPending !== true)
-      const held = listing.sessions.length - ready.length
+    /** Paint a page: replace the loaded rows and keep the cursor on its row. */
+    const applyPage = (page: ResumableSessionPage): void => {
+      // A page is steady by contract (every label resolved); hold back a
+      // placeholder anyway, so a future reader cannot put a raw id on screen
+      // that turns into a title a moment later.
+      const ready = page.sessions.filter(session => session.labelPending !== true)
       const focusedId = filterResumableSessions(state.sessions, state.query)[state.cursor]?.id
       const nextFiltered = filterResumableSessions(ready, state.query)
       state = {
         ...state,
         sessions: ready,
-        loading: listing.pending || held > 0,
-        pendingLabels: held,
+        loading: false,
+        more: page.remaining,
         cursor: retainCursor(focusedId, nextFiltered, state.cursor),
       }
       render()
+    }
+    const loadPage = async (): Promise<void> => {
+      if (done || pager === undefined || pageInFlight) return
+      pageInFlight = true
+      state = { ...state, loading: true }
+      render()
+      try {
+        const page = await pager.page(PICKER_PAGE_SIZE)
+        pageInFlight = false
+        if (done) return
+        applyPage(page)
+        // A filter that still has fewer matches than fit on screen keeps
+        // deepening; a plain page load stops here until the user asks again.
+        pump([], state)
+      } catch {
+        // A read that failed must not leave the picker stuck on "loading…".
+        pageInFlight = false
+        if (done) return
+        state = { ...state, loading: false, more: 0 }
+        render()
+      }
+    }
+    /**
+     * The one place that decides to read more history. Called after every
+     * applied input and after every page; `pickerWantsMorePage` holds the rule.
+     */
+    const pump = (actions: readonly SessionPickerAction[], previous: SessionPickerState): void => {
+      if (done || pager === undefined) return
+      const more = state.more ?? 0
+      if (more <= 0) return
+      if (!pickerWantsMorePage({ previous, next: state, actions, more })) return
+      void loadPage()
     }
     const startListing = async (): Promise<void> => {
       let persistence = ctx.get('sessionPersistence')
@@ -644,16 +724,19 @@ export async function showSessionPicker(
         cleanup({ kind: 'new' })
         return
       }
-      const listing = await listSessions(persistence, '', {
-        onUpdate: applyListing,
-      })
-      if (done) return
-      if (listing.complete.length === 0 && state.query === '') {
+      pager = await openPager(persistence, '')
+      if (done || signal?.aborted) return
+      // The first page is read in full before anything is painted: every row
+      // on screen carries its real title, and no id is ever shown and then
+      // replaced a moment later.
+      const first = await pager.page(PICKER_PAGE_SIZE)
+      if (done || signal?.aborted) return
+      if (first.sessions.length === 0) {
         cleanup({ kind: 'new' })
         stdout.write(t('picker.none'))
         return
       }
-      applyListing({ sessions: listing.complete, pending: false }, true)
+      applyPage(first)
     }
     void startListing().catch(() => {
       if (!done) cleanup({ kind: 'new' })

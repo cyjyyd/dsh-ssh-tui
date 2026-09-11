@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   actionsForInput,
+  pickerWantsMorePage,
   showSessionPicker,
   clampPickerCursor,
   feedPicker,
@@ -173,15 +174,15 @@ test('pickerStateUnchanged treats loading as part of the frame', () => {
   assert.equal(pickerStateUnchanged(idle, loading), false)
 })
 
-test('pickerStateUnchanged treats the pending-label count as part of the frame', () => {
+test('pickerStateUnchanged treats the unloaded count as part of the frame', () => {
   const sessions = [session('a')]
   const idle = state(sessions)
-  // The loading line says how many titles are still missing; a repaint that
-  // only changes that number still has to happen.
-  const held = state(sessions, { loading: true, pendingLabels: 3 })
-  assert.equal(pickerStateUnchanged(idle, held), false)
-  assert.equal(pickerStateUnchanged(held, state(sessions, { loading: true, pendingLabels: 4 })), false)
-  assert.equal(pickerStateUnchanged(held, state(sessions, { loading: true, pendingLabels: 3 })), true)
+  // The count line says how many sessions are still unread; a repaint that only
+  // changes that number still has to happen.
+  const more = state(sessions, { loading: false, more: 3 })
+  assert.equal(pickerStateUnchanged(idle, more), false)
+  assert.equal(pickerStateUnchanged(more, state(sessions, { loading: false, more: 4 })), false)
+  assert.equal(pickerStateUnchanged(more, state(sessions, { loading: false, more: 3 })), true)
 })
 
 // The launcher keeps owning the TTY as the display relay for the whole
@@ -258,114 +259,271 @@ test('a live picker repaints on resize and stops after cancel', { timeout: 5_000
   assert.equal(io.writes.length, after, 'a cancelled picker must never paint again')
 })
 
-// The first listing is a header sketch: an entry whose log has not been read is
-// labelled with its raw id, and painting that frame is how an unrecognisable
-// "session I did not ask for" jumped into the list. The lister marks those
-// entries, and the picker holds them until their real title exists.
-test('the picker holds the list until session titles load', { timeout: 5_000 }, async () => {
-  const io = pickerStreams()
-  const sketch = [{
-    id: 'main-session-16531619',
-    label: 'main-session-16531619',
-    updatedAt: 1,
-    cwd: '',
-    labelPending: true,
-  }]
-  const titled = [{ id: 'main-session-16531619', label: '兼容0.1.5并修光标漂移', updatedAt: 1, cwd: '/root' }]
-  const listSessions = async (_persistence, _current, { onUpdate }) => {
-    onUpdate({ sessions: sketch, pending: true })
-    await new Promise(resolve => setTimeout(resolve, 30))
-    onUpdate({ sessions: titled, pending: false })
-    return { sessions: titled, pending: false, complete: titled }
+/** A pager over fixed pages; `remaining`/`done` are derived like the real one. */
+function pagedSource(pages) {
+  const all = pages.flat()
+  let served = 0
+  return {
+    async page() {
+      const page = pages[Math.min(served, pages.length - 1)] ?? []
+      served = Math.min(served + 1, pages.length)
+      const loaded = pages.slice(0, served).flat()
+      return {
+        sessions: loaded,
+        remaining: all.length - loaded.length,
+        done: served >= pages.length,
+      }
+    },
+    async complete() { return all },
   }
+}
+
+function pagerOptions(pages, onPage) {
+  return async () => {
+    const source = pagedSource(pages)
+    return {
+      page: async (size) => {
+        const page = await source.page(size)
+        onPage?.(page)
+        return page
+      },
+      complete: source.complete,
+    }
+  }
+}
+
+const tick = (ms = 20) => new Promise(resolve => setTimeout(resolve, ms))
+
+test('pickerWantsMorePage only fires when the user reaches for older sessions', () => {
+  const loaded = [session('a'), session('b')]
+  const idle = state(loaded, { cursor: 0 })
+  const atEnd = state(loaded, { cursor: 1 })
+  const down = [{ type: 'move', delta: 1 }]
+  // Nothing left to read: never.
+  assert.equal(pickerWantsMorePage({ previous: atEnd, next: atEnd, actions: down, more: 0 }), false)
+  // Moving inside the loaded rows is not a request.
+  assert.equal(pickerWantsMorePage({ previous: idle, next: atEnd, actions: down, more: 5 }), false)
+  // Pressing down on the last loaded row is.
+  assert.equal(pickerWantsMorePage({ previous: atEnd, next: atEnd, actions: down, more: 5 }), true)
+  // Moving up is not.
+  assert.equal(pickerWantsMorePage({
+    previous: atEnd, next: idle, actions: [{ type: 'move', delta: -1 }], more: 5,
+  }), false)
+  // End asks for the end of the list from wherever the cursor is.
+  assert.equal(pickerWantsMorePage({ previous: idle, next: atEnd, actions: [{ type: 'end' }], more: 5 }), true)
+  // A filter with fewer matches than a page keeps looking; a full page does not.
+  const short = { ...idle, query: 'zz', filterActive: true }
+  assert.equal(pickerWantsMorePage({
+    previous: idle, next: short, actions: [{ type: 'type', text: 'z' }], more: 5,
+  }), true)
+  const full = state(Array.from({ length: 9 }, (_, index) => session(`m-${index}`)), {
+    query: 'm', filterActive: true,
+  })
+  assert.equal(pickerWantsMorePage({
+    previous: full, next: full, actions: [{ type: 'type', text: 'm' }], more: 5,
+  }), false)
+})
+
+// The first page is read in full before anything is painted: every row on
+// screen carries a real title, and no id is ever shown and then replaced a
+// moment later. This is what replaced the header sketch.
+test('the picker paints nothing until the first page is steady', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const page = [session('main-session-16531619', { label: '兼容0.1.5并修光标漂移' })]
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const openPager = async () => ({
+    page: async () => {
+      await gate
+      return { sessions: page, remaining: 0, done: true }
+    },
+    complete: async () => page,
+  })
   const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
-  await new Promise(resolve => setTimeout(resolve, 10))
-  const firstFrame = io.writes.join('')
-  assert.equal(firstFrame.includes('main-session-16531619'), false, 'raw ids must not be painted')
-  assert.equal(firstFrame.includes('正在读取会话标题'), true, 'the loading line holds the spot')
-  await new Promise(resolve => setTimeout(resolve, 60))
-  const withTitles = io.writes.join('')
-  assert.equal(withTitles.includes('兼容0.1.5并修光标漂移'), true, 'titles replace the sketch')
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  const loadingFrame = io.writes.join('')
+  assert.equal(loadingFrame.includes('main-session-16531619'), false, 'raw ids must not be painted')
+  assert.equal(loadingFrame.includes('正在读取历史会话'), true, 'the loading line holds the spot')
+  release()
+  await tick()
+  const steady = io.writes.join('')
+  assert.equal(steady.includes('兼容0.1.5并修光标漂移'), true, 'the title appears')
+  assert.equal(steady.includes('main-session-16531619'), false, 'and never as an id')
   abort.abort()
   await settled
 })
 
-// Entries that already carry a cached title must not wait for the sketch pass:
-// the index is what makes the first frame instant.
-test('a cached title is painted with the first listing', { timeout: 5_000 }, async () => {
+// Titles arrive with the page, not one by one: the page is one frame.
+test('the first page is painted as one frame', { timeout: 5_000 }, async () => {
   const io = pickerStreams()
-  const cached = [{ id: 'main-session-cached', label: '缓存标题', updatedAt: 1, cwd: '/root' }]
-  const pending = [{ id: 'main-session-later', label: 'main-session-later', updatedAt: 2, cwd: '', labelPending: true }]
-  const listSessions = async (_persistence, _current, { onUpdate }) => {
-    onUpdate({ sessions: [...cached, ...pending], pending: true })
-    await new Promise(resolve => setTimeout(resolve, 60))
-    return { sessions: cached, pending: false, complete: cached }
-  }
+  const page = [
+    session('main-session-a', { label: '第一条标题' }),
+    session('main-session-b', { label: '第二条标题' }),
+  ]
   const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
-  await new Promise(resolve => setTimeout(resolve, 15))
-  const firstFrame = io.writes.join('')
-  assert.equal(firstFrame.includes('缓存标题'), true, 'a cached title paints immediately')
-  assert.equal(firstFrame.includes('main-session-later'), false, 'an unresolved id stays hidden')
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager: pagerOptions([page]) })
+  await tick()
+  const frame = io.writes.find(write => write.includes('第一条标题'))
+  assert.notEqual(frame, undefined, 'the page was painted')
+  assert.equal(frame.includes('第二条标题'), true, 'both titles came in the same frame')
   abort.abort()
   await settled
 })
 
-// Even when nothing has a title the picker must still become usable.
-test('an untitled history is painted by the final listing', { timeout: 5_000 }, async () => {
+test('the loading frame says what it is waiting for, not which sessions', { timeout: 5_000 }, async () => {
   const io = pickerStreams()
-  const only = [{ id: 'main-session-plain', label: 'main-session-plain', updatedAt: 1, cwd: '' }]
-  const listSessions = async () => ({ sessions: only, pending: false, complete: only })
+  const page = [session('main-session-9f1c', { label: '读取完成后才有' })]
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const openPager = async () => ({
+    page: async () => { await gate; return { sessions: page, remaining: 0, done: true } },
+    complete: async () => page,
+  })
   const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
-  await new Promise(resolve => setTimeout(resolve, 40))
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  const painted = io.writes.join('')
+  assert.equal(painted.includes('正在读取历史会话'), true, `expected the loading line, got: ${painted.slice(-200)}`)
+  assert.equal(painted.includes('main-session-9f1c'), false)
+  release()
+  await tick()
+  abort.abort()
+  await settled
+})
+
+// A row whose log cannot be read is resolved too (it carries its id and the
+// unreadable note), so it still reaches the screen with the first page.
+test('a page that only has unreadable rows still paints them', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const page = [session('main-session-plain', { label: 'main-session-plain', unreadable: true })]
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager: pagerOptions([page]) })
+  await tick()
   assert.equal(io.writes.join('').includes('main-session-plain'), true)
   abort.abort()
   await settled
 })
 
-// The loading line is the only thing on screen while every entry is still an
-// id; it has to say what it is waiting for.
-test('the loading line counts the titles still being read', { timeout: 5_000 }, async () => {
+// Item 1's rule, kept as a second line of defence: a placeholder label is
+// never painted, whatever a reader hands back.
+test('a placeholder label is held back even when a page carries one', { timeout: 5_000 }, async () => {
   const io = pickerStreams()
-  const pending = [{ id: 'main-session-9f1c', label: 'main-session-9f1c', updatedAt: 1, cwd: '', labelPending: true }]
-  const listSessions = async (_persistence, _current, { onUpdate }) => {
-    onUpdate({ sessions: pending, pending: true })
-    await new Promise(resolve => setTimeout(resolve, 40))
-    return { sessions: pending, pending: false, complete: pending }
-  }
+  const page = [
+    session('main-session-plain', { label: 'main-session-plain', labelPending: true }),
+    session('main-session-titled', { label: '已经有标题' }),
+  ]
   const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
-  await new Promise(resolve => setTimeout(resolve, 15))
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager: pagerOptions([page]) })
+  await tick()
   const painted = io.writes.join('')
-  assert.equal(painted.includes('正在读取会话标题（1 个）'), true, `expected the pending count, got: ${painted.slice(-200)}`)
-  assert.equal(painted.includes('main-session-9f1c'), false)
-  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(painted.includes('main-session-plain'), false, 'a raw id must not be painted')
+  assert.equal(painted.includes('已经有标题'), true, 'the resolved row is painted')
   abort.abort()
   await settled
 })
 
-// A session that never gets a title still has to be selectable; the final
-// listing is painted in full even though the entry is still marked pending.
-test('the final listing paints an entry that never resolves', { timeout: 5_000 }, async () => {
+// The whole point of the lazy read: reaching the last loaded row is not a
+// request for more, pressing past it is.
+test('reaching the last row does not read more; pressing past it does', { timeout: 5_000 }, async () => {
   const io = pickerStreams()
-  const stuck = [{ id: 'main-session-stuck', label: 'main-session-stuck', updatedAt: 1, cwd: '', labelPending: true }]
-  const listSessions = async (_persistence, _current, { onUpdate }) => {
-    onUpdate({ sessions: stuck, pending: true })
-    await new Promise(resolve => setTimeout(resolve, 20))
-    return { sessions: stuck, pending: false, complete: stuck }
-  }
+  const pageOne = Array.from({ length: 3 }, (_, index) => session(`loaded-${index}`, { label: `已加载 ${index}` }))
+  const pageTwo = [session('older-0', { label: '更早的一条' })]
+  let pages = 0
+  const openPager = pagerOptions([pageOne, pageTwo], () => { pages += 1 })
   const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
-  await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(io.writes.join('').includes('main-session-stuck'), true,
-    'a permanently untitled session must appear from the final listing')
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  assert.equal(pages, 1, 'only the first page was read')
+  assert.equal(io.writes.join('').includes('还有 1 条未加载'), true, 'the count says what is left')
+  io.type('\x1b[B')
+  io.type('\x1b[B')
+  await tick(10)
+  assert.equal(pages, 1, 'arriving at the last row is not a request for more')
+  io.type('\x1b[B')
+  await tick()
+  assert.equal(pages, 2, 'a press past the end reads the next page')
+  assert.equal(io.writes.join('').includes('更早的一条'), true)
   abort.abort()
   await settled
+})
+
+test('End reads the next page', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pageOne = Array.from({ length: 3 }, (_, index) => session(`loaded-${index}`, { label: `已加载 ${index}` }))
+  const pageTwo = [session('older-0', { label: '更早的一条' })]
+  let pages = 0
+  const openPager = pagerOptions([pageOne, pageTwo], () => { pages += 1 })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  io.type('\x1b[F')
+  await tick()
+  assert.equal(pages, 2, 'End asks for the end of the list')
+  abort.abort()
+  await settled
+})
+
+// Filtering is the other way to reach older sessions: a query that matches
+// fewer rows than fit on screen keeps reading, page by page.
+test('a filter deepens the search until a page of matches is loaded', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pageOne = Array.from({ length: 9 }, (_, index) => session(`noise-${index}`, { label: `杂项 ${index}` }))
+  const pageTwo = [session('match-0', { label: '命中目标' })]
+  const pageThree = [session('never', { label: '不该再读' })]
+  let pages = 0
+  const openPager = pagerOptions([pageOne, pageTwo, pageThree], () => { pages += 1 })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  io.type('命中')
+  await tick(40)
+  assert.ok(pages >= 2, `the filter had to look past the first page (read ${pages})`)
+  assert.equal(io.writes.join('').includes('命中目标'), true)
+  abort.abort()
+  await settled
+})
+
+test('a filter that already has a page of matches reads no further', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pageOne = Array.from({ length: 9 }, (_, index) => session(`hit-${index}`, { label: `命中 ${index}` }))
+  const pageTwo = [session('never', { label: '不该再读' })]
+  let pages = 0
+  const openPager = pagerOptions([pageOne, pageTwo], () => { pages += 1 })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  io.type('命中')
+  await tick(30)
+  assert.equal(pages, 1, 'nine matches already fill the page')
+  assert.equal(io.writes.join('').includes('不该再读'), false)
+  abort.abort()
+  await settled
+})
+
+// Enter on a row that was read lazily still resumes it.
+test('a session read by a lazy page can be resumed', { timeout: 5_000 }, async () => {
+  const io = pickerStreams()
+  const pageOne = Array.from({ length: 2 }, (_, index) => session(`loaded-${index}`, { label: `已加载 ${index}` }))
+  const pageTwo = [session('older-9', { label: '更早的一条' })]
+  const openPager = pagerOptions([pageOne, pageTwo])
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+  await tick()
+  io.type('\x1b[B')       // row 2
+  io.type('\x1b[B')       // past the last loaded row: reads the next page
+  await tick()
+  io.type('\x1b[B')       // now the newly loaded row
+  io.type('\r')
+  assert.deepEqual(await settled, { kind: 'resume', id: 'older-9' })
 })

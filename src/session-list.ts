@@ -183,13 +183,42 @@ const INSPECT_BATCH_SIZE = 30
 /** Internal inspection result before display filtering. */
 type InspectedSession = ResumableSession & { hasUserInput: boolean; hasReply: boolean }
 
-/** Incremental listing so the picker can paint before older logs are parsed. */
+/** Incremental listing so a caller can paint before older logs are parsed. */
 export interface ResumableSessionListing {
   /** Sessions already inspected (or restored from the disk cache). */
   sessions: ResumableSession[]
   /** Whether older logs are still being inspected. */
   pending: boolean
 }
+
+/** One lazy page: everything read so far, plus what is still uninspected. */
+export interface ResumableSessionPage {
+  /** Resolved sessions in display order; a label here is never a placeholder. */
+  sessions: ResumableSession[]
+  /** Candidates not inspected yet (an upper bound on rows still to come). */
+  remaining: number
+  /** No candidates are left to inspect. */
+  done: boolean
+}
+
+/**
+ * A listing that grows on demand.
+ *
+ * The picker reads one page, paints it, and only reads on when the user reaches
+ * for older sessions. A launch used to inspect every log before the first
+ * frame, which is what made a large history feel like a hang; the first page
+ * alone also has every title resolved, so nothing on screen is ever a raw id
+ * that turns into a title a second later.
+ */
+export interface ResumableSessionPager {
+  /** Inspect onward until `size` more rows exist, or history runs out. */
+  page(size?: number): Promise<ResumableSessionPage>
+  /** Read every remaining candidate (the `/resume` flow wants the whole list). */
+  complete(): Promise<ResumableSession[]>
+}
+
+/** Sessions read before the picker's first paint, and per lazy page after it. */
+export const PICKER_PAGE_SIZE = 9
 
 function toResumable(item: InspectedSession): ResumableSession {
   const { hasUserInput: _hasUserInput, hasReply: _hasReply, ...rest } = item
@@ -223,115 +252,171 @@ function inspectedFromIndex(entry: SessionIndexEntry): InspectedSession {
 }
 
 /**
- * List resumable top-level sessions, newest first.
+ * One pass over the store: the header sketch, the cached labels, the attachable
+ * hosts, and an inspection cursor that advances page by page.
  *
- * Subagent-owned sessions and the current session are excluded. Sessions
- * whose event log cannot be inspected are kept (marked `unreadable`) instead
- * of silently disappearing from history; readable sessions with user input
- * sort first. The label is the persisted title, then the user's first input,
- * then the id.
- * @param persistence - the session persistence service.
- * @param currentId - the live session to exclude (empty at launch).
- * @returns every resumable candidate in display order (attachable live
- *   hosts first, then readable logs, then unreadable).
+ * The lazy pager, the progressive listing and the full `/resume` list all drive
+ * this, so the hardening lives in exactly one place: a failed or `detached`
+ * read is never treated as a blank session, and a blank one is only pruned
+ * after it was positively read.
  */
-export async function listResumableSessions(
-  persistence: object,
-  currentId: string,
-  listHosts: typeof listAttachableHosts = listAttachableHosts,
-): Promise<ResumableSession[]> {
-  const listing = await listResumableSessionsProgressive(persistence, currentId, { listHosts })
-  return listing.complete
-}
+class ResumableSessionSource {
+  private cursor = 0
+  private indexDirty = false
+  private readonly inspected: InspectedSession[] = []
+  private readonly blankLiveIds = new Set<string>()
+  private readonly extraLive = new Map<string, InspectedSession>()
 
-/**
- * List resumable sessions, painting the recent page first.
- *
- * `onUpdate` fires after the priority page (cached + newest logs) and again
- * after each later inspect batch. Unchanged logs reuse `$DSH_HOME/tui-session-index.json`.
- */
-export async function listResumableSessionsProgressive(
-  persistence: object,
-  currentId: string,
-  options: {
-    listHosts?: typeof listAttachableHosts
-    onUpdate?: (listing: ResumableSessionListing) => void
-    indexPath?: string
-    priorityCount?: number
-  } = {},
-): Promise<ResumableSessionListing & { complete: ResumableSession[] }> {
-  const listHosts = options.listHosts ?? listAttachableHosts
-  const indexPath = options.indexPath
-    ?? process.env.DSH_TUI_SESSION_INDEX
-    ?? sessionIndexPath()
-  const priorityCount = options.priorityCount ?? PICKER_PRIORITY_COUNT
-  const headers = await listPersistenceHeaders(persistence)
-  const candidates = headers
-    .filter(meta =>
-      meta.id !== currentId
-      && meta.cwd !== undefined
-      && meta.origin !== 'subagent'
-      && (meta.delegationDepth ?? 0) === 0)
-    .sort((a, b) => b.createdAt - a.createdAt)
+  private constructor(
+    private readonly persistence: object,
+    private readonly currentId: string,
+    private readonly candidates: SessionHeaderLike[],
+    private readonly hosts: Awaited<ReturnType<typeof listAttachableHosts>>,
+    private readonly index: Map<string, SessionIndexEntry>,
+    private readonly indexPath: string,
+  ) {}
 
-  const [index, hosts] = await Promise.all([
-    loadSessionIndex(indexPath),
-    listHosts(),
-  ])
-  const keepIds = new Set(candidates.map(meta => String(meta.id)))
-  const indexSizeBefore = index.size
-  pruneSessionIndex(index, keepIds)
-  let indexDirty = index.size !== indexSizeBefore
+  static async open(
+    persistence: object,
+    currentId: string,
+    options: { listHosts?: typeof listAttachableHosts; indexPath?: string } = {},
+  ): Promise<ResumableSessionSource> {
+    const listHosts = options.listHosts ?? listAttachableHosts
+    const indexPath = options.indexPath
+      ?? process.env.DSH_TUI_SESSION_INDEX
+      ?? sessionIndexPath()
+    const headers = await listPersistenceHeaders(persistence)
+    const candidates = headers
+      .filter(meta =>
+        meta.id !== currentId
+        && meta.cwd !== undefined
+        && meta.origin !== 'subagent'
+        && (meta.delegationDepth ?? 0) === 0)
+      .sort((a, b) => b.createdAt - a.createdAt)
 
-  const sketchFromHeader = (meta: SessionHeaderLike): InspectedSession => {
-    const cached = index.get(String(meta.id))
-    const stat = sessionArtifactStat(persistence, meta)
+    const [index, hosts] = await Promise.all([
+      loadSessionIndex(indexPath),
+      listHosts(),
+    ])
+    const keepIds = new Set(candidates.map(meta => String(meta.id)))
+    const indexSizeBefore = index.size
+    pruneSessionIndex(index, keepIds)
+    const source = new ResumableSessionSource(
+      persistence, currentId, candidates, hosts, index, indexPath,
+    )
+    source.indexDirty = index.size !== indexSizeBefore
+    return source
+  }
+
+  /** Header-only view: cached labels where known, the id (marked) for the rest. */
+  sketch(): ResumableSession[] {
+    const sketchFromHeader = (meta: SessionHeaderLike): InspectedSession => {
+      const cached = this.index.get(String(meta.id))
+      const stat = sessionArtifactStat(this.persistence, meta)
+      if (stat.size > 0 && indexEntryMatchesStat(cached, stat) && cached !== undefined) {
+        return inspectedFromIndex(cached)
+      }
+      return {
+        id: meta.id,
+        label: cached?.label && cached.label !== '' ? cached.label : meta.id,
+        updatedAt: cached?.updatedAt ?? meta.createdAt,
+        cwd: meta.cwd ?? cached?.cwd ?? '',
+        hasUserInput: cached?.hasUserInput ?? true,
+        hasReply: cached?.hasReply ?? true,
+        // Nothing but the header has been read yet: the label is the id.
+        labelPending: true,
+      }
+    }
+    const sketched = this.candidates.map(meta => toResumable(sketchFromHeader(meta)))
+    const sketchedById = new Map(sketched.map(item => [item.id, item]))
+    for (const host of this.hosts) {
+      if (host.sessionId === this.currentId) continue
+      const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
+      const existing = sketchedById.get(host.sessionId)
+      if (existing !== undefined) {
+        existing.attach = attach
+        continue
+      }
+      sketched.unshift({
+        id: host.sessionId,
+        label: host.sessionId,
+        updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
+        cwd: '',
+        attach,
+        // A live Host whose header never made it into the candidate list has no
+        // inspectable label yet either.
+        labelPending: true,
+      })
+    }
+    return sketched
+  }
+
+  /** Candidates this source has not inspected yet. */
+  get remaining(): number {
+    return this.candidates.length - this.cursor
+  }
+
+  /** Take the next `count` headers, in order. They are consumed by `resolve`. */
+  peek(count: number): SessionHeaderLike[] {
+    const batch = this.candidates.slice(this.cursor, this.cursor + Math.max(0, Math.floor(count)))
+    this.cursor += batch.length
+    return batch
+  }
+
+  /**
+   * Inspect candidates until `count` rows were added, or history runs out.
+   * A batch is read concurrently, but the rows keep the candidate order.
+   */
+  async take(count: number): Promise<void> {
+    let added = 0
+    while (added < count && this.cursor < this.candidates.length) {
+      const size = Math.min(Math.max(1, count - added), INSPECT_BATCH_SIZE)
+      const batch = this.peek(size)
+      const settled = await Promise.all(batch.map(async meta => this.resolve(meta)))
+      for (const item of settled) {
+        if (item === undefined) continue
+        this.inspected.push(item)
+        added += 1
+      }
+    }
+  }
+
+  /** Keep a resolved row in the display list. */
+  add(item: InspectedSession): void {
+    this.inspected.push(item)
+  }
+
+  /** Resolve one header into a row. Blank sessions are pruned and skipped. */
+  async resolve(meta: SessionHeaderLike): Promise<InspectedSession | undefined> {
+    const stat = sessionArtifactStat(this.persistence, meta)
+    const cached = this.index.get(String(meta.id))
+    // Fingerprint 0/0 means locate/stat failed: never treat that as a hit.
     if (stat.size > 0 && indexEntryMatchesStat(cached, stat) && cached !== undefined) {
       return inspectedFromIndex(cached)
     }
-    return {
-      id: meta.id,
-      label: cached?.label && cached.label !== '' ? cached.label : meta.id,
-      updatedAt: cached?.updatedAt ?? meta.createdAt,
-      cwd: meta.cwd ?? cached?.cwd ?? '',
-      hasUserInput: cached?.hasUserInput ?? true,
-      hasReply: cached?.hasReply ?? true,
-      // Nothing but the header has been read yet: the label is the id.
-      labelPending: true,
+    const item = await this.inspectCandidate(meta)
+    if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
+      this.index.delete(String(meta.id))
+      this.indexDirty = true
+      void pruneSessionArtifacts(this.persistence, meta)
+      return undefined
     }
-  }
-  const sketched = candidates.map(meta => toResumable(sketchFromHeader(meta)))
-  const sketchedById = new Map(sketched.map(item => [item.id, item]))
-  for (const host of hosts) {
-    if (host.sessionId === currentId) continue
-    const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
-    const existing = sketchedById.get(host.sessionId)
-    if (existing !== undefined) {
-      existing.attach = attach
-      continue
+    if (stat.size > 0) {
+      this.index.set(String(meta.id), indexFromInspected(item, stat))
+      this.indexDirty = true
     }
-    sketched.unshift({
-      id: host.sessionId,
-      label: host.sessionId,
-      updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
-      cwd: '',
-      attach,
-      // A live Host whose header never made it into the candidate list has no
-      // inspectable label yet either.
-      labelPending: true,
-    })
+    return item
   }
-  options.onUpdate?.({ sessions: sketched, pending: true })
 
-  const inspectCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession> => {
+  private async inspectCandidate(meta: SessionHeaderLike): Promise<InspectedSession> {
     try {
-      const inspection = await inspectPersistenceSession(persistence, meta.id)
+      const inspection = await inspectPersistenceSession(this.persistence, meta.id)
       // A `detached` slice (the writer is in this process and has not
       // materialized the artifact yet) or an empty one is an unreadable log,
       // never a blank session. Calling it blank made a listing delete a live
       // session's directory; keep it visible and let resume report the truth.
       if (inspection.eventState === 'detached' || inspection.events.length === 0) {
-        const cached = index.get(String(meta.id))
+        const cached = this.index.get(String(meta.id))
         return {
           id: meta.id,
           label: cached?.label && cached.label !== '' ? cached.label : meta.id,
@@ -372,37 +457,18 @@ export async function listResumableSessionsProgressive(
     }
   }
 
-  const resolveCandidate = async (meta: SessionHeaderLike): Promise<InspectedSession | undefined> => {
-    const stat = sessionArtifactStat(persistence, meta)
-    const cached = index.get(String(meta.id))
-    // Fingerprint 0/0 means locate/stat failed: never treat that as a hit.
-    if (stat.size > 0 && indexEntryMatchesStat(cached, stat) && cached !== undefined) {
-      return inspectedFromIndex(cached)
-    }
-    const item = await inspectCandidate(meta)
-    if (item.unreadable !== true && isBlankSession(item.hasUserInput, item.hasReply)) {
-      index.delete(String(meta.id))
-      indexDirty = true
-      void pruneSessionArtifacts(persistence, meta)
-      return undefined
-    }
-    if (stat.size > 0) {
-      index.set(String(meta.id), indexFromInspected(item, stat))
-      indexDirty = true
-    }
-    return item
-  }
-
-  const inspected: InspectedSession[] = []
-  const blankLiveIds = new Set<string>()
-  const extraLive = new Map<string, InspectedSession>()
-  const mergeHosts = async (items: InspectedSession[]): Promise<InspectedSession[]> => {
-    const resumable = items.filter(item => item.hasUserInput || item.unreadable === true)
+  /**
+   * The display list: the rows read so far with the attachable hosts merged in.
+   * Attachable hosts come first, then readable logs newest-first, then the
+   * unreadable ones (they may still be resumable, so they stay selectable).
+   */
+  async listing(): Promise<ResumableSession[]> {
+    const resumable = this.inspected.filter(item => item.hasUserInput || item.unreadable === true)
     const byId = new Map(resumable.map(item => [item.id, item]))
-    for (const host of hosts) {
-      if (host.sessionId === currentId || blankLiveIds.has(host.sessionId)) continue
+    for (const host of this.hosts) {
+      if (host.sessionId === this.currentId || this.blankLiveIds.has(host.sessionId)) continue
       const attach = { pid: host.lock.pid, sock: host.sock, state: host.lock.state }
-      const existing = byId.get(host.sessionId) ?? extraLive.get(host.sessionId)
+      const existing = byId.get(host.sessionId) ?? this.extraLive.get(host.sessionId)
       if (existing !== undefined) {
         existing.attach = attach
         if (!byId.has(host.sessionId)) {
@@ -421,7 +487,7 @@ export async function listResumableSessionsProgressive(
       let liveHasUserInput = false
       let liveLabel: string | undefined
       try {
-        const inspection = await inspectPersistenceSession(persistence, host.sessionId)
+        const inspection = await inspectPersistenceSession(this.persistence, host.sessionId)
         const materialized = inspection.eventState !== 'detached' && inspection.events.length > 0
         if (!materialized) {
           unreadableLive = true
@@ -439,15 +505,17 @@ export async function listResumableSessionsProgressive(
         unreadableLive = true
       }
       if (blankLive) {
-        blankLiveIds.add(host.sessionId)
+        this.blankLiveIds.add(host.sessionId)
         try { process.kill(attach.pid, 'SIGTERM') } catch { /* already gone */ }
-        const header = candidates.find(candidate => candidate.id === host.sessionId)
-        if (header !== undefined) void pruneSessionArtifacts(persistence, header)
+        const header = this.candidates.find(candidate => candidate.id === host.sessionId)
+        if (header !== undefined) void pruneSessionArtifacts(this.persistence, header)
         continue
       }
       const injected: InspectedSession = {
         id: host.sessionId,
-        label: liveLabel ?? host.sessionId,
+        // No readable log means no title: say so instead of showing a uuid the
+        // user cannot recognise (and let the tail of the id still be searched).
+        label: liveLabel ?? (unreadableLive ? t('picker.noLogLabel', { short: host.sessionId.slice(-8) }) : host.sessionId),
         updatedAt: Date.parse(host.lock.startedAt) || Date.now(),
         cwd: '',
         hasUserInput: liveHasUserInput || unreadableLive,
@@ -455,7 +523,7 @@ export async function listResumableSessionsProgressive(
         ...(unreadableLive ? { unreadable: true } : {}),
         attach,
       }
-      extraLive.set(host.sessionId, injected)
+      this.extraLive.set(host.sessionId, injected)
       resumable.push(injected)
       byId.set(host.sessionId, injected)
     }
@@ -463,59 +531,136 @@ export async function listResumableSessionsProgressive(
       (a.attach === undefined ? 1 : 0) - (b.attach === undefined ? 1 : 0)
       || (a.unreadable === true ? 1 : 0) - (b.unreadable === true ? 1 : 0)
       || b.updatedAt - a.updatedAt)
-    return resumable
+    return resumable.map(toResumable)
   }
-  const emit = async (pending: boolean): Promise<ResumableSession[]> => {
-    const listed = (await mergeHosts(inspected)).map(toResumable)
-    options.onUpdate?.({ sessions: listed, pending })
+
+  async emit(
+    pending: boolean,
+    onUpdate?: (listing: ResumableSessionListing) => void,
+  ): Promise<ResumableSession[]> {
+    const listed = await this.listing()
+    onUpdate?.({ sessions: listed, pending })
     return listed
   }
 
-  // Newest page first so the picker can paint before older logs are parsed.
-  const priority = candidates.slice(0, Math.max(0, priorityCount))
-  const rest = candidates.slice(priority.length)
-  // Cache before painting. The index used to be written only at the very end,
-  // so a picker the user closed (or the `/resume` flow that ran while the Host
-  // booted) left the next listing without titles and painted raw ids for the
-  // newest sessions again.
-  const flushIndex = async (): Promise<void> => {
-    if (!indexDirty) return
-    await saveSessionIndex(indexPath, index)
-    indexDirty = false
+  /**
+   * Persist the labels read so far. Flushed after every page: a picker the user
+   * closed (or a `/resume` that ran while the Host booted) must not leave the
+   * next listing without titles again.
+   */
+  async flushIndex(): Promise<void> {
+    if (!this.indexDirty) return
+    await saveSessionIndex(this.indexPath, this.index)
+    this.indexDirty = false
   }
+}
+
+/**
+ * Open a pager over the store. Nothing is inspected until the first `page()`.
+ */
+export async function openResumableSessionPager(
+  persistence: object,
+  currentId: string,
+  options: { listHosts?: typeof listAttachableHosts; indexPath?: string } = {},
+): Promise<ResumableSessionPager> {
+  const source = await ResumableSessionSource.open(persistence, currentId, options)
+  return {
+    page: async (size = PICKER_PAGE_SIZE): Promise<ResumableSessionPage> => {
+      const wanted = Number.isFinite(size) && size > 0 ? Math.floor(size) : PICKER_PAGE_SIZE
+      await source.take(wanted)
+      await source.flushIndex()
+      return {
+        sessions: await source.listing(),
+        remaining: source.remaining,
+        done: source.remaining === 0,
+      }
+    },
+    complete: async (): Promise<ResumableSession[]> => {
+      await source.take(Number.POSITIVE_INFINITY)
+      const sessions = await source.listing()
+      await source.flushIndex()
+      return sessions
+    },
+  }
+}
+
+/**
+ * List resumable top-level sessions, newest first.
+ *
+ * Subagent-owned sessions and the current session are excluded. Sessions
+ * whose event log cannot be inspected are kept (marked `unreadable`) instead
+ * of silently disappearing from history; readable sessions with user input
+ * sort first. The label is the persisted title, then the user's first input,
+ * then the id.
+ * @param persistence - the session persistence service.
+ * @param currentId - the live session to exclude (empty at launch).
+ * @returns every resumable candidate in display order (attachable live
+ *   hosts first, then readable logs, then unreadable).
+ */
+export async function listResumableSessions(
+  persistence: object,
+  currentId: string,
+  listHosts: typeof listAttachableHosts = listAttachableHosts,
+): Promise<ResumableSession[]> {
+  const pager = await openResumableSessionPager(persistence, currentId, { listHosts })
+  return pager.complete()
+}
+
+/**
+ * List resumable sessions, painting the recent page first.
+ *
+ * `onUpdate` fires after the header sketch, after the first resolved title, and
+ * again after each later inspect batch. Unchanged logs reuse
+ * `$DSH_HOME/tui-session-index.json`.
+ */
+export async function listResumableSessionsProgressive(
+  persistence: object,
+  currentId: string,
+  options: {
+    listHosts?: typeof listAttachableHosts
+    onUpdate?: (listing: ResumableSessionListing) => void
+    indexPath?: string
+    priorityCount?: number
+  } = {},
+): Promise<ResumableSessionListing & { complete: ResumableSession[] }> {
+  const source = await ResumableSessionSource.open(persistence, currentId, options)
+  options.onUpdate?.({ sessions: source.sketch(), pending: true })
+
+  const priorityCount = options.priorityCount ?? PICKER_PRIORITY_COUNT
+  const priority = source.peek(priorityCount)
   // Paint the first real title as soon as it exists instead of waiting for the
   // whole newest page. With a cold index that is the difference between a
   // loading line and a list the user can already pick from.
   let firstPainted = false
   const first = await Promise.all(priority.map(async meta => {
-    const item = await resolveCandidate(meta)
-    // Only the picker paints progressively; `/resume` awaits the full list.
-    if (!firstPainted && item !== undefined && rest.length > 0 && options.onUpdate !== undefined) {
+    const item = await source.resolve(meta)
+    // Only a caller that paints progressively gets the early frame.
+    if (!firstPainted && item !== undefined && source.remaining > 0 && options.onUpdate !== undefined) {
       firstPainted = true
-      inspected.push(item)
-      await flushIndex()
-      await emit(true)
+      source.add(item)
+      await source.flushIndex()
+      await source.emit(true, options.onUpdate)
       return { item, painted: true }
     }
     return { item, painted: false }
   }))
   for (const { item, painted } of first) {
-    if (item !== undefined && !painted) inspected.push(item)
+    if (item !== undefined && !painted) source.add(item)
   }
-  await flushIndex()
-  await emit(rest.length > 0)
+  await source.flushIndex()
+  await source.emit(source.remaining > 0, options.onUpdate)
 
-  for (let offset = 0; offset < rest.length; offset += INSPECT_BATCH_SIZE) {
-    const batch = rest.slice(offset, offset + INSPECT_BATCH_SIZE)
-    const settled = await Promise.all(batch.map(async meta => ({ meta, item: await resolveCandidate(meta) })))
-    for (const { item } of settled) {
-      if (item !== undefined) inspected.push(item)
+  while (source.remaining > 0) {
+    const batch = source.peek(INSPECT_BATCH_SIZE)
+    const settled = await Promise.all(batch.map(async meta => source.resolve(meta)))
+    for (const item of settled) {
+      if (item !== undefined) source.add(item)
     }
-    await emit(offset + INSPECT_BATCH_SIZE < rest.length)
+    await source.emit(source.remaining > 0, options.onUpdate)
   }
 
-  const complete = (await mergeHosts(inspected)).map(toResumable)
-  if (indexDirty) await saveSessionIndex(indexPath, index)
+  const complete = await source.listing()
+  await source.flushIndex()
   options.onUpdate?.({ sessions: complete, pending: false })
   return { sessions: complete, pending: false, complete }
 }

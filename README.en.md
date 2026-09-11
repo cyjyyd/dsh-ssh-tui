@@ -504,8 +504,11 @@ on-screen item (`0` starts a new session). `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`)
 move the highlight; `Enter` resumes the focused row. Typing (or `/` /
 `Ctrl+F`) filters by title, session id, or cwd; `PgUp`/`PgDn` page; `Esc`
 first leaves the filter, then cancels. The history list itself is not
-capped. The picker paints from session headers first and fills titles in
-the background; labels are cached in `$DSH_HOME/tui-session-index.json`.
+capped. Reading is lazy: the first nine sessions are inspected and painted
+only once their titles are known — no raw id is ever shown and then
+replaced — and older sessions are read when you reach for them (press
+`↓`/`PgDn`/`End` past the last row, or filter, which looks deeper on its
+own). Labels are cached in `$DSH_HOME/tui-session-index.json`.
 New and resume launches paint a splash immediately; the frontend relay
 spawns the Host without waiting for the plugin loader. Resuming a session
 skips token chunks and lays out only the visible tail on the first paint.

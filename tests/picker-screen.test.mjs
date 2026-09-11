@@ -57,10 +57,11 @@ async function waitFor(predicate, label, timeoutMs = 3_000) {
 function listingContext(sessions) {
   return {
     ctx: { get: (key) => key === 'sessionPersistence' ? {} : undefined },
-    listSessions: async (_persistence, _current, { onUpdate }) => {
-      onUpdate({ sessions, pending: false })
-      return { sessions, pending: false, complete: sessions }
-    },
+    // One steady page, like the real pager's first read.
+    openPager: async () => ({
+      page: async () => ({ sessions, remaining: 0, done: true }),
+      complete: async () => sessions,
+    }),
   }
 }
 
@@ -71,8 +72,8 @@ const SESSIONS = [
 
 test('a cancelled picker gives the alternate screen back with the transcript intact', async () => {
   const io = pickerStreams(60, 12)
-  const { ctx, listSessions } = listingContext(SESSIONS)
-  const settled = showSessionPicker(ctx, false, undefined, { ...io, listSessions })
+  const { ctx, openPager } = listingContext(SESSIONS)
+  const settled = showSessionPicker(ctx, false, undefined, { ...io, openPager })
   await waitFor(() => io.writes.join('').includes('修复绘制残留'), 'the first listing')
   io.type('\x1b')                       // Esc: cancel (the 60 ms hold releases it)
   assert.equal(await settled, null)
@@ -102,9 +103,9 @@ test('a cancelled picker gives the alternate screen back with the transcript int
 
 test('a resize while the picker is live repaints one clean frame, not a stack', async () => {
   const io = pickerStreams(60, 12)
-  const { ctx, listSessions } = listingContext(SESSIONS)
+  const { ctx, openPager } = listingContext(SESSIONS)
   const abort = new AbortController()
-  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, listSessions })
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
   await waitFor(() => io.writes.join('').includes('修复绘制残留'), 'the first listing')
 
   const before = io.writes.length
@@ -123,4 +124,55 @@ test('a resize while the picker is live repaints one clean frame, not a stack', 
     assert.equal(seen, 1, `${label} must appear exactly once on the repainted screen`)
   }
   assert.equal(painted.includes('live transcript line'), false, 'the picker still owns the screen')
+})
+
+// The user-visible half of the lazy read: while the first page is being read
+// the screen shows the loading line and nothing else — no session whose title
+// is still an id — and the page then lands in one frame with the sessions it
+// could not show yet counted below.
+test('the first screen waits for real titles and shows what is left to read', async () => {
+  const io = pickerStreams(60, 12)
+  const page = [
+    { id: 'main-session-aaaa', label: '修复绘制残留', updatedAt: 3, cwd: '/root/a' },
+    { id: 'main-session-bbbb', label: '写兼容护栏', updatedAt: 2, cwd: '/root/b' },
+  ]
+  let release = () => {}
+  const gate = new Promise(resolve => { release = resolve })
+  let firstCall = true
+  const openPager = async () => ({
+    page: async () => {
+      if (firstCall) {
+        firstCall = false
+        await gate
+      }
+      return { sessions: page, remaining: 7, done: false }
+    },
+    complete: async () => page,
+  })
+  const ctx = { get: (key) => key === 'sessionPersistence' ? {} : undefined }
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager })
+
+  const loading = screen(60, 12)
+  await loading.write('live transcript line\r\n> prompt')
+  for (const write of io.writes) await loading.write(write)
+  const pendingScreen = loading.grid().join('\n')
+  assert.match(pendingScreen, /正在读取历史会话/u, 'the loading line is up')
+  assert.equal(pendingScreen.includes('修复绘制残留'), false, 'no session before its title is known')
+  assert.equal(pendingScreen.includes('main-session-aaaa'), false, 'and never a raw id')
+
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const steady = screen(60, 12)
+  await steady.write('live transcript line\r\n> prompt')
+  for (const write of io.writes) await steady.write(write)
+  const painted = steady.grid().join('\n')
+  assert.match(painted, /修复绘制残留/u, 'the steady page is painted')
+  assert.match(painted, /写兼容护栏/u)
+  assert.match(painted, /还有 7 条未加载/u, 'and the user is told what is not loaded yet')
+  assert.match(painted, /继续加载更早的会话/u, 'with the key that reads it')
+  assert.equal(io.stdout.listenerCount('resize'), 1, 'the picker is still live')
+
+  abort.abort()
+  await settled
 })
