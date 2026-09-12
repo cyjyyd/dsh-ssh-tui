@@ -56,7 +56,7 @@ import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subag
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { formatFooterCwd, formatSessionTime, listResumableSessions } from './session-list.js'
+import { formatFooterCwd } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import {
@@ -551,12 +551,8 @@ export interface TuiConfig {
   presetId?: string
   /** Display name of the active preset. */
   presetName?: string
-  /** Switch the running TUI to another session (used by /resume). */
-  onSwitchSession?: (sessionId: string) => Promise<void> | void
   /** Notify the launcher of an explicit in-process selection change. */
   onSelectionChanged?: (selection: ModelSelection) => void
-  /** Open the history-session picker immediately after mounting (--resume). */
-  resumePicker?: boolean
   /**
    * Minimum milliseconds between paints while a turn is streaming.
    * Jump-host / proxied SSH can raise this so token ticks do not flood the
@@ -953,9 +949,7 @@ export class SshTui {
   private readonly providerName: string
   private readonly selectionRef: ModelSelectionRef | undefined
   private readonly subagentSelection: SubagentSelectionRef
-  private readonly onSwitchSession: ((sessionId: string) => Promise<void> | void) | undefined
   private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
-  private readonly resumePicker: boolean
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
   private presetId = 'standard'
@@ -1070,13 +1064,11 @@ export class SshTui {
     this.providerName = config.provider ?? 'deepseek-official'
     this.selectionRef = config.selectionRef
     this.subagentSelection = config.subagentSelection ?? { current: { model: DEFAULT_SUBAGENT_MODEL } }
-    this.onSwitchSession = config.onSwitchSession
     this.onSelectionChanged = config.onSelectionChanged
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
     this.headlessDisplay = config.headlessDisplay === true
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
-    this.resumePicker = config.resumePicker === true
     this.presetId = config.presetId ?? 'standard'
     this.presetName = config.presetName ?? this.presetId
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
@@ -1122,9 +1114,6 @@ export class SshTui {
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.render()
     this.updateTerminalTitle()
-    if (this.resumePicker) {
-      void this.runResumeCommand('', true)
-    }
     void this.calibratePaintInterval().finally(() => {
       if (this.disposed) return
       process.stdin.on('data', this.handleData)
@@ -2988,6 +2977,12 @@ export class SshTui {
               addDialog(t('onboard.providerLine', { label: providerLabel }))
               addDialog(t('onboard.idPrompt'))
               addDialog(t('onboard.default', { value: template.defaultId }))
+              addDialog(t('onboard.enterEsc'))
+              break
+            case 'key':
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.keyPrompt'))
+              if (ob.providerType === 'catalog') addDialog(t('onboard.keyCatalogHint'))
               addDialog(t('onboard.enterEsc'))
               break
             case 'base-url':
@@ -5835,70 +5830,6 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** /resume: switch to a past session, or open a picker when no id is given. */
-  private async runResumeCommand(arg: string, fromLaunch = false): Promise<void> {
-    const target = arg.trim()
-    if (!fromLaunch && this.agent.status === 'running') {
-      this.pushRow({ kind: 'error', text: t('resume.running') })
-      this.markDirty()
-      return
-    }
-    if (target !== '') {
-      if (target === String(this.agent.id)) {
-        this.pushRow({ kind: 'system', text: t('resume.same') })
-        this.markDirty()
-        return
-      }
-      if (this.onSwitchSession === undefined) {
-        this.pushRow({ kind: 'error', text: t('resume.noCallback') })
-        this.markDirty()
-        return
-      }
-      this.pushRow({ kind: 'system', text: t('resume.switching', { id: target }) })
-      this.markDirty()
-      await this.onSwitchSession(target)
-      return
-    }
-    const persistence = this.ctx.get('sessionPersistence')
-    if (persistence === undefined) {
-      this.pushRow({ kind: 'error', text: t('resume.noPersistence') })
-      this.markDirty()
-      return
-    }
-    const inspected = await listResumableSessions(persistence, String(this.agent.id))
-    if (inspected.length === 0) {
-      this.pushRow({ kind: 'system', text: t('resume.none') })
-      this.markDirty()
-      return
-    }
-    const labelCount = new Map<string, number>()
-    for (const item of inspected) {
-      labelCount.set(item.label, (labelCount.get(item.label) ?? 0) + 1)
-    }
-    const choices = inspected.map(item => ({
-      item,
-      label: (labelCount.get(item.label) ?? 0) > 1 ? `${item.label} · ${item.id}` : item.label,
-      description: `${item.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(item.updatedAt)} · ${item.cwd}`,
-    }))
-    const answer = await this.askQuestion({
-      id: 'resume-pick',
-      question: inspected.length > PICKER_WINDOW
-        ? t('resume.pickMany', { count: inspected.length })
-        : t('resume.pick'),
-      options: choices.map(choice => ({ label: choice.label, description: choice.description })),
-    })
-    const picked = choices.find(choice => choice.label === answer.selected[0])?.item
-    if (picked === undefined) return
-    if (this.onSwitchSession === undefined) {
-      this.pushRow({ kind: 'error', text: t('resume.noCallback') })
-      this.markDirty()
-      return
-    }
-    this.pushRow({ kind: 'system', text: t('resume.switching', { id: picked.id }) })
-    this.markDirty()
-    await this.onSwitchSession(picked.id)
-  }
-
   /** Current provider route selected for the running agent. */
   private currentProvider(): string {
     // `agent.options` is authoritative for the launched agent; the selection
@@ -7381,16 +7312,6 @@ export class SshTui {
         }
         break
       }
-      case 'resume':
-        void this.runResumeCommand(arg).catch((error: unknown) => {
-          if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('resume.cancelled') })
-          } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'resume', error: errorChain(error) }) })
-          }
-          this.markDirty()
-        })
-        break
       case 'approval': {
         const requested = arg.trim() === '' ? 'toggle' : arg.trim()
         if (isApprovalStatusArg(requested)) {

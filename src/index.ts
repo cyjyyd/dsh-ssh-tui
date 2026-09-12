@@ -112,7 +112,6 @@ export function apply(ctx: Context, config: Config): void {
   installUiLocale(ctx)
   ctx.effect(() => {
     let disposed = false
-    let switching = false
     let handle: AgentHandle | undefined
     let controller: TuiController | undefined
     let sessionLockPathHeld: string | undefined
@@ -367,7 +366,6 @@ export function apply(ctx: Context, config: Config): void {
       }
       controller = mountTui(ctx, {
         ...config,
-        resumePicker: false,
         headlessDisplay: true,
         sessionId: String(sessionId),
         resume,
@@ -379,7 +377,6 @@ export function apply(ctx: Context, config: Config): void {
         presetId,
         presetName,
         goodbye: goodbyeFor(String(sessionId)),
-        onSwitchSession: switchTo,
         onSelectionChanged: (next) => {
           liveSelection = next
         },
@@ -404,29 +401,6 @@ export function apply(ctx: Context, config: Config): void {
           })
         },
       })
-    }
-
-    /** Tear down the current channel and resume another session in its place. */
-    const switchTo = async (target: string): Promise<void> => {
-      if (switching || disposed) return
-      switching = true
-      try {
-        if (controller !== undefined) {
-          await controller.dispose()
-          controller = undefined
-        }
-        if (handle !== undefined) {
-          await handle.dispose()
-          handle = undefined
-        }
-        await dropSessionLock()
-        await start(SessionId(target), true)
-      } catch (error: unknown) {
-        process.stderr.write(`dsh-ssh-tui: failed to switch to session "${target}": ${errorChain(error)}\n`)
-        exitLauncher(1)
-      } finally {
-        switching = false
-      }
     }
 
     const pickerAbort = new AbortController()

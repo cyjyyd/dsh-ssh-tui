@@ -74,7 +74,7 @@ dsh --profile tui
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
   一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
 - 审批、`ask_user_question`、计划模式、子代理进度、`/mode` 模式切换、`/model` 模型切换、
-  `/resume` 会话切换、`/disconnect` 断线策略等完整支持；
+  `/disconnect` 断线策略等完整支持；
 - `/approval auto` 自动审批模式（Codex 式）：读类/构建/测试、工作区 `edit`/`write`/`read` 自动放行；
   `rm -rf`、`sudo`、`curl|sh`、`git push --force`、敏感路径只读等危险命令自动**拒绝**，并把原因
   回给模型由其自行调整；`npm publish`、解释器 `-c`/`-e` 等未识别形状交给**子代理模型 AI 复核**
@@ -262,7 +262,7 @@ dsh --profile tui --no-color
 
 `/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
 
-斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、`/resume`、
+斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、
 `/status`、`/diag`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
 界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
 工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
@@ -419,10 +419,10 @@ bash scripts/uninstall.sh work      # 指定 profile
 ## 开发与目录结构
 
 ```text
-src/index.ts        插件入口：启动选择器、会话创建/恢复/切换、session lock
+src/index.ts        插件入口：启动选择器、会话创建/恢复、session lock
 src/startup.ts      命令行参数解析（--resume / --new / --model ...）
 src/picker.ts       启动历史会话选择器（可见页 9 条，列表不截断，可筛选）
-src/session-list.ts 历史会话扫描与标签（共享给 /resume）
+src/session-list.ts 历史会话扫描与标签（共享给启动选择器）
 src/session-lock.ts 同会话防双开
 src/update-check.ts npm 最新版提示（不自动升级）
 src/tui.ts          终端渲染、交互、标题/铃声（SshTui；叶子函数再导出）

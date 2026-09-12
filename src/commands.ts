@@ -25,7 +25,6 @@ export const LOCAL_COMMANDS = [
   { name: 'balance', key: 'cmd.usage', aliasOf: 'usage' },
   { name: 'quota', key: 'cmd.usage', aliasOf: 'usage' },
   { name: 'subagents', key: 'cmd.subagents' },
-  { name: 'resume', key: 'cmd.resume' },
   { name: 'setup', key: 'cmd.setup' },
   { name: 'find', key: 'cmd.find' },
   { name: 'copy', key: 'cmd.copy' },

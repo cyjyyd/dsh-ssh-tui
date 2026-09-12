@@ -19,6 +19,7 @@ test('the bare slash lists this plugin commands, without aliases or dialog-test'
   const names = commandSuggestions('/', []).map(command => command.name)
   assert.equal(names.includes('help'), true)
   assert.equal(names.includes('diag'), true, 'the /diag command is offered')
+  assert.equal(names.includes('resume'), false, 'in-app session switching was removed; resume is a launch flag')
   assert.equal(names.includes('exit'), false, 'an alias waits for a typed prefix')
   assert.equal(names.includes('dialog-test'), false, 'a test-only command stays out of the list')
   assert.equal(commandSuggestions('/', []).every(command => command.local), true)

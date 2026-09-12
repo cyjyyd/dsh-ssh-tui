@@ -201,9 +201,9 @@ async function queryWindowsProcess(pid: number): Promise<WindowsProcessIdentity 
 }
 
 /**
- * Async on purpose: this runs on the TUI's render path (`/resume` lists every
- * lock), where a synchronous spawn would freeze painting and keystrokes for
- * the whole probe.
+ * Async on purpose: this runs on the history-listing path (the picker probes
+ * every lock), where a synchronous spawn would freeze painting and keystrokes
+ * for the whole probe.
  */
 function runPowerShell(exe: string, script: string): Promise<string | undefined> {
   return new Promise(resolve => {
@@ -303,8 +303,8 @@ export function windowsProcessMatchesLock(
  * behavior is kept.
  *
  * Async because the Windows probe spawns PowerShell, and this runs on the
- * render path (`/resume` inspects every lock); a synchronous spawn would
- * freeze painting and keystrokes for the duration of the probe.
+ * history-listing path (the picker inspects every lock); a synchronous spawn
+ * would freeze painting and keystrokes for the duration of the probe.
  */
 export async function lockOwnerIsAlive(lock: SessionLockInfo): Promise<boolean> {
   const pid = lock.pid

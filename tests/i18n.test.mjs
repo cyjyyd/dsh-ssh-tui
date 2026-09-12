@@ -97,8 +97,8 @@ test('colored tool headers keep zh and en titles after the status dot', () => {
 
 test('zh and en catalogs share every key including the resume picker strings', () => {
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort())
-  assert.equal(zh['resume.pickMany'].includes('{count}'), true)
-  assert.equal(en['resume.pickMany'].includes('{count}'), true)
+  assert.equal(zh['resume.unreadable'].includes('⚠'), true)
+  assert.equal(en['resume.unreadable'].includes('⚠'), true)
   assert.equal(zh['picker.hint'].includes('↑/↓'), true)
   assert.equal(en['picker.hint'].includes('↑/↓'), true)
   assert.equal(zh['picker.filter'].includes('{query}'), true)

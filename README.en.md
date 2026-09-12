@@ -479,12 +479,6 @@ has not produced work the switch applies immediately; otherwise it is remembered
 as the default for the next launch. The active mode is shown in the
 header/status line.
 
-`/resume` switches the running TUI to a past session. With no argument it
-opens a picker of history sessions (excluding subagents), labeled by the
-persisted title or first user message with a time/cwd description;
-`/resume <session-id>` switches directly. The list is not capped at nine —
-use ↑/↓ to scroll. Switching is refused while a turn is running.
-
 ```sh
 dsh --profile tui --model deepseek-v4-flash
 dsh --profile tui --no-color
@@ -496,8 +490,8 @@ dsh --profile tui --resume <session-id>
 history-session picker before the main interface; `dsh --profile tui --resume
 <session-id>` (or `dsh --profile tui resume <session-id>`) skips the picker
 and resumes directly. `dsh --profile tui --new` explicitly starts fresh
-without the picker. The in-app `/resume` command remains available for
-switching while running.
+without the picker. Resuming happens at launch: there is no in-app session
+switch.
 
 Picker keys: the visible page is nine rows so `1-9` always map onto every
 on-screen item (`0` starts a new session). `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`)

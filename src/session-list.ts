@@ -1,7 +1,7 @@
 /**
- * Shared history-session listing for the SSH TUI: the launch picker and the
- * in-app `/resume` command use the same candidates, labels, and ordering, so
- * both surfaces offer the same sessions.
+ * Shared history-session listing for the SSH TUI: the launch picker's lazy
+ * pages and the eager `listResumableSessions` listing use the same candidates,
+ * labels, and ordering, so both surfaces offer the same sessions.
  */
 
 import { existsSync } from 'node:fs'
@@ -236,7 +236,7 @@ export interface ResumableSessionPage {
 export interface ResumableSessionPager {
   /** Inspect onward until `size` more rows exist, or history runs out. */
   page(size?: number): Promise<ResumableSessionPage>
-  /** Read every remaining candidate (the `/resume` flow wants the whole list). */
+  /** Read every remaining candidate (the eager listing wants the whole list). */
   complete(): Promise<ResumableSession[]>
 }
 
@@ -278,7 +278,7 @@ function inspectedFromIndex(entry: SessionIndexEntry): InspectedSession {
  * One pass over the store: the header sketch, the cached labels, the attachable
  * hosts, and an inspection cursor that advances page by page.
  *
- * The lazy pager, the progressive listing and the full `/resume` list all drive
+ * The lazy pager, the progressive listing and the eager full listing all drive
  * this, so the hardening lives in exactly one place: a failed or `detached`
  * read is never treated as a blank session, and a blank one is only pruned
  * after it was positively read.
@@ -585,7 +585,7 @@ class ResumableSessionSource {
 
   /**
    * Persist the labels read so far. Flushed after every page: a picker the user
-   * closed (or a `/resume` that ran while the Host booted) must not leave the
+   * closed (or a listing that ran while the Host booted) must not leave the
    * next listing without titles again.
    */
   async flushIndex(): Promise<void> {
