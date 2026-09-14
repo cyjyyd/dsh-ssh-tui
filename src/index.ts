@@ -32,6 +32,7 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
+import { presetLabel } from './preset-label.js'
 
 // The attach/recovery state machine (and its constants) live in attach.ts so
 // they can be driven by tests; re-exported here for the bundle's own API.
@@ -355,13 +356,18 @@ export function apply(ctx: Context, config: Config): void {
         return
       }
       const presetId = agentPresets?.composedPreset(handle.agent.ctx) ?? agentPresets?.defaultId
-      let presetName = presetId
+      // A profile that composes no roster names no preset, and the TUI's own
+      // default is the standard composition either way; label it in the active
+      // language instead of leaking the raw id.
+      let presetName = presetId === undefined ? undefined : presetLabel(presetId)
+      let presetTrust: string | undefined
       if (presetId !== undefined) {
         try {
           const preset = await agentPresets?.resolve(presetId)
-          if (preset?.name !== undefined) presetName = preset.name
+          presetTrust = preset?.trust
+          presetName = presetLabel(presetId, preset?.name, presetTrust)
         } catch {
-          // Fall back to the id.
+          // Fall back to the id's own label.
         }
       }
       controller = mountTui(ctx, {
@@ -376,6 +382,7 @@ export function apply(ctx: Context, config: Config): void {
         subagentSelection,
         presetId,
         presetName,
+        presetTrust,
         goodbye: goodbyeFor(String(sessionId)),
         onSelectionChanged: (next) => {
           liveSelection = next

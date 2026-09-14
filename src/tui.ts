@@ -58,6 +58,8 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
+import { presetLabel, profileFromArgv } from './preset-label.js'
+import { ensureRosterRows, rosterPatchPath } from './preset-rows.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import {
   QUESTION_OPTION_KEYS,
@@ -551,6 +553,12 @@ export interface TuiConfig {
   presetId?: string
   /** Display name of the active preset. */
   presetName?: string
+  /**
+   * Trust of the root the active preset came from (`system`/`user`). A `user`
+   * preset keeps its own published name; a shipped one resolves through the
+   * locale dictionary.
+   */
+  presetTrust?: string
   /** Notify the launcher of an explicit in-process selection change. */
   onSelectionChanged?: (selection: ModelSelection) => void
   /**
@@ -953,7 +961,7 @@ export class SshTui {
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
   private presetId = 'standard'
-  private presetName = t('mode.standard')
+  private presetName = t('mode.preset.standard')
   private readonly useAlternateScreen: boolean
   private agentGone = false
   private onboarding: OnboardingState | undefined
@@ -1070,7 +1078,7 @@ export class SshTui {
     this.headlessDisplay = config.headlessDisplay === true
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.presetId = config.presetId ?? 'standard'
-    this.presetName = config.presetName ?? this.presetId
+    this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
     this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
     this.paintLink = detectSshSession() ? 'ssh' : 'local'
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
@@ -1079,6 +1087,13 @@ export class SshTui {
     this.pushRow({ kind: 'brand-logo' })
     this.pushRow({ kind: 'system', text: t('boot.banner') })
     this.pushRow({ kind: 'system', text: t('boot.help') })
+    // The roster is a profile-layer row, so an install that predates it (or an
+    // in-app update, which only runs `dsh plugin add`) boots without one. Say
+    // so at boot: the banner's localized default hides the missing service, and
+    // the loss is not only `/mode` — the preset-owned tools are absent too.
+    if (this.ctx.get('agentPresets') === undefined) {
+      this.pushRow({ kind: 'system', text: t('mode.bootMissing') })
+    }
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
       this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
     }
@@ -5776,8 +5791,28 @@ export class SshTui {
   /** /mode: pick an agent preset (standard / minimal / ptc / cordis / routing-suite / ...). */
   private async runModeCommand(arg = ''): Promise<void> {
     const agentPresets = this.ctx.get('agentPresets')
+    const direct = arg.trim().toLowerCase()
+    if (direct === 'fix' || direct === 'repair') {
+      await this.repairRoster()
+      return
+    }
     if (agentPresets === undefined) {
-      this.pushRow({ kind: 'error', text: t('mode.missingService') })
+      // A terminal profile built on dsh-base composes no roster, and the
+      // plugin's bundle patch may not mount one; only the profile's user layer
+      // can. Report the exact row and offer the in-app repair: the install
+      // scripts are the checkout path, while an npm install and the in-app
+      // `dsh plugin add` update never run them.
+      const profile = profileFromArgv()
+      this.pushRow({
+        kind: 'error',
+        text: [
+          t('mode.missingService'),
+          t('mode.missingServiceHint', {
+            profile,
+            patch: rosterPatchPath(resolveDshHome(), profile),
+          }),
+        ].join('\n'),
+      })
       this.markDirty()
       return
     }
@@ -5787,13 +5822,17 @@ export class SshTui {
       this.markDirty()
       return
     }
-    const direct = arg.trim().toLowerCase()
-    let selected = direct === ''
-      ? undefined
-      : presets.find(preset =>
-        preset.id.toLowerCase() === direct
-        || (preset.name ?? '').toLowerCase() === direct)
-    if (selected === undefined && direct !== '') {
+    // Shipped presets resolve through the TUI dictionary; a user-authored one
+    // keeps the name its own preset.yml published.
+    const labels = presets.map(preset => presetLabel(preset.id, preset.name, preset.trust))
+    const matchesDirect = (preset: (typeof presets)[number], label: string): boolean =>
+      preset.id.toLowerCase() === direct
+      || (preset.name ?? '').trim().toLowerCase() === direct
+      || label.toLowerCase() === direct
+    let index = direct === ''
+      ? -1
+      : presets.findIndex((preset, at) => matchesDirect(preset, labels[at] ?? preset.id))
+    if (index < 0 && direct !== '') {
       this.pushRow({
         kind: 'error',
         text: t('mode.unknown', { id: arg.trim(), available: presets.map(preset => preset.id).join(', ') }),
@@ -5801,19 +5840,29 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if (selected === undefined) {
+    if (index < 0 && direct === '') {
       const answer = await this.askQuestion({
         id: 'mode-pick',
         question: t('mode.pick'),
-        options: presets.map(preset => ({
-          label: preset.name ?? preset.id,
-          description: `${preset.id === this.presetId ? t('mode.currentPrefix') : ''}${preset.description ?? ''}`.trim(),
+        options: presets.map((preset, at) => ({
+          label: labels[at] ?? preset.id,
+          description: `${preset.id === this.presetId ? t('mode.currentPrefix') : ''}${preset.broken === undefined ? preset.description ?? '' : t('mode.brokenSuffix', { reason: preset.broken })}`.trim(),
         })),
       })
-      selected = presets.find(preset => (preset.name ?? preset.id) === answer.selected[0])
+      index = labels.indexOf(answer.selected[0] ?? '')
     }
+    if (index < 0) return
+    const selected = presets[index]
     if (selected === undefined) return
-    const selectedName = selected.name ?? selected.id
+    if (selected.broken !== undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: t('mode.broken', { name: labels[index] ?? selected.id, reason: selected.broken }),
+      })
+      this.markDirty()
+      return
+    }
+    const selectedName = labels[index] ?? selected.id
     const hasWork = sessionEvents(this.agent.session).some(event => event.type === 'turn/start')
     if (!hasWork) {
       await agentPresets.recompose(this.agent.ctx, selected.id)
@@ -5827,6 +5876,28 @@ export class SshTui {
       })
     }
     await this.ctx.get('settings')?.update(settingsNamespace('agent-presets'), { default: selected.id })
+    this.markDirty()
+  }
+
+  /**
+   * `/mode fix`: write the roster row into this profile's user patch layer.
+   *
+   * The write only takes effect on the next launch — the loader composes the
+   * patch tree once at boot — so the report says so instead of pretending the
+   * running session gained a roster.
+   */
+  private async repairRoster(): Promise<void> {
+    const profile = profileFromArgv()
+    const patch = rosterPatchPath(resolveDshHome(), profile)
+    try {
+      const result = await ensureRosterRows(resolveDshHome(), profile)
+      this.pushRow({
+        kind: 'system',
+        text: result === 'present' ? t('mode.fixPresent', { patch }) : t('mode.fixWritten', { patch }),
+      })
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: t('mode.fixFailed', { patch, error: errorChain(error) }) })
+    }
     this.markDirty()
   }
 

@@ -26,6 +26,9 @@ npm run build
 echo "==> linking into dsh profile '$PROFILE'"
 dsh plugin --profile "$PROFILE" add "link:${REPO_DIR}"
 
+echo "==> mounting the agent-preset roster /mode needs"
+bash "${REPO_DIR}/scripts/ensure-profile-rows.sh" "$PROFILE"
+
 echo "==> done"
 echo "start with:          dsh --profile $PROFILE"
 echo "verify with:         bash scripts/verify.sh $PROFILE"

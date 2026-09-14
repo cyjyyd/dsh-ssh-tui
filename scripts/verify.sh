@@ -15,4 +15,12 @@ echo "==> CLI parses"
 dsh --profile "$PROFILE" --help >/dev/null
 echo "ok: dsh --profile $PROFILE --help"
 
+echo "==> composed profile mounts the agent-preset roster"
+if dsh --profile "$PROFILE" --dump-config | grep -q "@deepseek-ai/dsh-agent-presets"; then
+  echo "ok: /mode can list and switch presets"
+else
+  echo "warn: no agent-presets row composed, so /mode reports the service missing" >&2
+  echo "      fix with: bash scripts/ensure-profile-rows.sh $PROFILE" >&2
+fi
+
 echo "==> done"

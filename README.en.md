@@ -161,6 +161,49 @@ npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
+### The preset roster `/mode` needs
+
+A terminal profile built on `dsh-base` composes no preset roster (only the Web
+bundle, `@deepseek-ai/dsh-web-app`, does), and DSH STORE accepts additive bundle
+patches with plugin-owned ids and no `@deepseek-ai/*` module names — so this
+plugin's own patch cannot mount the roster. The row belongs to the profile's
+user layer, and it is not just the `/mode` menu: the preset owns
+`ask_user_question`, `present`, PTC's presentation layer, and the subagent
+model-selection rows, so without it those tools are absent from the agent's
+catalog.
+
+Three ways to repair it (idempotent, pick one):
+
+1. **In-app**: `/mode fix` writes the block below and tells you to restart.
+   This is the generic path — an npm install and the in-app "Update now" both go
+   through `dsh plugin add` and never run the repository scripts.
+2. From a checkout: `bash scripts/ensure-profile-rows.sh [profile]`
+   (default `tui`).
+3. By hand, in `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+```
+
+The script also mounts `code-runtime` (the TypeScript runtime the `ptc` preset
+needs) and `subagent-model-selection-settings` (the host-owned delegation
+setting), and skips a profile that already composes the roster (one bundling
+`@deepseek-ai/dsh-web-app`, for example). Restart the TUI to pick it up.
+The reverse order bites: adding `dsh-web-app` to a profile that already carries
+this block lists the roster row twice, and the second mount fails with
+`service "agentPresets" has been registered` — delete the block first.
+
+Without the row, the TUI prints a boot line ("No agent-preset roster is
+composed…"), `/mode` reports the patch path plus the `/mode fix` entry point,
+and `scripts/verify.sh` says the same. Preset identity is per module instance,
+so a dsh install tree carrying two copies of `@deepseek-ai/dsh-scope` (an
+npm-nested checkout can) fails the mount with `refusing to compose an unscoped
+context`; a global `npm i -g` install is not affected.
+
 For the optional **智能路由模式 (routing-suite)** mode, also run:
 
 ```sh
@@ -478,6 +521,14 @@ plus any locally authored presets (e.g. `whoami-standard`). On a session that
 has not produced work the switch applies immediately; otherwise it is remembered
 as the default for the next launch. The active mode is shown in the
 header/status line.
+
+Shipped presets are labelled in the active `/language` (Standard / Minimal /
+PTC / Cordis in English, 标准模式 / 极简模式 / PTC 模式 / 创造模式 in Chinese); a
+preset you authored keeps the name in its own `preset.yml`. `/mode <id|label>`
+switches directly, e.g. `/mode minimal` or `/mode 极简模式`. When the roster row
+is missing, the TUI says so at boot and `/mode` reports the profile patch path
+plus the `/mode fix` repair — see
+[The preset roster `/mode` needs](#the-preset-roster-mode-needs).
 
 ```sh
 dsh --profile tui --model deepseek-v4-flash

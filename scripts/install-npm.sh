@@ -17,6 +17,18 @@ fi
 echo "==> adding dsh-ssh-tui from npm into dsh profile '$PROFILE'"
 dsh plugin --profile "$PROFILE" add dsh-ssh-tui@latest
 
+# The published package cannot mount the roster from its own bundle patch (DSH
+# STORE takes additive, plugin-owned rows only), so the profile's user layer
+# gets it after the package is on disk.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$REPO_DIR/scripts/ensure-profile-rows.sh" ]; then
+  echo "==> mounting the agent-preset roster /mode needs"
+  bash "$REPO_DIR/scripts/ensure-profile-rows.sh" "$PROFILE"
+else
+  ROSTER_PATCH="${DSH_HOME:-$HOME/.dsh}/profiles/$PROFILE/cordis.patch.yml"
+  echo "note: add the agent-presets row to $ROSTER_PATCH if /mode reports it missing"
+fi
+
 echo "==> done"
 echo "start with:     dsh --profile $PROFILE"
 echo "verify with:    bash scripts/verify.sh $PROFILE"

@@ -2,11 +2,16 @@
  * Shared reasoning-effort defaults for the SSH TUI.
  *
  * OpenCode / third-party (llm-pi-ai) routes carry no adapter-level reasoning
- * default (unlike `llm-deepseek`, whose row declares `reasoningEffort: max`).
- * Without an explicit effort the model streams its thinking as plain `text`
- * chunks instead of `reasoning` blocks, so the TUI never receives the data
- * needed to render the collapsible `思考中` block. This helper picks a
+ * default. Without an explicit effort the model streams its thinking as plain
+ * `text` chunks instead of `reasoning` blocks, so the TUI never receives the
+ * data needed to render the collapsible `思考中` block. This helper picks a
  * supported default so the fold has data to show.
+ *
+ * `llm-deepseek` is not covered here: its adapter always reports a
+ * `defaultEffort`, which the LLM runtime materializes into the request on its
+ * own. Since the 0.5.1 STORE compliance trim dropped the bundle patch's
+ * `reasoningEffort: max` row override, that adapter default is `high` unless a
+ * deployment sets it (or `/effort` picks one, remembered per route).
  */
 
 import { type LlmRuntime, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'

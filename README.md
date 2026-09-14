@@ -182,7 +182,43 @@ bash scripts/install.sh work
 ```
 
 脚本会依次：安装依赖 → 构建 `lib/` → 通过 `dsh plugin --profile <name> add link:<repo>`
-把插件链接进 profile，并自动把 `dsh-ssh-tui` 加入该 profile 的 `dsh.profile.bundles`。
+把插件链接进 profile，自动把 `dsh-ssh-tui` 加入该 profile 的 `dsh.profile.bundles`，
+最后把 `/mode` 需要的 preset 名单行写进该 profile 的 `cordis.patch.yml`（见下节）。
+
+### `/mode` 的 preset 名单（agent-presets 行）
+
+`dsh-base` 的终端 profile 不组合 preset 名单（只有 Web 端的 `dsh-web-app` 组合包会），
+而 DSH STORE 只接受「附加式、插件自有 id、不出现 `@deepseek-ai/*` 名字」的 Bundle Patch，
+所以插件自己的 patch 不能挂载官方行 —— 名单行归 profile 的用户层。名单不只是
+`/mode` 的菜单：`ask_user_question`、`present`、PTC 的呈现层、`subagent` 的模型选择
+这些工具行都由 preset 提供，缺席时它们都不在 Agent 的工具目录里。
+
+三种修复方式（幂等，选一即可）：
+
+1. **运行中的应用内修复**：`/mode fix` 写入下面这段并提示重启。npm 安装和
+   「现在更新」走的是 `dsh plugin add`，不会执行仓库脚本，所以这是最通用的一条。
+2. 仓库安装：`bash scripts/ensure-profile-rows.sh [profile]`（默认 `tui`）。
+3. 手动在该 profile 的 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里加入：
+
+```yaml
+- insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+```
+
+脚本会一并挂载 `code-runtime`（PTC 模式需要的 TypeScript 运行时）和
+`subagent-model-selection-settings`（宿主侧子代理委派设置），并跳过已经组合了名单的
+profile（例如同时装了 `@deepseek-ai/dsh-web-app` 的 profile）。改完重启 TUI 生效。
+反过来，已经写了这段的 profile 之后再装 `dsh-web-app` 会让名单行出现两次（第二次挂载
+会以 `service "agentPresets" has been registered` 失败），先把 profile 补丁里的这段删掉。
+
+名单缺席时，TUI 启动会打一行提示（中文界面：「未挂载 agent-presets 名单…」），
+`/mode` 会打印补丁路径和 `/mode fix` 修复入口，`scripts/verify.sh` 也会给出提示。
+另外，preset 的 scope 身份按模块实例判定：一个 dsh 安装树里若存在两份
+`@deepseek-ai/dsh-scope`（npm 嵌套安装的 checkout 可能如此），名单挂载会以
+`refusing to compose an unscoped context` 失败；全局安装（`npm i -g`）不受影响。
 
 ### 方式二：手动安装
 
@@ -260,7 +296,12 @@ dsh --profile tui --no-color
 | `Ctrl+D` | 退出 |
 | `Ctrl+L` | 重绘整个画面 |
 
-`/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式。
+`/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式（如 `routing-suite`）。
+官方 preset 的名字跟 `/language` 走（中文下显示“标准模式 / 极简模式 / PTC 模式 / 创造模式”，
+英文下显示 Standard / Minimal / PTC / Cordis）；`$DSH_HOME/.agent-presets` 里自己写的
+preset 保留它 `preset.yml` 里的名字不翻译。`/mode <id|名字>` 直接切，比如
+`/mode minimal`、`/mode 极简模式`；当前会话已经跑过一轮时只记住选择，下次启动生效。
+名单没挂载时启动会打一行提示，`/mode` 会打印 profile 补丁路径和 `/mode fix` 修复入口（见「`/mode` 的 preset 名单」）。
 
 斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、
 `/status`、`/diag`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
