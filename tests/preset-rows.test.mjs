@@ -20,8 +20,9 @@ test('the roster block mounts the roster and the two preset host services', () =
 test('the install script and the runtime write the same block', async () => {
   // The published package does not ship scripts/, so the runtime owns a copy.
   // A drift here would make the in-app repair write a different roster than the
-  // installer does; fail instead.
-  const script = await readFile(join(root, 'scripts', 'ensure-profile-rows.sh'), 'utf8')
+  // installer does; fail instead. Windows checkouts carry CRLF, and the block
+  // itself is a template literal, so normalise before comparing.
+  const script = (await readFile(join(root, 'scripts', 'ensure-profile-rows.sh'), 'utf8')).replaceAll('\r\n', '\n')
   const match = /const block = `([\s\S]*?)`\n/u.exec(script)
   assert.ok(match, 'the script must define its block as a template literal')
   assert.equal(match[1], ROSTER_PATCH_BLOCK)
