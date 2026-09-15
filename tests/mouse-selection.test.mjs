@@ -189,3 +189,32 @@ test('the terminal is asked for held-button motion, or a drag never arrives', ()
   assert.ok(init.includes('\x1b[?1002h'), 'and motion while a button is held')
   assert.ok(init.includes('\x1b[?1006h'), 'in SGR encoding, which is what the parser reads')
 })
+
+test('a drag keeps its grip when the transcript scrolls under it', () => {
+  // A live session keeps painting: a tool result or a streamed line arrives
+  // while the button is still down, and the transcript (pinned to the bottom)
+  // shifts up. The anchor was a screen row index, so the selection silently
+  // slid onto whatever moved into that row — the user would paste the wrong
+  // text and never know why.
+  const tui = fixture()
+  for (let index = 0; index < 40; index += 1) tui.rows.push({ kind: 'system', text: `filler ${index}` })
+  tui.rows.push({ kind: 'assistant', text: 'the reply the press landed on' })
+  const at = locate(tui, 'the reply the press landed on')
+  assert.ok(at.row > 0, 'the reply is on screen before the drag')
+
+  tui.handleData(Buffer.from(press(0, at.startColumn, at.row)))
+  // The transcript moves: the reply is now one screen row higher.
+  tui.rows.push({ kind: 'system', text: 'WORK-LANDED-WHILE-DRAGGING' })
+  const movedTo = locate(tui, 'the reply the press landed on')
+  assert.equal(movedTo.row, at.row - 1, 'the reply shifted up under the drag')
+
+  // The pointer has not moved, so the drag must still start at the reply.
+  tui.handleData(Buffer.from(press(32, movedTo.endColumn, movedTo.row)))
+  tui.handleData(Buffer.from(release(0, movedTo.endColumn, movedTo.row)))
+
+  assert.equal(
+    tui.copyYank,
+    'the reply the press landed on',
+    'the drag still copies the reply it grabbed, not the row that slid into its place',
+  )
+})

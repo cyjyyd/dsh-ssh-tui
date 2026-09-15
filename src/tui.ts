@@ -1173,11 +1173,17 @@ export class SshTui {
    * from a model reply are copyable: the mouse belongs to the TUI, so dragging
    * cannot reach the terminal's own selection, and this is what replaces it.
    */
-  private selectableLines: { raw: string; copyable: boolean }[] = []
+  private selectableLines: { raw: string; copyable: boolean; ref?: Row | CollapsibleBlock }[] = []
   /** Screen row (1-based) of the first transcript line in the last frame. */
   private transcriptTopScreenY = 1
   /** Where a drag started; the run it belongs to decides what can be selected. */
   private mouseAnchor: SelectionPoint | undefined
+  /**
+   * What the drag grabbed, so a transcript that scrolls mid-drag cannot slide
+   * the selection onto a different row: the source row and the line's text.
+   */
+  private mouseAnchorRef: Row | CollapsibleBlock | undefined
+  private mouseAnchorText = ''
   /** The drag being painted in reverse video right now. */
   private mouseSelection: ScreenSelection | undefined
   /** A press that has not moved yet: a release without motion is still a click. */
@@ -3600,6 +3606,7 @@ export class SshTui {
     // runs on every frame, and a mouse event is rare next to a repaint.
     this.selectableLines = visible.map((line, index) => ({
       raw: line,
+      ref: visibleRefs[index],
       // Only a model reply is freely copyable; a tool card, a notice or the
       // chrome keeps its click behavior instead.
       copyable: (visibleRefs[index] as { kind?: string } | undefined)?.kind === 'assistant',
@@ -8126,6 +8133,36 @@ export class SshTui {
   }
 
   /** Toggle the collapsible row under a click, or copy an OSC-8 link. */
+  /**
+   * The anchor's line index in the *current* frame.
+   *
+   * A live session repaints while the button is down, and the transcript is
+   * pinned to the bottom: a row arriving below shifts everything up by one. The
+   * stored index would then point at whatever moved into that screen row, so
+   * the anchor is re-found by the row it grabbed (and by its text when the row
+   * carries no identity). When the row has scrolled out of view entirely, the
+   * old index is the best that can be done.
+   */
+  private resolveAnchorLine(): number | undefined {
+    const anchor = this.mouseAnchor
+    if (anchor === undefined) return undefined
+    const candidates: number[] = []
+    for (let index = 0; index < this.selectableLines.length; index += 1) {
+      const line = this.selectableLines[index]
+      if (line === undefined || line.copyable !== true) continue
+      if (this.mouseAnchorRef !== undefined) {
+        if (line.ref === this.mouseAnchorRef) candidates.push(index)
+      } else if (stripAnsi(line.raw) === this.mouseAnchorText) {
+        candidates.push(index)
+      }
+    }
+    if (candidates.length === 0) return anchor.line
+    return candidates.reduce(
+      (best, index) => (Math.abs(index - anchor.line) < Math.abs(best - anchor.line) ? index : best),
+      candidates[0] ?? anchor.line,
+    )
+  }
+
   /** The painted lines as plain text, for the selection rules. */
   private plainSelectableLines(): SelectableLine[] {
     return this.selectableLines.map(line => ({ text: stripAnsi(line.raw), copyable: line.copyable }))
@@ -8156,13 +8193,18 @@ export class SshTui {
       return
     }
     this.mouseAnchor = { line, column: Math.max(0, x - 1) }
+    const grabbed = this.selectableLines[line]
+    this.mouseAnchorRef = grabbed?.ref
+    this.mouseAnchorText = grabbed === undefined ? '' : stripAnsi(grabbed.raw)
     this.mouseSelection = undefined
   }
 
   /** The button is held and the pointer moved: extend the drag and repaint it. */
   private extendMouseSelection(y: number, x: number): void {
+    const resolved = this.resolveAnchorLine()
+    if (resolved === undefined || this.mouseAnchor === undefined) return
+    this.mouseAnchor = { line: resolved, column: this.mouseAnchor.column }
     const anchor = this.mouseAnchor
-    if (anchor === undefined) return
     const line = this.selectableLineAt(y) ?? (y < this.transcriptTopScreenY ? 0 : this.selectableLines.length - 1)
     const clamped = clampSelection(this.plainSelectableLines(), anchor, { line, column: Math.max(0, x - 1) })
     if (clamped === undefined) return
@@ -8177,10 +8219,15 @@ export class SshTui {
 
   /** Release: copy the dragged text, or perform the click that never became one. */
   private endMouseSelection(y: number, x: number): void {
-    const anchor = this.mouseAnchor
+    const resolved = this.resolveAnchorLine()
+    const anchor = resolved === undefined || this.mouseAnchor === undefined
+      ? undefined
+      : { line: resolved, column: this.mouseAnchor.column }
     const selection = this.mouseSelection
     const click = this.pendingMouseClick
     this.mouseAnchor = undefined
+    this.mouseAnchorRef = undefined
+    this.mouseAnchorText = ''
     this.mouseSelection = undefined
     this.pendingMouseClick = undefined
     if (anchor === undefined) {
