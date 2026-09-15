@@ -887,6 +887,7 @@ export const en: Record<string, string> = {
   'view.switched': 'Workspace view: {name}.',
   'view.unknown': 'Unknown view "{id}". Use detailed or compact.',
   'view.footerCompact': 'compact',
+  'compact.filesMore': '+{count} more file(s)',
   'compact.tools': 'called {count} tools',
   'compact.toolsFailed': 'called {count} tools · {failed} failed',
   'compact.edits': 'edited',

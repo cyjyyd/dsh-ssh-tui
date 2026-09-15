@@ -319,6 +319,8 @@ import {
 import {
   buildToolHeader,
   compactEditPath,
+  compactFailureLines,
+  compactFileStats,
   compactToolBursts,
   compactToolGroups,
   countDiffAddDel,
@@ -801,6 +803,8 @@ const PLUGIN_VERSION = ((): string => {
     return '0.0.0'
   }
 })()
+/** Files named on a collapsed compact burst before the rest are counted. */
+const MAX_COMPACT_FILE_STATS = 4
 const STALL_WARNING_MS = 60000
 /** Bytes already queued for the terminal before a frame is skipped instead. */
 const STDOUT_BACKLOG_BYTES = 32 * 1024
@@ -1652,6 +1656,22 @@ export class SshTui {
         ? this.styleLine('tool', collapsed)
         : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
       addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
+      // A collapsed burst is all the reader sees, so the two things that decide
+      // whether to expand belong on it: which files moved, and what failed.
+      if (kind === 'edits') {
+        const stats = compactFileStats(groups.edits)
+        const shown = stats.slice(0, MAX_COMPACT_FILE_STATS)
+        const parts = shown.map(stat => `${stat.path} ${diffStatToken(stat.add, stat.del)}`.trim())
+        if (stats.length > shown.length) {
+          parts.push(t('compact.filesMore', { count: stats.length - shown.length }))
+        }
+        if (parts.length > 0) {
+          addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${parts.join(' · ')}`, width)), anchor)
+        }
+      }
+      for (const line of compactFailureLines(items)) {
+        addDisplay(this.styleLine('error', truncateToWidth(`    ${line}`, width)), anchor)
+      }
       return
     }
     const expandedHeaderLines = headerSegments.length === 0

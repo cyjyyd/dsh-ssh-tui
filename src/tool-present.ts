@@ -88,6 +88,46 @@ export function countDiffAddDel(hunks: readonly ToolDiffHunk[] | undefined): { a
 }
 
 /**
+ * Per-file change counts for the compact view's collapsed line.
+ *
+ * The summary header says "3 files" and one total; a reader deciding whether to
+ * expand needs to know *which* file moved. Files keep the order they first
+ * appear in, so the line does not reshuffle as the turn progresses.
+ */
+export function compactFileStats(
+  edits: readonly { name: string; args: string; summary?: string; diff?: readonly ToolDiffHunk[] }[],
+): Array<{ path: string; add: number; del: number }> {
+  const byPath = new Map<string, { path: string; add: number; del: number }>()
+  for (const edit of edits) {
+    const path = compactEditPath(edit).trim()
+    if (path === '') continue
+    const stat = countDiffAddDel(edit.diff)
+    const entry = byPath.get(path)
+    if (entry === undefined) {
+      byPath.set(path, { path, add: stat.add, del: stat.del })
+      continue
+    }
+    entry.add += stat.add
+    entry.del += stat.del
+  }
+  return [...byPath.values()]
+}
+
+/**
+ * The failed tools of one burst, one line each.
+ *
+ * A count in the header is not enough: the reader has to see *what* failed
+ * without expanding, because a failure is the reason to expand at all.
+ */
+export function compactFailureLines(
+  calls: readonly { title: string; summary?: string; status?: string }[],
+): string[] {
+  return calls
+    .filter(call => call.status === 'error')
+    .map(call => [call.title, call.summary?.trim() ?? ''].filter(part => part !== '').join('  '))
+}
+
+/**
  * Git diffstat token, deletions first like `-13 +24`. Zero parts drop out
  * (a new file shows only `+24`); empty when the diff has no counted lines.
  */
