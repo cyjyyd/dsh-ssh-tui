@@ -45,6 +45,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "docs/remote-ops.md",
     "docs/screenshots/compare.png",
     "docs/screenshots/headless.png",
     "docs/screenshots/workspace.png",

@@ -135,6 +135,7 @@ milliseconds; `0`/`off` restores the old behavior) and then exits, handing the
 lock back — long enough for the old window to reattach, after which `--resume`
 reopens the flushed log. A Host that never finishes its turn still falls back to
 `DSH_TUI_DETACHED_IDLE_MS` (6h). Optional: wrap the TUI in tmux.
+Copy-paste recipes for keeping a session reachable (tmux, screen, systemd --user, long turns) are in [`docs/remote-ops.md`](docs/remote-ops.md) (Chinese for now), together with what the `reconnected N times · away X` and `away …` transcript lines mean.
 
 New sessions inherit the directory you launched from. Resuming a session
 `chdir`s into that session's recorded working directory. The footer shows

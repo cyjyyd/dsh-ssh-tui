@@ -162,6 +162,7 @@ Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线
 （`DSH_TUI_IDLE_EXIT_MS`，或 settings.yaml 的 `ssh-tui.idleExit`，毫秒；设 `0`/`off` 恢复旧行为）
 就自行退出并让出锁：这段时间够原窗口重连接入，之后 `--resume` 重新打开已落盘的日志。
 完全没有显示器且一直空闲的兜底仍由 `DSH_TUI_DETACHED_IDLE_MS`（默认 6 小时）负责。可选：用 tmux 包一层。
+常驻与接管的可复制配方（tmux / screen / systemd --user / 长任务）见 [`docs/remote-ops.md`](docs/remote-ops.md)；重连后转录里的「已重连 N 次 · 断开 Xs」与「离开 …」两行的语义也在那里。
 
 启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
