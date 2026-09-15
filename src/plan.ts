@@ -3,7 +3,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { formatTokens } from './footer.js'
+import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens } from './footer.js'
 import { parseJsonArgs } from './json-args.js'
 import type { DisplayKind, PlanTodoItem, Row, SubagentLogEntry } from './transcript-types.js'
 
@@ -13,6 +13,18 @@ export const TODO_STATUS_MARK: Record<PlanTodoItem['status'], string> = {
   pending: '○',
   in_progress: '◐',
   completed: '●',
+  failed: '✖',
+  skipped: '⊘',
+}
+
+/** The status a model names, mapped onto the five we render. */
+function normalizeTodoStatus(value: unknown): PlanTodoItem['status'] {
+  const text = typeof value === 'string' ? value.trim().toLowerCase().replaceAll('-', '_') : ''
+  if (text === 'in_progress' || text === 'active' || text === 'doing') return 'in_progress'
+  if (text === 'completed' || text === 'complete' || text === 'done') return 'completed'
+  if (text === 'failed' || text === 'fail' || text === 'error' || text === 'blocked') return 'failed'
+  if (text === 'skipped' || text === 'skip' || text === 'cancelled' || text === 'canceled' || text === 'deferred') return 'skipped'
+  return 'pending'
 }
 
 /** True while a plan still belongs in the dock (latest incomplete work). */
@@ -269,18 +281,44 @@ export function planDockNote(plan: {
 export function todoProgressLabel(todos: readonly PlanTodoItem[]): string {
   const done = todos.filter(item => item.status === 'completed').length
   const active = todos.filter(item => item.status === 'in_progress').length
-  const pending = todos.length - done - active
+  const failed = todos.filter(item => item.status === 'failed').length
+  const skipped = todos.filter(item => item.status === 'skipped').length
+  const pending = todos.length - done - active - failed - skipped
   const parts: string[] = []
   if (done > 0) parts.push(t('plan.todoDone', { count: done }))
   if (active > 0) parts.push(t('plan.todoActive', { count: active }))
   if (pending > 0) parts.push(t('plan.todoPending', { count: pending }))
+  if (failed > 0) parts.push(t('plan.todoFailed', { count: failed }))
+  if (skipped > 0) parts.push(t('plan.todoSkipped', { count: skipped }))
   return parts.join(' · ')
 }
 
 export function todoItemKind(status: PlanTodoItem['status']): DisplayKind {
   if (status === 'completed') return 'todo-done'
   if (status === 'in_progress') return 'todo-active'
+  if (status === 'failed') return 'todo-failed'
+  if (status === 'skipped') return 'todo-skipped'
   return 'todo-pending'
+}
+
+/**
+ * A Braille bar for the plan's completion, in the same family as the context
+ * ring: `⣿` filled, `⣀` empty, and the eight partial cells between them.
+ * @param todos - the list as the model last wrote it.
+ * @param cells - bar width in cells.
+ */
+export function todoProgressBar(todos: readonly PlanTodoItem[], cells = 10): string {
+  const width = Math.max(1, cells)
+  const total = todos.length
+  if (total === 0) return CONTEXT_RING_EMPTY.repeat(width)
+  const done = todos.filter(item => item.status === 'completed').length
+  const steps = Math.round((done / total) * width * 8)
+  let bar = ''
+  for (let cell = 0; cell < width; cell += 1) {
+    const remaining = steps - cell * 8
+    bar += CONTEXT_RING_SEGMENTS[Math.max(0, Math.min(8, remaining))] ?? CONTEXT_RING_FULL
+  }
+  return bar
 }
 
 export function planMarkdownFromArgs(value: unknown): string | undefined {
@@ -311,11 +349,7 @@ export function parsePlanTodos(value: unknown): PlanTodoItem[] {
       ? (item as { content: string }).content.trim()
       : ''
     if (content === '') continue
-    const status = (item as { status?: unknown }).status
-    out.push({
-      content,
-      status: status === 'in_progress' || status === 'completed' ? status : 'pending',
-    })
+    out.push({ content, status: normalizeTodoStatus((item as { status?: unknown }).status) })
   }
   return out
 }

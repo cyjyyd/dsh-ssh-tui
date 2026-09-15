@@ -103,6 +103,8 @@ export function contextPressureView(sample: ContextPressureSample): ContextPress
  */
 export const CONTEXT_RING_EMPTY = '⣀'
 export const CONTEXT_RING_SEGMENTS = ['⣀', '⠉', '⠋', '⠛', '⠞', '⠟', '⠿', '⡿', '⣿'] as const
+/** The full cell of the same Braille family, for bars built like the ring. */
+export const CONTEXT_RING_FULL = '⣿'
 
 export function formatContextPressureRing(percent: number): string {
   if (!Number.isFinite(percent) || percent <= 0) return CONTEXT_RING_EMPTY

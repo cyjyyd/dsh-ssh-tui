@@ -213,6 +213,8 @@ export const en: Record<string, string> = {
   'plan.closed': 'Plan mode is off. Use /plan to re-enter.',
   'plan.todoDone': '{count} done',
   'plan.todoActive': '{count} in progress',
+  'plan.todoFailed': '{count} failed',
+  'plan.todoSkipped': '{count} skipped',
   'plan.todoPending': '{count} pending',
   'plan.list': 'todo list',
   'plan.todoSummary': '{done}/{total} done',

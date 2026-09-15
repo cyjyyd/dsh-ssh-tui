@@ -213,6 +213,8 @@ export const zh: Record<string, string> = {
   'plan.closed': '计划模式已关闭，可用 /plan 重新进入。',
   'plan.todoDone': '{count} 已完成',
   'plan.todoActive': '{count} 进行中',
+  'plan.todoFailed': '{count} 失败',
+  'plan.todoSkipped': '{count} 跳过',
   'plan.todoPending': '{count} 待处理',
   'plan.list': '计划列表',
   'plan.todoSummary': '{done}/{total} 完成',

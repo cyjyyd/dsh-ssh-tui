@@ -16,7 +16,12 @@ export interface SubagentLogEntry {
 /** One todo-list item as the plan card renders it. */
 export interface PlanTodoItem {
   content: string
-  status: 'pending' | 'in_progress' | 'completed'
+  /**
+   * The tool's own schema sends the first three. `failed` and `skipped` are
+   * accepted from models that mark an item that way anyway — silently showing
+   * those as pending would misreport the work that is left.
+   */
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
 }
 
 export type Row =
@@ -126,7 +131,7 @@ export type CollapsibleBlock =
   | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
-export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'plan-dock'
+export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'todo-failed' | 'todo-skipped' | 'plan-dock'
 
 /** One file's change, matching the web diff-card contract (`card: 'diff'`). */
 export interface ToolDiffHunk {

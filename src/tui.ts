@@ -2704,6 +2704,7 @@ export class SshTui {
       const style = kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
         ? this.styleLine(kind, body)
         : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
+          || kind === 'todo-failed' || kind === 'todo-skipped'
           ? this.styleLine(kind, body)
           : kind === 'error'
             ? this.styleLine('error', body)
@@ -2738,6 +2739,7 @@ export class SshTui {
           kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
             ? this.styleLine(kind, body)
             : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
+              || kind === 'todo-failed' || kind === 'todo-skipped'
               ? this.styleLine(kind, body)
               : kind === 'error'
                 ? this.styleLine('error', body)
@@ -4304,6 +4306,8 @@ export class SshTui {
       kind === 'diff-path' ? '1;36' :
       kind === 'todo-done' ? '2;32' :
       kind === 'todo-active' ? '1;36' :
+      kind === 'todo-failed' ? '31' :
+      kind === 'todo-skipped' ? '2;33' :
       kind === 'todo-pending' ? '90' :
       kind === 'plan-dock' ? '38;5;180' :
       kind === 'error' ? '31' :

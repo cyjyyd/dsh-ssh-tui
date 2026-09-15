@@ -10,6 +10,7 @@ import { firstString, parseJsonArgs, scalarText } from './json-args.js'
 import {
   parsePlanTodos,
   planTitleFromMarkdown,
+  todoProgressBar,
   todoProgressLabel,
   todoSummary,
   askSummary,
@@ -716,7 +717,11 @@ export function specializedToolBody(row: NamedToolBodySource, maxLines = Number.
     unlimited ? text : truncate(text, Math.min(maxLines, fallback))
   if (name === 'todo_write' || name === 'todo') {
     const todos = parsePlanTodos(args ?? row.args)
-    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: todoProgressLabel(todos) || t('todo.list') }]
+    // The bar leads: the counts alone make the reader do the division, and the
+    // header is the one line that is always visible when the card is collapsed.
+    const label = todoProgressLabel(todos)
+    const header = todos.length === 0 ? t('todo.list') : `${todoProgressBar(todos)} ${label}`
+    const out: DiffDisplayLine[] = [{ kind: 'diff-path', text: header }]
     if (todos.length === 0) {
       out.push({ kind: 'tool-result', text: t('todo.empty') })
     } else {
