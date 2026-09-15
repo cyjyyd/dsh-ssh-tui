@@ -543,6 +543,8 @@ export const zh: Record<string, string> = {
   'dialog.ask': '提问用户 {index}/{total}: {question}',
   'dialog.recommended': '（推荐）',
   'dialog.freeform': '  （自由输入：在下方输入后按 Enter）',
+  'dialog.filterLabel': '筛选：{query}',
+  'dialog.filterHint': '输入筛选 · Enter 应用 · Esc 清除',
   'dialog.multiHint': '  数字/字母切换，Enter 提交，Esc 取消（首项默认选中）',
   'dialog.singleHint': '  数字/字母选择，Enter 提交，Esc 取消（首项默认选中）',
   'dialog.scrolled': '↑ 已回看 {count} 行 · PgUp/PgDn/滚轮滚动 · Esc 回到底部',

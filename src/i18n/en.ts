@@ -543,6 +543,8 @@ export const en: Record<string, string> = {
   'dialog.ask': 'ask user {index}/{total}: {question}',
   'dialog.recommended': ' (recommended)',
   'dialog.freeform': '  (freeform: type below and press Enter)',
+  'dialog.filterLabel': 'filter: {query}',
+  'dialog.filterHint': 'type to filter · Enter applies · Esc clears',
   'dialog.multiHint': '  digits/letters toggle, Enter submits, Esc cancels (first option preselected)',
   'dialog.singleHint': '  digits/letters select, Enter submits, Esc cancels (first option preselected)',
   'dialog.scrolled': '↑ scrolled {count} lines · PgUp/PgDn/wheel · Esc to bottom',

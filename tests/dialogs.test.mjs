@@ -7,6 +7,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  applyQuestionFilter,
+  backspaceQuestionFilter,
+  clearQuestionFilter,
   confirmAnswer,
   inspectClosesOn,
   moveQuestionCursor,
@@ -15,6 +18,8 @@ import {
   questionSubmit,
   selectQuestionOption,
   selectQuestionOptionByKey,
+  typeQuestionFilter,
+  visibleQuestionIndexes,
 } from '../lib/dialogs.js'
 import { SshTui } from '../lib/tui.js'
 
@@ -184,4 +189,84 @@ test('the live dialog answers Enter with the default option and cancels only on 
   tui.dialog = dialog()
   tui.handleDialogChar('\x1b')
   assert.deepEqual(calls, [['reject', 'ASK_ABORTED']], 'Esc is the explicit cancel')
+})
+
+/**
+ * B-2b: type-to-filter inside an option list.
+ *
+ * Letters and digits are the list's hotkeys, so filtering is entered with `/`
+ * rather than by hijacking every keystroke: while the filter is being typed the
+ * hotkeys are off and the printable keys build the query.
+ */
+const FILTER_OPTIONS = [
+  { label: '标准模式', description: '官方 · 适合日常' },
+  { label: 'PTC', description: '官方 · plan-then-code' },
+  { label: '我的模式', description: '本地 · 自己写的' },
+]
+
+test('an empty filter shows every option', () => {
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS)), [0, 1, 2])
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS, { filter: '  ' })), [0, 1, 2])
+})
+
+test('the filter matches the label or the description, case-insensitively', () => {
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS, { filter: 'ptc' })), [1])
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS, { filter: 'PLAN-THEN' })), [1])
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS, { filter: '本地' })), [2])
+  assert.deepEqual(visibleQuestionIndexes(questionDialog(FILTER_OPTIONS, { filter: 'zzz' })), [])
+})
+
+test('typing builds the query only in filter mode, and backspace edits it', () => {
+  const dialog = questionDialog(FILTER_OPTIONS, { filtering: true, filter: '' })
+  assert.equal(typeQuestionFilter(dialog, 'p'), true)
+  assert.equal(dialog.filter, 'p')
+  typeQuestionFilter(dialog, 'tc')
+  assert.deepEqual(visibleQuestionIndexes(dialog), [1])
+  backspaceQuestionFilter(dialog)
+  assert.equal(dialog.filter, 'pt')
+  // Enter keeps what was typed, Esc shows the whole list again.
+  applyQuestionFilter(dialog)
+  assert.equal(dialog.filtering, false)
+  assert.equal(dialog.filter, 'pt')
+  clearQuestionFilter(dialog)
+  assert.equal(dialog.filter, '')
+  assert.deepEqual(visibleQuestionIndexes(dialog), [0, 1, 2])
+
+  const idle = questionDialog(FILTER_OPTIONS)
+  assert.equal(typeQuestionFilter(idle, 'x'), false, 'typing outside filter mode is not a filter')
+  assert.equal(idle.filter, undefined)
+})
+
+test('the highlight stays on a visible option and moves only among them', () => {
+  const dialog = questionDialog(FILTER_OPTIONS, { filtering: true, filter: '', cursor: 2 })
+  dialog.selected.add(2)
+  typeQuestionFilter(dialog, 'ptc')
+  assert.equal(dialog.cursor, 1, 'the cursor jumps to the only match')
+  assert.deepEqual([...dialog.selected], [1], 'and the selection follows it')
+  // Movement cannot reach a filtered-out option.
+  moveQuestionCursor(dialog, 1)
+  assert.equal(dialog.cursor, 1)
+  moveQuestionCursor(dialog, -1)
+  assert.equal(dialog.cursor, 1)
+  clearQuestionFilter(dialog)
+  moveQuestionCursor(dialog, 1)
+  assert.equal(dialog.cursor, 2, 'with the filter cleared the whole list is reachable again')
+})
+
+test('hotkeys are off while filtering, so a letter can be typed', () => {
+  const dialog = questionDialog(FILTER_OPTIONS, { filtering: true })
+  // `2` is the second option's hotkey, and a letter would be too.
+  assert.equal(selectQuestionOptionByKey(dialog, '2'), false)
+  dialog.filtering = false
+  assert.equal(selectQuestionOptionByKey(dialog, '2'), true, 'and on again afterwards')
+  assert.equal(dialog.cursor, 1)
+})
+
+test('a filtered list that matches nothing submits the custom text instead of answering', () => {
+  const dialog = questionDialog(FILTER_OPTIONS, { filtering: true, filter: 'zzz' })
+  assert.deepEqual(visibleQuestionIndexes(dialog), [])
+  // The cursor still points at a real option, which is what Enter answers with:
+  // a filter that matches nothing must not turn Enter into a silent no-op.
+  const submit = questionSubmit(dialog, '')
+  assert.equal(submit.kind, 'resolve')
 })

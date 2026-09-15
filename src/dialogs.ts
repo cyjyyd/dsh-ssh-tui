@@ -24,6 +24,21 @@ export interface QuestionDialog {
   total: number
   selected: Set<number>
   cursor: number
+  /**
+   * The typed filter, once the user pressed `/`. Letters and digits are the
+   * list's hotkeys, so filtering is entered explicitly instead of hijacking
+   * every keystroke — the two would otherwise fight over the same keys.
+   */
+  filter?: string
+  /** True while the filter is being typed; Enter applies it, Esc clears it. */
+  filtering?: boolean
+  /**
+   * Machine names for the options, indexed like `question.options`. The option
+   * shape belongs to the questions package and carries only display text, so a
+   * preset id would otherwise be unmatchable — and `routing-suite` is exactly
+   * what a user types to find it.
+   */
+  matchKeys?: readonly string[]
   resolve(selection: { selected: string[]; custom?: string }): void
   reject(error: unknown): void
 }
@@ -64,11 +79,80 @@ export function questionOptionIndex(key: string, optionCount: number): number | 
   return index
 }
 
+/**
+ * The option indexes the current filter leaves visible, in list order.
+ *
+ * An empty or absent filter keeps everything. The match is the same shape the
+ * pickers use: the label or the description, case-insensitively.
+ */
+export function visibleQuestionIndexes(dialog: QuestionDialog): number[] {
+  const options = dialog.question.options ?? []
+  const needle = (dialog.filter ?? '').trim().toLowerCase()
+  const all = options.map((_option, index) => index)
+  if (needle === '') return all
+  return all.filter(index => {
+    const option = options[index]
+    if (option === undefined) return false
+    return [option.label, option.description ?? '', dialog.matchKeys?.[index] ?? '']
+      .some(field => field.toLowerCase().includes(needle))
+  })
+}
+
+/** Append a typed character to the filter (filter mode only). */
+export function typeQuestionFilter(dialog: QuestionDialog, text: string): boolean {
+  if (dialog.filtering !== true) return false
+  dialog.filter = `${dialog.filter ?? ''}${text}`
+  clampCursorToVisible(dialog)
+  return true
+}
+
+/** Remove the last character of the filter; the caller exits when it is empty. */
+export function backspaceQuestionFilter(dialog: QuestionDialog): boolean {
+  if (dialog.filtering !== true) return false
+  dialog.filter = (dialog.filter ?? '').slice(0, -1)
+  clampCursorToVisible(dialog)
+  return true
+}
+
+/** Leave filter mode, keeping whatever was typed (Enter applies it). */
+export function applyQuestionFilter(dialog: QuestionDialog): void {
+  dialog.filtering = false
+}
+
+/** Leave filter mode and show the whole list again (Esc clears it). */
+export function clearQuestionFilter(dialog: QuestionDialog): void {
+  dialog.filtering = false
+  dialog.filter = ''
+  clampCursorToVisible(dialog)
+}
+
+/**
+ * Keep the highlight on a visible option after the filter changed: the cursor
+ * indexes the full list, and a filtered-out option would otherwise stay
+ * selected while invisible.
+ */
+function clampCursorToVisible(dialog: QuestionDialog): void {
+  const visible = visibleQuestionIndexes(dialog)
+  if (visible.length === 0) return
+  if (visible.includes(dialog.cursor)) return
+  dialog.cursor = visible[0] ?? dialog.cursor
+  if (dialog.question.multiSelect !== true) {
+    dialog.selected.clear()
+    dialog.selected.add(dialog.cursor)
+  }
+}
+
 /** Move the question highlight, clamped to its options. Returns false if not a question dialog. */
 export function moveQuestionCursor(dialog: QuestionDialog, delta: number): boolean {
   const count = dialog.question.options?.length ?? 0
   if (count === 0) return false
-  dialog.cursor = Math.max(0, Math.min(count - 1, dialog.cursor + delta))
+  const visible = visibleQuestionIndexes(dialog)
+  if (visible.length === 0) return false
+  const at = visible.indexOf(dialog.cursor)
+  const next = at === -1
+    ? (delta >= 0 ? visible[0] : visible[visible.length - 1])
+    : visible[Math.max(0, Math.min(visible.length - 1, at + delta))]
+  dialog.cursor = next ?? dialog.cursor
   if (dialog.question.multiSelect !== true) {
     dialog.selected.clear()
     dialog.selected.add(dialog.cursor)
@@ -90,6 +174,7 @@ export function selectQuestionOption(dialog: QuestionDialog, index: number): voi
 
 /** Handle a hotkey: select its option and report whether it applied. */
 export function selectQuestionOptionByKey(dialog: QuestionDialog, key: string): boolean {
+  if (dialog.filtering === true) return false
   const index = questionOptionIndex(key, dialog.question.options?.length ?? 0)
   if (index === undefined) return false
   selectQuestionOption(dialog, index)

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { errorText, systemText, tick, waitForError, waitForText } from './wait.mjs'
+import { errorText, systemText, tick, waitForDialog, waitForError, waitForText } from './wait.mjs'
 import { SshTui } from '../lib/tui.js'
 
 const ROSTER = [
@@ -208,4 +208,57 @@ test('child-agent requests carry the TUI subagent model, not the parent route', 
   // The main agent keeps its own /model waterfall untouched.
   const main = await tui.handleAgentRequest({ agent: tui.agent }, async () => ({ ...parent }))
   assert.equal(main.model, 'deepseek-flash')
+})
+
+test('typing narrows the /mode list, and Enter answers the match', async () => {
+  const { tui, composed } = fixture()
+  tui.runCommand('/mode')
+  await waitForDialog(tui, 'questions')
+
+  // `/` starts filtering: letters are the list's hotkeys, so the two cannot
+  // share the keyboard without a mode.
+  tui.handleChar('/')
+  for (const char of 'routing') tui.handleChar(char)
+  const frame = tui.captureFrame(100, 30).join('\n')
+  assert.match(frame, /筛选：routing/u, 'the query is shown')
+  // The option line is the only place the name carries its group suffix: the
+  // banner and the footer both name the preset in effect without it.
+  assert.ok(frame.includes('智能路由模式 — 本地'), 'the match is listed')
+  assert.equal(frame.includes('标准模式 — 官方'), false, 'the rest is filtered out of the list')
+
+  // First Enter applies the filter, second answers the highlighted match.
+  tui.handleChar('\r')
+  tui.handleChar('\r')
+  await waitForText(tui, '已切换')
+  assert.deepEqual(composed, ['routing-suite'], 'the filtered match is what got composed')
+})
+
+test('Esc clears a filter instead of cancelling the question', async () => {
+  const { tui } = fixture()
+  tui.runCommand('/mode')
+  await waitForDialog(tui, 'questions')
+  tui.handleChar('/')
+  tui.handleChar('z')
+  tui.handleChar('z')
+  tui.handleChar('\x1b')
+  assert.equal(tui.dialog?.kind, 'questions', 'the question is still open')
+  const frame = tui.captureFrame(100, 30).join('\n')
+  assert.equal(frame.includes('筛选：zz'), false, 'and the filter is gone')
+  assert.ok(frame.includes('标准模式'), 'the whole list is back')
+})
+
+test('a filter that matches nothing leaves the list empty but the question answerable', async () => {
+  const { tui } = fixture()
+  tui.runCommand('/mode')
+  await waitForDialog(tui, 'questions')
+  tui.handleChar('/')
+  for (const char of 'zzz') tui.handleChar(char)
+  const frame = tui.captureFrame(100, 30).join('\n')
+  assert.equal(frame.includes('标准模式 — 官方'), false, 'no option line survives the filter')
+  assert.match(frame, /筛选：zzz/u)
+  tui.handleChar('\x1b')
+  assert.ok(
+    tui.captureFrame(100, 30).join('\n').includes('标准模式 — 官方'),
+    'clearing brings the roster back',
+  )
 })

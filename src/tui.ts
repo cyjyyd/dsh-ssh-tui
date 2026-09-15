@@ -88,6 +88,11 @@ import {
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import {
   QUESTION_OPTION_KEYS,
+  applyQuestionFilter,
+  backspaceQuestionFilter,
+  clearQuestionFilter,
+  typeQuestionFilter,
+  visibleQuestionIndexes,
   confirmAnswer,
   inspectClosesOn,
   moveQuestionCursor,
@@ -3527,10 +3532,20 @@ export class SshTui {
         }
         const options = d.question.options ?? []
         const approve = d.question.intent?.approve
-        const start = pickerWindowStart(d.cursor, options.length)
-        const end = Math.min(options.length, start + PICKER_WINDOW)
+        if (d.filtering === true || (d.filter ?? '') !== '') {
+          addDialog(`  ${t('dialog.filterLabel', { query: d.filter ?? '' })}`)
+        }
+        // Only the options the filter left are listed. The hotkey stays the
+        // option's own number in the full list, so it does not move under the
+        // user's fingers as the filter narrows.
+        const visibleIndexes = visibleQuestionIndexes(d)
+        const cursorAt = Math.max(0, visibleIndexes.indexOf(d.cursor))
+        const start = pickerWindowStart(cursorAt, visibleIndexes.length)
+        const end = Math.min(visibleIndexes.length, start + PICKER_WINDOW)
         if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
-        for (let index = start; index < end; index += 1) {
+        for (let at = start; at < end; at += 1) {
+          const index = visibleIndexes[at]
+          if (index === undefined) continue
           const option = options[index]
           if (option === undefined) continue
           const marker = d.selected.has(index) ? '●' : '○'
@@ -3540,9 +3555,14 @@ export class SshTui {
           const extra = option.description === undefined ? '' : ` — ${option.description}`
           addDialog(` ${focused}${key} ${marker} ${option.label}${recommended}${extra}`)
         }
-        if (end < options.length) addDialog(`  ${t('picker.moreBelow', { count: options.length - end })}`)
+        if (end < visibleIndexes.length) {
+          addDialog(`  ${t('picker.moreBelow', { count: visibleIndexes.length - end })}`)
+        }
         if (options.length === 0) {
           addDialog(t('dialog.freeform'))
+        }
+        if (d.filtering === true) {
+          addDialog(t('dialog.filterHint'))
         }
         addDialog(d.question.multiSelect === true ? t('dialog.multiHint') : t('dialog.singleHint'))
       }
@@ -5913,6 +5933,7 @@ export class SshTui {
     resolve: (answer: DialogAnswer) => void,
     reject: (error: unknown) => void,
     preselected?: number,
+    matchKeys?: readonly string[],
   ): QuestionDialog {
     // A list opens with its first option already chosen: Enter then answers that
     // default for a single- and a multi-select question alike, instead of
@@ -5929,6 +5950,7 @@ export class SshTui {
       total,
       selected: new Set(initial >= 0 ? [initial] : []),
       cursor: initial >= 0 ? initial : 0,
+      ...(matchKeys === undefined ? {} : { matchKeys }),
       resolve: (selection) => {
         this.settleQuestion(dialog, () => resolve(selection))
       },
@@ -5941,9 +5963,15 @@ export class SshTui {
   }
 
   /** Open one question dialog and await its answer (cancellation rejects). */
-  private askQuestion(question: AskUserQuestionItem, index = 0, total = 1, preselected?: number): Promise<DialogAnswer> {
+  private askQuestion(
+    question: AskUserQuestionItem,
+    index = 0,
+    total = 1,
+    preselected?: number,
+    matchKeys?: readonly string[],
+  ): Promise<DialogAnswer> {
     return new Promise<DialogAnswer>((resolve, reject) => {
-      this.openQuestion(question, index, total, resolve, reject, preselected)
+      this.openQuestion(question, index, total, resolve, reject, preselected, matchKeys)
     })
   }
 
@@ -6909,7 +6937,7 @@ export class SshTui {
         id: 'mode-pick',
         question: t('mode.pick'),
         options: options.map(option => ({ label: option.label, description: option.description })),
-      }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
+      }, 0, 1, currentIndex >= 0 ? currentIndex : undefined, options.map(option => option.id))
       const picked = answer.selected[0] ?? ''
       index = options.findIndex(option => option.label === picked)
     }
@@ -7583,6 +7611,32 @@ export class SshTui {
       if (answer !== undefined) this.closeConfirm(answer)
       return
     }
+    // Filter mode owns the printable keys: the list's hotkeys are letters and
+    // digits, so the two cannot both be live at once.
+    if (dialog.filtering === true) {
+      if (text === '\r' || text === '\n') {
+        applyQuestionFilter(dialog)
+        this.markDirty()
+        return
+      }
+      if (text === '\x7f' || text === '\b') {
+        backspaceQuestionFilter(dialog)
+        this.markDirty()
+        return
+      }
+      if (text.length === 1 && text >= ' ') {
+        typeQuestionFilter(dialog, text)
+        this.markDirty()
+        return
+      }
+      return
+    }
+    if (text === '/' && (dialog.question.options?.length ?? 0) > 0) {
+      dialog.filtering = true
+      dialog.filter = ''
+      this.markDirty()
+      return
+    }
     if (selectQuestionOptionByKey(dialog, text)) this.markDirty()
     if (text === '\r' || text === '\n') {
       const submit = questionSubmit(dialog, this.input)
@@ -8168,6 +8222,15 @@ export class SshTui {
   }
 
   private handleEscape(): void {
+    if (this.dialog?.kind === 'questions'
+      && (this.dialog.filtering === true || (this.dialog.filter ?? '') !== '')) {
+      // Esc means "show me everything again" while a filter is up; cancelling
+      // the whole question on the same key would throw away the answer the user
+      // is still composing.
+      clearQuestionFilter(this.dialog)
+      this.markDirty()
+      return
+    }
     if (this.dialog !== undefined) {
       if (this.dialog.kind === 'inspect') {
         this.closeInspect()
