@@ -77,16 +77,27 @@ async function footerTui({ presets } = {}) {
   return new SshTui(ctx, agent, { sessionId: 'main-session', color: false, headlessDisplay: true })
 }
 
-const statsRowOf = tui => tui.captureFrame(40, 24).map(stripAnsi).find(line => /⚠|SSH/u.test(line) && !line.includes('DeepSeek Harness'))
+/**
+ * The strip row carrying the health warning.
+ *
+ * Located by the glyph, not by the link chip's text: the chip says `SSH` on a
+ * remote shell and `本地`/`local` everywhere else, and the CI runner is the
+ * latter — a matcher that looked for `SSH` found no row at all there.
+ */
+const warningRowOf = (tui, width = 40) => tui.captureFrame(width, 24).map(stripAnsi).find(line => line.includes('⚠'))
 
 test('a missing roster puts the health chip on the strip, and clicking it opens /doctor', async () => {
   const tui = await footerTui()
-  const row = statsRowOf(tui)
-  assert.ok(row !== undefined && row.includes('⚠'), `the strip carries the warning: ${JSON.stringify(row)}`)
+  const frame = tui.captureFrame(40, 24)
+  const rowIndex = frame.findIndex(line => stripAnsi(line).includes('⚠')) + 1
+  assert.ok(rowIndex > 0, `the strip carries the warning:\n${frame.map(stripAnsi).join('\n')}`)
 
-  const rowIndex = tui.captureFrame(40, 24).findIndex(line => stripAnsi(line) === row) + 1
   tui.handleMouseClick(rowIndex, 1)
-  await new Promise(resolve => setTimeout(resolve, 50))
+  // `/doctor` is asynchronous, so poll instead of assuming a fixed delay.
+  const deadline = Date.now() + 3_000
+  while (Date.now() < deadline && !tui.rows.some(entry => entry.kind === 'diag')) {
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
   assert.ok(
     tui.rows.some(entry => entry.kind === 'diag'),
     'clicking the warning runs the report that explains it',
@@ -95,8 +106,12 @@ test('a missing roster puts the health chip on the strip, and clicking it opens 
 
 test('a mounted roster leaves the strip clean', async () => {
   const tui = await footerTui({ presets: { list: async () => [] } })
-  const row = statsRowOf(tui)
-  assert.equal(row?.includes('⚠'), false, `no warning when the roster is mounted: ${JSON.stringify(row)}`)
+  const frame = tui.captureFrame(40, 24).map(stripAnsi)
+  assert.equal(
+    frame.some(line => line.includes('⚠')),
+    false,
+    `no warning when the roster is mounted:\n${frame.join('\n')}`,
+  )
 })
 
 test('the strip holds the operational signals exactly once', async () => {
@@ -117,8 +132,8 @@ test('narrowing keeps the warning and drops the counter text', async () => {
   const tui = await footerTui()
   // Give the strip a counter group to lose.
   tui.rows.push({ kind: 'assistant', text: 'x' })
-  const wide = tui.captureFrame(80, 24).map(stripAnsi).find(line => line.includes('⚠')) ?? ''
-  const narrow = tui.captureFrame(24, 24).map(stripAnsi).find(line => line.includes('⚠')) ?? ''
+  const wide = warningRowOf(tui, 80) ?? ''
+  const narrow = warningRowOf(tui, 24) ?? ''
   assert.ok(narrow.includes('⚠'), `the warning survives 24 columns: ${JSON.stringify(narrow)}`)
   assert.ok(displayWidth(narrow) <= 24, 'and the row still fits')
   assert.ok(displayWidth(narrow) <= displayWidth(wide), 'narrowing never widens the strip')
