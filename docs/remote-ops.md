@@ -114,5 +114,7 @@ DSH_TUI_IDLE_EXIT_MS=600000 dsh --profile tui --resume
 
 - `/diag`：这条会话的通道、锁、Host 身份、判定链（"会接入后台 Host，不要另开第二个窗口"）。
 - `/doctor`：profile 组合、依赖、兼容与 `dsh-scope` 副本数；`/doctor --fix` 修 profile 补丁（写前备份）。
-- 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//preset/退出）与
-  `node scripts/tui-drop-probe.mjs`（杀掉窗口再接管，断言转录保留、可输入、无乱码）。
+- 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//copy error//preset/鼠标模式/退出）、
+  `node scripts/tui-drop-probe.mjs`（杀掉窗口再接管，断言转录保留、可输入、无乱码）与
+  `node scripts/tui-mock-probe.mjs`（**合成临时 profile + 脚本化模型**，跑一个真实轮次后验证"拖选复制"
+  与 `/find` 高亮；不碰你的 profile、不花额度）。
