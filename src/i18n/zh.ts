@@ -320,6 +320,7 @@ export const zh: Record<string, string> = {
   'doctor.fix.failed': '修复 profile 补丁失败：{error}',
   'doctor.fix.unknownRow': '未知的行名：{row}（可选：{rows}）',
   'doctor.fix.restart': '重启 TUI 后生效：dsh --profile {profile}',
+  'doctor.copyTrapHint': '提示：这是「模块副本陷阱」——插件与宿主各自解析到不同的 @deepseek-ai/dsh-scope 实例（常见于 profile 里用软链指向 checkout、而 CLI 是另一处全局安装），agent-presets 因此拒绝组合。修法：让两者共用一份，把插件以 npm 方式装进该 profile（dsh plugin add dsh-ssh-tui@latest）而不是软链；详见 README「模块副本陷阱」。',
   'cmd.unknown': 'Unknown command: /{command} (try /help)',
   'cmd.failedNamed': '/{command} failed: {error}',
   'cmd.serviceMissing': '{service} service is unavailable',
@@ -478,8 +479,8 @@ export const zh: Record<string, string> = {
   'dialog.ask': '提问用户 {index}/{total}: {question}',
   'dialog.recommended': '（推荐）',
   'dialog.freeform': '  （自由输入：在下方输入后按 Enter）',
-  'dialog.multiHint': '  数字/字母切换，Enter 提交，Esc 取消',
-  'dialog.singleHint': '  数字/字母选择，Enter 提交，Esc 取消',
+  'dialog.multiHint': '  数字/字母切换，Enter 提交，Esc 取消（首项默认选中）',
+  'dialog.singleHint': '  数字/字母选择，Enter 提交，Esc 取消（首项默认选中）',
   'dialog.scrolled': '↑ 已回看 {count} 行 · PgUp/PgDn/滚轮滚动 · Esc 回到底部',
 
   'reason.done': '{marker} 已思考 · {lines} 行',

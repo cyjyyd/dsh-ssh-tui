@@ -16,6 +16,7 @@ import {
 } from '../lib/preset-rows.js'
 import {
   collectDoctor,
+  copyTrapHint,
   doctorChecks,
   findScopeCopies,
   formatDoctorReport,
@@ -266,6 +267,18 @@ test('findScopeCopies locates a nested copy and deduplicates', async () => {
   } finally {
     await rm(home, { recursive: true, force: true })
   }
+})
+
+test('a boot that died on the copy trap gets an actionable hint', () => {
+  // The composition fails before the TUI exists, so /doctor cannot answer this
+  // one; the launcher's failure report is the only place the hint can land.
+  const real = 'agent-presets: refusing to compose an unscoped context; the scope key is what joins an agent to its preset'
+  const hint = copyTrapHint(real)
+  assert.ok(hint !== undefined, 'the real failure text must be recognized')
+  assert.ok(hint.includes('dsh-scope'), hint)
+  assert.ok(hint.includes('README'), hint)
+  assert.equal(copyTrapHint('some other host failure'), undefined)
+  assert.equal(copyTrapHint(''), undefined)
 })
 
 test('writePatchWithBackup keeps the previous bytes', async () => {

@@ -5192,13 +5192,21 @@ export class SshTui {
     reject: (error: unknown) => void,
     preselected?: number,
   ): QuestionDialog {
+    // A list opens with its first option already chosen: Enter then answers that
+    // default for a single- and a multi-select question alike, instead of
+    // coming back with an empty selection. Esc stays the explicit cancel, and a
+    // question with no options still answers with the typed text.
+    const optionCount = question.options?.length ?? 0
+    const initial = preselected !== undefined && preselected >= 0 && preselected < optionCount
+      ? preselected
+      : optionCount > 0 ? 0 : -1
     const dialog: QuestionDialog = {
       kind: 'questions',
       question,
       index,
       total,
-      selected: new Set(preselected !== undefined && preselected >= 0 ? [preselected] : []),
-      cursor: preselected !== undefined && preselected >= 0 ? preselected : 0,
+      selected: new Set(initial >= 0 ? [initial] : []),
+      cursor: initial >= 0 ? initial : 0,
       resolve: (selection) => {
         this.settleQuestion(dialog, () => resolve(selection))
       },
@@ -6174,6 +6182,8 @@ export class SshTui {
       return
     }
     if (index < 0 && direct === '') {
+      // Like every other picker, the list opens on what is in effect now.
+      const currentIndex = presets.findIndex(preset => preset.id === this.presetId)
       const answer = await this.askQuestion({
         id: 'mode-pick',
         question: t('mode.pick'),
@@ -6181,7 +6191,7 @@ export class SshTui {
           label: labels[at] ?? preset.id,
           description: `${preset.id === this.presetId ? t('mode.currentPrefix') : ''}${preset.broken === undefined ? preset.description ?? '' : t('mode.brokenSuffix', { reason: preset.broken })}`.trim(),
         })),
-      })
+      }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
       index = labels.indexOf(answer.selected[0] ?? '')
     }
     if (index < 0) return

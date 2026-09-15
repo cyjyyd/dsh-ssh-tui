@@ -320,6 +320,7 @@ export const en: Record<string, string> = {
   'doctor.fix.failed': 'repairing the profile patch failed: {error}',
   'doctor.fix.unknownRow': 'unknown row name: {row} (known: {rows})',
   'doctor.fix.restart': 'restart the TUI to pick it up: dsh --profile {profile}',
+  'doctor.copyTrapHint': 'Hint: this is the module-copy trap — the plugin and the host resolved different @deepseek-ai/dsh-scope instances (usual shape: the profile links the plugin into a checkout while the CLI lives in a global install), so agent-presets refuses to compose. Fix: give both one copy by installing the plugin into that profile with npm (dsh plugin add dsh-ssh-tui@latest) instead of a symlink; see "the module-copy trap" in the README.',
   'cmd.unknown': 'Unknown command: /{command} (try /help)',
   'cmd.failedNamed': '/{command} failed: {error}',
   'cmd.serviceMissing': '{service} service is unavailable',
@@ -478,8 +479,8 @@ export const en: Record<string, string> = {
   'dialog.ask': 'ask user {index}/{total}: {question}',
   'dialog.recommended': ' (recommended)',
   'dialog.freeform': '  (freeform: type below and press Enter)',
-  'dialog.multiHint': '  digits/letters toggle, Enter submits, Esc cancels',
-  'dialog.singleHint': '  digits/letters select, Enter submits, Esc cancels',
+  'dialog.multiHint': '  digits/letters toggle, Enter submits, Esc cancels (first option preselected)',
+  'dialog.singleHint': '  digits/letters select, Enter submits, Esc cancels (first option preselected)',
   'dialog.scrolled': '↑ scrolled {count} lines · PgUp/PgDn/wheel · Esc to bottom',
 
   'reason.done': '{marker} thought · {lines} lines',

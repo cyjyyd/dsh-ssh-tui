@@ -32,6 +32,7 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
+import { copyTrapHint } from './doctor.js'
 import { presetLabel } from './preset-label.js'
 
 // The attach/recovery state machine (and its constants) live in attach.ts so
@@ -454,6 +455,8 @@ export function apply(ctx: Context, config: Config): void {
         ? error.message
         : errorChain(error)
       process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start:\n${detail}\n`)
+      const hint = copyTrapHint(detail)
+      if (hint !== undefined) process.stderr.write(`${hint}\n`)
       exitLauncher(1)
     })
 

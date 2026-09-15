@@ -122,9 +122,15 @@ test('Enter answers a selected list with the selected labels', () => {
   assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['alpha', 'charlie'] })
 })
 
-test('Enter on an empty multi-select list is an empty answer, not a cancel', () => {
+test('Enter on an unticked multi-select list answers with the highlighted option', () => {
+  // The reported bug: Enter came back with an empty selection, so a question
+  // answered with the default highlight reached the model as "nothing chosen".
   const dialog = questionDialog(OPTIONS, { question: { multiSelect: true } })
-  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: [] })
+  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['alpha'] })
+  moveQuestionCursor(dialog, 2)
+  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['charlie'] })
+  selectQuestionOption(dialog, 2)
+  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['charlie'] })
 })
 
 test('a question with no options answers with the typed text', () => {

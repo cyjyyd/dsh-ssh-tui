@@ -102,11 +102,12 @@ export type QuestionSubmit =
   | { kind: 'none' }
 
 /**
- * What Enter means for a question dialog. A single-select list answers with the
- * option its highlight sits on: the list opens on the first option, so Enter
- * without arrowing answers that default instead of cancelling, and Esc stays the
- * explicit cancel. A multi-select list may answer with an empty selection. With
- * no options at all, the typed text is the answer.
+ * What Enter means for a question dialog. Enter never answers with nothing: the
+ * list opens on the first option, and that highlight is the answer for a
+ * single-select list and a multi-select one alike — pressing Enter without
+ * touching anything returns the option under the cursor, and Esc stays the
+ * explicit cancel. Space (or a digit/letter) still builds a multi-select set,
+ * and a list with no options at all answers with the typed text.
  */
 export function questionSubmit(dialog: QuestionDialog, input: string): QuestionSubmit {
   const options = dialog.question.options ?? []
@@ -114,10 +115,10 @@ export function questionSubmit(dialog: QuestionDialog, input: string): QuestionS
     .map(index => options[index]?.label)
     .filter((label): label is string => label !== undefined)
   if (options.length === 0) return { kind: 'resolve', selected: [], custom: input }
-  if (selected.length === 0 && dialog.question.multiSelect !== true) {
+  if (selected.length === 0) {
     const highlighted = options[dialog.cursor]?.label
     // The cursor is clamped to the option list, so this guards only a dialog
-    // built without one; Enter must never silently cancel.
+    // built without one; Enter must never silently answer nothing.
     if (highlighted === undefined) return { kind: 'reject' }
     return { kind: 'resolve', selected: [highlighted] }
   }

@@ -432,3 +432,21 @@ export function rowsToRepair(facts: DoctorFacts): RosterRow[] {
     || (row.id === ROSTER_ROWS[1]?.id && !facts.services.codeRuntime)
     || row.id === ROSTER_ROWS[2]?.id)
 }
+
+/** The scope-key signature of the module-copy trap, seen in a host's stderr. */
+const COPY_TRAP_PATTERN = /unscoped context|scope key/u
+
+/**
+ * What to tell a user whose boot died on the module-copy trap.
+ *
+ * `/doctor` cannot answer this one: the composition fails before the TUI exists,
+ * so the launcher's own failure report is the only place the hint can land. The
+ * signature is `agent-presets` refusing an unscoped context, which happens when
+ * the plugin and the host resolve different `@deepseek-ai/dsh-scope` instances
+ * (a profile that links the plugin into a checkout is the usual shape).
+ * @param detail - the host failure text the launcher is about to print.
+ * @returns the hint, or `undefined` for every other failure.
+ */
+export function copyTrapHint(detail: string): string | undefined {
+  return COPY_TRAP_PATTERN.test(detail) ? t('doctor.copyTrapHint') : undefined
+}
