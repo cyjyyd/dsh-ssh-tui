@@ -235,6 +235,7 @@ On first launch (when no API key is configured) the TUI opens a setup wizard:
 1. choose a provider template, matching the official Models page:
    - DeepSeek official;
    - OpenCode Go (`opencode.ai/zen/go/v1`, Responses protocol);
+   - Command Code (`api.commandcode.ai`, Completions protocol, with its own quota);
    - custom OpenAI-compatible gateway (Completions);
    - custom OpenAI Responses gateway;
    - Anthropic Messages-compatible gateway;
@@ -243,6 +244,17 @@ On first launch (when no API key is configured) the TUI opens a setup wizard:
    sensible template default. On the models step, press `Ctrl+F` to fetch the
    current model list straight from the provider endpoint;
 3. confirm and save.
+
+The wizard sizes each model's context window automatically: the endpoint
+`/models` capacities first, then the installed pi-ai catalog by model name
+(stripping the thinking-level suffixes providers bake into an id — `-high`,
+`-low`, `-thinking` — plus `vendor/` prefixes, `:free` tags, and date stamps).
+Only when some pick still has no capacity does a route-default step appear,
+pre-filled with the smallest window the route proved, so accepting it needs no
+typing; when every pick matched, that step is skipped entirely. What is saved
+is the route-level `defaultContextWindow`, which models added later through
+`/model` inherit too — and `/model` itself looks the model up in the catalog
+first, writing that model's `contextWindow` directly when it matches.
 
 The wizard writes the key to `~/.dsh/.credentials.yaml` when no environment
 variable shadows it; if the machine injects `DEEPSEEK_API_KEY` from
@@ -299,6 +311,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   when a session is replayed on `--resume` — from the durable `assistant/chunk`
   events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
   on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
+- Emoji width: BMP symbols carrying the Unicode `Emoji` property are budgeted two cells. When the monospace font lacks the glyph, the terminal falls back to a colour emoji about 1.6 cells wide that still advances one cell — it covers its neighbours, and the second budgeted cell goes unspent so the row comes up short. `pinEmojiCells()` does both halves at paint time: VS15 asks for the narrow text form, and a reserving space spends the second cell (emitted unconditionally, so "two cells plus every space in the text" equals "one cell of glyph advance, one reserving space, and those same spaces" for every shape). Symbols that already default to emoji presentation (`✅` `⚡` …) and astral emoji (`😀` …) advance two cells and are left alone.
 - Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically — silently, with the TTY kept in raw mode and queued bytes dropped so a stale cursor reply is never echoed as `^[[17;1R`; and a probe that misses its window is retried while the Host keeps the last measurement, so the footer chip does not fall back to four hollow circles.
 - Reporting a problem: `/diag` prints a local, read-only snapshot — plugin/dsh/node
   versions, platform, session id, whether this process is the launcher or the detached
@@ -340,7 +353,7 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
 | `Ctrl+D` | exit |
 | `Ctrl+L` | redraw |
 | `y` / `n` / `Esc` | answer an approval prompt |
-| `1..9` + `Enter` | answer an `ask_user_question` dialog |
+| `1..9` + `Enter` | answer an `ask_user_question` dialog: `1..9` picks directly, `Enter` takes the highlighted option (the first by default), `Esc` cancels |
 
 Type `/` to see slash-command suggestions — the panel merges the TUI's own
 commands (`/find`, `/copy`, `/model`, `/effort`, `/provider`, `/language`, `/view`, `/disconnect`, `/approval`, `/help`, ...) with every command the harness
@@ -426,9 +439,10 @@ labelled `(images ok)` in the command list and completion hints.
 - **OpenAI Completions gateways** probe `/user/balance` and `credit_grants`;
 - **SuperGrok** reads `GET cli-chat-proxy.grok.com/v1/billing` (weekly remaining %);
 - **OpenCode Go** reads the official `/v1/usage` windows (5-hour / week / month);
+- **Command Code** reads `/alpha/billing/credits` (5-hour / week windows plus the USD credit pool);
 - **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
 
-OpenCode Go / SuperGrok quota is fetched silently at start and every 10
+OpenCode Go / Command Code / SuperGrok quota is fetched silently at start and every 10
 model steps (every 4 when an hourly window is near a threshold). The footer
 shows plan name + remaining bar + percent; on a narrow row the plan name
 drops first. DeepSeek official and queryable OpenAI-compatible gateways put

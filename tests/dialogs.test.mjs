@@ -16,6 +16,7 @@ import {
   selectQuestionOption,
   selectQuestionOptionByKey,
 } from '../lib/dialogs.js'
+import { SshTui } from '../lib/tui.js'
 
 function questionDialog(options, overrides = {}) {
   const { question: questionOverrides, ...dialogOverrides } = overrides
@@ -105,9 +106,15 @@ test('a hotkey selects only the option it names', () => {
   assert.deepEqual([...dialog.selected], [1], 'an out-of-range key changes nothing')
 })
 
-test('Enter on an unselected single-select list cancels instead of answering', () => {
+test('Enter on an unselected single-select list answers with the highlighted option', () => {
   const dialog = questionDialog(OPTIONS)
-  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'reject' })
+  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['alpha'] })
+})
+
+test('Enter answers with the moved highlight instead of cancelling', () => {
+  const dialog = questionDialog(OPTIONS)
+  moveQuestionCursor(dialog, 2)
+  assert.deepEqual(questionSubmit(dialog, ''), { kind: 'resolve', selected: ['charlie'] })
 })
 
 test('Enter answers a selected list with the selected labels', () => {
@@ -143,4 +150,32 @@ test('the inspect overlay closes on its own keys and ignores the rest', () => {
   for (const key of ['j', '/', 'y']) {
     assert.equal(inspectClosesOn(key), false, JSON.stringify(key))
   }
+})
+
+test('the live dialog answers Enter with the default option and cancels only on Esc', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 's', options: {}, status: 'idle', session: { id: 's', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 's', color: false })
+  const calls = []
+  const dialog = () => ({
+    kind: 'questions',
+    question: { id: 'q1', question: 'Pick', options: OPTIONS },
+    index: 1,
+    total: 1,
+    selected: new Set(),
+    cursor: 0,
+    resolve: answer => calls.push(['resolve', answer]),
+    reject: error => calls.push(['reject', error?.code]),
+  })
+
+  tui.input = ''
+  tui.cursor = 0
+  tui.dialog = dialog()
+  tui.handleDialogChar('\r')
+  assert.deepEqual(calls, [['resolve', { selected: ['alpha'] }]], 'Enter takes the first option')
+
+  calls.length = 0
+  tui.dialog = dialog()
+  tui.handleDialogChar('\x1b')
+  assert.deepEqual(calls, [['reject', 'ASK_ABORTED']], 'Esc is the explicit cancel')
 })

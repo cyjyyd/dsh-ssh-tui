@@ -6,7 +6,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { padAnsiToWidth, truncateToWidth } from './term-text.js'
+import { padAnsiToWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
 import { detectSshSession, RTT_SAMPLE_TIMEOUT_MS, TerminalInputPump } from './terminal-input.js'
 
 const RENDER_INTERVAL_MS = 160
@@ -196,7 +196,7 @@ export function composePaintOutput(options: {
     const current = paintRows[i] ?? ''
     if (current === prev[i] && !(chromeChanged && i >= dirtyChromeStart)) continue
     painted = true
-    const clipped = padAnsiToWidth(current, width)
+    const clipped = pinEmojiCells(padAnsiToWidth(current, width))
     // EL2 *before* the glyphs, from column 1. A full-width write followed
     // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
     // next card instead of the row we just drew.
@@ -317,7 +317,7 @@ export function writeBootSplash(message: string, color = true): void {
   const useAlt = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
     && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
   try {
-    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${line}\n${'─'.repeat(width)}\n${detail}\n`)
+    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${'─'.repeat(width)}\n${pinEmojiCells(detail)}\n`)
   } catch {
     // TTY may already be gone.
   }

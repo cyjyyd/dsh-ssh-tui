@@ -22,6 +22,8 @@ export interface CatalogPreset {
   name: string
   baseUrl: string
   modelIds: string[]
+  /** Context capacity the catalog records, by lowercased model id; absent when it sizes none. */
+  capacities?: Record<string, number>
 }
 
 /** Filter presets by a case-insensitive substring match on id or name. */
@@ -81,6 +83,7 @@ export function mergeProviderEntries(
 const CHILD_SCRIPT = `
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 const anchors = JSON.parse(process.env.DSH_CATALOG_ANCHORS ?? '[]')
 const pkgCandidates = []
 for (const anchor of anchors) {
@@ -105,14 +108,23 @@ for (const pkgPath of pkgCandidates) {
     const presets = []
     for (const provider of providers) {
       let modelIds = []
+      let capacities = {}
       try {
-        modelIds = (provider.getModels?.() ?? []).map(m => m.id).filter(id => typeof id === 'string' && id !== '')
-      } catch { modelIds = [] }
+        const models = provider.getModels?.() ?? []
+        modelIds = models.map(m => m.id).filter(id => typeof id === 'string' && id !== '')
+        for (const model of models) {
+          if (typeof model?.id !== 'string' || model.id === '') continue
+          if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
+            capacities[model.id.toLowerCase()] = model.contextWindow
+          }
+        }
+      } catch { modelIds = []; capacities = {} }
       presets.push({
         id: provider.id,
         name: typeof provider.name === 'string' && provider.name !== '' ? provider.name : provider.id,
         baseUrl: typeof provider.baseUrl === 'string' ? provider.baseUrl : '',
         modelIds,
+        ...(Object.keys(capacities).length === 0 ? {} : { capacities }),
       })
     }
     if (presets.length > 0) {

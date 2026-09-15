@@ -51,6 +51,11 @@ import {
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
 import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
+import {
+  catalogContextWindow,
+  catalogWindowIndex,
+  suggestedRouteContextWindow,
+} from './context-window.js'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '@deepseek-ai/dsh-subagent'
 
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -203,6 +208,11 @@ import {
   type FooterStatusInput,
 } from './footer.js'
 import {
+  COMMAND_CODE_CREDITS_URL,
+  COMMAND_CODE_SUBSCRIPTIONS_URL,
+  COMMAND_CODE_USAGE_URL,
+  commandCodePeriodStart,
+  commandCodeSourceFor,
   crossedQuotaThresholds,
   DEEPSEEK_PUBLIC_BASE_URL,
   formatAccountBalance,
@@ -214,6 +224,7 @@ import {
   OPENCODE_ZEN_BASE_URL,
   openCodeApiErrorMessage,
   openCodeSourceFor,
+  parseCommandCodeQuota,
   parseDeepSeekBalance,
   parseOpenAiCompatibleBalance,
   parseOpenCodeGoQuota,
@@ -224,6 +235,7 @@ import {
   SUPERGROK_BILLING_URL,
   tightestQuotaWindow,
   type AccountBalanceSnapshot,
+  type CommandCodeSource,
   type LlmPiAiProviderProfile,
   type LlmPiAiSection,
   type OpenCodeSource,
@@ -371,6 +383,8 @@ export {
   type StatusReportInput,
 } from './footer.js'
 export {
+  commandCodePeriodStart,
+  commandCodeSourceFor,
   crossedQuotaThresholds,
   formatAccountBalance,
   formatFooterBalance,
@@ -379,6 +393,7 @@ export {
   formatQuotaStatusLine,
   joinUrl,
   openCodeSourceFor,
+  parseCommandCodeQuota,
   parseDeepSeekBalance,
   parseOpenAiCompatibleBalance,
   parseOpenCodeGoQuota,
@@ -390,6 +405,7 @@ export {
   tightestQuotaWindow,
   type AccountBalanceLine,
   type AccountBalanceSnapshot,
+  type CommandCodeSource,
   type OpenCodeFlavor,
   type OpenCodeSource,
   type QuotaPeriod,
@@ -456,6 +472,9 @@ export {
   wrappedToolBodyLineCount,
 } from './tool-present.js'
 
+/** One model an endpoint listing advertises, with whatever capacities it disclosed. */
+type DiscoveredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+
 /** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-rc.1.
  *  0.1.1 reads `request.signal`; 0.1.2 reads the third argument and dropped
  *  `signal` from the request type. Passing both keeps cancellation on either. */
@@ -470,14 +489,14 @@ type ModelDiscoveryHost = {
       signal?: AbortSignal
     },
     signal?: AbortSignal,
-  ): Promise<Array<{ id: string; name?: string }>>
+  ): Promise<DiscoveredModel[]>
 }
 
 function discoverProviderModels(
   llm: ModelDiscoveryHost,
   request: { provider?: string; baseURL?: string; api?: string; apiKey?: string },
   signal: AbortSignal,
-): Promise<Array<{ id: string; name?: string }>> {
+): Promise<DiscoveredModel[]> {
   return llm.discoverModels(settingsNamespace('llm-pi-ai'), { ...request, signal }, signal)
 }
 
@@ -521,6 +540,13 @@ function installUserQuestionAnswerer(
 }
 
 const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
+
+/**
+ * The window llm-pi-ai falls back to when neither a model entry nor the
+ * installed catalog sizes a model. The wizard pre-fills it only so a route
+ * whose capacity nothing could discover still shows the number it will use.
+ */
+const HARNESS_DEFAULT_CONTEXT_WINDOW = 262_144
 
 
 /** Presentation configuration for the terminal channel. */
@@ -580,6 +606,7 @@ export interface TuiConfig {
 type OnboardingProviderType =
   | 'official'
   | 'opencode-go'
+  | 'command-code'
   | 'openai-completions'
   | 'openai-responses'
   | 'anthropic-messages'
@@ -591,6 +618,8 @@ interface ProviderTemplate {
   defaultBaseUrl: string
   api?: 'openai-completions' | 'openai-responses' | 'anthropic-messages'
   defaultModels: string[]
+  /** Capacities already verified for the template's default models, by id. */
+  defaultModelCapacity?: Record<string, { contextWindow?: number; maxTokens?: number }>
 }
 
 function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>, ProviderTemplate> {
@@ -607,6 +636,16 @@ function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>,
     defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
     api: 'openai-responses',
     defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
+  // A fixed provider: its chat route is OpenAI-completions, but billing uses
+  // Command Code's own `/alpha/billing/credits` surface on the API root.
+  'command-code': {
+    label: t('onboard.providerCommandCode'),
+    defaultId: 'command-code',
+    defaultBaseUrl: 'https://api.commandcode.ai/provider/v1',
+    api: 'openai-completions',
+    defaultModels: ['deepseek/deepseek-v4.1-flash'],
+    defaultModelCapacity: { 'deepseek/deepseek-v4.1-flash': { contextWindow: 1_048_576 } },
   },
   'openai-completions': {
     label: t('onboard.providerCompletions'),
@@ -649,12 +688,19 @@ function onboardTemplate(state: OnboardingState): ProviderTemplate {
 }
 
 interface OnboardingState {
-  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'confirm'
+  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'context' | 'confirm'
   providerType: OnboardingProviderType
   providerId: string
   baseUrl: string
   key: string
   models: string[]
+  /** Capacities the endpoint's model listing disclosed, keyed by model id.
+   *  A hand-declared gateway has no pi-ai catalog entry, so this is the only
+   *  source for its context window and output cap. */
+  modelCapacity?: Map<string, { contextWindow?: number; maxTokens?: number }>
+  /** Route-level `defaultContextWindow` the wizard will persist, pre-filled
+   *  from whatever the listing or the installed catalog sized. */
+  routeContextWindow?: number
   /** Web-aligned catalog presets; undefined while loading or when the host's
    *  pi-ai catalog is unreachable (option 6 stays hidden). */
   catalogPresets: CatalogPreset[] | undefined
@@ -874,6 +920,68 @@ function undeclaredEffortChoices(): { id: string; label: string }[] {
   return effortChoices(UNDECLARED_EFFORT_IDS)
 }
 
+/**
+ * The `reasoningEfforts` map `/setup` writes for a hand-declared
+ * OpenAI-compatible route.
+ *
+ * Such a route is absent from pi-ai's catalog, so `defaultReasoningEffort`
+ * resolves nothing before the profile is saved and the model would land as a
+ * bare `{ id }` entry. The Harness then reports that model as non-reasoning
+ * (`levels [off]`) and refuses every effort the TUI itself offers for an
+ * undeclared model. Declaring the offered vocabulary up front keeps the model
+ * dispatchable; no parameter is sent until an effort is selected.
+ * @returns the level-to-wire map, with `off` meaning "send no parameter".
+ */
+export function handDeclaredReasoningEfforts(): Record<string, string | null> {
+  return {
+    off: null,
+    ...Object.fromEntries(UNDECLARED_EFFORT_IDS.filter(id => id !== 'off').map(id => [id, id])),
+  }
+}
+
+/**
+ * Whether a wizard template speaks the OpenAI completions dialect whose
+ * `reasoning_effort` the TUI may declare without a catalog.
+ *
+ * The Responses dialect maps levels too, but its unset state materializes as
+ * `reasoning: { effort: "none" }`, which a custom gateway need not accept, so
+ * it keeps the existing undeclared behavior until an endpoint verifies it.
+ * @param providerType - the wizard template under test.
+ */
+function declaresOfferedReasoning(providerType: string): boolean {
+  return providerType === 'openai-completions' || providerType === 'command-code'
+}
+
+/**
+ * The `reasoningEfforts` map `/setup` persists for one model entry.
+ *
+ * A hand-declared OpenAI-compatible completions route always receives the
+ * offered vocabulary; a catalog-backed route keeps whatever live model info
+ * resolved, preserving the existing behavior of redeclaring only the chosen
+ * default.
+ * @param providerType - the wizard template that produced the route.
+ * @param defaultEffort - the level resolved from live model info, if any.
+ * @returns the level-to-wire map, or `undefined` to declare nothing.
+ */
+export function onboardingReasoningEfforts(
+  providerType: string,
+  defaultEffort: string | undefined,
+): Record<string, string | null> | undefined {
+  if (declaresOfferedReasoning(providerType)) {
+    return handDeclaredReasoningEfforts()
+  }
+  return defaultEffort === undefined ? undefined : { off: null, [defaultEffort]: defaultEffort }
+}
+
+/** The id of one configured llm-pi-ai models entry, in either stored form. */
+function modelEntryId(raw: unknown): string | undefined {
+  if (typeof raw === 'string') return raw
+  if (typeof raw === 'object' && raw !== null && typeof (raw as { id?: unknown }).id === 'string') {
+    return (raw as { id: string }).id
+  }
+  return undefined
+}
+
 function localOAuthEffortChoices(modelId: string): { id: string; label: string }[] {
   return effortChoices(modelId === 'grok-4.6'
     ? ['off', 'low', 'medium', 'high', 'xhigh']
@@ -913,6 +1021,8 @@ export class SshTui {
   /** Web-aligned provider presets from the host's pi-ai catalog (undefined until loaded / when unreachable). */
   private catalogPresets: CatalogPreset[] | undefined
   private catalogLoad: Promise<CatalogPreset[] | undefined> | undefined
+  /** Memoized id→window index over {@link catalogPresets}. */
+  private catalogWindows: Map<string, number> | undefined
   private input = ''
   private cursor = 0
   private inputFolded = false
@@ -1593,6 +1703,7 @@ export class SshTui {
         baseUrl: '',
         key: '',
         models: [],
+        modelCapacity: new Map(),
         catalogPresets: undefined,
         catalog: undefined,
         providerCursor: 0,
@@ -3019,6 +3130,15 @@ export class SshTui {
               if (ob.providerType === 'catalog') addDialog(t('onboard.modelsCatalogHint'))
               addDialog(t('onboard.enterEsc'))
               break
+            case 'context':
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.contextPrompt'))
+              addDialog(t('onboard.contextValue', {
+                value: String(ob.routeContextWindow ?? HARNESS_DEFAULT_CONTEXT_WINDOW),
+              }))
+              addDialog(t('onboard.contextHint'))
+              addDialog(t('onboard.enterEsc'))
+              break
             case 'confirm':
               addDialog(t('onboard.confirmTitle'))
               addDialog(t('onboard.confirmProvider', { label: providerLabel }))
@@ -3028,6 +3148,9 @@ export class SshTui {
                 api: template.api ?? (ob.providerType === 'catalog' ? t('onboard.apiCatalog') : 'deepseek-official'),
               }))
               addDialog(t('onboard.confirmModels', { list: formatModelList(ob.models, 8) }))
+              if (ob.routeContextWindow !== undefined) {
+                addDialog(t('onboard.confirmContext', { value: String(ob.routeContextWindow) }))
+              }
               addDialog(t('onboard.confirmKey', {
                 head: sliceCodePoints(ob.key, 6),
                 tail: lastCodePoints(ob.key, 4),
@@ -5009,6 +5132,13 @@ export class SshTui {
     }
     if (ids.has(modelId)) return true
     const modelEntry: Record<string, unknown> = { id: modelId }
+    // A model added here skips the wizard, so size it from the installed
+    // catalog the same way `/setup` does; the route default covers a miss.
+    const catalogWindows = this.catalogWindowIndexSource()
+    if (catalogWindows.size > 0) {
+      const contextWindow = catalogContextWindow(modelId, catalogWindows)
+      if (contextWindow !== undefined) modelEntry.contextWindow = contextWindow
+    }
     const reasoningEfforts = reasoningEffortsForDefault(profile.reasoning)
     if (reasoningEfforts !== undefined) modelEntry.reasoningEfforts = reasoningEfforts
     try {
@@ -5270,6 +5400,7 @@ export class SshTui {
       })),
     }, 0, 1, currentIndex)
     const effort = choices.find(option => option.label === effortAnswer.selected[0])?.id
+    if (isUndeclared && effort !== undefined) await this.declareReasoningEffort(provider, modelId, effort)
 
     const next: ModelSelection = {
       provider,
@@ -5581,12 +5712,60 @@ export class SshTui {
     await this.setReasoningEffort(provider, modelId, picked.id, isUndeclared)
   }
 
+  /**
+   * Persist one explicitly chosen level as a model's `reasoningEfforts`.
+   *
+   * `/effort` offers `low`…`max` for a model whose route declares nothing, but
+   * the selection alone cannot make the request legal: the Harness still
+   * resolves the model as non-reasoning and refuses it. Writing the chosen
+   * level — merged with whatever the entry already declares — keeps the
+   * selection and the declaration consistent. Only a route that explicitly
+   * speaks OpenAI Completions is amended: its dialect omits the parameter for
+   * `off` and was verified against a gateway, while another protocol may
+   * materialize an unset level as a value its endpoint refuses.
+   * @returns whether the entry now declares the level.
+   */
+  private async declareReasoningEffort(provider: string, modelId: string, effort: string): Promise<boolean> {
+    const settings = this.ctx.get('settings')
+    const profile = this.piAiProviderProfile(provider)
+    if (settings === undefined || profile === undefined) return false
+    if (profile.api !== 'openai-completions') return false
+    const models = Array.isArray(profile.models) ? [...profile.models] : []
+    const index = models.findIndex(raw => modelEntryId(raw) === modelId)
+    const existing: Record<string, unknown> = index >= 0 && typeof models[index] === 'object' && models[index] !== null
+      ? { ...(models[index] as Record<string, unknown>) }
+      : {}
+    const declared = existing.reasoningEfforts
+    const efforts: Record<string, unknown> = typeof declared === 'object' && declared !== null && !Array.isArray(declared)
+      ? { ...(declared as Record<string, unknown>) }
+      : {}
+    if (efforts[effort] === effort && 'off' in efforts) return true
+    const entry: Record<string, unknown> = {
+      ...existing,
+      id: modelId,
+      reasoningEfforts: { ...efforts, off: null, [effort]: effort },
+    }
+    if (index >= 0) models[index] = entry
+    else models.push(entry)
+    try {
+      await settings.mutate(settingsNamespace('llm-pi-ai'), [
+        { op: 'set', path: ['providers', provider, 'models'], value: models },
+      ])
+      return true
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: t('effort.declareFailed', { provider, model: modelId, error: errorChain(error) }) })
+      this.markDirty()
+      return false
+    }
+  }
+
   private async setReasoningEffort(
     provider: string,
     modelId: string,
     effort: string | undefined,
     isUndeclared: boolean,
   ): Promise<void> {
+    if (isUndeclared && effort !== undefined) await this.declareReasoningEffort(provider, modelId, effort)
     const next: ModelSelection = {
       provider,
       model: modelId,
@@ -5635,6 +5814,9 @@ export class SshTui {
         return
       }
       const targetEffort = parsed.kind === 'default' ? undefined : parsed.id
+      if (effortOptions.length === 0 && targetEffort !== undefined) {
+        await this.declareReasoningEffort(provider, current.model, targetEffort)
+      }
       const next: SubagentSelection = {
         ...current,
         ...(targetEffort === undefined ? { reasoningEffort: undefined } : { reasoningEffort: ReasoningEffortId(targetEffort) }),
@@ -5675,6 +5857,9 @@ export class SshTui {
     }, 0, 1, currentIndex)
     const picked = choices.find(option => option.label === answer.selected[0])
     if (picked === undefined) return
+    if (effortOptions.length === 0 && picked.id !== undefined) {
+      await this.declareReasoningEffort(provider, current.model, picked.id)
+    }
 
     const next: SubagentSelection = {
       ...current,
@@ -5951,6 +6136,37 @@ export class SshTui {
     return payload
   }
 
+  /**
+   * Command Code's quota: the rolling 5h/weekly windows and credit pool off
+   * `/alpha/billing/credits`, enriched by the subscription period and spend.
+   * Only the credits read is required; the two enrichment reads are
+   * best-effort so one failing endpoint cannot hide the windows.
+   * @param source - the recognized Command Code route.
+   */
+  private async fetchCommandCodeQuota(source: CommandCodeSource): Promise<QuotaSnapshot> {
+    const apiKey = await this.resolveCredential(source.apiKeyEnv)
+    if (apiKey === undefined) throw new Error(t('usage.noCred', { env: source.apiKeyEnv }))
+    const headers = { authorization: `Bearer ${apiKey}`, accept: 'application/json' }
+    const credits = await this.fetchJson(COMMAND_CODE_CREDITS_URL, headers, source.label)
+    const subscription = await this.tryFetchJson(COMMAND_CODE_SUBSCRIPTIONS_URL, headers, source.label)
+    const since = commandCodePeriodStart(subscription)
+    const summaryUrl = since === undefined
+      ? COMMAND_CODE_USAGE_URL
+      : `${COMMAND_CODE_USAGE_URL}?since=${encodeURIComponent(since)}`
+    const summary = await this.tryFetchJson(summaryUrl, headers, source.label)
+    return parseCommandCodeQuota({ credits, subscription, summary }, source.provider)
+  }
+
+  /** Best-effort JSON read for quota enrichment; a failure leaves the field out. */
+  private async tryFetchJson(url: string, headers: Record<string, string>, label: string): Promise<unknown> {
+    try {
+      return await this.fetchJson(url, headers, label)
+    } catch {
+      // Enrichment only: the required billing read already decided the outcome.
+      return undefined
+    }
+  }
+
   /** Explain Zen metered billing instead of pretending it has a quota. */
   private zenUsageText(source: OpenCodeSource): string {
     const usage = this.stats.usage
@@ -6120,6 +6336,8 @@ export class SshTui {
       }
     }
     const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const commandCode = commandCodeSourceFor(provider, llmPiAi)
+    if (commandCode !== null) return this.fetchCommandCodeQuota(commandCode)
     const source = openCodeSourceFor(provider, llmPiAi)
     if (source === null || source.flavor !== 'go') return undefined
     const apiKey = await this.resolveCredential(source.apiKeyEnv)
@@ -6476,7 +6694,8 @@ export class SshTui {
     if (text === '\r' || text === '\n') {
       const submit = questionSubmit(dialog, this.input)
       if (submit.kind === 'reject') {
-        // no selection: treat as cancel unless there are no options
+        // A list with options always answers with its highlight; this guards
+        // only a malformed question whose cursor names no option.
         dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
         return
       }
@@ -6514,6 +6733,7 @@ export class SshTui {
     const templateEntries: ProviderListEntry[] = [
       { key: 'template:official', label: templates.official.label, detail: 'api.deepseek.com' },
       { key: 'template:opencode-go', label: templates['opencode-go'].label, detail: 'opencode.ai/zen/go · Responses' },
+      { key: 'template:command-code', label: templates['command-code'].label, detail: 'api.commandcode.ai · Completions' },
       { key: 'template:openai-completions', label: templates['openai-completions'].label, detail: 'openai-completions' },
       { key: 'template:openai-responses', label: templates['openai-responses'].label, detail: 'openai-responses' },
       { key: 'template:anthropic-messages', label: templates['anthropic-messages'].label, detail: 'anthropic-messages' },
@@ -6529,6 +6749,36 @@ export class SshTui {
     state.providerCursor = Math.max(0, Math.min(total - 1, state.providerCursor + delta))
     this.markDirty()
     return true
+  }
+
+  /** The installed catalog's id→window index, built once per catalog load. */
+  private catalogWindowIndexSource(): Map<string, number> {
+    this.catalogWindows ??= catalogWindowIndex(this.catalogPresets ?? [])
+    return this.catalogWindows
+  }
+
+  /**
+   * Size the wizard's picked models from the installed catalog, filling in the
+   * capacities the endpoint's listing did not disclose and recording them on
+   * the wizard state so the saved entries carry them.
+   * @param state - the wizard state whose `models` are being sized.
+   * @returns the windows discovered for this pick, by model id.
+   */
+  private sizeOnboardingModels(state: OnboardingState): Map<string, number> {
+    const index = this.catalogWindowIndexSource()
+    const sized = new Map<string, number>()
+    for (const id of state.models) {
+      const listed = state.modelCapacity?.get(id)?.contextWindow
+      const window = listed ?? (index.size === 0 ? undefined : catalogContextWindow(id, index))
+      if (window === undefined) continue
+      sized.set(id, window)
+      if (listed === undefined) {
+        const capacity = state.modelCapacity?.get(id) ?? {}
+        state.modelCapacity ??= new Map()
+        state.modelCapacity.set(id, { ...capacity, contextWindow: window })
+      }
+    }
+    return sized
   }
 
   private handleOnboardingChar(text: string): void {
@@ -6548,6 +6798,7 @@ export class SshTui {
           state.baseUrl = ''
           state.key = ''
           state.models = []
+          state.modelCapacity = new Map()
           this.input = ''
           this.cursor = 0
           if (entry.catalog !== undefined) {
@@ -6586,7 +6837,8 @@ export class SshTui {
       case 'id':
       case 'base-url':
       case 'key':
-      case 'models': {
+      case 'models':
+      case 'context': {
         if (state.step === 'models' && text === '\x06') {
           void this.fetchOnboardingModels()
           return
@@ -6611,8 +6863,11 @@ export class SshTui {
             state.key = value
           } else if (state.step === 'models') {
             const template = onboardTemplate(state)
+            // Ctrl+F has already filled state.models; Enter accepts that
+            // listing instead of discarding it for the template's placeholder
+            // ids, which a generic gateway does not serve.
             const parsed = value === ''
-              ? template.defaultModels
+              ? (state.models.length > 0 ? state.models : template.defaultModels)
               : value.split(/[\s,，]+/u).filter(Boolean)
             if (parsed.length === 0) {
               this.pushRow({ kind: 'error', text: t('onboard.needModel') })
@@ -6620,6 +6875,17 @@ export class SshTui {
               return
             }
             state.models = parsed
+          } else if (state.step === 'context') {
+            // Enter keeps the pre-filled value; a typed number overrides it.
+            if (value !== '') {
+              const parsed = Number.parseInt(value.replace(/[_,\s]/gu, ''), 10)
+              if (!Number.isInteger(parsed) || parsed <= 0) {
+                this.pushRow({ kind: 'error', text: t('onboard.contextInvalid', { value }) })
+                this.markDirty()
+                return
+              }
+              state.routeContextWindow = parsed
+            }
           } else {
             state.baseUrl = value
           }
@@ -6651,6 +6917,7 @@ export class SshTui {
           state.baseUrl = ''
           state.key = ''
           state.models = []
+          state.modelCapacity = new Map()
           this.input = ''
           this.cursor = 0
           this.markDirty()
@@ -6671,6 +6938,20 @@ export class SshTui {
     } else if (state.step === 'key') {
       state.step = 'models'
     } else if (state.step === 'models') {
+      // Size the picks before the confirm step so the route default the wizard
+      // persists is derived, not guessed: the listing first, the installed
+      // catalog second. Only when some pick stayed unsized does the route
+      // default matter, and only then is a step shown for it.
+      const sized = this.sizeOnboardingModels(state)
+      const unsized = state.models.filter(id => !sized.has(id))
+      if (unsized.length === 0) {
+        state.step = 'confirm'
+      } else {
+        state.routeContextWindow = suggestedRouteContextWindow(sized.values())
+          ?? HARNESS_DEFAULT_CONTEXT_WINDOW
+        state.step = 'context'
+      }
+    } else if (state.step === 'context') {
       state.step = 'confirm'
     }
     this.input = ''
@@ -6719,6 +7000,13 @@ export class SshTui {
         this.pushRow({ kind: 'error', text: t('onboard.noModels') })
       } else {
         state.models = ids
+        state.modelCapacity = new Map(discovered.flatMap(model => {
+          const capacity: { contextWindow?: number; maxTokens?: number } = {
+            ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+            ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+          }
+          return Object.keys(capacity).length === 0 ? [] : [[model.id, capacity] as const]
+        }))
         this.input = ''
         this.cursor = 0
         this.pushRow({ kind: 'system', text: t('onboard.fetchedModels', { count: ids.length, list: formatModelList(ids, 6) }) })
@@ -6770,14 +7058,23 @@ export class SshTui {
         // to a supported level (if any) and persist it in both the profile
         // and the default-model selection.
         const llm = this.ctx.get('llm')
-        const defaultEffort = model !== undefined && llm !== undefined
-          ? await defaultReasoningEffort(llm, state.providerId, model)
-          : undefined
-        const reasoningEfforts = defaultEffort === undefined
+        // A hand-declared OpenAI-compatible gateway has no pi-ai catalog entry,
+        // so nothing resolves its models before this profile is saved. Skip the
+        // live lookup there and declare the vocabulary the TUI offers instead.
+        const handDeclared = declaresOfferedReasoning(state.providerType)
+        const defaultEffort = handDeclared || model === undefined || llm === undefined
           ? undefined
-          : { off: null, [defaultEffort]: defaultEffort }
+          : await defaultReasoningEffort(llm, state.providerId, model)
+        const reasoningEfforts = onboardingReasoningEfforts(
+          state.providerType,
+          defaultEffort === undefined ? undefined : String(defaultEffort),
+        )
         const existing = this.piAiProviderProfile(state.providerId)
         const existingModels = Array.isArray(existing?.models) ? existing.models : []
+        // The confirm step can be reached without walking the models step (and
+        // a saved catalog answer may have landed after it), so size the picks
+        // here too: the call is idempotent and fills only missing windows.
+        this.sizeOnboardingModels(state)
         const mergedIds: string[] = []
         const seen = new Set<string>()
         for (const id of state.models) {
@@ -6817,8 +7114,10 @@ export class SshTui {
               }),
           models: mergedIds.map(id => ({
             id,
+            ...(state.modelCapacity?.get(id) ?? template.defaultModelCapacity?.[id] ?? {}),
             ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
           })),
+          ...(state.routeContextWindow === undefined ? {} : { defaultContextWindow: state.routeContextWindow }),
           ...(defaultEffort === undefined ? {} : { reasoning: defaultEffort }),
         }
         if (settings === undefined) {

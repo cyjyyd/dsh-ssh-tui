@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
+import { pinEmojiCells } from '../lib/term-text.js'
 setLocale('zh')
 
 import {
@@ -163,15 +164,19 @@ test('displayWidth matches glibc wcwidth for CJK vs ambiguous TUI glyphs', () =>
   assert.equal(displayWidth('❯ hello'), 7)
 })
 
-test('displayWidth counts emoji symbols two cells and variation selectors zero', () => {
-  // npm test's pass/fail marks: an emoji font draws these double-width, so a
-  // row measured at one cell spilled onto the next card.
+test('displayWidth budgets BMP emoji symbols two cells', () => {
+  // The monospace font of the terminal this was measured on covers `▶` but not
+  // `✖` / `ℹ`, so those fall back to a colour emoji glyph about 1.6 cells wide
+  // that still advances one cell. Every BMP emoji symbol is therefore budgeted
+  // two cells, and pinEmojiCells spends the second one.
   assert.equal(displayWidth('✔'), 2)
   assert.equal(displayWidth('✖'), 2)
-  assert.equal(displayWidth('✔️'), 2)
+  assert.equal(displayWidth('ℹ'), 2)
+  assert.equal(displayWidth('▶'), 2)
+  assert.equal(displayWidth('⚠'), 2)
   assert.equal(displayWidth('✅'), 2)
-  assert.equal(displayWidth('❌'), 2)
-  assert.equal(displayWidth('⚠️'), 2)
+  assert.equal(displayWidth('⚡'), 2)
+  assert.equal(displayWidth('😀'), 2)
   // Box-drawing, TUI chrome, and text arrows keep their one-cell width.
   assert.equal(displayWidth('✓'), 1)
   assert.equal(displayWidth('✗'), 1)
@@ -179,6 +184,38 @@ test('displayWidth counts emoji symbols two cells and variation selectors zero',
   assert.equal(displayWidth('·'), 1)
   assert.equal(displayWidth('#️⃣'), 2)
   assert.equal(displayWidth('✔ 计划'), 7)
+})
+
+test('pinEmojiCells gives every emoji symbol its second cell', () => {
+  // Text-default symbols in these rows: the terminal here falls back to a
+  // colour emoji glyph for the ones the monospace font lacks, and such a glyph
+  // advances one cell.
+  const textDefault = new Set([0x2714, 0x2716, 0x2139, 0x25b6, 0x26a0])
+  // One reserving space per symbol, always — even when the run already has one,
+  // so the table's two cells and the terminal's one-cell glyph advance plus one
+  // space stay equal for every shape.
+  assert.equal(pinEmojiCells('✖|ℹ'), '✖\uFE0E |ℹ\uFE0E ')
+  assert.equal(pinEmojiCells('▶ 已思考'), '▶\uFE0E  已思考')
+  assert.equal(pinEmojiCells('✔ 计划'), '✔\uFE0E  计划')
+  assert.equal(pinEmojiCells('✖   '), '✖\uFE0E    ')
+  // Exactly one VS15 is emitted; an emoji request is rewritten, because that
+  // form is the one the cell budget cannot hold.
+  assert.equal(pinEmojiCells('✖\uFE0E'), '✖\uFE0E ')
+  assert.equal(pinEmojiCells('✖\uFE0F'), '✖\uFE0E ')
+  // Emoji-default and astral emoji already spend two cells and are untouched.
+  assert.equal(pinEmojiCells('✅ ⚡ 😀'), '✅ ⚡ 😀')
+  // The reserving space is exactly what makes the terminal spend the budget:
+  // one cell of glyph advance plus one of space, per symbol.
+  const advance = (pinned) => [...pinned].reduce((sum, char) => {
+    const cp = char.codePointAt(0)
+    if (cp === 0xfe0e) return sum
+    // A symbol the monospace font lacks advances one cell; its reserving space
+    // is the character right after it and is counted on its own iteration.
+    return sum + (textDefault.has(cp) ? 1 : displayWidth(char))
+  }, 0)
+  for (const row of ['✖|ℹ', '跨 ✖|^ℹ 共 5 字符', '▶ 已思考', '✔ 计划', '✖   ', '✅ ⚡ 😀']) {
+    assert.equal(advance(pinEmojiCells(row)), displayWidth(row), `budget for ${JSON.stringify(row)}`)
+  }
 })
 
 test('clipAnsiToWidth keeps SGR and never exceeds the cell budget', () => {
@@ -1259,15 +1296,30 @@ test('composePaintOutput disables auto-wrap around the row batch', () => {
   assert.equal(idle, '')
 })
 
-test('painted frames never exceed the terminal width with npm-test emoji', () => {
-  // Independent terminal truth: a terminal with an emoji font draws ✔ / ✖
-  // two cells wide. Reusing displayWidth here would hide the very mismatch
-  // this test exists to catch.
-  const emojiWide = new Set([0x2714, 0x2716, 0x2705, 0x274c, 0x26a0, 0x2b50])
-  const terminalWidth = (line) => {
+test('painted frames give every emoji symbol its second cell', () => {
+  // Independent terminal truth for the pinned row: a symbol the monospace font
+  // lacks is drawn with a colour glyph that advances one cell, and the painter
+  // must have cleared the next one (VS15 + a reserving space) or the following
+  // character lands under the glyph. Emoji-default symbols advance two.
+  const emojiDefault = new Set([0x2705, 0x274c, 0x2b50, 0x26a1])
+  const mustClear = new Set([0x2714, 0x2716])
+  const terminalAdvance = (line) => {
+    const plain = line.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')
     let used = 0
-    for (const char of line.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')) {
-      used += emojiWide.has(char.codePointAt(0)) ? 2 : displayWidth(char)
+    const chars = [...plain]
+    for (let i = 0; i < chars.length; i += 1) {
+      const cp = chars[i].codePointAt(0)
+      if (cp === 0xfe0e) continue
+      if (emojiDefault.has(cp)) { used += 2; continue }
+      if (mustClear.has(cp)) {
+        // The colour glyph advances one cell; the reserving space supplies the
+        // other, so the following character is not drawn under the glyph.
+        assert.equal(chars[i + 1], '\uFE0E', `U+${cp.toString(16)} must carry VS15`)
+        assert.equal(chars[i + 2], ' ', `U+${cp.toString(16)} must be followed by its second cell`)
+        used += 1
+        continue
+      }
+      used += displayWidth(chars[i])
     }
     return used
   }
@@ -1299,9 +1351,23 @@ test('painted frames never exceed the terminal width with npm-test emoji', () =>
   })
   const width = 40
   const frame = tui.captureFrame(width, 18)
-  const wide = frame.filter(line => terminalWidth(line) > width)
-  assert.deepEqual(wide, [], 'every painted row must fit the terminal width')
-  assert.ok(frame.some(line => line.includes('✔')), 'the emoji body is actually painted')
+  const painted = composePaintOutput({
+    width,
+    height: 18,
+    paintRows: frame,
+    previousRows: [],
+    sizeChanged: true,
+    chromeChanged: true,
+    chromeStart: 0,
+    cursorRow: 17,
+    cursorColumn: 1,
+  })
+  const rows = [...painted.matchAll(/\x1b\[\d+;1H\x1b\[0m\x1b\[2K([\s\S]*?)\x1b\[0m/gu)].map(m => m[1])
+  assert.ok(rows.length > 0, 'the frame must paint rows')
+  for (const row of rows) {
+    assert.ok(terminalAdvance(row) <= width, `row exceeds ${width} cells: ${JSON.stringify(row)}`)
+  }
+  assert.ok(rows.some(row => row.includes('✔')), 'the emoji body is actually painted')
 })
 
 test('prompt plus ASCII input cursor stays on integer columns', () => {
@@ -2117,7 +2183,7 @@ test('presentToolCall localizes mutation and common file tool names', () => {
   assert.equal(presentToolCall('skills', '{}').title, '技能')
   assert.equal(presentToolCall('skill', JSON.stringify({ name: 'release' })).title, '技能')
   assert.equal(presentToolCall('skill', JSON.stringify({ name: 'release' })).summary, 'release')
-  assert.equal(presentToolCall('bash', JSON.stringify({ command: 'ls' })).title, 'bash')
+  assert.equal(presentToolCall('bash', JSON.stringify({ command: 'ls' })).title, '终端')
   assert.equal(presentToolCall('update_goal', JSON.stringify({ action: 'edit', objective: '收口工具卡' })).title, '更新目标')
   assert.equal(presentToolCall('create_goal', JSON.stringify({ objective: '做完 A' })).title, '创建目标')
   assert.equal(presentToolCall('get_goal', '{}').title, '查看目标')
@@ -2224,7 +2290,7 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   assert.equal(cards[0].expanded, false)
   assert.equal(cards[1].expanded, false)
   assert.ok(cards[0].logs.some(entry => entry.text.includes('alpha working')))
-  assert.ok(cards[1].logs.some(entry => entry.text.includes('bash')))
+  assert.ok(cards[1].logs.some(entry => entry.text.includes('终端')))
   assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('运行中'), true)
   tui.handleSubagentEnd({
     runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',

@@ -4,6 +4,7 @@
 
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import { t } from './i18n/index.js'
+import { jobAlias } from './job-label.js'
 import { wrap, type TextSegment, truncate, sliceCodePoints } from './term-text.js'
 import { firstString, parseJsonArgs, scalarText } from './json-args.js'
 import {
@@ -20,6 +21,7 @@ import type { DisplayKind, Row, ToolDiffHunk } from './transcript-types.js'
 
 export const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 export const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
+export const JOB_TOOL_NAMES = new Set(['job_list', 'job_output', 'job_kill'])
 
 /** Format a model list compactly: show the first few entries and an ellipsis. */
 export function formatModelList(models: readonly string[], max = 5): string {
@@ -279,7 +281,7 @@ export function presentToolCall(name: string, args: string): {
   if (SHELL_TOOL_NAMES.has(name)) {
     const command = typeof parsed?.command === 'string' ? parsed.command : sliceCodePoints(args, 80)
     return {
-      title: name,
+      title: toolTitle(name),
       summary: `$ ${command}`,
       command,
       cwd: typeof parsed?.workdir === 'string' ? parsed.workdir : undefined,
@@ -358,6 +360,16 @@ export function presentToolCall(name: string, args: string): {
   if (name === 'web_fetch') {
     const url = typeof parsed?.url === 'string' ? parsed.url : ''
     return { title: toolTitle('web_fetch'), summary: url || friendlyArgsSummary(name, args) }
+  }
+  if (JOB_TOOL_NAMES.has(name)) {
+    // The native `job_id: bash-1` argument reads as a field dump; lead with the
+    // job's stable alias instead, keeping the id addressable after it.
+    const jobId = typeof parsed?.job_id === 'string' ? parsed.job_id.trim()
+      : typeof parsed?.id === 'string' ? parsed.id.trim()
+        : ''
+    if (jobId === '') return { title: toolTitle(name), summary: '' }
+    const alias = jobAlias(jobId)
+    return { title: toolTitle(name), summary: alias === undefined ? `#${jobId}` : `${alias} · #${jobId}` }
   }
   return { title: toolTitle(name), summary: friendlyArgsSummary(name, args) }
 }

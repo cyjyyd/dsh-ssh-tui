@@ -154,14 +154,13 @@ export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_D
 }
 
 /**
- * BMP symbols with the Unicode `Emoji` property that terminals with an emoji
- * font draw two cells wide even without VS16 — `npm test`'s ✔ / ✖, status
- * marks, warning signs. Keycap bases (#, *, digits) are deliberately absent:
- * they are only emoji when followed by VS16.
+ * BMP symbols carrying the Unicode `Emoji` property: a terminal with an emoji
+ * font may draw them with a colour glyph instead of the monospace one, so the
+ * painter has to decide which form it is budgeting cells for. Keycap bases
+ * (#, *, digits) are deliberately absent: they are only emoji after VS16.
  *
- * Over-counting these is safe (padding absorbs the spare cell); under-counting
- * spills: a row measured at the terminal width wraps its last cell onto the
- * next row and punches the caret/glyphs through the card below.
+ * Which width each one gets is decided by {@link EMOJI_PRESENTATION_SYMBOLS},
+ * not by this membership list.
  */
 const EMOJI_SYMBOL_RANGES: readonly (readonly [number, number])[] = [
   [0x203c, 0x2049], [0x2122, 0x2139], [0x2194, 0x21aa],
@@ -182,8 +181,38 @@ const EMOJI_SYMBOL_RANGES: readonly (readonly [number, number])[] = [
   [0x2934, 0x2935], [0x2b05, 0x2b07], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
 ]
 
+/**
+ * The subset of {@link EMOJI_SYMBOL_RANGES} whose Unicode default presentation
+ * is emoji (`Emoji_Presentation=Yes` in `emoji-data.txt`, Unicode 17.0): every
+ * terminal draws these two cells wide with no variation selector, so they are
+ * budgeted two cells and left alone.
+ *
+ * Everything else in the table defaults to *text* presentation. Terminals with
+ * an emoji fallback font often substitute a colour glyph for those anyway — and
+ * that glyph is wider than the cell it advances, so it collides with its
+ * neighbours and, because the table used to budget two cells for it, every row
+ * containing one ended a cell short. Those symbols are budgeted one cell and the
+ * painter pins the text form with VS15.
+ */
+const EMOJI_PRESENTATION_RANGES: readonly (readonly [number, number])[] = [
+  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
+  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd],
+  [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
+  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55],
+]
+
 const EMOJI_SYMBOLS: ReadonlySet<number> = new Set(
   EMOJI_SYMBOL_RANGES.flatMap(([start, end]) =>
+    Array.from({ length: end - start + 1 }, (_, index) => start + index)),
+)
+
+const EMOJI_PRESENTATION_SYMBOLS: ReadonlySet<number> = new Set(
+  EMOJI_PRESENTATION_RANGES.flatMap(([start, end]) =>
     Array.from({ length: end - start + 1 }, (_, index) => start + index)),
 )
 
@@ -196,10 +225,13 @@ const EMOJI_SYMBOLS: ReadonlySet<number> = new Set(
  * those ambiguous glyphs as two made `repeatToWidth('─', cols)` paint a
  * half-width rule and parked the input cursor half a cell past the text.
  *
- * Emoji-bearing symbols are the exception: an emoji font draws them two cells
- * wide even where wcwidth says one, and ✔ / ✖ from `npm test` spilled a row
- * into the next card. Variation selectors are zero-width, so ✔️ counts once
- * for the base plus nothing for VS16.
+ * Emoji-bearing symbols are the exception: a terminal with an emoji font draws
+ * a symbol the monospace font lacks with a colour glyph that is wider than the
+ * cell it advances, so they are budgeted two cells. {@link pinEmojiCells} makes
+ * the terminal actually spend both: VS15 asks for the narrow text form, and a
+ * reserving space clears the second cell when the run does not already end in
+ * one. Budgeting two cells without clearing the second is what left `✖`
+ * overlapping the `|` beside it while every `▶` row came up a cell short.
  *
  * Overflow into the input box is handled by clipping/padding painted rows to
  * the measured column count, not by inflating glyph width.
@@ -241,6 +273,48 @@ export function displayWidth(text: string): number {
     width += wide ? 2 : 1
   }
   return width
+}
+
+/**
+ * Make a painted row spend the two cells {@link displayWidth} budgets for every
+ * BMP emoji symbol.
+ *
+ * The monospace font of the terminal this was measured on covers `▶` but not
+ * `✖` or `ℹ`, so the two fall back to a colour emoji glyph about 1.6 cells wide
+ * while still advancing one cell: the `|` and `^` beside them were drawn under
+ * the glyph, and the row ended short because the second budgeted cell was never
+ * spent. The fix has two halves:
+ *
+ * - VS15 asks for the narrow text form (`emoji-variation-sequences.txt`,
+ *   Unicode 17.0, lists `2139 FE0E` and `2716 FE0E` among 371 such sequences).
+ *   Terminals that ignore it fall back to the colour glyph, which the next
+ *   bullet still contains.
+ * - A reserving space supplies the second cell, always emitted even when the run
+ *   already has one. That keeps the budget and the terminal in step for every
+ *   shape: the table counts the symbol as two cells plus every space the text
+ *   carries, and the terminal spends one cell of glyph advance, one for the
+ *   reserving space, and one for each of those spaces.
+ *
+ * A symbol whose Unicode default presentation is emoji already advances two
+ * cells, so it is left untouched.
+ * @param text - one already-padded, already-clipped row.
+ * @returns the row with the text request and the second cell filled in.
+ */
+export function pinEmojiCells(text: string): string {
+  let out = ''
+  let index = 0
+  while (index < text.length) {
+    const cp = text.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    index += char.length
+    out += char
+    if (!EMOJI_SYMBOLS.has(cp) || EMOJI_PRESENTATION_SYMBOLS.has(cp)) continue
+    const selector = text.codePointAt(index)
+    if (selector === 0xfe0e || selector === 0xfe0f) index += 1
+    out += '\uFE0E '
+  }
+  return out
 }
 
 /** Pad or clip one already-sanitized line so it occupies exactly `width` cells. */
