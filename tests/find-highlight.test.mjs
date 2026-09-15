@@ -130,3 +130,40 @@ test('stepping still reports the position and moves the highlight', t => {
   tui.runCommand('/find deploy')
   assert.match(allText(tui), /1\s*\/\s*2|2\s*\/\s*2/u, 'the step line reports index and total')
 })
+
+test('the highlight follows the search, which is case-insensitive', t => {
+  terminal(t, { color: true })
+  const tui = fixture()
+  tui.rows.push({ kind: 'assistant', text: 'Deploy the thing after lunch' })
+  tui.runCommand('/find deploy')
+  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
+  // The search lowercases both sides, so it hits; the highlight must find the
+  // needle in the text as painted, not only in the case that was typed.
+  assert.deepEqual(spans, ['Deploy'], 'the matched word is highlighted in its own casing')
+})
+
+test('a needle the wrap split is still pointed at', t => {
+  terminal(t, { color: true })
+  const tui = fixture()
+  const width = 40
+  // The wrap lands between the two words, so no single painted line contains
+  // the whole phrase the user searched for. The row still matched, so the user
+  // has to be shown where the hit is.
+  tui.rows.push({ kind: 'assistant', text: `${'x'.repeat(30)} deploy --dry-run here` })
+  tui.runCommand('/find deploy --dry')
+  const frame = tui.captureFrame(width, 30)
+  const marked = frame.filter(line => line.includes('\x1b[7m'))
+  assert.ok(marked.length >= 1, `the hit row is pointed at even when the wrap splits it:\n${frame.join('\n')}`)
+  assert.match(allText(tui), /1\/1/u, 'and the search did report the hit')
+})
+
+test('an emoji before the match does not shift the highlight', t => {
+  terminal(t, { color: true })
+  const tui = fixture()
+  // The emoji is one code point but two UTF-16 units, and the search counts
+  // units: an offset mapping that forgets this marks the wrong cells.
+  tui.rows.push({ kind: 'assistant', text: '🚀 deploy 🚀 deploy done' })
+  tui.runCommand('/find deploy')
+  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
+  assert.deepEqual(spans, ['deploy', 'deploy'], 'both matches, exactly the word')
+})

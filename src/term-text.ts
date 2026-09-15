@@ -548,23 +548,31 @@ export interface PaintedLinkHit {
   endCol: number
 }
 
+/** True when `haystack` contains `needle` the way `/find` compares them. */
+export function searchContains(haystack: string, needle: string): boolean {
+  return needle !== '' && haystack.toLowerCase().includes(needle.toLowerCase())
+}
+
 /**
  * Wrap every occurrence of `needle` in a painted line with reverse video.
  *
- * The line carries escape sequences, so the search runs over its visible text
- * and the markers are inserted between them: a wrapped long line is highlighted
- * per screen line, which is why the highlight cannot drift out of position the
- * way source offsets would after a wrap.
+ * The comparison is the search's own — both sides lowercased — so a hit that
+ * `/find` reported is always a hit the reader can see marked. The line carries
+ * escape sequences, so the scan runs over its visible text and the markers are
+ * inserted between them; a long line is highlighted per screen line, which is
+ * why the highlight cannot drift the way source offsets would after a wrap.
+ *
+ * When lowercasing would change the text's length (a handful of exotic code
+ * points), the mapping back to the painted line cannot be trusted, so nothing
+ * is marked rather than marking the wrong cells.
  */
 export function highlightAnsiNeedle(line: string, needle: string): string {
   if (needle === '') return line
-  let out = ''
   let index = 0
-  let plainIndex = 0
-  // Walk the visible characters, remembering where each one sits in the raw
-  // string, so a match found in plain text maps back to the painted line.
-  const positions: number[] = []
   let plain = ''
+  // Raw offsets by UTF-16 index: an emoji before the match is one code point
+  // but two units, and `indexOf` counts units.
+  const rawAt: number[] = []
   while (index < line.length) {
     if (line.charCodeAt(index) === 0x1b) {
       index = skipAnsiSequence(line, index)
@@ -573,25 +581,26 @@ export function highlightAnsiNeedle(line: string, needle: string): string {
     const cp = line.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    positions[plainIndex] = index
+    for (let unit = 0; unit < char.length; unit += 1) rawAt[plain.length + unit] = index
     plain += char
-    plainIndex += 1
     index += char.length
   }
   if (plain === '') return line
+  const haystack = plain.toLowerCase()
+  const lower = needle.toLowerCase()
+  if (haystack.length !== plain.length) return line
+  let out = ''
   let cursor = 0
   let searchFrom = 0
   for (;;) {
-    const at = plain.indexOf(needle, searchFrom)
+    const at = haystack.indexOf(lower, searchFrom)
     if (at === -1) break
-    const fromRaw = positions[at] ?? 0
-    const afterRaw = at + needle.length < positions.length
-      ? positions[at + needle.length] ?? line.length
-      : line.length
+    const fromRaw = rawAt[at] ?? 0
+    const afterRaw = at + lower.length < rawAt.length ? rawAt[at + lower.length] ?? line.length : line.length
     out += line.slice(cursor, fromRaw)
     out += `\x1b[7m${line.slice(fromRaw, afterRaw)}\x1b[27m`
     cursor = afterRaw
-    searchFrom = at + needle.length
+    searchFrom = at + lower.length
   }
   if (out === '') return line
   return out + line.slice(cursor)

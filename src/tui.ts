@@ -169,6 +169,7 @@ import {
   foldInputView,
   fmtElapsedCompact,
   highlightAnsiNeedle,
+  searchContains,
   lastCodePoints,
   padToWidth,
   sliceCodePoints,
@@ -2903,15 +2904,41 @@ export class SshTui {
     this.markDirty()
   }
 
-  private highlightSearchLine(line: string): string {
-    if (line.includes('\x1b[7m')) return line
+  /**
+   * Mark the search hit across the lines that are actually on screen.
+   *
+   * Only the lines that show the match are marked — highlighting the whole card
+   * made a hit look like a selected card, and on a narrow screen the reader
+   * could not tell which word had matched. When the wrap split the needle so no
+   * single line contains it, the row's first line is marked instead: `/find`
+   * reported a hit, so the reader has to see where it is.
+   */
+  private highlightSearchLines(
+    visible: readonly string[],
+    refs: readonly (Row | CollapsibleBlock | undefined)[],
+  ): string[] {
+    const hit = this.searchHits[this.searchIndex]
     const needle = this.searchNeedle
-    // Only the lines that actually show the match are marked: highlighting the
-    // whole card made a hit look like the card was selected, and on a narrow
-    // screen the reader could not tell which word had matched.
-    const plain = stripAnsi(line)
-    if (needle === '' || !plain.includes(needle)) return line
-    return this.color ? highlightAnsiNeedle(line, needle) : `» ${line}`
+    if (hit === undefined || needle === '') return [...visible]
+    const hitLines: number[] = []
+    for (let index = 0; index < visible.length; index += 1) {
+      if (refs[index] === hit) hitLines.push(index)
+    }
+    if (hitLines.length === 0) return [...visible]
+    const inlineHit = hitLines.some(index => searchContains(stripAnsi(visible[index] ?? ''), needle))
+    const lines = [...visible]
+    for (const index of hitLines) {
+      const line = lines[index] ?? ''
+      if (line.includes('\x1b[7m')) continue
+      if (searchContains(stripAnsi(line), needle)) {
+        lines[index] = this.color ? highlightAnsiNeedle(line, needle) : `» ${line}`
+        continue
+      }
+      if (!inlineHit && index === hitLines[0]) {
+        lines[index] = this.color ? `\x1b[7m${line}\x1b[27m` : `» ${line}`
+      }
+    }
+    return lines
   }
 
   private revealRow(row: Row | CollapsibleBlock | undefined): void {
@@ -3040,9 +3067,7 @@ export class SshTui {
       line: string,
       ref?: Row | CollapsibleBlock,
     ): void => {
-      const clipped = clipAnsiToWidth(line, width)
-      const hit = ref !== undefined && ref === searchHit
-      display.push(hit ? this.highlightSearchLine(clipped) : clipped)
+      display.push(clipAnsiToWidth(line, width))
       displayRefs.push(ref)
     }
     const pushRow = (kind: DisplayKind, text: string, ref?: Row): void => {
@@ -3618,9 +3643,10 @@ export class SshTui {
       const hits = paintedLinkHits(visible[index] ?? '')
       if (hits.length > 0) this.paintedLinkHitsByRow.set(screenY, hits)
     }
+    const visibleWithSearch = this.highlightSearchLines(visible, visibleRefs)
     const visibleWithSelection = this.mouseSelection === undefined
-      ? visible
-      : this.highlightSelection(visible)
+      ? visibleWithSearch
+      : this.highlightSelection(visibleWithSearch)
     const dockPlan = this.findLivePlanRow()
     if (dockPlan !== undefined && planDockLines.length > 0) {
       const dockTop = headerLines.length + visible.length + 1
