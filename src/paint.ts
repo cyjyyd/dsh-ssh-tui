@@ -6,6 +6,7 @@
  */
 
 import { t } from './i18n/index.js'
+import { lineModeEnabled } from './line-mode.js'
 import { padAnsiToWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
 import { detectSshSession, RTT_SAMPLE_TIMEOUT_MS, TerminalInputPump } from './terminal-input.js'
 
@@ -453,8 +454,17 @@ export function pickerWindowStart(cursor: number, total: number, windowSize = PI
   return Math.max(0, Math.min(maxStart, start))
 }
 
-/** Immediate first-frame chrome so a 2–3s Host boot is not a blank TTY. */
+/**
+ * Immediate first-frame chrome so a 2–3s Host boot is not a blank TTY.
+ *
+ * Line mode gets nothing: a splash enters the alternate screen and paints over
+ * itself, which is exactly what that mode exists to avoid — the log would open
+ * with screen control instead of the session's first event.
+ * @param message - what the launcher is waiting for.
+ * @param color - whether colour is allowed.
+ */
 export function writeBootSplash(message: string, color = true): void {
+  if (lineModeEnabled()) return
   const width = Math.max(20, process.stdout.columns || 80)
   const title = t('boot.banner')
   const line = color

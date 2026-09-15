@@ -104,6 +104,18 @@ DSH_TUI_IDLE_EXIT_MS=600000 dsh --profile tui --resume
 
 不需要交互、只要最后一条回复时，用官方 `dsh --profile headless "…"`：跑完把最终文本打到 stdout 就退出。思考、工具调用、子代理都在会话日志里，终端上看不到——这正是本 TUI 存在的理由（同一条任务的对照图见 README）。
 
+### 4.6 纯行模式（屏幕阅读器与日志录制）
+
+```bash
+DSH_TUI_LINE_MODE=1 dsh --profile tui --resume      # 每个事件追加若干纯文本行
+DSH_TUI_LINE_MODE=1 ssh host 'dsh --profile tui --resume' | tee session.log
+```
+
+行模式**不画帧**：不进备用屏、不做绝对光标寻址、不用回车原地重绘、不出动画。每个事件按顺序追加一次，
+多行内容（报告、diff、工具输出）按其自身结构展开，因此 `tee`、`script(1)`、屏幕阅读器都能完整读到。
+状态符号（● ⚠ ✖、diff 的 `+`/`-`）仍然保留，语义不依赖颜色。全屏交互（鼠标拖选、卡片展开、
+`/find` 高亮）在行模式下不可用——那是画帧的代价，需要时用普通模式。
+
 ## 5. 明确不做（以及为什么）
 
 - **内置 `--daemon` 常驻模式**：Host 不是服务。它是"某个会话的写者"，靠 idle-exit 把写锁交还；把它变成常驻服务会让 Web UI 与其它窗口长期打不开同一会话。

@@ -66,6 +66,7 @@ import { collectDiag, formatDiag } from './diag.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
+import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -662,6 +663,8 @@ export interface TuiConfig {
   onReattach?: () => void | Promise<void>
   /** Host process: no local TTY; paint only through the display socket. */
   headlessDisplay?: boolean
+  /** Append events as plain lines instead of painting (see `line-mode`). */
+  lineMode?: boolean
   /** Hangup policy while busy: pause cancels the turn; continue lets it finish detached. Idle hangup always exits. */
   disconnectPolicy?: DisconnectPolicyName
 }
@@ -1260,6 +1263,17 @@ export class SshTui {
   private healthChipRow: number | undefined
   /** How much colour this terminal can take (see `color-depth`). */
   private readonly colorDepth: ColorDepth
+  /** Append events as plain lines instead of painting a framed screen. */
+  private readonly lineMode: boolean
+  /**
+   * Lines produced before a display attached.
+   *
+   * The Host boots, pushes its banner, and only then does the launcher's relay
+   * arrive — and a Host's stdout is a discarded pipe, so anything written in
+   * that window is gone. Without this buffer line mode loses the beginning of
+   * the session, which is the one thing a log must not do.
+   */
+  private lineModePending: string[] = []
   /** The counters as they stood when the display went away, for the summary. */
   private awaySnapshot: { allowed: number; denied: number; detached: number } | undefined
   /** Approvals refused because nobody could confirm them (a subset of denials). */
@@ -1313,10 +1327,15 @@ export class SshTui {
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
     this.headlessDisplay = config.headlessDisplay === true
+    // Line mode: no frames at all, one appended line per event. The alternate
+    // screen is what makes a screen reader and a `tee` lose events, so it stays
+    // off too.
+    this.lineMode = config.lineMode === true || lineModeEnabled(process.env)
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.presetId = config.presetId ?? 'standard'
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
-    this.useAlternateScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+    this.useAlternateScreen = !this.lineMode
+      && process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
     this.paintLink = detectSshSession() ? 'ssh' : 'local'
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
       ssh: this.paintLink === 'ssh',
@@ -1364,6 +1383,15 @@ export class SshTui {
     process.stdout.on('error', this.handleIoError)
     process.stdin.on('error', this.handleIoError)
 
+    if (this.lineMode) {
+      // Typing still works — commands are how the user drives the session — but
+      // there is no screen to paint and no animation to run.
+      process.stdin.setRawMode(true)
+      process.stdin.resume()
+      process.stdin.on('data', this.handleData)
+      this.bootBackgroundTasks()
+      return
+    }
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.render()
     this.updateTerminalTitle()
@@ -2413,6 +2441,19 @@ export class SshTui {
     })
   }
 
+  /** Say the user was away, and what happened while they were. */
+  private pushReconnectNotice(): void {
+    if (this.detachedAt === undefined) return
+    this.displayDrops += 1
+    const away = Date.now() - this.detachedAt
+    this.detachedAt = undefined
+    this.pushRow({
+      kind: 'system',
+      text: t('attach.reconnected', { count: this.displayDrops, away: formatShortDuration(away) }),
+    })
+    this.pushAwaySummary(away)
+  }
+
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
     // A relay that HELLOs while a hangup is still unwinding must be honored by
@@ -2432,22 +2473,22 @@ export class SshTui {
     this.lastPaintRows = []
     this.lastChromeKey = ''
     this.lastTranscriptStart = -1
+    if (this.lineMode) {
+      // No DECSET at all in line mode: no mouse reporting, no hidden cursor, no
+      // alternate screen. The held lines are the whole point of the handover.
+      this.flushLineMode()
+      // The user is back, and the notice belongs in the log like any event.
+      this.pushReconnectNotice()
+      void this.onReattach?.()
+      return
+    }
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.forceFullPaint = true
     this.dirty = true
     // The user is back: say so, with how many times this Host has been
     // reconnected and how long this gap lasted. Pushed before the paint so the
     // frame that follows carries it.
-    if (this.detachedAt !== undefined) {
-      this.displayDrops += 1
-      const away = Date.now() - this.detachedAt
-      this.detachedAt = undefined
-      this.pushRow({
-        kind: 'system',
-        text: t('attach.reconnected', { count: this.displayDrops, away: formatShortDuration(away) }),
-      })
-      this.pushAwaySummary(away)
-    }
+    this.pushReconnectNotice()
     this.paint()
     this.startRenderTimer()
     void this.onReattach?.()
@@ -2515,6 +2556,13 @@ export class SshTui {
   /** Append one transcript row, bounding memory on long sessions. */
   private pushRow(row: Row): void {
     this.rows.push(row)
+    if (this.lineMode) {
+      // Appended here rather than from the render timer: a timer can coalesce
+      // two events into one tick, and an event that is coalesced away is an
+      // event the log lost.
+      const appended = appendRow(lineModeLines(row))
+      if (appended !== '') this.writeLineMode(appended)
+    }
     // Locate the focused card before trimming: after the splice every surviving
     // index shifts down and a stale index would clear the focus by accident.
     const focusedIndex = this.focusedRow === null || this.focusedRow.kind === 'streaming-reasoning'
@@ -2523,6 +2571,22 @@ export class SshTui {
     const removed = boundTranscriptRows(this.rows)
     if (removed === 0) return
     if (focusedIndex !== undefined && focusedIndex < removed) this.focusedRow = null
+  }
+
+  /** Append one event, holding it until a display can carry it. */
+  private writeLineMode(chunk: string): void {
+    if (this.displayHost?.attached === true && !this.displayDetached) {
+      this.write(chunk)
+      return
+    }
+    this.lineModePending.push(chunk)
+  }
+
+  /** Hand the held lines to the display that just attached. */
+  private flushLineMode(): void {
+    if (this.lineModePending.length === 0) return
+    const pending = this.lineModePending.splice(0)
+    this.write(pending.join(''))
   }
 
   /** The transcript rows that support per-row expand/collapse. */
@@ -3154,7 +3218,7 @@ export class SshTui {
   }
 
   private paint = (): void => {
-    if (this.exiting) return
+    if (this.exiting || this.lineMode) return
     const width = Math.max(10, this.screenColumns())
     const height = Math.max(6, this.screenRows())
     if (this.dialog?.kind === 'inspect') {

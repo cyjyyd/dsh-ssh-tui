@@ -33,6 +33,8 @@ const USAGE = `usage: node scripts/tui-probe.mjs [--session <id>] [--keep] [--ho
   --session <id>   resume an existing session instead of creating one
   --keep           leave the host running after the probe
   --home <dir>     DSH_HOME to probe (default: $PROBE_HOME / $DSH_HOME / ~/.dsh)
+  --line-mode      run with DSH_TUI_LINE_MODE=1 and assert plain appended lines
+                   (no alternate screen, no cursor addressing, no repaint)
 
 Set PROBE_HOME to a throwaway tree to keep the probe away from real sessions.`
 
@@ -131,7 +133,7 @@ function clipboardWrites(text) {
   return out
 }
 
-async function runProbe({ sessionId, keep, home }) {
+async function runProbe({ sessionId, keep, home, lineMode }) {
   const pty = await loadPty()
   if (pty === undefined) {
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
@@ -155,6 +157,7 @@ async function runProbe({ sessionId, keep, home }) {
     DSH_TUI_NO_UPDATE_CHECK: '1',
     SSH_CONNECTION: '10.0.0.2 55555 10.0.0.1 22',
     SSH_TTY: '/dev/pts/9',
+    ...(lineMode === true ? { DSH_TUI_LINE_MODE: '1' } : {}),
   }
   console.log(`probe home: ${home}`)
   console.log(`probe session: ${createdSessionId}${sessionId === undefined ? ' (created, removed on exit)' : ' (existing, kept)'}`)
@@ -188,10 +191,45 @@ async function runProbe({ sessionId, keep, home }) {
   try {
     // 1. The TUI boots and paints its chrome.
     await waitFor(text => text.includes('DeepSeek Harness'), 60_000, 'the boot banner')
-    await waitFor(text => /空闲|idle/u.test(text), 60_000, 'the idle status line')
 
-    // 2. A resize must resize the frame, not resurrect an earlier screen. The
-    //    historical bug repainted a finished picker on every SIGWINCH.
+    if (lineMode === true) {
+      // Line mode never paints, so its assertions a    if (lineMode === true) {
+      // Line mode never paints, so its assertions are about the shape of the
+      // stream: text appended, nothing that moves a cursor, and events the
+      // framed painter would have coalesced still present.
+      const beforeDiag = output.length
+      term.write('/diag\r')
+      await waitFor(
+        text => /判定链|verdict chain/u.test(text.slice(beforeDiag)),
+        30_000,
+        'the /diag lines in line mode',
+      )
+      check(!output.includes('\x1b[?1049h'), 'line mode must not use the alternate screen')
+      check(!/\x1b\[\d+;\d+H/u.test(output), 'line mode must not address rows absolutely')
+      // `\r\n` is an ordinary newline; a *bare* carriage return is what overwrites the line just written.
+      check(!/\r(?!\n)/u.test(output), 'line mode must not use a bare carriage return')
+      check(plain(output).includes('DeepSeek Harness'), 'the boot banner still reaches the terminal')
+      term.write('\x15')
+      term.write('/exit\r')
+      const code = await new Promise(resolve => {
+        const timer = setTimeout(() => resolve(undefined), 15_000)
+        term.onExit(({ exitCode }) => {
+          clearTimeout(timer)
+          resolve(exitCode)
+        })
+      })
+      check(code === 0, `line mode must exit on /exit (got ${code ?? 'no exit within 15s'})`)
+      if (problems.length > 0) {
+        console.error('FAIL')
+        for (const problem of problems) console.error(`  - ${problem}`)
+        return 1
+      }
+      console.log('OK: line mode appended the session as plain lines, with no cursor control')
+      return 0
+    }
+
+    await waitFor(text => /空闲|idle/u.test(text), 60_000, 'the idle status line')
+   //    historical bug repainted a finished picker on every SIGWINCH.
     const beforeResize = output.length
     term.resize(72, 24)
     await new Promise(resolve => setTimeout(resolve, 1200))
@@ -324,6 +362,7 @@ function parseArgs(argv) {
   const parsed = {
     sessionId: undefined,
     keep: argv.includes('--keep'),
+    lineMode: argv.includes('--line-mode'),
     home: process.env.PROBE_HOME ?? process.env.DSH_HOME ?? join(process.env.HOME ?? '/root', '.dsh'),
     help: argv.includes('--help') || argv.includes('-h'),
   }

@@ -38,6 +38,7 @@ import { presetLabel } from './preset-label.js'
 // The attach/recovery state machine (and its constants) live in attach.ts so
 // they can be driven by tests; re-exported here for the bundle's own API.
 export { ATTACH_RECOVERY_WINDOW_MS, attachPeerVanished } from './attach.js'
+import { lineModeEnabled } from './line-mode.js'
 import { writeBootSplash } from './paint.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
@@ -159,7 +160,9 @@ export function apply(ctx: Context, config: Config): void {
     const attacher = createAttacher({
       relay: (sock, seed, announce) => runDisplayRelay(sock, {
         ...(seed === '' ? {} : { seed }),
-        ...(announce ? { announce: true } : {}),
+        // Line mode has no status line to erase, and the erase sequence is the
+        // one piece of cursor control the launcher still emitted.
+        ...(announce && !lineModeEnabled() ? { announce: true } : {}),
       }),
       quiet: () => { quietTerminalInput() },
       beginCapture: () => { inputCapture = captureTerminalInput() },
