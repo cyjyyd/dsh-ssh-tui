@@ -65,6 +65,7 @@ import { formatFooterCwd } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
+import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -1253,6 +1254,8 @@ export class SshTui {
   private rosterMissing = false
   /** Screen row of the health chip in the status strip, for click-to-doctor. */
   private healthChipRow: number | undefined
+  /** How much colour this terminal can take (see `color-depth`). */
+  private readonly colorDepth: ColorDepth
   /** The counters as they stood when the display went away, for the summary. */
   private awaySnapshot: { allowed: number; denied: number; detached: number } | undefined
   /** Approvals refused because nobody could confirm them (a subset of denials). */
@@ -1287,8 +1290,10 @@ export class SshTui {
     private readonly agent: Agent,
     config: TuiConfig,
   ) {
-    const noColorEnv = process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== ''
-    this.color = config.color !== false && !noColorEnv && process.env.TERM !== 'dumb'
+    // The palette the terminal can take, decided once: a truecolor pair on an
+    // 8-colour terminal is not a cosmetic loss, it is the wrong colour.
+    this.colorDepth = config.color === false ? 'none' : colorDepth(process.env)
+    this.color = this.colorDepth !== 'none'
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
     this.showReasoning = config.showReasoning !== false
     this.workspaceView = this.readWorkspaceView()
@@ -4397,7 +4402,7 @@ export class SshTui {
   private styleLine(kind: DisplayKind, text: string): string {
     const safe = sanitizeTerminalText(text)
     if (!this.color) return safe
-    const code =
+    const requested =
       kind === 'user' ? '36' :
       kind === 'assistant' ? '37' :
       kind === 'reasoning' ? '2;3' :
@@ -4416,6 +4421,9 @@ export class SshTui {
       kind === 'diag' ? '2;36' :
       kind === 'error' ? '31' :
       '90'
+    const code = downgradeSgr(requested, this.colorDepth)
+    // Nothing left to paint: the text stands on its own.
+    if (code === '') return safe
     return `\x1b[${code}m${safe}\x1b[0m`
   }
 
