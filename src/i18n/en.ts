@@ -888,6 +888,8 @@ export const en: Record<string, string> = {
   'view.unknown': 'Unknown view "{id}". Use detailed or compact.',
   'view.footerCompact': 'compact',
   'compact.filesMore': '+{count} more file(s)',
+  'diff.omitted': '  ⋯ {count} unchanged line(s)',
+  'diff.enterFull': '  Enter for the full view',
   'compact.tools': 'called {count} tools',
   'compact.toolsFailed': 'called {count} tools · {failed} failed',
   'compact.edits': 'edited',

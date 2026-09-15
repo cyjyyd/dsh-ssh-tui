@@ -2473,10 +2473,14 @@ test('compact edit summary expands to the merged diff body', () => {
   tui.focusedRow = edit
   tui.toggleCollapsible()
   assert.equal(edit.expanded, true)
-  const text = tui.captureFrame(72, 20).join('\n')
+  // The frame carries ANSI, and a changed line is emphasised *inside* the word
+  // it changed, so the content assertions read it without styling.
+  const raw = tui.captureFrame(72, 20).join('\n')
+  const text = raw.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')
   assert.ok(text.includes('已编辑 a.ts'))
-  assert.ok(text.includes('old-line'))
-  assert.ok(text.includes('new-line'))
+  assert.ok(text.includes('- old-line'), `the removed line is shown whole: ${text}`)
+  assert.ok(text.includes('+ new-line'), 'and so is the added one')
+  assert.ok(raw.includes('\x1b[7mold\x1b[27m'), 'with only the changed part emphasised')
   // The expanded per-file entry shows its own -/+ stat instead of a total.
   assert.ok(text.includes('-1 +1'))
 })

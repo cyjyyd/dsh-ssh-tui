@@ -888,6 +888,8 @@ export const zh: Record<string, string> = {
   'view.unknown': '未知视图 "{id}"。可用 detailed 或 compact。',
   'view.footerCompact': '极简',
   'compact.filesMore': '+{count} 个文件',
+  'diff.omitted': '  ⋯ {count} 行未变',
+  'diff.enterFull': '  Enter 看全文',
   'compact.tools': '已调用 {count} 个工具',
   'compact.toolsFailed': '已调用 {count} 个工具 · {failed} 失败',
   'compact.edits': '已编辑',

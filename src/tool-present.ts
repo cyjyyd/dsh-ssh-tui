@@ -3,6 +3,7 @@
  */
 
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
+import { diffHunks, diffLines, wordDiffSpans, type DiffLine } from './line-diff.js'
 import { t } from './i18n/index.js'
 import { jobAlias } from './job-label.js'
 import { wrap, type TextSegment, truncate, sliceCodePoints } from './term-text.js'
@@ -442,6 +443,13 @@ export function diffContentLines(text: string): string[] {
 export interface DiffDisplayLine {
   kind: DisplayKind
   text: string
+  /**
+   * Ranges of `text` to emphasise, in UTF-16 offsets. They travel with the line
+   * rather than being baked in as escapes because the painter sanitises the text
+   * it styles — an escape inserted down here would be stripped, leaving a
+   * literal `[7m` on screen.
+   */
+  spans?: readonly { start: number; end: number }[]
 }
 
 /** Cap one flat diff/body row list to `maxLines` while preserving the final line. */
@@ -569,36 +577,97 @@ export function toolBodyFitsWorkspace(bodyLines: number, workspaceRows: number):
   return bodyLines + 1 <= Math.max(1, workspaceRows)
 }
 
-/** Flatten hunks into git-style `-`/`+` lines plus the web-compatible footer. */
+/**
+ * Flatten hunks into a line diff with context, plus the counts footer.
+ *
+ * The card printed every old line as `-` and every new line as `+` — a one-line
+ * change in a hundred-line file became two hundred rows. Changed lines are now
+ * paired with their context, distant changes are separate runs with the gap
+ * counted, and a replaced pair emphasises the characters that differ. When the
+ * whole thing cannot fit the card's budget, the counts and a pointer to the full
+ * view are what remain: a truncated diff is worse than none.
+ * @param diffs - the tool's hunks.
+ * @param maxLines - the card body budget.
+ * @returns display lines, at most `maxLines` of them.
+ */
 export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDisplayLine[] {
-  const rows: DiffDisplayLine[] = []
   const paths = new Set<string>()
   let added = 0
   let removed = 0
-  let prevPath: string | undefined
+  const perHunk: Array<{ hunk: ToolDiffHunk; lines: DiffLine[] }> = []
   for (const hunk of diffs) {
     paths.add(hunk.path)
+    const diff = diffLines(hunk.oldText ?? '', hunk.newText)
+    added += diff.filter(line => line.kind === 'add').length
+    removed += diff.filter(line => line.kind === 'del').length
+    perHunk.push({ hunk, lines: diff })
+  }
+  const footer = `└ +${added} -${removed} · ${paths.size} file${paths.size === 1 ? '' : 's'}`
+  // Three lines of context read better, one line still shows the change, and
+  // bare changed lines fit almost any budget. Only when even those do not does
+  // the card give up the body: collapsing a one-line change because the budget
+  // is small would hide exactly what was asked for.
+  for (const context of [DIFF_CONTEXT_LINES, 1, 0]) {
+    const rows = paintHunks(perHunk, context)
+    if (rows.length + 1 <= maxLines) {
+      return capDisplayLines([...rows, { kind: 'tool-result', text: footer }], maxLines)
+    }
+  }
+  const head: DiffDisplayLine[] = [...paths]
+    .slice(0, Math.max(0, maxLines - 2))
+    .map(path => ({ kind: 'diff-path' as const, text: path }))
+  return capDisplayLines([
+    ...head,
+    { kind: 'tool-result', text: footer },
+    { kind: 'tool-result', text: t('diff.enterFull') },
+  ], maxLines)
+}
+
+/** The diff rows for one context width, without the footer. */
+function paintHunks(
+  perHunk: readonly { hunk: ToolDiffHunk; lines: DiffLine[] }[],
+  context: number,
+): DiffDisplayLine[] {
+  // With no context there is nothing to say about skipped lines either: the
+  // point of this width is that the change itself still fits.
+  const markers = context > 0
+  const rows: DiffDisplayLine[] = []
+  let prevPath: string | undefined
+  for (const { hunk, lines } of perHunk) {
     rows.push(hunk.path === prevPath
       ? { kind: 'diff-path', text: '⋯' }
       : { kind: 'diff-path', text: hunk.path })
     prevPath = hunk.path
-    if (hunk.oldText !== null) {
-      for (const line of diffContentLines(hunk.oldText)) {
-        rows.push({ kind: 'diff-del', text: `- ${line}` })
-        removed += 1
+    for (const run of diffHunks(lines, context)) {
+      if (markers && run.omittedBefore > 0) {
+        rows.push({ kind: 'tool-result', text: t('diff.omitted', { count: run.omittedBefore }) })
+      }
+      for (let at = 0; at < run.lines.length; at += 1) {
+        const line = run.lines[at]
+        if (line === undefined) continue
+        if (line.kind === 'same') {
+          rows.push({ kind: 'tool-result', text: `  ${line.text}` })
+          continue
+        }
+        const partner = line.kind === 'del' ? run.lines[at + 1] : run.lines[at - 1]
+        const spans = line.kind === 'del' && partner?.kind === 'add'
+          ? wordDiffSpans(line.text, partner.text).old
+          : line.kind === 'add' && partner?.kind === 'del'
+            ? wordDiffSpans(partner.text, line.text).new
+            : []
+        rows.push({
+          kind: line.kind === 'add' ? 'diff-add' : 'diff-del',
+          text: `${line.kind === 'add' ? '+' : '-'} ${line.text}`,
+          ...(spans.length === 0 ? {} : { spans: spans.map(span => ({ start: span.start + 2, end: span.end + 2 })) }),
+        })
       }
     }
-    for (const line of diffContentLines(hunk.newText)) {
-      rows.push({ kind: 'diff-add', text: `+ ${line}` })
-      added += 1
-    }
   }
-  rows.push({
-    kind: 'tool-result',
-    text: `└ +${added} -${removed} · ${paths.size} file${paths.size === 1 ? '' : 's'}`,
-  })
-  return capDisplayLines(rows, maxLines)
+  return rows
 }
+
+
+const DIFF_CONTEXT_LINES = 3
 
 /** Keys whose multiline strings render as indented content blocks. */
 const LONG_TEXT_KEYS = new Set([

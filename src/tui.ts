@@ -2745,6 +2745,56 @@ export class SshTui {
     return lines
   }
 
+  /**
+   * One diff line with its changed characters in reverse video.
+   *
+   * The line is split at the spans and each piece is styled on its own. Reverse
+   * is an attribute rather than a colour, so the emphasis survives every palette,
+   * including a monochrome terminal.
+   */
+  private styleEmphasisedLine(line: DiffDisplayLine, width: number): string[] {
+    const inner = Math.max(1, width - 2)
+    const spans = [...(line.spans ?? [])].sort((left, right) => left.start - right.start)
+    const pieces: Array<{ text: string; emphasis: boolean }> = []
+    let cursor = 0
+    for (const span of spans) {
+      const from = Math.max(cursor, Math.min(line.text.length, span.start))
+      const to = Math.max(from, Math.min(line.text.length, span.end))
+      if (from > cursor) pieces.push({ text: line.text.slice(cursor, from), emphasis: false })
+      if (to > from) pieces.push({ text: line.text.slice(from, to), emphasis: true })
+      cursor = to
+    }
+    if (cursor < line.text.length) pieces.push({ text: line.text.slice(cursor), emphasis: false })
+    const flat = pieces.length === 0 ? [{ text: line.text, emphasis: false }] : pieces
+    const rows: string[] = []
+    let buffer: Array<{ text: string; emphasis: boolean }> = []
+    let used = 0
+    const flush = (): void => {
+      if (buffer.length === 0) return
+      const body = buffer
+        .map(piece => (piece.emphasis
+          ? `\x1b[7m${this.styleLine(line.kind, piece.text)}\x1b[27m`
+          : this.styleLine(line.kind, piece.text)))
+        .join('')
+      rows.push(`  ${body}`)
+      buffer = []
+      used = 0
+    }
+    for (const piece of flat) {
+      let rest = piece.text
+      while (rest !== '') {
+        const room = Math.max(1, inner - used)
+        const wrapped = wrap(rest, room)[0] ?? rest
+        buffer.push({ text: wrapped, emphasis: piece.emphasis })
+        used += displayWidth(wrapped)
+        rest = rest.slice(wrapped.length)
+        if (used >= inner && rest !== '') flush()
+      }
+    }
+    flush()
+    return rows.length === 0 ? [this.styleLine(line.kind, '')] : rows
+  }
+
   private paintToolBodyLine(
     addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
     row: Row | CollapsibleBlock | undefined,
@@ -2753,6 +2803,13 @@ export class SshTui {
   ): void {
     const inner = Math.max(1, width - 2)
     const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
+    // An emphasised line is styled in parts: the escapes wrap *styled* pieces,
+    // because the painter's sanitiser strips any escape that reaches it inside
+    // the text — which is how a literal `[7m` once appeared on screen.
+    if (line.spans !== undefined && line.spans.length > 0) {
+      for (const painted of this.styleEmphasisedLine(line, width)) addDisplay(painted, row)
+      return
+    }
     for (const wrapped of wrap(line.text, inner)) {
       const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
       const kind = line.kind
