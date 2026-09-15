@@ -66,6 +66,7 @@ import { collectDiag, formatDiag } from './diag.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
+import { flattenGroups, groupPresets, type PresetPickerOption } from './preset-picker.js'
 import {
   isRefusal,
   planCopy,
@@ -6884,49 +6885,48 @@ export class SshTui {
       this.markDirty()
       return
     }
-    // Shipped presets resolve through the TUI dictionary; a user-authored one
-    // keeps the name its own preset.yml published.
-    const labels = presets.map(preset => presetLabel(preset.id, preset.name, preset.trust))
-    const matchesDirect = (preset: (typeof presets)[number], label: string): boolean =>
-      preset.id.toLowerCase() === direct
-      || (preset.name ?? '').trim().toLowerCase() === direct
-      || label.toLowerCase() === direct
+    // Shipped presets first, then locally authored ones, each line naming its
+    // group and position: the dialog is a flat list, so the grouping lives in
+    // the order and the text.
+    const options: PresetPickerOption[] = flattenGroups(groupPresets(presets, this.presetId))
+    const matchesDirect = (option: (typeof options)[number]): boolean =>
+      option.id.toLowerCase() === direct || option.label.toLowerCase() === direct
     let index = direct === ''
       ? -1
-      : presets.findIndex((preset, at) => matchesDirect(preset, labels[at] ?? preset.id))
+      : options.findIndex(option => matchesDirect(option))
     if (index < 0 && direct !== '') {
       this.pushRow({
         kind: 'error',
-        text: t('mode.unknown', { id: arg.trim(), available: presets.map(preset => preset.id).join(', ') }),
+        text: t('mode.unknown', { id: arg.trim(), available: options.map(option => option.id).join(', ') }),
       })
       this.markDirty()
       return
     }
     if (index < 0 && direct === '') {
       // Like every other picker, the list opens on what is in effect now.
-      const currentIndex = presets.findIndex(preset => preset.id === this.presetId)
+      const currentIndex = options.findIndex(option => option.id === this.presetId)
       const answer = await this.askQuestion({
         id: 'mode-pick',
         question: t('mode.pick'),
-        options: presets.map((preset, at) => ({
-          label: labels[at] ?? preset.id,
-          description: `${preset.id === this.presetId ? t('mode.currentPrefix') : ''}${preset.broken === undefined ? preset.description ?? '' : t('mode.brokenSuffix', { reason: preset.broken })}`.trim(),
-        })),
+        options: options.map(option => ({ label: option.label, description: option.description })),
       }, 0, 1, currentIndex >= 0 ? currentIndex : undefined)
-      index = labels.indexOf(answer.selected[0] ?? '')
+      const picked = answer.selected[0] ?? ''
+      index = options.findIndex(option => option.label === picked)
     }
     if (index < 0) return
-    const selected = presets[index]
+    const option = options[index]
+    if (option === undefined) return
+    const selected = presets.find(preset => preset.id === option.id)
     if (selected === undefined) return
-    if (selected.broken !== undefined) {
+    if (option.broken !== undefined) {
       this.pushRow({
         kind: 'error',
-        text: t('mode.broken', { name: labels[index] ?? selected.id, reason: selected.broken }),
+        text: t('mode.broken', { name: option.label, reason: option.broken }),
       })
       this.markDirty()
       return
     }
-    const selectedName = labels[index] ?? selected.id
+    const selectedName = option.label
     const hasWork = sessionEvents(this.agent.session).some(event => event.type === 'turn/start')
     if (!hasWork) {
       await agentPresets.recompose(this.agent.ctx, selected.id)

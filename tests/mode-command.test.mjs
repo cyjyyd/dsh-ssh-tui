@@ -175,9 +175,14 @@ test('/mode switches by id and by the label the picker shows', async () => {
 test('an unknown mode lists the roster ids', async () => {
   const { tui, composed } = fixture()
   tui.runCommand('/mode nope')
-  await waitForError(tui, 'standard, minimal, ptc, routing-suite')
+  await waitForError(tui, '可用')
   assert.deepEqual(composed, [])
-  assert.ok(errorText(tui).includes('standard, minimal, ptc, routing-suite'), errorText(tui))
+  // The list follows the picker's own order now (shipped by declared position,
+  // then locally authored), so the assertion is about membership, not sequence.
+  const report = errorText(tui)
+  for (const id of ['standard', 'minimal', 'ptc', 'routing-suite']) {
+    assert.ok(report.includes(id), `the report names ${id}: ${report}`)
+  }
 })
 
 test('child-agent requests carry the TUI subagent model, not the parent route', async () => {
