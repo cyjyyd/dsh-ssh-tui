@@ -1200,6 +1200,12 @@ export class SshTui {
   private displayDrops = 0
   /** When the display went away, so the reconnect can say how long it was gone. */
   private detachedAt: number | undefined
+  /** The counters as they stood when the display went away, for the summary. */
+  private awaySnapshot: { allowed: number; denied: number; detached: number } | undefined
+  /** Approvals refused because nobody could confirm them (a subset of denials). */
+  private detachedDeniedCount = 0
+  /** Questions waiting for a display right now — their cards do not exist yet. */
+  private queuedQuestions = 0
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -2098,6 +2104,11 @@ export class SshTui {
     // The one place a real detach starts from, so the reconnect notice can say
     // how long the user was away. A boot attach never sets it.
     this.detachedAt ??= Date.now()
+    this.awaySnapshot ??= {
+      allowed: this.autoAllowedCount,
+      denied: this.autoDeniedCount,
+      detached: this.detachedDeniedCount,
+    }
     this.reattachedDuringHangup = false
     ignoreFurtherHangupSignals()
     this.detachDisplay()
@@ -2293,6 +2304,34 @@ export class SshTui {
     this.displayHost = host
   }
 
+  /**
+   * One row for what happened while nobody was watching.
+   *
+   * Only the parts that actually happened are listed, so a plain link blip stays
+   * one line. The counts are deltas against the snapshot taken at the drop: the
+   * totals belong to the session, this belongs to the gap.
+   */
+  private pushAwaySummary(awayMs: number): void {
+    const before = this.awaySnapshot
+    this.awaySnapshot = undefined
+    if (before === undefined) return
+    const allowed = this.autoAllowedCount - before.allowed
+    const denied = this.autoDeniedCount - before.denied
+    const detached = this.detachedDeniedCount - before.detached
+    const waiting = this.queuedQuestions
+    const parts: string[] = []
+    if (allowed + denied > 0) {
+      parts.push(t('attach.awayApprovals', { allowed, denied }))
+    }
+    if (detached > 0) parts.push(t('attach.awayDetached', { count: detached }))
+    if (waiting > 0) parts.push(t('attach.awayWaiting', { count: waiting }))
+    if (parts.length === 0) return
+    this.pushRow({
+      kind: 'system',
+      text: t('attach.awaySummary', { away: formatShortDuration(awayMs), parts: parts.join(' · ') }),
+    })
+  }
+
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
     // A relay that HELLOs while a hangup is still unwinding must be honored by
@@ -2326,6 +2365,7 @@ export class SshTui {
         kind: 'system',
         text: t('attach.reconnected', { count: this.displayDrops, away: formatShortDuration(away) }),
       })
+      this.pushAwaySummary(away)
     }
     this.paint()
     this.startRenderTimer()
@@ -5550,6 +5590,7 @@ export class SshTui {
         return 'rejected'
       }
       if (!this.hasLiveDisplay()) {
+        this.detachedDeniedCount += 1
         this.recordAutoApproval('deny', 'medium', request.toolName, command, t('approval.ruleDetached'))
         return 'rejected'
       }
@@ -5591,7 +5632,16 @@ export class SshTui {
   }
 
   readonly handleUserQuestions = async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
-    if (!this.hasLiveDisplay()) await this.waitForLiveDisplay(request.signal)
+    if (!this.hasLiveDisplay()) {
+      // Counted here, not read off the rows: the card is built only after the
+      // wait resolves, so at reattach time a queued question has no row yet.
+      this.queuedQuestions += 1
+      try {
+        await this.waitForLiveDisplay(request.signal)
+      } finally {
+        this.queuedQuestions -= 1
+      }
+    }
     const answers: AskUserQuestionAnswer['answers'] = []
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined

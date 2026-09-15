@@ -32,7 +32,10 @@ function detachedTui() {
     options: {},
     status: 'idle',
     session: { id: 'main-session-away', events: [] },
-    cancel() {},
+    // A real cancel ends the turn, and `handleHangup` waits for exactly that
+    // (up to ten seconds) before deciding whether to keep the Host. A no-op
+    // cancel made every busy-drop test pay that timeout.
+    cancel() { agent.status = 'idle' },
   }
   return new SshTui(ctx, agent, { sessionId: 'main-session-away', color: false, headlessDisplay: true })
 }
@@ -194,6 +197,15 @@ test('a rejection from the gap is visible in the transcript after reconnecting',
  * for how long, and how often this Host has been reconnected.
  */
 const fakeDisplay = () => ({ attached: true, sendStdout() {}, sendGoodbye() {}, close: async () => {} })
+
+/**
+ * The relay is gone: the Host object stays, but it no longer reports an attach.
+ * A static fake kept saying `attached: true` after a hangup, so `hasLiveDisplay()`
+ * stayed true and a detached approval went looking for a human to ask.
+ */
+function dropDisplay(tui) {
+  if (tui.displayHost !== undefined) tui.displayHost.attached = false
+}
 const reconnectRows = tui => tui.rows
   .filter(row => row.kind === 'system' && String(row.text).includes('已重连'))
   .map(row => String(row.text))
@@ -208,6 +220,7 @@ test('a reconnect is announced once, with the count and the time away', async ()
   // The link drops with the Host busy, which is the case that keeps it alive.
   tui.agent.status = 'running'
   await tui.handleHangup()
+  dropDisplay(tui)
   await delay(1_100)
   tui.agent.status = 'idle'
   tui.displayHost = fakeDisplay()
@@ -219,6 +232,7 @@ test('a reconnect is announced once, with the count and the time away', async ()
   // A second gap counts up, and the notice says so separately.
   tui.agent.status = 'running'
   await tui.handleHangup()
+  dropDisplay(tui)
   await delay(150)
   tui.agent.status = 'idle'
   tui.displayHost = fakeDisplay()
@@ -233,6 +247,7 @@ test('a resize while detached is still a reconnect, and does not double-count', 
   tui.attachRelayDisplay()
   tui.agent.status = 'running'
   await tui.handleHangup()
+  dropDisplay(tui)
   tui.agent.status = 'idle'
 
   // The Host learns the new size before the relay says HELLO: that path also
@@ -242,4 +257,107 @@ test('a resize while detached is still a reconnect, and does not double-count', 
   // A later resize with the display already attached must not add another row.
   tui.attachRelayDisplay()
   assert.equal(reconnectRows(tui).length, 1, 'a re-attach of a live display is not a new reconnect')
+})
+
+/**
+ * The away summary: what happened while nobody was watching. Deltas against the
+ * counters at the drop, so a plain link blip stays one line.
+ */
+const awayRows = tui => tui.rows
+  .filter(row => row.kind === 'system' && String(row.text).startsWith('离开'))
+  .map(row => String(row.text))
+
+/** Drop the display with the Host busy, then bring it back. */
+async function dropAndReturn(tui, awayMs = 150) {
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  dropDisplay(tui)
+  await delay(awayMs)
+  tui.agent.status = 'idle'
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+}
+
+test('a quiet gap gets no summary, only the reconnect line', async () => {
+  const tui = detachedTui()
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  await dropAndReturn(tui)
+  assert.deepEqual(reconnectRows(tui).length, 1, 'the reconnect is still announced')
+  assert.deepEqual(awayRows(tui), [], 'nothing happened, so there is nothing to summarise')
+})
+
+test('approvals decided in the gap are summarised, including the detached refusals', async () => {
+  const tui = detachedTui()
+  tui.runCommand('/approval auto')
+  await waitForText(tui, '自动审批')
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+
+  // One approval BEFORE the drop: the summary must count the gap, not the
+  // session's totals, so this one must not show up in it.
+  const tool = (callId, command) => tui.rows.push({
+    kind: 'tool',
+    callId,
+    name: 'bash',
+    title: '终端',
+    summary: `$ ${command}`,
+    args: JSON.stringify({ command }),
+    command,
+    status: 'running',
+    expanded: false,
+  })
+  tool('before-drop', 'git status')
+  assert.equal(await tui.handleApproval(
+    { toolName: 'bash', callId: 'before-drop', agent: tui.agent, reason: undefined },
+    async () => { throw new Error('classified decisions must not reach the waterfall') },
+  ), 'allowed-once')
+
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  dropDisplay(tui)
+  tui.agent.status = 'idle'
+
+  // One low-risk shape the rules allow, and one unknown shape nobody can confirm.
+  tool('gap-allow', 'git status')
+  assert.equal(await tui.handleApproval(
+    { toolName: 'bash', callId: 'gap-allow', agent: tui.agent, reason: undefined },
+    async () => { throw new Error('classified decisions must not reach the waterfall') },
+  ), 'allowed-once')
+  tool('gap-deny', 'python deploy.py')
+  assert.equal(await tui.handleApproval(
+    { toolName: 'bash', callId: 'gap-deny', agent: tui.agent, reason: undefined },
+    async () => { throw new Error('classified decisions must not reach the waterfall') },
+  ), 'rejected')
+
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  assert.equal(awayRows(tui).length, 1, 'one summary for the gap')
+  assert.match(awayRows(tui)[0], /^离开 \d+s：自动审批 1 次放行 \/ 1 次拒绝/u)
+  assert.match(awayRows(tui)[0], /其中 1 次因无人确认被拒/u)
+})
+
+test('a question still queued at reattach is counted before its card exists', async () => {
+  const tui = detachedTui()
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  dropDisplay(tui)
+  tui.agent.status = 'idle'
+  const pending = tui.handleUserQuestions({
+    questions: [{ id: 'q-away', question: '继续部署吗？', options: [{ label: '继续' }] }],
+  })
+  await delay(50)
+
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  assert.equal(awayRows(tui).length, 1, 'the queued question is part of the summary')
+  assert.match(awayRows(tui)[0], /1 条提问待回答/u)
+
+  // It is also answerable, which is the promise the summary is reporting on.
+  await waitForDialog(tui, 'questions', { timeoutMs: 3_000 })
+  tui.handleChar('\r')
+  assert.deepEqual((await pending).answers[0].selected, ['继续'])
 })
