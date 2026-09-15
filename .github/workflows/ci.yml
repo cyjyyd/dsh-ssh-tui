@@ -42,7 +42,19 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           rm -f package-lock.json
-      - run: npm install --no-audit --no-fund
+      - name: Install
+        if: matrix.dsh != '0.1.5-rc.1'
+        run: npm install --no-audit --no-fund
+      # 0.1.5-rc.1 is npm `latest` and stays declared as supported, but its own
+      # peer ranges do not resolve (that is why the family is pinned to rc.2
+      # above): npm fights over dsh-invariants and gives up with ERESOLVE. This
+      # leg installs with legacy peers, which skips them and nests a second
+      # @deepseek-ai/dsh-scope — enough for typecheck and the test suite, while
+      # the roster composition that nesting breaks is covered on the rc.2 leg
+      # and by `scripts/tui-probe.mjs` against a real profile.
+      - name: Install (legacy peers for the rc.1 line)
+        if: matrix.dsh == '0.1.5-rc.1'
+        run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: npx tsc -p tsconfig.json --noEmit
       - run: node --test "tests/*.test.mjs"
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
