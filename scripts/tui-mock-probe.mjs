@@ -35,12 +35,14 @@ const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const ROOT = process.cwd()
 
-const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy] [--keep]
+const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy] [--keep] [--cols N] [--rows N]
 
   (no args)   synthesize a profile, run a scripted turn, verify copy and find
   --busy      run the busy-drop scenario instead: kill the window mid-turn and
               check the Host survives, then that the reconnected window says so
-  --keep      leave the throwaway home behind (its path is printed)`
+  --keep      leave the throwaway home behind (its path is printed)
+  --cols N    terminal width to drive (default 110; narrow widths force wraps)
+  --rows N    terminal height to drive (default 32)`
 
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 const OSC = /\x1b\][^\x07]*\x07/gu
@@ -79,9 +81,15 @@ function clipboardWrites(text) {
  * reply sits, which the mouse reports need as coordinates.
  */
 function screenRows(text) {
+  // Only the newest frame counts: a row chunk carries whatever followed it in
+  // the stream, and an earlier frame's tail would otherwise be read as this
+  // frame's content — which is how a 78-cell line looked unclipped on a 40-cell
+  // terminal. The painter closes a frame by re-enabling autowrap.
+  const lastFrame = text.lastIndexOf('\x1b[?7h')
+  const frame = lastFrame === -1 ? text : text.slice(lastFrame)
   const rows = new Map()
   const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
-  for (const match of text.matchAll(pattern)) {
+  for (const match of frame.matchAll(pattern)) {
     rows.set(Number(match[1]), plain(match[2] ?? ''))
   }
   return rows
@@ -217,7 +225,7 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, check,
   }
 }
 
-async function runProbe({ keep, busy }) {
+async function runProbe({ keep, busy, cols, rows }) {
   const pty = await loadModule('node-pty')
   if (pty === undefined) {
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
@@ -272,8 +280,8 @@ async function runProbe({ keep, busy }) {
 
   const term = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {
     name: 'xterm-256color',
-    cols: 110,
-    rows: 32,
+    cols,
+    rows,
     cwd: home,
     env,
   })
@@ -399,10 +407,13 @@ async function runProbe({ keep, busy }) {
 }
 
 function parseArgs(argv) {
-  const parsed = { keep: false, busy: false }
-  for (const arg of argv) {
+  const parsed = { keep: false, busy: false, cols: 110, rows: 32 }
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
     if (arg === '--keep') parsed.keep = true
     else if (arg === '--busy') parsed.busy = true
+    else if (arg === '--cols') parsed.cols = Number(argv[++index]) || 110
+    else if (arg === '--rows') parsed.rows = Number(argv[++index]) || 32
     else if (arg === '--help' || arg === '-h') {
       console.log(USAGE)
       process.exit(0)
