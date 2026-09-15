@@ -2,8 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ATTACH_RECOVERY_WINDOW_MS,
+  RECOVERY_BACKOFF_MS,
   attachPeerVanished,
   createAttacher,
+  recoveryDelay,
 } from '../lib/attach.js'
 
 /** An attacher with scripted relay outcomes and a fake clock. */
@@ -11,6 +13,7 @@ function harness(options = {}) {
   const reports = []
   const exits = []
   const spawned = []
+  const reconnects = []
   const relayResults = [...(options.relays ?? [])]
   let clock = 1_000
   const events = []
@@ -49,8 +52,11 @@ function harness(options = {}) {
     now: () => clock,
     burst: options.burst,
     debug: options.debug,
+    backoff: options.backoff,
+    random: options.random ?? (() => 0),
+    onReconnected: info => { reconnects.push(info) },
   })
-  return { attacher, reports, exits, spawned, events, tick: ms => { clock += ms } }
+  return { attacher, reports, exits, spawned, events, reconnects, tick: ms => { clock += ms } }
 }
 
 test('a kick from a newer display is an exit, not a retry', async () => {
@@ -240,4 +246,94 @@ test('attachPeerVanished only accepts a vanished peer inside the window', () => 
   }
   assert.equal(attachPeerVanished(other, 10), false)
   assert.equal(attachPeerVanished(new Error('plain'), 10), false)
+})
+
+// The backoff schedule: one run gets the whole thing, so a link that flaps for
+// half a minute is no longer cut off after three tries.
+test('the retry backoff grows, is jittered, and is capped', () => {
+  assert.deepEqual([...RECOVERY_BACKOFF_MS], [250, 500, 1_000, 2_000, 4_000])
+  // A jitter of 0 takes the low half, 1 the full nominal wait.
+  assert.equal(recoveryDelay(0, () => 0), 125)
+  assert.equal(recoveryDelay(0, () => 1), 250)
+  assert.equal(recoveryDelay(2, () => 1), 1_000)
+  for (let attempt = 0; attempt < RECOVERY_BACKOFF_MS.length; attempt += 1) {
+    const low = recoveryDelay(attempt, () => 0)
+    const high = recoveryDelay(attempt, () => 1)
+    assert.ok(low <= high, `attempt ${attempt} keeps its bounds`)
+  }
+  // Past the schedule the last wait repeats rather than growing without bound.
+  assert.equal(recoveryDelay(99, () => 1), 4_000)
+})
+
+test('a run retries through the schedule and reports the reconnect', async () => {
+  const epipe = () => Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+  // The initial attach fails, then the run's own attempts: two of them fail and
+  // the third reaches a Host that stays up.
+  const h = harness({
+    backoff: [0, 0, 0],
+    relays: [
+      { error: epipe(), tookMs: 20 },
+      { error: epipe(), tookMs: 20 }, { error: epipe(), tookMs: 20 },
+      { reason: 'goodbye' },
+    ],
+  })
+  await h.attacher.attachExisting('main-session', 'sock-a')
+  assert.equal(h.spawned.length, 3, 'every attempt in the run spawned a Host')
+  assert.deepEqual(h.exits, [0], 'the third one succeeded and the window ran to its end')
+  assert.deepEqual(
+    h.reconnects,
+    [{ attempts: 2, elapsedMs: 40 }],
+    'the run reports how many retries it needed and how long the whole run took',
+  )
+  // One run is one burst entry, however many attempts it needed.
+  assert.equal(h.attacher.recoveries, 1)
+})
+
+test('a run gives up only after the whole schedule, then says flapping', async () => {
+  const epipe = () => Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+  const h = harness({
+    backoff: [0, 0, 0],
+    // The initial attach plus one failure per scheduled attempt.
+    relays: [
+      { error: epipe(), tookMs: 20 }, { error: epipe(), tookMs: 20 },
+      { error: epipe(), tookMs: 20 }, { error: epipe(), tookMs: 20 },
+    ],
+  })
+  await assert.rejects(() => h.attacher.attachExisting('main-session', 'sock-a'), /flapping main-session/)
+  assert.equal(h.spawned.length, 3, 'every attempt in the schedule was tried before giving up')
+  assert.deepEqual(h.reconnects, [], 'nothing recovered, so nothing is reported')
+})
+
+test('a real fault still ends the run on the spot', async () => {
+  const h = harness({
+    backoff: [0, 0, 0],
+    relays: [
+      { error: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }), tookMs: 20 },
+      { error: Object.assign(new Error('nope'), { code: 'EACCES' }) },
+    ],
+  })
+  await assert.rejects(() => h.attacher.attachExisting('main-session', 'sock-a'), /nope/)
+  assert.equal(h.spawned.length, 1, 'the schedule does not swallow a real failure')
+})
+
+test('the burst breaker counts runs, not attempts', async () => {
+  const epipe = () => Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })
+  const h = harness({
+    backoff: [0, 0, 0],
+    burst: { windowMs: 60_000, limit: 1 },
+    relays: [
+      { error: epipe(), tookMs: 20 }, { error: epipe(), tookMs: 20 },
+      { error: epipe(), tookMs: 20 }, { error: epipe(), tookMs: 20 },
+      // The refused run still fails its initial attach before asking to recover.
+      { error: epipe(), tookMs: 20 },
+    ],
+  })
+  await assert.rejects(() => h.attacher.attachExisting('main-session', 'sock-a'), /flapping/)
+  assert.equal(h.spawned.length, 3, 'the single allowed run still spent its whole schedule')
+  await assert.rejects(
+    () => h.attacher.attachExisting('main-session', 'sock-b'),
+    /flapping/,
+    'a second run inside the window is refused before spawning',
+  )
+  assert.equal(h.spawned.length, 3, 'and it spawns nothing')
 })

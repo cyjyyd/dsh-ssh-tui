@@ -27,6 +27,32 @@ export const HOST_START_TIMEOUT_MS = 15_000
 /** Pause between "is the old Host gone yet" checks while recovering. */
 const RECOVERY_POLL_MS = 150
 
+/**
+ * Waits between the automatic re-attach attempts of one run.
+ *
+ * A single retry was not enough for a link that flaps for half a minute: the
+ * burst breaker cut the run at three tries inside ten seconds and told the user
+ * to come back later, when one more try would have caught the link. One run now
+ * backs off — 250ms, 500ms, 1s, 2s, 4s — and only then gives up; the breaker
+ * still stops *runs* from fighting each other, which is what it was for.
+ */
+export const RECOVERY_BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000] as const
+
+/**
+ * How long to wait before attempt `attempt` (0-based), with jitter.
+ *
+ * Two windows that drop together must not retry in lockstep, so each wait is
+ * taken from the upper half of its base: 0.5–1× the nominal delay.
+ * @param attempt - 0 for the first retry after the initial failure.
+ * @param random - injectable for tests.
+ * @returns milliseconds to wait.
+ */
+export function recoveryDelay(attempt: number, random: () => number = Math.random): number {
+  const last = RECOVERY_BACKOFF_MS[RECOVERY_BACKOFF_MS.length - 1] ?? 4_000
+  const base = RECOVERY_BACKOFF_MS[Math.max(0, Math.min(attempt, RECOVERY_BACKOFF_MS.length - 1))] ?? last
+  return Math.round(base * (0.5 + random() * 0.5))
+}
+
 /** True when a relay error means the peer vanished rather than a real fault. */
 export function attachPeerVanished(error: unknown, elapsedMs: number): boolean {
   if (elapsedMs >= ATTACH_RECOVERY_WINDOW_MS) return false
@@ -88,6 +114,12 @@ export interface AttacherDeps {
   debug?: boolean
   /** Override the burst breaker window/limit (tests). */
   burst?: { windowMs?: number; limit?: number }
+  /** Override the backoff schedule (tests); defaults to {@link RECOVERY_BACKOFF_MS}. */
+  backoff?: readonly number[]
+  /** Jitter source for {@link recoveryDelay} (tests). */
+  random?: () => number
+  /** One run recovered after at least one retry; the Host side reports it. */
+  onReconnected?(info: { attempts: number; elapsedMs: number }): void
 }
 
 export interface Attacher {
@@ -150,10 +182,9 @@ export function createAttacher(deps: AttacherDeps): Attacher {
   }
 
   /** Wait out a Host that was mid-dispose, then take the normal path again. */
-  const recoverAttach = async (sessionId: string): Promise<void> => {
-    if (!recoveryAllowed()) throw new Error(deps.messages.flapping(sessionId))
-    if (deps.debug === true) deps.report(deps.messages.recovering(sessionId))
-    // Between attempts the TTY is back in cooked mode: without this, a cursor
+  /** Let a Host that was mid-dispose finish before starting a fresh one. */
+  const waitOutLiveHost = async (sessionId: string): Promise<void> => {
+    // The TTY is back in cooked mode between attempts: without this, a cursor
     // reply still owed to the relay that just ended is echoed as `^[[17;1R`
     // for the whole (up to 3s) wait.
     deps.quiet()
@@ -163,7 +194,40 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       if (live === undefined || now() >= deadline) break
       await new Promise(resolve => setTimeout(resolve, RECOVERY_POLL_MS))
     }
-    await spawnHostAndRelay(sessionId, false)
+  }
+
+  /**
+   * Attach again, with the bounded backoff in {@link RECOVERY_BACKOFF_MS}.
+   *
+   * One run gets the whole schedule; the burst breaker counts *runs*, not
+   * attempts, so its guard against two windows fighting stays exactly as it
+   * was while a single flapping link is no longer cut short. A real fault (not
+   * a vanished peer) still ends the run on the spot: retrying it would only
+   * repeat the same failure.
+   */
+  const recoverAttach = async (sessionId: string): Promise<void> => {
+    if (!recoveryAllowed()) throw new Error(deps.messages.flapping(sessionId))
+    const schedule = deps.backoff ?? RECOVERY_BACKOFF_MS
+    const startedAt = now()
+    for (let attempt = 0; attempt < Math.max(1, schedule.length); attempt += 1) {
+      if (attempt > 0) {
+        const wait = recoveryDelay(attempt - 1, deps.random)
+        if (deps.debug === true) deps.report(`${deps.messages.recovering(sessionId)} [${attempt + 1}/${schedule.length} +${wait}ms]`)
+        await new Promise(resolve => setTimeout(resolve, wait))
+      } else if (deps.debug === true) {
+        deps.report(deps.messages.recovering(sessionId))
+      }
+      await waitOutLiveHost(sessionId)
+      const attemptStartedAt = now()
+      try {
+        await spawnHostAndRelay(sessionId, false)
+        if (attempt > 0) deps.onReconnected?.({ attempts: attempt, elapsedMs: now() - startedAt })
+        return
+      } catch (error) {
+        if (!attachPeerVanished(error, now() - attemptStartedAt)) throw error
+      }
+    }
+    throw new Error(deps.messages.flapping(sessionId))
   }
 
   const attachExisting = async (
