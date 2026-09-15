@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
+import { errorText, systemText, tick, waitForError, waitForText } from './wait.mjs'
 import { SshTui } from '../lib/tui.js'
 
 const ROSTER = [
@@ -39,7 +40,6 @@ function fixture(ctxOverrides = {}) {
   return { tui: new SshTui(ctx, agent, { sessionId: 'main-session', color: false }), composed }
 }
 
-const tick = () => new Promise(resolve => setTimeout(resolve, 20))
 
 /**
  * Wait for `/mode fix` to land its write instead of sleeping once.
@@ -59,8 +59,6 @@ async function waitForPatch(path, pattern, tui, timeoutMs = 3_000) {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
 }
-const systemText = tui => tui.rows.filter(row => row.kind === 'system').map(row => String(row.text)).join('\n')
-const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row => String(row.text)).join('\n')
 
 test('a missing roster is reported at the patch and repaired by /mode fix', async () => {
   setLocale('zh')
@@ -76,7 +74,7 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     assert.equal(composed.length, 0)
 
     tui.runCommand('/mode')
-    await tick()
+    await waitForText(tui, 'agentPresets 服务不可用')
     const report = errorText(tui)
     assert.ok(report.includes('agentPresets 服务不可用'), report)
     assert.ok(report.includes('/mode fix'), report)
@@ -93,7 +91,7 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     // A second repair is a no-op, not a duplicate row.
     const before = tui.rows.length
     tui.runCommand('/mode fix')
-    await tick()
+    await tick(30)
     assert.ok(tui.rows.length > before)
     assert.equal(await readFile(patch, 'utf8'), written, 'a second repair is a no-op, not a duplicate row')
   } finally {
@@ -104,7 +102,7 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
   setLocale('en')
   const en = fixture({ get: () => undefined })
   en.tui.runCommand('/mode')
-  await tick()
+  await waitForText(en.tui, '/mode fix')
   assert.ok(errorText(en.tui).includes('/mode fix'))
   setLocale('zh')
 })
@@ -120,7 +118,7 @@ test('a failing /mode fix reports the path and the error instead of throwing', a
   try {
     const { tui } = fixture({ get: () => undefined })
     tui.runCommand('/mode fix')
-    await tick()
+    await waitForError(tui, '写入')
     assert.ok(errorText(tui).includes('写入'), errorText(tui))
     assert.ok(errorText(tui).includes('cordis.patch.yml'), errorText(tui))
   } finally {
@@ -157,18 +155,18 @@ test('/mode switches by id and by the label the picker shows', async () => {
   setLocale('zh')
   const { tui, composed } = fixture()
   tui.runCommand('/mode minimal')
-  await tick()
+  await waitForText(tui, '极简模式')
   assert.deepEqual(composed, ['minimal'])
   assert.ok(systemText(tui).includes('极简模式'), systemText(tui))
 
   // The localized label is what the user reads in the picker, so it is what
   // they can type back; a user-authored preset keeps its own name.
   tui.runCommand('/mode 智能路由模式')
-  await tick()
+  await waitForText(tui, '智能路由模式')
   assert.deepEqual(composed, ['minimal', 'routing-suite'])
   assert.ok(systemText(tui).includes('智能路由模式'))
   tui.runCommand('/mode PTC 模式')
-  await tick()
+  await waitForError(tui, 'codeRuntime')
   assert.deepEqual(composed, ['minimal', 'routing-suite'], 'a broken preset must not compose')
   assert.ok(errorText(tui).includes('codeRuntime'), errorText(tui))
   setLocale('zh')
@@ -177,7 +175,7 @@ test('/mode switches by id and by the label the picker shows', async () => {
 test('an unknown mode lists the roster ids', async () => {
   const { tui, composed } = fixture()
   tui.runCommand('/mode nope')
-  await tick()
+  await waitForError(tui, 'standard, minimal, ptc, routing-suite')
   assert.deepEqual(composed, [])
   assert.ok(errorText(tui).includes('standard, minimal, ptc, routing-suite'), errorText(tui))
 })

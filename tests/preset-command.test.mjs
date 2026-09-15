@@ -6,6 +6,9 @@ import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import {
+  errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForLastSystem, waitForText,
+} from './wait.mjs'
 
 /**
  * `/preset` drives the same four operations the web client has (list, read,
@@ -64,8 +67,6 @@ function fixture(overrides = {}) {
   return { tui: new SshTui(ctx, agent, { sessionId: 'main-session', color: false }), calls, service }
 }
 
-const tick = () => new Promise(resolve => setTimeout(resolve, 25))
-
 /**
  * Wait for an async write to land instead of sleeping once.
  *
@@ -73,7 +74,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 25))
  * runner that chain finishes after a fixed tick, which read the old file and
  * failed a test whose command had actually succeeded.
  */
-async function waitForText(path, pattern, tui, timeoutMs = 3_000) {
+async function waitForFileText(path, pattern, tui, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const text = await readFile(path, 'utf8').catch(() => '')
@@ -95,14 +96,11 @@ async function waitForBackup(directory, tui, timeoutMs = 3_000) {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
 }
-const systemText = tui => tui.rows.filter(row => row.kind === 'system').map(row => String(row.text)).join('\n')
-const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row => String(row.text)).join('\n')
-
 test('the list names every preset with its trust and flags', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset list')
-  await tick()
+  await waitForText(tui, 'Agent presets')
   const text = systemText(tui)
   assert.match(text, /Agent presets：2 个 · 默认 standard/u)
   assert.match(text, /standard · 标准模式 · 出厂 · 默认/u)
@@ -114,7 +112,7 @@ test('a read-only deployment says so instead of offering writes', async () => {
   setLocale('zh')
   const { tui } = fixture({ service: { authorable: false } })
   tui.runCommand('/preset list')
-  await tick()
+  await waitForText(tui, '只读')
   assert.match(systemText(tui), /只读：本部署未配置用户可写的 preset root|只读：本部署未配置用户可写的 preset/u)
 })
 
@@ -122,7 +120,7 @@ test('show prints the metadata and the composition rows', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset show standard')
-  await tick()
+  await waitForText(tui, '@deepseek-ai/dsh-persona')
   const text = systemText(tui)
   assert.match(text, /preset standard：标准模式/u)
   assert.match(text, /出厂 · order 1/u)
@@ -139,7 +137,7 @@ test('show reports a broken preset instead of its rows', async () => {
     broken: 'the composition file agent.cordis.yml is missing',
   } })
   tui.runCommand('/preset show broken-one')
-  await tick()
+  await waitForText(tui, '不可用：the composition file')
   assert.match(systemText(tui), /不可用：the composition file/u)
 })
 
@@ -147,7 +145,7 @@ test('an unknown id lists what is available', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset show nope')
-  await tick()
+  await waitForError(tui, '未知的 preset')
   assert.match(errorText(tui), /未知的 preset：nope（可用：standard, routing-suite）/u)
 })
 
@@ -155,7 +153,7 @@ test('copy calls the service and points at /mode', async () => {
   setLocale('zh')
   const { tui, calls } = fixture()
   tui.runCommand('/preset copy standard review-only 只读审查')
-  await tick()
+  await waitForText(tui, '已复制 standard → review-only')
   assert.deepEqual(calls.copy, [{ from: 'standard', id: 'review-only', name: '只读审查' }])
   const text = systemText(tui)
   assert.match(text, /已复制 standard → review-only · 只读审查/u)
@@ -167,16 +165,16 @@ test('copy refusals never reach the service', async () => {
   const { tui, calls } = fixture()
   // One token, so the id is what is invalid and "Id" is not read as a name.
   tui.runCommand('/preset copy standard Bad-Id')
-  await tick()
+  await waitForError(tui, 'id 不合法')
   assert.match(errorText(tui), /id 不合法：Bad-Id/u)
   tui.runCommand('/preset copy standard routing-suite')
-  await tick()
+  await waitForError(tui, 'id 已被占用')
   assert.match(errorText(tui), /id 已被占用：routing-suite/u)
   tui.runCommand('/preset copy ghost fresh')
-  await tick()
+  await waitForError(tui, '找不到来源 preset：ghost')
   assert.match(errorText(tui), /找不到来源 preset：ghost/u)
   tui.runCommand('/preset copy')
-  await tick()
+  await waitForError(tui, '找不到来源 preset')
   assert.match(errorText(tui), /找不到来源 preset/u)
   assert.deepEqual(calls.copy, [], 'a refused plan never calls out')
 })
@@ -185,7 +183,7 @@ test('a shipped preset is refused by the plan, not by the service error', async 
   setLocale('zh')
   const { tui, calls } = fixture()
   tui.runCommand('/preset delete standard')
-  await tick()
+  await waitForError(tui, '出厂 preset 不能修改或删除')
   assert.match(errorText(tui), /出厂 preset 不能修改或删除：standard/u)
   assert.deepEqual(calls.remove, [])
 })
@@ -198,18 +196,17 @@ test('delete asks once and only then calls the service', async () => {
       id: 'mine', trust: 'user', path: join(home, 'mine', 'agent.cordis.yml'), name: '我的预设',
     } })
     tui.runCommand('/preset delete mine')
-    await tick()
-    assert.equal(tui.dialog?.kind, 'confirm')
+    await waitForDialog(tui, 'confirm')
     assert.match(String(tui.dialog.prompt), /删除 preset mine/u)
     tui.handleChar('n')
-    await tick()
+    await waitForText(tui, '已取消，未删除任何内容')
     assert.deepEqual(calls.remove, [], 'cancelling deletes nothing')
     assert.match(systemText(tui), /已取消，未删除任何内容/u)
 
     tui.runCommand('/preset delete mine')
-    await tick()
+    await waitForDialog(tui, 'confirm')
     tui.handleChar('y')
-    await tick()
+    await waitForText(tui, '已删除 preset mine')
     assert.deepEqual(calls.remove, ['mine'])
     assert.match(systemText(tui), /已删除 preset mine/u)
   } finally {
@@ -229,7 +226,7 @@ test('renaming writes preset.yml beside a backup and keeps the other fields', as
     } })
 
     tui.runCommand('/preset rename mine 只读审查')
-    const written = await waitForText(join(directory, 'preset.yml'), /name: 只读审查/u, tui)
+    const written = await waitForFileText(join(directory, 'preset.yml'), /name: 只读审查/u, tui)
     assert.match(written, /description: 旧描述/u, 'the description survives a rename')
     assert.match(written, /order: 3/u, 'order survives')
     const backups = (await waitForBackup(directory, tui)).filter(name => name.includes('.bak-'))
@@ -238,7 +235,7 @@ test('renaming writes preset.yml beside a backup and keeps the other fields', as
     assert.match(systemText(tui), /原文件备份/u)
 
     tui.runCommand('/preset describe mine 新的描述')
-    const described = await waitForText(join(directory, 'preset.yml'), /description: 新的描述/u, tui)
+    const described = await waitForFileText(join(directory, 'preset.yml'), /description: 新的描述/u, tui)
     assert.match(described, /name: 只读审查/u, 'the name survives a description edit')
     assert.match(described, /description: 新的描述/u)
   } finally {
@@ -250,10 +247,10 @@ test('renaming without a value, or a shipped preset, is refused', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset rename routing-suite')
-  await tick()
+  await waitForError(tui, '需要一个新的值')
   assert.match(errorText(tui), /需要一个新的值/u)
   tui.runCommand('/preset rename standard 新名字')
-  await tick()
+  await waitForError(tui, '出厂 preset 不能修改或删除')
   assert.match(errorText(tui), /出厂 preset 不能修改或删除：standard/u)
 })
 
@@ -266,13 +263,13 @@ test('an older host degrades with a clear message instead of throwing', async ()
     read: async () => 'rows:\n  - @deepseek-ai/dsh-persona\n',
   } })
   tui.runCommand('/preset copy standard fresh')
-  await tick()
+  await waitForError(tui, '不支持该操作：copy')
   assert.match(errorText(tui), /不支持该操作：copy/u)
   tui.runCommand('/preset delete routing-suite')
-  await tick()
+  await waitForError(tui, '不支持该操作：delete')
   assert.match(errorText(tui), /不支持该操作：delete/u)
   tui.runCommand('/preset show standard')
-  await tick()
+  await waitForText(tui, '@deepseek-ai/dsh-persona')
   const text = systemText(tui)
   assert.match(text, /没有 compositionInventory/u)
   assert.match(text, /@deepseek-ai\/dsh-persona/u, 'the raw document still answers show')
@@ -282,7 +279,7 @@ test('a profile without the preset service points at /mode fix', async () => {
   setLocale('zh')
   const { tui } = fixture({ noService: true })
   tui.runCommand('/preset list')
-  await tick()
+  await waitForError(tui, 'agentPresets 服务不可用')
   const text = errorText(tui)
   assert.match(text, /agentPresets 服务不可用/u)
   assert.match(text, /\/mode fix/u)
@@ -292,7 +289,7 @@ test('an unknown subcommand lists the surface', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset frobnicate')
-  await tick()
+  await waitForError(tui, '未知的子命令')
   assert.match(errorText(tui), /未知的子命令：frobnicate（可用：list \/ show \/ copy \/ rename \/ describe \/ delete）/u)
 })
 
@@ -317,15 +314,13 @@ test('the wizard shows a preset and then its composition', async () => {
   setLocale('zh')
   const { tui } = fixture()
   tui.runCommand('/preset')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'questions')
+  await waitForDialog(tui, 'questions')
   assert.deepEqual(pickerLabels(tui), ['standard · 标准模式', 'routing-suite · 智能路由模式'])
   choose(tui, 'standard · 标准模式')
-  await tick()
+  await waitForDialog(tui, 'questions')
   assert.match(String(tui.dialog?.question?.question ?? ''), /preset standard（标准模式）：要做什么/u)
   choose(tui, '查看组成（有哪些行）')
-  await tick()
-  assert.match(systemText(tui), /@deepseek-ai\/dsh-persona（id persona）/u)
+  await waitForText(tui, '@deepseek-ai/dsh-persona（id persona）')
 })
 
 test('the wizard copies after asking for an id and an optional name', async () => {
@@ -334,19 +329,19 @@ test('the wizard copies after asking for an id and an optional name', async () =
   tui.runCommand('/preset')
   await tick()
   choose(tui, 'standard · 标准模式')
-  await tick()
+  await waitForDialog(tui, 'questions')
   choose(tui, '复制一份（web 端同款创建方式）')
-  await tick()
+  await waitForDialog(tui, 'questions')
   tui.handleChar('r')
   tui.handleChar('e')
   tui.handleChar('v')
   tui.handleChar('\r')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'questions', 'the name step is a free-form question')
+  await waitForDialog(tui, 'questions')
+  assert.match(String(tui.dialog?.question?.question ?? ''), /显示名/u, 'the name step is a free-form question')
   tui.handleChar('只')
   tui.handleChar('读')
   tui.handleChar('\r')
-  await tick()
+  await waitForText(tui, '已复制 standard → rev')
   assert.deepEqual(calls.copy, [{ from: 'standard', id: 'rev', name: '只读' }])
   assert.match(systemText(tui), /已复制 standard → rev · 只读/u)
 })
@@ -364,19 +359,19 @@ test('the wizard renames a user preset and refuses a shipped one', async () => {
     tui.runCommand('/preset')
     await tick()
     choose(tui, 'mine · 旧名字')
-    await tick()
+    await waitForDialog(tui, 'questions')
     choose(tui, '改显示名')
-    await tick()
+    await waitForDialog(tui, 'questions')
     tui.handleChar('新')
     tui.handleChar('\r')
-    await waitForText(join(directory, 'preset.yml'), /name: 新/u, tui)
+    await waitForFileText(join(directory, 'preset.yml'), /name: 新/u, tui)
     assert.match(systemText(tui), /已更新 mine 的名称/u)
 
     // A shipped preset offers no rename/delete action at all.
     tui.runCommand('/preset')
     await tick()
     choose(tui, 'standard · 标准模式')
-    await tick()
+    await waitForDialog(tui, 'questions')
     const actions = pickerLabels(tui)
     assert.ok(actions.includes('查看组成（有哪些行）'))
     assert.deepEqual(actions.filter(label => /改显示名|改描述|删除/.test(label)), [])
@@ -395,12 +390,11 @@ test('the wizard deletes only after the same confirmation', async () => {
     tui.runCommand('/preset')
     await tick()
     choose(tui, 'mine · 我的')
-    await tick()
+    await waitForDialog(tui, 'questions')
     choose(tui, '删除（仅用户层）')
-    await tick()
-    assert.equal(tui.dialog?.kind, 'confirm', 'the wizard still confirms the delete')
+    await waitForDialog(tui, 'confirm')
     tui.handleChar('y')
-    await tick()
+    await waitForText(tui, '已删除 preset mine')
     assert.deepEqual(calls.remove, ['mine'])
   } finally {
     await rm(home, { recursive: true, force: true })
@@ -410,12 +404,11 @@ test('the wizard deletes only after the same confirmation', async () => {
 test('backing out of the wizard writes nothing', async () => {
   setLocale('zh')
   const { tui, calls } = fixture()
-  const lastSystem = () => String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const lastSystem = () => lastSystemText(tui)
   tui.runCommand('/preset')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'questions')
+  await waitForDialog(tui, 'questions')
   tui.handleChar('\x1b')
-  await tick()
+  await waitForLastSystem(tui, '已取消，未做任何改动')
   assert.match(lastSystem(), /已取消，未做任何改动/u)
   assert.deepEqual(calls.copy, [])
   assert.deepEqual(calls.remove, [])
@@ -429,7 +422,7 @@ test('backing out of the wizard writes nothing', async () => {
   choose(tui, '改描述')
   await tick()
   tui.handleChar('\x1b')
-  await tick()
+  await waitForLastSystem(tui, '已取消，未做任何改动')
   assert.match(lastSystem(), /已取消，未做任何改动/u)
   assert.equal(errorText(tui), '', 'a cancel must not surface as an error')
 })
@@ -440,6 +433,6 @@ test('a read-only deployment offers no write action in the wizard', async () => 
   tui.runCommand('/preset')
   await tick()
   choose(tui, 'routing-suite · 智能路由模式')
-  await tick()
+  await waitForDialog(tui, 'questions')
   assert.deepEqual(pickerLabels(tui), ['查看组成（有哪些行）'])
 })

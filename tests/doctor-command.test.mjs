@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
+import { errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForText } from './wait.mjs'
 import { ROSTER_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { SshTui } from '../lib/tui.js'
 
@@ -22,9 +23,7 @@ function fixture(ctxOverrides = {}) {
   return new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
 }
 
-const tick = () => new Promise(resolve => setTimeout(resolve, 30))
-const systemText = tui => tui.rows.filter(row => row.kind === 'system').map(row => String(row.text)).join('\n')
-const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row => String(row.text)).join('\n')
+
 
 /**
  * Read a file the command under test writes, polling instead of sleeping once.
@@ -34,17 +33,22 @@ const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row =>
  * Windows runner (the file appeared after the assertion had already read), so
  * the tests wait for the result and report the transcript when it never comes.
  */
-async function writtenPatch(path, tui, timeoutMs = 3_000) {
+async function writtenPatch(path, expect, tui, timeoutMs = 4_000) {
+  // A string means "wait until the file is exactly this" — `includes` would
+  // also match a file that still carries an extra copy the repair removes,
+  // which is the case this test is about. A RegExp waits for a marker.
+  const matches = text => (typeof expect === 'string' ? text === expect : expect.test(text))
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    try {
-      return await readFile(path, 'utf8')
-    } catch {
-      if (Date.now() >= deadline) {
-        assert.fail(`no patch was written to ${path}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
-      }
-      await new Promise(resolve => setTimeout(resolve, 25))
+    // `writePatchWithBackup` copies and then truncate-writes, so a single read
+    // can land on an empty or half-written file; wait for the content the test
+    // is about instead of the first readable bytes.
+    const text = await readFile(path, 'utf8').catch(() => '')
+    if (matches(text)) return text
+    if (Date.now() >= deadline) {
+      assert.fail(`no patch matching ${expect} at ${path}\n--- last content ---\n${text}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
     }
+    await new Promise(resolve => setTimeout(resolve, 25))
   }
 }
 
@@ -70,7 +74,7 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await tick()
+  await waitForText(tui, '名单未组合')
   const report = systemText(tui)
   assert.ok(report.includes('/doctor'), report)
   assert.ok(report.includes('名单未组合'), report)
@@ -79,12 +83,11 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   assert.ok(report.includes('/doctor --fix'), report)
 
   tui.runCommand('/doctor --fix')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'confirm')
+  await waitForDialog(tui, 'confirm')
   tui.handleChar('y')
   await tick()
 
-  const written = await writtenPatch(patch, tui)
+  const written = await writtenPatch(patch, /subagent-model-selection-settings/u, tui)
   assert.ok(written.startsWith(WEB_ROW), 'the user row stays first')
   assert.ok(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), written)
   assert.ok(written.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"), written)
@@ -95,9 +98,8 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   // The services stay missing for this launcher, so the report still fails, but
   // a second --fix has nothing left to write.
   tui.runCommand('/doctor --fix')
-  await tick()
-  assert.ok(systemText(tui).includes('没有需要修复的行'), systemText(tui))
-  assert.equal(await writtenPatch(patch, tui), written)
+  await waitForText(tui, '没有需要修复的行')
+  assert.equal(await writtenPatch(patch, written, tui), written)
 })
 
 test('/doctor reports a duplicate mount by line and --fix merges it', async t => {
@@ -111,7 +113,7 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await tick()
+  await waitForText(tui, '名单未组合')
   const report = systemText(tui)
   assert.ok(report.includes('3 行被挂载两次'), report)
   // The second copy starts after the first block; the detail carries its line.
@@ -121,11 +123,10 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   assert.ok(Math.min(...lines) > blockLines, `duplicates point past the first copy: ${lines}`)
 
   tui.runCommand('/doctor --fix')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'confirm')
+  await waitForDialog(tui, 'confirm')
   tui.handleChar('y')
   await tick()
-  assert.equal(await writtenPatch(patch, tui), `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`)
+  assert.equal(await writtenPatch(patch, `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`, tui), `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`)
 })
 
 test('/fix <row> writes one requested row', async t => {
@@ -135,15 +136,13 @@ test('/fix <row> writes one requested row', async t => {
   const tui = fixture()
 
   tui.runCommand('/fix nonsense')
-  await tick()
-  assert.ok(errorText(tui).includes('未知的行名'), errorText(tui))
+  await waitForError(tui, '未知的行名')
 
   tui.runCommand('/fix code-runtime')
-  await tick()
-  assert.equal(tui.dialog?.kind, 'confirm')
+  await waitForDialog(tui, 'confirm')
   tui.handleChar('y')
   await tick()
-  const written = await writtenPatch(patch, tui)
+  const written = await writtenPatch(patch, /code-runtime-worker-thread/u, tui)
   assert.ok(written.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"), written)
   assert.equal(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), false, 'only the requested row is written')
 })
@@ -157,7 +156,7 @@ test('/doctor lists two dsh-scope installs from its anchors', async t => {
   const tui = fixture({ baseUrl: anchor })
 
   tui.runCommand('/doctor')
-  await tick()
+  await waitForText(tui, '名单未组合')
   const report = systemText(tui)
   assert.ok(report.includes(join(anchor, 'node_modules', '@deepseek-ai', 'dsh-scope')), report)
   // The test runner's own anchor may add the repository's copy; either way the
