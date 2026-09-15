@@ -65,6 +65,36 @@ function fixture(overrides = {}) {
 }
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 25))
+
+/**
+ * Wait for an async write to land instead of sleeping once.
+ *
+ * A rename reads the current metadata and writes beside a backup; on a slower
+ * runner that chain finishes after a fixed tick, which read the old file and
+ * failed a test whose command had actually succeeded.
+ */
+async function waitForText(path, pattern, tui, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const text = await readFile(path, 'utf8').catch(() => '')
+    if (pattern.test(text)) return text
+    if (Date.now() >= deadline) {
+      assert.fail(`timed out waiting for ${pattern} in ${path}; last content:\n${text}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+
+/** Wait until the directory holds a backup of the preset metadata. */
+async function waitForBackup(directory, tui, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const names = await readdir(directory).catch(() => [])
+    if (names.some(name => name.includes('.bak-'))) return names
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for a backup in ${directory}: ${names.join(', ')}`)
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
 const systemText = tui => tui.rows.filter(row => row.kind === 'system').map(row => String(row.text)).join('\n')
 const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row => String(row.text)).join('\n')
 
@@ -199,19 +229,16 @@ test('renaming writes preset.yml beside a backup and keeps the other fields', as
     } })
 
     tui.runCommand('/preset rename mine 只读审查')
-    await tick()
-    const written = await readFile(join(directory, 'preset.yml'), 'utf8')
-    assert.match(written, /name: 只读审查/u)
+    const written = await waitForText(join(directory, 'preset.yml'), /name: 只读审查/u, tui)
     assert.match(written, /description: 旧描述/u, 'the description survives a rename')
     assert.match(written, /order: 3/u, 'order survives')
-    const backups = (await readdir(directory)).filter(name => name.includes('.bak-'))
+    const backups = (await waitForBackup(directory, tui)).filter(name => name.includes('.bak-'))
     assert.equal(backups.length, 1, 'the previous file is kept')
     assert.match(systemText(tui), /已更新 mine 的名称/u)
     assert.match(systemText(tui), /原文件备份/u)
 
     tui.runCommand('/preset describe mine 新的描述')
-    await tick()
-    const described = await readFile(join(directory, 'preset.yml'), 'utf8')
+    const described = await waitForText(join(directory, 'preset.yml'), /description: 新的描述/u, tui)
     assert.match(described, /name: 只读审查/u, 'the name survives a description edit')
     assert.match(described, /description: 新的描述/u)
   } finally {
@@ -342,8 +369,7 @@ test('the wizard renames a user preset and refuses a shipped one', async () => {
     await tick()
     tui.handleChar('新')
     tui.handleChar('\r')
-    await tick()
-    assert.match(await readFile(join(directory, 'preset.yml'), 'utf8'), /name: 新/u)
+    await waitForText(join(directory, 'preset.yml'), /name: 新/u, tui)
     assert.match(systemText(tui), /已更新 mine 的名称/u)
 
     // A shipped preset offers no rename/delete action at all.
