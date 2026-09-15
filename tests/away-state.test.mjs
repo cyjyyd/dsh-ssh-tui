@@ -188,3 +188,58 @@ test('a rejection from the gap is visible in the transcript after reconnecting',
   )
   assert.ok(frame.includes('python deploy.py'), 'and which command it was')
 })
+
+/**
+ * The reconnect notice: the user comes back and is told that they were away,
+ * for how long, and how often this Host has been reconnected.
+ */
+const fakeDisplay = () => ({ attached: true, sendStdout() {}, sendGoodbye() {}, close: async () => {} })
+const reconnectRows = tui => tui.rows
+  .filter(row => row.kind === 'system' && String(row.text).includes('已重连'))
+  .map(row => String(row.text))
+
+test('a reconnect is announced once, with the count and the time away', async () => {
+  const tui = detachedTui()
+  // The boot attach is not a reconnect: nothing was dropped yet.
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  assert.deepEqual(reconnectRows(tui), [], 'the first attach is not a reconnect')
+
+  // The link drops with the Host busy, which is the case that keeps it alive.
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  await delay(1_100)
+  tui.agent.status = 'idle'
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+
+  assert.equal(reconnectRows(tui).length, 1, 'one drop, one notice')
+  assert.match(reconnectRows(tui)[0], /^已重连 1 次 · 断开 \d+s$/u)
+
+  // A second gap counts up, and the notice says so separately.
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  await delay(150)
+  tui.agent.status = 'idle'
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  assert.equal(reconnectRows(tui).length, 2, 'the second gap is its own notice')
+  assert.match(reconnectRows(tui)[1], /^已重连 2 次 · 断开 \d+s$/u)
+})
+
+test('a resize while detached is still a reconnect, and does not double-count', async () => {
+  const tui = detachedTui()
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  tui.agent.status = 'running'
+  await tui.handleHangup()
+  tui.agent.status = 'idle'
+
+  // The Host learns the new size before the relay says HELLO: that path also
+  // attaches, and must be the one that reports the reconnect.
+  tui.displayHost = fakeDisplay()
+  tui.attachRelayDisplay()
+  // A later resize with the display already attached must not add another row.
+  tui.attachRelayDisplay()
+  assert.equal(reconnectRows(tui).length, 1, 'a re-attach of a live display is not a new reconnect')
+})

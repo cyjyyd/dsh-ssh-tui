@@ -770,6 +770,7 @@ export const en: Record<string, string> = {
   'attach.connecting': 'Attaching to session {session}…',
   'attach.recovering': 'The background Host is finishing up; retrying to attach {session}…',
   'attach.replaced': 'Session {session} is now displayed in another terminal; closing this window.',
+  'attach.reconnected': 'reconnected {count} times · away {away}',
   'attach.flapping': 'The display for session {session} keeps being taken over; automatic reconnect stopped. Attach again when the other window is idle.',
   'attach.zombie': 'Session {session} pid {pid} is alive but the display socket is unreachable. If that process is dead, --resume from the log; do not start a second Host.',
 

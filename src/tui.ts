@@ -756,10 +756,10 @@ export interface TuiController {
 }
 
 /**
- * How long ago a cached verdict was produced, in the shortest useful unit.
- * Locale-neutral on purpose: `12s` / `3m` / `1h` read the same in both catalogs.
+ * A short duration in the shortest useful unit: `12s` / `3m` / `1h`.
+ * Locale-neutral on purpose — it reads the same in both catalogs.
  */
-function formatCacheAge(ageMs: number): string {
+function formatShortDuration(ageMs: number): string {
   const seconds = Math.max(0, Math.round(ageMs / 1000))
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.round(seconds / 60)
@@ -1196,6 +1196,10 @@ export class SshTui {
   private forceFullPaint = false
   /** Highest row the last budgeted frame could not paint, resumed next tick. */
   private paintResume: number | undefined
+  /** How many times a display has come back after a drop in this Host's life. */
+  private displayDrops = 0
+  /** When the display went away, so the reconnect can say how long it was gone. */
+  private detachedAt: number | undefined
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -2091,6 +2095,9 @@ export class SshTui {
   async handleHangup(): Promise<void> {
     if (this.hangingUp || this.disposed) return
     this.hangingUp = true
+    // The one place a real detach starts from, so the reconnect notice can say
+    // how long the user was away. A boot attach never sets it.
+    this.detachedAt ??= Date.now()
     this.reattachedDuringHangup = false
     ignoreFurtherHangupSignals()
     this.detachDisplay()
@@ -2308,6 +2315,18 @@ export class SshTui {
     this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.forceFullPaint = true
     this.dirty = true
+    // The user is back: say so, with how many times this Host has been
+    // reconnected and how long this gap lasted. Pushed before the paint so the
+    // frame that follows carries it.
+    if (this.detachedAt !== undefined) {
+      this.displayDrops += 1
+      const away = Date.now() - this.detachedAt
+      this.detachedAt = undefined
+      this.pushRow({
+        kind: 'system',
+        text: t('attach.reconnected', { count: this.displayDrops, away: formatShortDuration(away) }),
+      })
+    }
     this.paint()
     this.startRenderTimer()
     void this.onReattach?.()
@@ -5421,7 +5440,7 @@ export class SshTui {
           reason,
         })
       : t('approval.cacheHitRow', {
-          age: formatCacheAge(fromCache.ageMs),
+          age: formatShortDuration(fromCache.ageMs),
           verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
           command: clipped,
           risk,
