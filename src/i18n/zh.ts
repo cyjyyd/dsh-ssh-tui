@@ -885,6 +885,7 @@ export const zh: Record<string, string> = {
   'compact.editsFiles': '已编辑 {files} 个文件',
   'tool.repeatCount': '×{count}',
   'tool.readStats': '{chars} 字 · {lines} 行',
+  'copy.selection': '已复制选中文本：{chars} 字符 / {lines} 行',
   'copy.ok': '已复制 {chars} 字到本机剪贴板（{source}）',
   'copy.empty': '没有可复制的内容。先用空输入 ↑/↓ 选一张卡片，或等模型回复。',
   'copy.sourceFocused': '焦点卡片',

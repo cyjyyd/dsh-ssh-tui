@@ -176,6 +176,7 @@ import {
   repeatToWidth,
   sanitizeTerminalText,
   shimmerText,
+  stripAnsi,
   truncate,
   truncateToWidth,
   waitCardCopy,
@@ -185,6 +186,17 @@ import {
   type InputView,
   type TextSegment,
 } from './term-text.js'
+import {
+  clampSelection,
+  offsetAfterColumn,
+  offsetAtColumn,
+  orderPoints,
+  selectionSpans,
+  selectionText,
+  type ScreenSelection,
+  type SelectableLine,
+  type SelectionPoint,
+} from './selection.js'
 import {
   captureHangupSignals,
   advancePaintedRows,
@@ -1155,6 +1167,20 @@ export class SshTui {
   private reattachedDuringHangup = false
   private scrollOffset = 0
   private readonly clickableRows = new Map<number, CollapsibleBlock>()
+  /**
+   * The transcript as painted, for free-form selection. Only the lines that came
+   * from a model reply are copyable: the mouse belongs to the TUI, so dragging
+   * cannot reach the terminal's own selection, and this is what replaces it.
+   */
+  private selectableLines: { raw: string; copyable: boolean }[] = []
+  /** Screen row (1-based) of the first transcript line in the last frame. */
+  private transcriptTopScreenY = 1
+  /** Where a drag started; the run it belongs to decides what can be selected. */
+  private mouseAnchor: SelectionPoint | undefined
+  /** The drag being painted in reverse video right now. */
+  private mouseSelection: ScreenSelection | undefined
+  /** A press that has not moved yet: a release without motion is still a click. */
+  private pendingMouseClick: { y: number; x: number } | undefined
   private readonly paintedLinkHitsByRow = new Map<number, ReturnType<typeof paintedLinkHits>>()
   private copyYank = ''
   /** Last OSC-52 payload (tests; empty when nothing has been copied). */
@@ -1299,7 +1325,7 @@ export class SshTui {
     process.stdout.on('error', this.handleIoError)
     process.stdin.on('error', this.handleIoError)
 
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.render()
     this.updateTerminalTitle()
     void this.calibratePaintInterval().finally(() => {
@@ -1838,7 +1864,7 @@ export class SshTui {
     try {
       process.stdout.write('\x1b]0;\x07')
       process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-      process.stdout.write(`\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+      process.stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
     } catch (error) {
       if (!isHangupErrno(error)) {
         try {
@@ -2351,7 +2377,7 @@ export class SshTui {
     this.lastPaintRows = []
     this.lastChromeKey = ''
     this.lastTranscriptStart = -1
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
     this.forceFullPaint = true
     this.dirty = true
     // The user is back: say so, with how many times this Host has been
@@ -3556,6 +3582,15 @@ export class SshTui {
     const visibleRefs = window.visibleRefs
     this.clickableRows.clear()
     this.paintedLinkHitsByRow.clear()
+    this.transcriptTopScreenY = headerLines.length + 1
+    // Kept as painted and stripped only when a drag actually happens: this
+    // runs on every frame, and a mouse event is rare next to a repaint.
+    this.selectableLines = visible.map((line, index) => ({
+      raw: line,
+      // Only a model reply is freely copyable; a tool card, a notice or the
+      // chrome keeps its click behavior instead.
+      copyable: (visibleRefs[index] as { kind?: string } | undefined)?.kind === 'assistant',
+    }))
     for (let index = 0; index < visibleRefs.length; index++) {
       const ref = visibleRefs[index]
       const screenY = headerLines.length + index + 1
@@ -3563,6 +3598,9 @@ export class SshTui {
       const hits = paintedLinkHits(visible[index] ?? '')
       if (hits.length > 0) this.paintedLinkHitsByRow.set(screenY, hits)
     }
+    const visibleWithSelection = this.mouseSelection === undefined
+      ? visible
+      : this.highlightSelection(visible)
     const dockPlan = this.findLivePlanRow()
     if (dockPlan !== undefined && planDockLines.length > 0) {
       const dockTop = headerLines.length + visible.length + 1
@@ -3652,7 +3690,7 @@ export class SshTui {
 
     const paintRows: string[] = [
       ...headerLines,
-      ...visible,
+      ...visibleWithSelection,
       ...planDockLines,
       ...dialogLines,
       inputDivider,
@@ -7190,6 +7228,7 @@ export class SshTui {
     const sgrMouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
     if (sgrMouse !== null) {
       const button = Number(sgrMouse[1])
+      const x = Number(sgrMouse[2])
       const y = Number(sgrMouse[3])
       if (sgrMouse[4] === 'M') {
         if (button === 64) {
@@ -7200,12 +7239,19 @@ export class SshTui {
           this.scrollInspectOrTranscript(-3)
           return
         }
-        if (button === 0) {
-          const x = Number(sgrMouse[2])
-          this.handleMouseClick(y, x)
+        // 32 is "motion with the left button held": a drag over a reply.
+        if (button === 32) {
+          this.extendMouseSelection(y, x)
           return
         }
+        if (button === 0) {
+          this.beginMouseSelection(y, x)
+          return
+        }
+        return
       }
+      // A release ends either a drag (copy what it covered) or a plain click.
+      if (button === 0) this.endMouseSelection(y, x)
       return
     }
     if (combined === '\x1b[5~') {
@@ -8064,6 +8110,96 @@ export class SshTui {
   }
 
   /** Toggle the collapsible row under a click, or copy an OSC-8 link. */
+  /** The painted lines as plain text, for the selection rules. */
+  private plainSelectableLines(): SelectableLine[] {
+    return this.selectableLines.map(line => ({ text: stripAnsi(line.raw), copyable: line.copyable }))
+  }
+
+  /** Screen row from a mouse report to an index into `selectableLines`. */
+  private selectableLineAt(screenY: number): number | undefined {
+    const index = screenY - this.transcriptTopScreenY
+    if (index < 0 || index >= this.selectableLines.length) return undefined
+    return index
+  }
+
+  /**
+   * Left button pressed. The click itself waits for the release: this may turn
+   * into a drag, and a press that never moves must still open a link or toggle
+   * a card exactly as before.
+   */
+  private beginMouseSelection(y: number, x: number): void {
+    this.pendingMouseClick = undefined
+    this.mouseAnchor = undefined
+    if (this.dialog !== undefined) {
+      this.pendingMouseClick = { y, x }
+      return
+    }
+    const line = this.selectableLineAt(y)
+    if (line === undefined || this.selectableLines[line]?.copyable !== true) {
+      this.pendingMouseClick = { y, x }
+      return
+    }
+    this.mouseAnchor = { line, column: Math.max(0, x - 1) }
+    this.mouseSelection = undefined
+  }
+
+  /** The button is held and the pointer moved: extend the drag and repaint it. */
+  private extendMouseSelection(y: number, x: number): void {
+    const anchor = this.mouseAnchor
+    if (anchor === undefined) return
+    const line = this.selectableLineAt(y) ?? (y < this.transcriptTopScreenY ? 0 : this.selectableLines.length - 1)
+    const clamped = clampSelection(this.plainSelectableLines(), anchor, { line, column: Math.max(0, x - 1) })
+    if (clamped === undefined) return
+    const same = this.mouseSelection !== undefined
+      && this.mouseSelection.from.line === clamped.from.line
+      && this.mouseSelection.from.column === clamped.from.column
+      && this.mouseSelection.to.line === clamped.to.line
+      && this.mouseSelection.to.column === clamped.to.column
+    this.mouseSelection = clamped
+    if (!same) this.markDirty()
+  }
+
+  /** Release: copy the dragged text, or perform the click that never became one. */
+  private endMouseSelection(y: number, x: number): void {
+    const anchor = this.mouseAnchor
+    const selection = this.mouseSelection
+    const click = this.pendingMouseClick
+    this.mouseAnchor = undefined
+    this.mouseSelection = undefined
+    this.pendingMouseClick = undefined
+    if (anchor === undefined) {
+      if (click !== undefined) this.handleMouseClick(click.y, click.x)
+      return
+    }
+    const text = selection === undefined ? '' : selectionText(this.plainSelectableLines(), selection)
+    if (text.trim() === '') {
+      // A press that did not really drag is a click, not an empty copy.
+      this.handleMouseClick(y, x)
+      this.markDirty()
+      return
+    }
+    const lines = selection === undefined ? 1 : selection.to.line - selection.from.line + 1
+    this.copyPlainText(text, t('copy.selection', { chars: text.length, lines }))
+    this.markDirty()
+  }
+
+  /** Paint the drag in reverse video; the affected lines drop their colors. */
+  private highlightSelection(visible: readonly string[]): string[] {
+    const selection = this.mouseSelection
+    if (selection === undefined) return [...visible]
+    const plain = this.plainSelectableLines()
+    const spans = selectionSpans(plain, selection)
+    if (spans.length === 0) return [...visible]
+    const lines = [...visible]
+    for (const span of spans) {
+      const text = plain[span.line]?.text ?? ''
+      const startOffset = offsetAtColumn(text, span.start)
+      const endOffset = offsetAfterColumn(text, span.end)
+      lines[span.line] = `${text.slice(0, startOffset)}\x1b[7m${text.slice(startOffset, endOffset)}\x1b[27m${text.slice(endOffset)}`
+    }
+    return lines
+  }
+
   handleMouseClick(y: number, x = 1): void {
     if (this.dialog !== undefined) return
     const hits = this.paintedLinkHitsByRow.get(y)

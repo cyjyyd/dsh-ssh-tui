@@ -885,6 +885,7 @@ export const en: Record<string, string> = {
   'compact.editsFiles': 'edited {files} files',
   'tool.repeatCount': '×{count}',
   'tool.readStats': '{chars} chars · {lines} lines',
+  'copy.selection': 'copied the selection: {chars} chars / {lines} lines',
   'copy.ok': 'Copied {chars} characters to the local clipboard ({source})',
   'copy.empty': 'Nothing to copy. Select a card with empty-input ↑/↓, or wait for a reply.',
   'copy.sourceFocused': 'focused card',
