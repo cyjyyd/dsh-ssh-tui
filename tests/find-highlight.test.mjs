@@ -25,6 +25,11 @@ setLocale('zh')
 function terminal(t, { color }) {
   const previousNoColor = process.env.NO_COLOR
   const previousTerm = process.env.TERM
+  const previousDepth = process.env.DSH_TUI_COLOR_DEPTH
+  // The palette override wins over TERM/NO_COLOR, so a test that means "colour
+  // terminal" has to state the palette too or a forced `none` in the
+  // environment silently turns the assertion into a no-op.
+  process.env.DSH_TUI_COLOR_DEPTH = color ? 'truecolor' : 'none'
   if (color) {
     delete process.env.NO_COLOR
     process.env.TERM = 'xterm-256color'
@@ -37,6 +42,8 @@ function terminal(t, { color }) {
     else process.env.NO_COLOR = previousNoColor
     if (previousTerm === undefined) delete process.env.TERM
     else process.env.TERM = previousTerm
+    if (previousDepth === undefined) delete process.env.DSH_TUI_COLOR_DEPTH
+    else process.env.DSH_TUI_COLOR_DEPTH = previousDepth
   })
 }
 

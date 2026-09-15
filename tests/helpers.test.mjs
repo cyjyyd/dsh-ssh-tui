@@ -2593,6 +2593,9 @@ test('expanding any collapsible card does not leave body glyphs on the input row
 test('tool card colors follow state: green ok, red error, dim shell command', () => {
   const prevTerm = process.env.TERM
   const prevNoColor = process.env.NO_COLOR
+  const prevDepth = process.env.DSH_TUI_COLOR_DEPTH
+  // Same reason as the find tests: the palette override outranks TERM.
+  process.env.DSH_TUI_COLOR_DEPTH = 'truecolor'
   process.env.TERM = 'xterm-256color'
   delete process.env.NO_COLOR
   try {
@@ -2637,6 +2640,8 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
     else process.env.TERM = prevTerm
     if (prevNoColor === undefined) delete process.env.NO_COLOR
     else process.env.NO_COLOR = prevNoColor
+    if (prevDepth === undefined) delete process.env.DSH_TUI_COLOR_DEPTH
+    else process.env.DSH_TUI_COLOR_DEPTH = prevDepth
   }
 })
 

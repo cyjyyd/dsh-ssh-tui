@@ -269,9 +269,12 @@ async function runProbe({ keep, busy, cols, rows }) {
     SSH_TTY: '/dev/pts/9',
     DEEPSEEK_BASE_URL: mock.baseURL,
     DEEPSEEK_API_KEY: 'sk-tui-mock-probe',
-    // The probe asserts reverse video, so the run has to be a color terminal:
-    // inheriting NO_COLOR would silently switch to the `»` marker path.
+    // The probe asserts reverse video, so the run has to be a colour terminal:
+    // inheriting NO_COLOR — or a `DSH_TUI_COLOR_DEPTH=none` from the caller —
+    // would silently switch to the `»` marker path, which is the correct
+    // behaviour for a monochrome terminal and the wrong assertion for this one.
     NO_COLOR: '',
+    DSH_TUI_COLOR_DEPTH: 'truecolor',
   }
   console.log(`probe home: ${home}${keep ? ' (kept)' : ''}`)
   console.log(`probe session: ${sessionId}`)

@@ -54,6 +54,9 @@ test('/language catalog switches chrome and tool titles', () => {
 test('colored tool headers keep zh and en titles after the status dot', () => {
   const prevTerm = process.env.TERM
   const prevNoColor = process.env.NO_COLOR
+  const prevDepth = process.env.DSH_TUI_COLOR_DEPTH
+  // The palette override outranks TERM, so a colour assertion must state it.
+  process.env.DSH_TUI_COLOR_DEPTH = 'truecolor'
   process.env.TERM = 'xterm-256color'
   delete process.env.NO_COLOR
   const paint = (locale, name) => {
@@ -92,6 +95,8 @@ test('colored tool headers keep zh and en titles after the status dot', () => {
     else process.env.TERM = prevTerm
     if (prevNoColor === undefined) delete process.env.NO_COLOR
     else process.env.NO_COLOR = prevNoColor
+    if (prevDepth === undefined) delete process.env.DSH_TUI_COLOR_DEPTH
+    else process.env.DSH_TUI_COLOR_DEPTH = prevDepth
   }
 })
 
