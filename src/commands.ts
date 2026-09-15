@@ -30,6 +30,10 @@ export const LOCAL_COMMANDS = [
   { name: 'copy', key: 'cmd.copy' },
   { name: 'language', key: 'cmd.language' },
   { name: 'lang', key: 'cmd.language', aliasOf: 'language' },
+  // Diagnostics stay at the end of the catalog so the first suggestion screen
+  // keeps the day-to-day commands (a bare `/` shows twelve rows).
+  { name: 'doctor', key: 'cmd.doctor' },
+  { name: 'fix', key: 'cmd.fix' },
   { name: 'dialog-test', key: 'cmd.dialog-test' },
 ] as const
 

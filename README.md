@@ -546,6 +546,14 @@ npm run build
   链路 RTT 与绘制间隔、会话日志格式与大小、本机其它会话的锁，最后是**判定链**——例如
   "会接入后台 Host（pid N），不要另起第二个窗口"、"pid 被回收成别的程序"、
   "通道上留着不响应的 socket 文件，这正是第一次接 EPIPE 的来源"。报 issue 时贴这段即可。
+- **升级后 `/mode` 报「服务不可用」、preset 工具消失**：敲 `/doctor`。它在 `/diag` 的会话事实之外
+  把**部署组合**逐项判定：profile 补丁能否解析、agent-presets 名单与 code-runtime 是否组合
+  （缺哪一行直接点名）、子代理模型选择设置行在不在、有没有行被挂载两次（带行号）、profile 层与
+  bundle 层是否重复挂载、dsh 版本是否在插件声明的兼容表内、是否装着两份 `@deepseek-ai/dsh-scope`
+  （npm 嵌套安装的副本陷阱），以及默认路由与子代理模型是否自洽。每项给「结论 + 证据 + 修复命令」。
+  `/doctor --fix` 会把缺的行补进 `cordis.patch.yml`、把重复的挂载合并掉，写前留
+  `.bak-<时间戳>` 备份，**不动你自己写的 override/disable**，重启 TUI 后生效；只想修一行时用
+  `/fix code-runtime`。与 `/diag` 一样只读本地信息、不外传。
 - **TUI 里进得去、Web 里打不开同一个会话**：会话的写锁（`session.lock`）是内核锁，同时只允许一个写者。
   SSH 断开时那个还在跑轮的 Host 会留着锁，于是 Web 端打开时报
   `resume failed for session "…" is already owned by an active write handle`——从 0.5.10 起

@@ -52,10 +52,18 @@ test('rosterPatchText is idempotent', () => {
   assert.ok(once !== undefined)
   assert.equal(rosterPatchText(once), undefined)
   assert.equal(rosterPatchText(ROSTER_PATCH_BLOCK), undefined)
-  assert.equal(
-    rosterPatchText('- insert:\n    - id: agent-presets\n      name: \'@deepseek-ai/dsh-agent-presets\'\n'),
-    undefined,
-  )
+})
+
+test('a partially mounted roster gains only the rows it lacks', () => {
+  // 0.7: a profile that already mounts the roster row but not the two services
+  // is a broken composition, so the repair tops it up instead of doing nothing.
+  const partial = '- insert:\n    - id: agent-presets\n      name: \'@deepseek-ai/dsh-agent-presets\'\n'
+  const repaired = rosterPatchText(partial)
+  assert.ok(repaired !== undefined)
+  assert.equal(repaired.match(/id: agent-presets/gu)?.length, 1, 'the existing row is not mounted twice')
+  assert.ok(repaired.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"))
+  assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'"))
+  assert.equal(rosterPatchText(repaired), undefined, 'the repair is idempotent')
 })
 
 test('ensureRosterRows creates, then leaves the profile patch alone', async () => {

@@ -63,8 +63,17 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
+import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
-import { ensureRosterRows, rosterPatchPath } from './preset-rows.js'
+import {
+  ensureRosterRows,
+  planDuplicateRepair,
+  planRosterRepair,
+  rosterPatchPath,
+  writePatchWithBackup,
+  ROSTER_ROWS,
+  type RosterRow,
+} from './preset-rows.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
 import {
   QUESTION_OPTION_KEYS,
@@ -1846,6 +1855,145 @@ export class SshTui {
       ...(this.paintIntervalMs === undefined ? {} : { paintIntervalMs: this.paintIntervalMs }),
     })
     this.pushRow({ kind: 'system', text: formatDiag(snapshot).join('\n') })
+    this.markDirty()
+  }
+
+  /**
+   * Whether a host service is registered.
+   *
+   * The typed `ctx.get` knows only the services this plugin depends on;
+   * `/doctor` also probes `codeRuntime`, which the PTC preset mounts and this
+   * plugin deliberately does not depend on, so the lookup is untyped here.
+   */
+  private hasHostService(name: string): boolean {
+    const get = (this.ctx as unknown as { get?: (service: string) => unknown }).get
+    return typeof get === 'function' && get.call(this.ctx, name) !== undefined
+  }
+
+  /** Routing facts for the doctor's self-consistency check. */
+  private doctorRouting(): DoctorRouting | undefined {
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) return undefined
+    const section = settings.get(settingsNamespace('llm-pi-ai')) as LlmPiAiSection | undefined
+    const providers = section?.providers ?? {}
+    const provider = this.currentProvider()
+    const models = Array.isArray(providers[provider]?.models) ? providers[provider]?.models ?? [] : []
+    const model = this.agent.options.model ?? this.selectionRef?.current?.model
+    const sub = this.subagentSelection.current
+    return {
+      provider,
+      ...(model === undefined ? {} : { model }),
+      routes: Object.keys(providers),
+      routeModels: models.map(modelEntryId).filter((id): id is string => id !== undefined),
+      ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+      ...(sub.model === undefined ? {} : { subModel: sub.model }),
+    }
+  }
+
+  /** One collected `/doctor` snapshot, from this process's own services. */
+  private async collectDoctorFacts(profile: string): Promise<DoctorFacts> {
+    const routing = this.doctorRouting()
+    return collectDoctor({
+      profile,
+      dshHome: resolveDshHome(),
+      hostVersion: hostDshVersion(),
+      services: {
+        roster: this.ctx.get('agentPresets') !== undefined,
+        codeRuntime: this.hasHostService('codeRuntime'),
+      },
+      anchors: [process.argv[1], (this.ctx as { baseUrl?: string }).baseUrl],
+      ...(routing === undefined ? {} : { routing }),
+    })
+  }
+
+  /**
+   * `/doctor`: the deployment checkup. `/doctor --fix` then repairs whatever
+   * the report marked fixable, after one confirmation.
+   */
+  private async runDoctorCommand(arg: string, fixRequested: boolean): Promise<void> {
+    const profile = profileFromArgv()
+    const facts = await this.collectDoctorFacts(profile)
+    this.pushRow({ kind: 'system', text: formatDoctorReport(facts, doctorChecks(facts)).join('\n') })
+    this.markDirty()
+    if (!fixRequested) return
+    await this.repairProfilePatch(rowsToRepair(facts), facts)
+  }
+
+  /** `/fix <row>`: repair one named roster row of the profile patch. */
+  private async runFixCommand(arg: string): Promise<void> {
+    const name = arg.trim().toLowerCase()
+    const row = ROSTER_ROWS.find(candidate => candidate.id === name || candidate.name.toLowerCase() === name)
+    if (row === undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: t('doctor.fix.unknownRow', { row: arg.trim(), rows: ROSTER_ROWS.map(candidate => candidate.id).join(', ') }),
+      })
+      this.markDirty()
+      return
+    }
+    await this.repairProfilePatch([row], await this.collectDoctorFacts(profileFromArgv()))
+  }
+
+  /**
+   * Write the planned repairs into the profile patch after one confirmation.
+   *
+   * Only two things are ever changed: rows that are missing get mounted, and an
+   * insert that repeats an earlier one is removed. An override or disable the
+   * user wrote is never touched, and the previous file is kept as a backup.
+   */
+  private async repairProfilePatch(rows: readonly RosterRow[], facts: DoctorFacts): Promise<void> {
+    let text = facts.patch.text
+    const duplicates = facts.patch.readable ? planDuplicateRepair(text) : undefined
+    if (duplicates !== undefined) text = duplicates.text
+    const roster = planRosterRepair(text, rows)
+    if (roster !== undefined) text = roster.text
+    const added = roster?.added ?? []
+    const removed = duplicates?.removed ?? []
+    if (added.length === 0 && removed.length === 0) {
+      this.pushRow({ kind: 'system', text: t('doctor.fix.none') })
+      this.markDirty()
+      return
+    }
+    const changes = [
+      ...added.map(id => `+${id}`),
+      ...removed.map(entry => `-${entry.id} (line ${entry.line})`),
+    ].join(' ')
+    const answer = await new Promise<'y' | 'n' | 'cancel'>(resolve => {
+      this.openConfirm(
+        t('doctor.fix.confirm', { changes }),
+        t('doctor.fix.confirmHint', { path: facts.patchPath }),
+        resolve,
+      )
+    })
+    if (answer !== 'y') {
+      this.pushRow({ kind: 'system', text: t('doctor.fix.cancelled') })
+      this.markDirty()
+      return
+    }
+    try {
+      // A patch that does not exist yet needs no backup: the write creates it
+      // from the template, exactly as the installer would.
+      let backup: string | undefined
+      if (facts.patch.readable) {
+        backup = await writePatchWithBackup(facts.patchPath, text)
+      } else {
+        await ensureRosterRows(facts.dshHome, facts.profile, rows)
+      }
+      this.pushRow({
+        kind: 'system',
+        text: [
+          t('doctor.fix.applied', {
+            added: added.join(', ') || '—',
+            removed: removed.map(entry => entry.id).join(', ') || '—',
+            path: facts.patchPath,
+          }),
+          ...(backup === undefined ? [] : [t('doctor.fix.backup', { path: backup })]),
+          t('doctor.fix.restart', { profile: facts.profile }),
+        ].join('\n'),
+      })
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: t('doctor.fix.failed', { error: errorChain(error) }) })
+    }
     this.markDirty()
   }
 
@@ -7623,6 +7771,18 @@ export class SshTui {
         break
       case 'diag':
         void this.runDiagCommand().catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.markDirty()
+        })
+        break
+      case 'doctor':
+        void this.runDoctorCommand(arg, /--fix|(^|\s)fix(\s|$)/u.test(arg)).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.markDirty()
+        })
+        break
+      case 'fix':
+        void this.runFixCommand(arg).catch((error: unknown) => {
           this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
           this.markDirty()
         })

@@ -321,6 +321,19 @@ The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
   a **verdict chain** ("attaches to the leftover Host (pid N), do not open a second
   window", "the pid was recycled", "a leftover socket file that does not answer — the
   source of the first-attach EPIPE"). Nothing leaves the machine; paste it into an issue.
+- When `/mode` reports a missing service or the preset tools vanish after an upgrade
+  (the 0.6.3 class of configuration regression), run `/doctor`. It judges the
+  **deployment composition** item by item: whether the profile patch parses, whether the
+  agent-presets roster and code-runtime are composed (naming the missing row), whether the
+  subagent model-selection settings row is mounted, whether any row is mounted twice (with
+  its line), whether the profile layer and the bundle layer both mount a row, whether the
+  host version is in the plugin's declared compatibility table, whether two
+  `@deepseek-ai/dsh-scope` installs exist (the nested-install copy trap), and whether the
+  default route and the subagent model are self-consistent. Every item carries its evidence
+  and the command that acts on it. `/doctor --fix` mounts the missing rows and merges
+  duplicates into `cordis.patch.yml`, keeping a `.bak-<timestamp>` beside it and never
+  touching an override or disable you wrote; `/fix code-runtime` repairs one row. A restart
+  picks it up, and like `/diag` nothing leaves the machine.
 - Leftover Host lifetime: the write lock a dropped-but-still-running Host holds is what makes the Web UI refuse the same session (`resume failed for session … is already owned by an active write handle`), and a drop that raced a reattach used to leave the honored-reattach flag set, so the *next* drop was ignored and the session lock kept its stale state. The flag is cleared once a turn runs again, and once the turn the Host stayed for settles it exits within `DSH_TUI_IDLE_EXIT_MS` (default 60s, `0` disables) instead of holding the session for six hours.
 - Subagent route: the identity row always carries `sub:<model>` — the route
   every child inherits — suffixed with the effort when `/subeffort` set one,
