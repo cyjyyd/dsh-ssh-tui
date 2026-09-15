@@ -111,6 +111,26 @@ function assertHomeIsCoherent(home) {
   }
 }
 
+/**
+ * Decode every OSC 52 clipboard write the terminal received. `/copy` and the
+ * drag-select both end here, so this is the only place that proves the text
+ * actually reached the wire rather than just the in-app state.
+ */
+function clipboardWrites(text) {
+  const out = []
+  const pattern = /\x1b\]52;[^;]*;([A-Za-z0-9+/=]*)\x1b\\/gu
+  for (const match of text.matchAll(pattern)) {
+    const payload = match[1] ?? ''
+    if (payload === '') continue
+    try {
+      out.push(Buffer.from(payload, 'base64').toString('utf8'))
+    } catch {
+      // A malformed payload is the assertion's problem, not the parser's.
+    }
+  }
+  return out
+}
+
 async function runProbe({ sessionId, keep, home }) {
   const pty = await loadPty()
   if (pty === undefined) {
@@ -211,6 +231,23 @@ async function runProbe({ sessionId, keep, home }) {
     check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
     check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
 
+    // 4b. /copy error puts the report on the wire: the row kind introduced in
+    //     batch A is only useful if its text reaches the terminal's clipboard.
+    const beforeCopy = output.length
+    term.write('/copy error\r')
+    await waitFor(text => /52;[^;]*;[A-Za-z0-9+/=]+\x1b/u.test(text.slice(beforeCopy)), 20_000, 'the OSC 52 write')
+    const copied = clipboardWrites(output.slice(beforeCopy))
+    check(copied.length >= 1, '/copy error must send an OSC 52 clipboard write')
+    check(
+      copied.some(text => /profile 补丁|profile patch|部署体检|deployment checkup/u.test(text)),
+      `/copy error must send the report itself, got: ${JSON.stringify(copied.map(t => t.slice(0, 60)))}`,
+    )
+
+    // 4c. The mouse modes a drag needs are on the real terminal: `?1000h` alone
+    //     reports presses, so a drag would be invisible without `?1002h`.
+    check(output.includes('\x1b[?1000h'), 'the probe terminal must be asked for mouse presses')
+    check(output.includes('\x1b[?1002h'), 'and for held-button motion, without which a drag never arrives')
+
     // 5. /preset lists the roster read-only. The bare command opens the
     //    wizard (an interactive picker), so the probe drives the explicit
     //    subcommand: it never writes, which makes it safe on a real profile,
@@ -279,7 +316,7 @@ async function runProbe({ sessionId, keep, home }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: boot, resize repaint, /diag, /doctor, /preset, typing, and the /exit handback all behaved')
+  console.log('OK: boot, resize repaint, /diag, /doctor, /copy error, /preset, mouse modes, typing, and the /exit handback all behaved')
   return 0
 }
 
