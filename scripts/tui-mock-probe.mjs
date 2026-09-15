@@ -81,15 +81,14 @@ function clipboardWrites(text) {
  * reply sits, which the mouse reports need as coordinates.
  */
 function screenRows(text) {
-  // Only the newest frame counts: a row chunk carries whatever followed it in
-  // the stream, and an earlier frame's tail would otherwise be read as this
-  // frame's content — which is how a 78-cell line looked unclipped on a 40-cell
-  // terminal. The painter closes a frame by re-enabling autowrap.
-  const lastFrame = text.lastIndexOf('\x1b[?7h')
-  const frame = lastFrame === -1 ? text : text.slice(lastFrame)
+  // Accumulate across frames: the painter only rewrites dirty rows, so the
+  // newest frame usually holds the status line and nothing else. Restricting
+  // the parse to it (tried in 92cad48) lost the reply entirely — the acceptance
+  // run caught it. A row's content ends at the next row marker or at the frame
+  // close, which is what keeps a chunk's tail out of the row.
   const rows = new Map()
   const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
-  for (const match of frame.matchAll(pattern)) {
+  for (const match of text.matchAll(pattern)) {
     rows.set(Number(match[1]), plain(match[2] ?? ''))
   }
   return rows
