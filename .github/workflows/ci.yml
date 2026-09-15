@@ -9,28 +9,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the newest verified host, 0.1.5-rc.1 (npm `latest`);
-        # rc.2 is upstream `next`, and 0.1.2-rc.1 is the oldest supported stack.
-        # Every non-default leg rewrites the @deepseek-ai/dsh-* devDependencies
-        # and resolves from scratch, so each leg installs one coherent host tree
-        # instead of mixing versions (which needs no legacy-peer-deps).
-        dsh: ["0.1.5-rc.1", "0.1.5-rc.2", "0.1.2-rc.1"]
+        # package.json pins the whole dsh family to 0.1.5-rc.2 (upstream `next`).
+        # Pinning it to rc.1 does not resolve: several rc.1 packages peer-range
+        # `^0.1.5-rc.2` siblings (dsh-storage-domain rc.2 wants dsh-invariants
+        # rc.2), so npm nests a second @deepseek-ai/dsh-scope and the agent
+        # runtime loads two module instances — `agent-presets` then refuses to
+        # compose an unscoped context and the TUI never starts. One version for
+        # the whole family keeps a single copy. 0.1.2-rc.1 stays as the oldest
+        # supported stack; 0.1.5-rc.1 (npm `latest`) is still covered because
+        # every non-default leg rewrites the @deepseek-ai/dsh-* devDependencies
+        # and resolves from scratch.
+        dsh: ["0.1.5-rc.2", "0.1.5-rc.1", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
-        if: matrix.dsh != '0.1.5-rc.1'
+        if: matrix.dsh != '0.1.5-rc.2'
         run: |
           node -e "
             const fs = require('node:fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             // The CLI itself is '@deepseek-ai/dsh' (no trailing dash). Missing it
             // left every leg on the newest CLI: a caret prerelease range such as
-            // '^0.1.5-rc.1' resolves to the 'latest' tag (rc.1), not to the
-            // highest satisfying version (rc.2) — so the rc.2 leg ran rc.1 and
-            // the 0.1.2 leg ran a mixed tree.
+            // '^0.1.5-rc.2' resolves to the 'latest' tag (rc.1), not to the
+            // highest satisfying version — so the leg ran the wrong host.
             const hostPackage = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
             for (const name of Object.keys(pkg.devDependencies)) {
               if (hostPackage(name)) pkg.devDependencies[name] = '${{ matrix.dsh }}';
