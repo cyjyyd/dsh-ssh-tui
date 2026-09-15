@@ -813,6 +813,8 @@ export const zh: Record<string, string> = {
   'help.intro5': '/model 切换当前提供商的模型与思考强度；/provider 切换提供商并重选模型（下一次请求生效，无需重启）。',
   'help.intro6': '/setup 只新增或更新某一条 API Key 提供商，不会删掉其它已保存的路由。SuperGrok 走本机 OAuth，不需要填 Key。',
   'help.intro7': '/status 会标明当前是 DeepSeek 官方、SuperGrok 订阅、OpenCode Go / Zen，以及链路、额度窗口、子代理是否与父路由同族。',
+  'keys.report': '键位配置有问题，未生效的部分：{report}',
+  'help.intro9': '按键可改：settings.yaml 的 ssh-tui.keys（动作：pageUp / pageDown / toggleCard / copy / cancel，例 `keys: { pageUp: ctrl+b }`）；冲突或未知的名字会在启动时提示并保持默认。纯行模式：DSH_TUI_LINE_MODE=1（或 ssh-tui.lineMode: true）改为逐事件追加纯文本行，适合屏幕阅读器与日志录制。',
   'help.intro8': '/disconnect pause（默认）忙碌断线暂停当前轮、空闲断线退出；/disconnect continue 忙碌时后台跑完，审批等重连后再弹。/permission 切换权限预设（如 workspace-write 或 danger-full-access）。',
   'help.modelCancel': '模型选择已取消。',
   'help.effortCancel': '思考强度选择已取消。',

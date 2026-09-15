@@ -160,6 +160,11 @@ Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线
 留下的 Host 持有该会话的内核写锁（`session.lock`），而 Web 端打开同一会话时正是被这把锁挡下的
 （`resume failed for session … is already owned by an active write handle`）。所以它**跑完留下来的那一轮后最多再等 1 分钟**
 （`DSH_TUI_IDLE_EXIT_MS`，或 settings.yaml 的 `ssh-tui.idleExit`，毫秒；设 `0`/`off` 恢复旧行为）
+
+按键可改：`ssh-tui.keys`（动作 `pageUp` / `pageDown` / `toggleCard` / `copy` / `cancel`，如 `keys: { pageUp: ctrl+b }`）。
+冲突或未知的名字**不会静默生效**：启动时提示，且该键保持默认或变成无操作。
+纯行模式：`DSH_TUI_LINE_MODE=1`（或 `ssh-tui.lineMode: true`）——不画帧，逐事件追加纯文本行，
+适合屏幕阅读器、`tee` 与录屏；代价是全屏交互（鼠标拖选、卡片展开、`/find` 高亮）不可用。
 就自行退出并让出锁：这段时间够原窗口重连接入，之后 `--resume` 重新打开已落盘的日志。
 完全没有显示器且一直空闲的兜底仍由 `DSH_TUI_DETACHED_IDLE_MS`（默认 6 小时）负责。可选：用 tmux 包一层。
 常驻与接管的可复制配方（tmux / screen / systemd --user / 长任务）见 [`docs/remote-ops.md`](docs/remote-ops.md)；重连后转录里的「已重连 N 次 · 断开 Xs」与「离开 …」两行的语义也在那里。

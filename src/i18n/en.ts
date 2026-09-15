@@ -813,6 +813,8 @@ export const en: Record<string, string> = {
   'help.intro5': '/model changes model and effort for the current provider. /provider switches provider (then model); takes effect on next request without restart.',
   'help.intro6': '/setup adds or updates one API-key provider without wiping others. SuperGrok uses local OAuth; no key.',
   'help.intro7': '/status labels DeepSeek official, SuperGrok, OpenCode Go / Zen, plus link, quota window, and subagent family fit.',
+  'keys.report': 'key bindings not applied: {report}',
+  'help.intro9': 'Keys are rebindable in settings.yaml under ssh-tui.keys (actions: pageUp / pageDown / toggleCard / copy / cancel, e.g. `keys: { pageUp: ctrl+b }`); a conflict or an unknown name is reported at boot and the default stays. Line mode: DSH_TUI_LINE_MODE=1 (or ssh-tui.lineMode: true) appends plain lines per event, for screen readers and log capture.',
   'help.intro8': '/disconnect pause (default) pauses a busy turn on SSH drop and exits when idle; /disconnect continue finishes a busy turn in background and defers approvals. /permission switches presets (e.g. workspace-write or danger-full-access).',
   'help.modelCancel': 'Model picker cancelled.',
   'help.effortCancel': 'Reasoning effort picker cancelled.',

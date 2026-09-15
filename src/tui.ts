@@ -67,6 +67,7 @@ import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput 
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
+import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -665,6 +666,8 @@ export interface TuiConfig {
   headlessDisplay?: boolean
   /** Append events as plain lines instead of painting (see `line-mode`). */
   lineMode?: boolean
+  /** Key overrides, action to key name (see `keymap`). */
+  keys?: Readonly<Record<string, string>>
   /** Hangup policy while busy: pause cancels the turn; continue lets it finish detached. Idle hangup always exits. */
   disconnectPolicy?: DisconnectPolicyName
 }
@@ -790,6 +793,25 @@ export interface TuiController {
  * A short duration in the shortest useful unit: `12s` / `3m` / `1h`.
  * Locale-neutral on purpose — it reads the same in both catalogs.
  */
+/**
+ * The `keys` section of this plugin's settings, if the deployment has one.
+ *
+ * Read once at construction: a keymap that changed under a running session would
+ * move a key mid-use, which is worse than asking for a restart.
+ */
+function readConfiguredKeys(ctx: { get(name: string): unknown }): Record<string, string> {
+  const settings = ctx.get('settings') as { get?: (namespace: string) => unknown } | undefined
+  const section = settings?.get?.(settingsNamespace('ssh-tui'))
+  if (section === null || typeof section !== 'object' || Array.isArray(section)) return {}
+  const keys = (section as { keys?: unknown }).keys
+  if (keys === null || typeof keys !== 'object' || Array.isArray(keys)) return {}
+  const out: Record<string, string> = {}
+  for (const [action, value] of Object.entries(keys as Record<string, unknown>)) {
+    if (typeof value === 'string') out[action] = value
+  }
+  return out
+}
+
 function formatShortDuration(ageMs: number): string {
   const seconds = Math.max(0, Math.round(ageMs / 1000))
   if (seconds < 60) return `${seconds}s`
@@ -1265,6 +1287,8 @@ export class SshTui {
   private readonly colorDepth: ColorDepth
   /** Append events as plain lines instead of painting a framed screen. */
   private readonly lineMode: boolean
+  /** Rebindable actions (see `keymap`); defaults are only replaced on request. */
+  private readonly keymap: ResolvedKeymap
   /**
    * Lines produced before a display attached.
    *
@@ -1331,6 +1355,7 @@ export class SshTui {
     // screen is what makes a screen reader and a `tee` lose events, so it stays
     // off too.
     this.lineMode = config.lineMode === true || lineModeEnabled(process.env)
+    this.keymap = resolveKeymap(config.keys ?? readConfiguredKeys(this.ctx))
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.presetId = config.presetId ?? 'standard'
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
@@ -1347,6 +1372,10 @@ export class SshTui {
     // in-app update, which only runs `dsh plugin add`) boots without one. Say
     // so at boot: the banner's localized default hides the missing service, and
     // the loss is not only `/mode` — the preset-owned tools are absent too.
+    const keyReport = keymapReport(this.keymap)
+    if (keyReport !== undefined) {
+      this.pushRow({ kind: 'system', text: t('keys.report', { report: keyReport }) })
+    }
     this.refreshRosterHealth()
     if (this.rosterMissing) {
       this.pushRow({ kind: 'system', text: t('mode.bootMissing') })
@@ -7458,6 +7487,18 @@ export class SshTui {
       return
     }
 
+    // A key the user moved, and a key their move displaced. Consulted before any
+    // routing so a plain control byte reaches it as readily as a CSI sequence;
+    // everything else keeps the handling below, which is what makes the defaults
+    // unchanged by construction.
+    if (this.dialog === undefined && combined !== '') {
+      const moved = this.keymap.sequences.get(combined)
+      if (moved !== undefined && this.keymap.overridden.has(moved)) {
+        if (this.runKeyAction(moved)) return
+      }
+      if (this.keymap.suppressed.has(combined)) return
+    }
+
     const escape = /^\x1b\[([A-D])$/u
     const match = combined.match(escape)
     if (match !== null) {
@@ -7736,6 +7777,33 @@ export class SshTui {
       this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
       this.cursor += char.length
       this.markDirty()
+    }
+  }
+
+  /**
+   * Run one rebindable action.
+   * @param action - the action the pressed key was moved to.
+   * @returns true when the key was consumed.
+   */
+  private runKeyAction(action: KeyAction): boolean {
+    switch (action) {
+      case 'pageUp':
+        this.scrollInspectOrTranscript(Math.max(3, Math.floor(this.screenRows() / 2)))
+        return true
+      case 'pageDown':
+        this.scrollInspectOrTranscript(-Math.max(3, Math.floor(this.screenRows() / 2)))
+        return true
+      case 'toggleCard':
+        this.toggleCollapsible()
+        return true
+      case 'copy':
+        this.copyFocusedCard()
+        return true
+      case 'cancel':
+        this.handleEscape()
+        return true
+      default:
+        return false
     }
   }
 
