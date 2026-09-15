@@ -3,10 +3,18 @@
  */
 
 import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
-import { diffHunks, diffLines, wordDiffSpans, type DiffLine } from './line-diff.js'
+import {
+  SIDE_BY_SIDE_GUTTER,
+  diffHunks,
+  diffLayout,
+  diffLines,
+  sideBySideRows,
+  wordDiffSpans,
+  type DiffLine,
+} from './line-diff.js'
 import { t } from './i18n/index.js'
 import { jobAlias } from './job-label.js'
-import { wrap, type TextSegment, truncate, sliceCodePoints } from './term-text.js'
+import { padToWidth, sliceCodePoints, truncate, type TextSegment, wrap } from './term-text.js'
 import { firstString, parseJsonArgs, scalarText } from './json-args.js'
 import {
   parsePlanTodos,
@@ -590,7 +598,7 @@ export function toolBodyFitsWorkspace(bodyLines: number, workspaceRows: number):
  * @param maxLines - the card body budget.
  * @returns display lines, at most `maxLines` of them.
  */
-export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDisplayLine[] {
+export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number, width?: number): DiffDisplayLine[] {
   const paths = new Set<string>()
   let added = 0
   let removed = 0
@@ -608,7 +616,9 @@ export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDis
   // the card give up the body: collapsing a one-line change because the budget
   // is small would hide exactly what was asked for.
   for (const context of [DIFF_CONTEXT_LINES, 1, 0]) {
-    const rows = paintHunks(perHunk, context)
+    const rows = width !== undefined && diffLayout(width) === 'side-by-side'
+      ? paintHunksSideBySide(perHunk, context, width)
+      : paintHunks(perHunk, context)
     if (rows.length + 1 <= maxLines) {
       return capDisplayLines([...rows, { kind: 'tool-result', text: footer }], maxLines)
     }
@@ -621,6 +631,49 @@ export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number): DiffDis
     { kind: 'tool-result', text: footer },
     { kind: 'tool-result', text: t('diff.enterFull') },
   ], maxLines)
+}
+
+/**
+ * The diff rows with the two columns of a wide terminal.
+ *
+ * A paired row is neutral rather than styled as an addition or a removal: it is
+ * both, and styling it as one would mislabel half of it. The `-`/`+` markers
+ * inside each column carry the meaning, and the emphasis still marks the
+ * characters that differ.
+ */
+function paintHunksSideBySide(
+  perHunk: readonly { hunk: ToolDiffHunk; lines: DiffLine[] }[],
+  context: number,
+  width: number,
+): DiffDisplayLine[] {
+  const column = Math.max(20, Math.floor((width - 2 - SIDE_BY_SIDE_GUTTER.length) / 2))
+  const rows: DiffDisplayLine[] = []
+  let prevPath: string | undefined
+  for (const { hunk, lines } of perHunk) {
+    rows.push(hunk.path === prevPath
+      ? { kind: 'diff-path', text: '⋯' }
+      : { kind: 'diff-path', text: hunk.path })
+    prevPath = hunk.path
+    for (const run of diffHunks(lines, context)) {
+      if (context > 0 && run.omittedBefore > 0) {
+        rows.push({ kind: 'tool-result', text: t('diff.omitted', { count: run.omittedBefore }) })
+      }
+      for (const row of sideBySideRows(run.lines)) {
+        const left = padToWidth(row.left, column)
+        const text = `${left}${SIDE_BY_SIDE_GUTTER}${row.right}`
+        const spans = [
+          ...row.leftSpans,
+          ...row.rightSpans.map(span => ({ start: span.start + column + SIDE_BY_SIDE_GUTTER.length, end: span.end + column + SIDE_BY_SIDE_GUTTER.length })),
+        ]
+        rows.push({
+          kind: row.context ? 'tool-result' : 'tool-result',
+          text,
+          ...(spans.length === 0 ? {} : { spans }),
+        })
+      }
+    }
+  }
+  return rows
 }
 
 /** The diff rows for one context width, without the footer. */
@@ -763,13 +816,13 @@ export function parseJsonBody(text: string): unknown | null {
  * dedicated views; every other tool's JSON arguments and JSON result are
  * converted into readable indented content instead of raw JSON text.
  */
-export function toolBodyLines(row: ToolBodySource, maxLines: number): DiffDisplayLine[] {
+export function toolBodyLines(row: ToolBodySource, maxLines: number, width?: number): DiffDisplayLine[] {
   const unlimited = !Number.isFinite(maxLines) || maxLines >= Number.MAX_SAFE_INTEGER
   if (row.diff !== undefined && row.diff.length > 0) {
     // File-edit diffs are never truncated in the card: omitting hunks would
     // hide the exact code change the model applied. `maxLines` only governs
     // shell and generic JSON output bodies (and the inspect overlay).
-    return renderToolDiff(row.diff, unlimited ? Number.MAX_SAFE_INTEGER : maxLines)
+    return renderToolDiff(row.diff, unlimited ? Number.MAX_SAFE_INTEGER : maxLines, width)
   }
   if (row.command !== undefined) {
     const out: DiffDisplayLine[] = []

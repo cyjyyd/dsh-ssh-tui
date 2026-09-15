@@ -118,3 +118,85 @@ test('a diff that cannot fit collapses to its counts and a pointer', async () =>
   assert.ok(text.includes('Enter 看全文'), 'and where the whole diff is')
   assert.equal(text.includes('old 0'), false, 'without a truncated body')
 })
+
+/**
+ * C-2b: the same diff, laid out for the terminal it is painted on.
+ */
+test('the layout follows the width, with a threshold that means something', async () => {
+  const { diffLayout, SIDE_BY_SIDE_MIN_WIDTH } = await import('../lib/line-diff.js')
+  assert.equal(diffLayout(SIDE_BY_SIDE_MIN_WIDTH - 1), 'stacked')
+  assert.equal(diffLayout(SIDE_BY_SIDE_MIN_WIDTH), 'side-by-side')
+  assert.equal(diffLayout(80), 'stacked', 'a normal terminal stacks')
+  assert.equal(diffLayout(200), 'side-by-side')
+})
+
+test('a replacement shares a row, and context appears in both columns', async () => {
+  const { diffLines, sideBySideRows } = await import('../lib/line-diff.js')
+  const rows = sideBySideRows(diffLines('same\nold line\nlast', 'same\nnew line\nlast'))
+  assert.deepEqual(rows.map(row => [row.left, row.right]), [
+    ['  same', '  same'],
+    ['- old line', '+ new line'],
+    ['  last', '  last'],
+  ])
+  assert.equal(rows[1].context, false)
+  // `old line` and `new line` share their suffix, so `old`/`new` is the change;
+  // the `- `/`+ ` marker adds two cells before the text.
+  assert.deepEqual(rows[1].leftSpans, [{ start: 2, end: 5 }], 'the changed word, after the marker')
+  assert.deepEqual(rows[1].rightSpans, [{ start: 2, end: 5 }])
+})
+
+test('a lone removal or addition leaves the other column empty', async () => {
+  const { diffLines, sideBySideRows } = await import('../lib/line-diff.js')
+  const removed = sideBySideRows(diffLines('a\nb\nc', 'a\nc'))
+  assert.deepEqual(removed.map(row => [row.left, row.right]), [
+    ['  a', '  a'],
+    ['- b', ''],
+    ['  c', '  c'],
+  ])
+  const added = sideBySideRows(diffLines('a\nc', 'a\nb\nc'))
+  assert.deepEqual(added.map(row => [row.left, row.right]), [
+    ['  a', '  a'],
+    ['', '+ b'],
+    ['  c', '  c'],
+  ])
+})
+
+test('a wide card paints two columns that fit, a narrow one stacks', async () => {
+  const { renderToolDiff, toolBodyLines } = await import('../lib/tool-present.js')
+  const diffs = [{ path: 'a.ts', oldText: 'keep\nold line\nx', newText: 'keep\nnew line\ny' }]
+  const wide = renderToolDiff(diffs, 20, 120)
+  // The first row with a gutter is the context row; the change is the one to
+  // check the columns of.
+  const paired = wide.find(line => line.text.includes('- old line'))
+  assert.ok(paired !== undefined, `a wide diff is side by side: ${JSON.stringify(wide.map(l => l.text))}`)
+  assert.match(paired.text, /- old line\s+│ \+ new line/u)
+  for (const line of wide) {
+    assert.ok([...line.text].length <= 120, `the row fits: ${JSON.stringify(line.text)}`)
+  }
+  // Every gutter sits in the same column: that alignment is what makes the two
+  // sides readable, and a column that is not padded loses it.
+  const gutters = wide
+    .filter(line => line.text.includes('│'))
+    .map(line => line.text.indexOf('│'))
+  // Every line of a change block appears: pairing must not drop the tail of a
+  // block that happens to be longer than one line.
+  const text = wide.map(line => line.text).join('\n')
+  assert.match(text, /- old line/u)
+  assert.match(text, /\+ new line/u)
+  assert.match(text, /- x\s+│ \+ y/u, `the block's second pair is rendered: ${JSON.stringify(text)}`)
+  assert.ok(gutters.length >= 2, `several paired rows are needed to test alignment: ${JSON.stringify(gutters)}`)
+  assert.equal(
+    new Set(gutters).size,
+    1,
+    `every gutter sits in the same column, however long the line beside it: ${JSON.stringify(gutters)}`,
+  )
+  assert.ok((paired.spans ?? []).length >= 1, 'and the changed characters are still emphasised')
+
+  const narrow = renderToolDiff(diffs, 20, 80)
+  assert.equal(narrow.some(line => line.text.includes('│')), false, 'a narrow diff stacks instead')
+
+  // The body builder passes the width through, so the card follows the terminal.
+  const row = { kind: 'tool', callId: 'c', name: 'edit', title: 'edit', summary: 'a.ts', args: '{}', status: 'ok', expanded: true, diff: diffs }
+  assert.ok(toolBodyLines(row, 20, 120).some(line => line.text.includes('│')))
+  assert.equal(toolBodyLines(row, 20, 80).some(line => line.text.includes('│')), false)
+})

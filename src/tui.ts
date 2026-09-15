@@ -1745,7 +1745,7 @@ export class SshTui {
           ? t('compact.lines', { count: countDiffLines(item.diff) || 1 })
           : token
         addDisplay(this.styleLine('tool-result', truncateToWidth(`    ${item.title}  ${extra}`, width)), item)
-        for (const line of toolBodyLines(item, Number.MAX_SAFE_INTEGER)) {
+        for (const line of toolBodyLines(item, Number.MAX_SAFE_INTEGER, width)) {
           this.paintToolBodyLine(addDisplay, item, line, width)
         }
         continue
@@ -3365,7 +3365,7 @@ export class SshTui {
         // overlay instead; every other link shows it in full, exactly as it has
         // since the 0.3.9 card pass.
         const bodyLimit = toolBodyLineLimit(linkQualityOf(this.paintLink, this.paintRttMs))
-        const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
+        const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER, width)
         for (const line of body.slice(0, bodyLimit)) {
           this.paintToolBodyLine(addDisplay, row, line, width)
         }

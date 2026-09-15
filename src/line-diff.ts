@@ -28,6 +28,94 @@ export interface DiffHunk {
   lines: DiffLine[]
 }
 
+/** Two columns plus a gutter need this much room to be worth it. */
+export const SIDE_BY_SIDE_MIN_WIDTH = 100
+
+/** The gutter between the two columns. */
+export const SIDE_BY_SIDE_GUTTER = ' │ '
+
+/**
+ * Whether a diff should be shown side by side at this terminal width.
+ *
+ * Below the threshold the columns would be narrower than the code they hold,
+ * which turns every changed line into a wrapped mess — stacked reads better.
+ * @param width - the terminal width in cells.
+ * @returns the layout to use.
+ */
+export function diffLayout(width: number): 'side-by-side' | 'stacked' {
+  return width >= SIDE_BY_SIDE_MIN_WIDTH ? 'side-by-side' : 'stacked'
+}
+
+/** One row of a side-by-side rendering. */
+export interface SideBySideRow {
+  /** Marker plus text for the left column: `- old`, `  context`, or empty. */
+  left: string
+  /** Marker plus text for the right column: `+ new`, `  context`, or empty. */
+  right: string
+  /** Emphasis inside `left`, offsets into it. */
+  leftSpans: DiffSpan[]
+  /** Emphasis inside `right`, offsets into it. */
+  rightSpans: DiffSpan[]
+  /** Whether both columns carry the same line (context) rather than a change. */
+  context: boolean
+}
+
+/**
+ * Pair a line diff into two columns.
+ *
+ * A removed line immediately followed by an added one is a replacement and
+ * shares a row, with the changed characters emphasised on each side; a lone
+ * removal or addition keeps its own row with the other column empty. Context
+ * rows carry the text on both sides so the eye can follow either column.
+ * @param lines - a diff, as {@link diffLines} returns it.
+ * @returns the rows, in order.
+ */
+export function sideBySideRows(lines: readonly DiffLine[]): SideBySideRow[] {
+  const rows: SideBySideRow[] = []
+  let at = 0
+  while (at < lines.length) {
+    const line = lines[at]
+    if (line === undefined) break
+    if (line.kind === 'same') {
+      rows.push({ left: `  ${line.text}`, right: `  ${line.text}`, leftSpans: [], rightSpans: [], context: true })
+      at += 1
+      continue
+    }
+    // A change comes as a block: the diff emits every removed line and then
+    // every added one, so pairing has to be positional inside the block rather
+    // than looking only at the next line. `- a - b + A + B` is two pairs, not a
+    // lone removal followed by a lone addition.
+    const removed: string[] = []
+    const added: string[] = []
+    while (at < lines.length && lines[at]?.kind === 'del') {
+      removed.push(lines[at]?.text ?? '')
+      at += 1
+    }
+    while (at < lines.length && lines[at]?.kind === 'add') {
+      added.push(lines[at]?.text ?? '')
+      at += 1
+    }
+    if (removed.length === 0 && added.length === 0) {
+      at += 1
+      continue
+    }
+    for (let index = 0; index < Math.max(removed.length, added.length); index += 1) {
+      const oldText = removed[index]
+      const newText = added[index]
+      const spans = oldText !== undefined && newText !== undefined ? wordDiffSpans(oldText, newText) : { old: [], new: [] }
+      rows.push({
+        left: oldText === undefined ? '' : `- ${oldText}`,
+        right: newText === undefined ? '' : `+ ${newText}`,
+        // The marker adds two cells before the text.
+        leftSpans: spans.old.map(span => ({ start: span.start + 2, end: span.end + 2 })),
+        rightSpans: spans.new.map(span => ({ start: span.start + 2, end: span.end + 2 })),
+        context: false,
+      })
+    }
+  }
+  return rows
+}
+
 /** One emphasized range inside a line, in UTF-16 offsets. */
 export interface DiffSpan {
   start: number
