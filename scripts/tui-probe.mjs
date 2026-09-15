@@ -211,11 +211,12 @@ async function runProbe({ sessionId, keep, home }) {
     check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
     check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
 
-    // 5. /preset lists the roster read-only. It never writes, so running it
-    //    against a real profile is safe; it also proves the authoring surface
-    //    sees the same presets /mode does.
+    // 5. /preset lists the roster read-only. The bare command opens the
+    //    wizard (an interactive picker), so the probe drives the explicit
+    //    subcommand: it never writes, which makes it safe on a real profile,
+    //    and it proves the authoring surface sees the same presets /mode does.
     const beforePreset = output.length
-    term.write('/preset\r')
+    term.write('/preset list\r')
     await waitFor(text => {
       const slice = text.slice(beforePreset)
       return slice.includes('Agent presets') || slice.includes('preset authoring')

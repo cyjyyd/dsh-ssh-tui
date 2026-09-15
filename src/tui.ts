@@ -3843,6 +3843,10 @@ export class SshTui {
       return
     }
     const parts = arg.trim().split(/\s+/u).filter(part => part !== '')
+    // No argument opens the wizard: pick a preset, then pick what to do with
+    // it. Every action it offers calls the same handler the line command does,
+    // so both paths share one set of plans, refusals, and confirmations.
+    if (parts.length === 0) return this.presetWizard(service)
     const sub = parts[0] ?? 'list'
     const rest = parts.slice(1)
     if (sub === 'list') return this.presetList(service)
@@ -3858,6 +3862,110 @@ export class SshTui {
   /** The preset service, or undefined on a profile without the roster. */
   private presetService(): PresetService | undefined {
     return this.ctx.get('agentPresets') as unknown as PresetService | undefined
+  }
+
+  /**
+   * The interactive path: pick a preset, then pick what to do with it.
+   *
+   * Built only on the dialogs the rest of the TUI already uses — a list with a
+   * preselected current entry, and a question with no options for typed input —
+   * and it hands every action to the same handler the line command calls, so a
+   * wizard write can never take a shortcut past a plan, a refusal, or the
+   * delete confirmation.
+   */
+  private async presetWizard(service: PresetService): Promise<void> {
+    try {
+      const presets = await service.list()
+      if (presets.length === 0) {
+        this.pushRow({ kind: 'error', text: t('preset.none') })
+        this.markDirty()
+        return
+      }
+      const labelOf = (preset: AgentPreset): string => `${preset.id} · ${preset.name ?? preset.id}`
+      const currentIndex = presets.findIndex(preset => preset.id === this.presetId)
+      const pickedAnswer = await this.askQuestion({
+        id: 'preset-pick',
+        question: t('preset.wizardPick', { count: presets.length }),
+        options: presets.map(preset => ({
+          label: labelOf(preset),
+          description: [
+            preset.trust === 'user' ? t('preset.trustUser') : t('preset.trustSystem'),
+            ...(preset.id === service.defaultId ? [t('preset.isDefault')] : []),
+            ...(preset.id === this.presetId ? [t('preset.isCurrent')] : []),
+            ...(preset.broken === undefined ? [] : [t('preset.wizardBroken')]),
+          ].join(' · '),
+        })),
+      }, 0, 1, currentIndex >= 0 ? currentIndex : 0)
+      const picked = presets.find(preset => labelOf(preset) === pickedAnswer.selected[0])
+      if (picked === undefined) return
+      const authorable = service.authorable === true
+      const userOwned = picked.trust === 'user'
+      const actions = [
+        { id: 'show', label: t('preset.actionShow') },
+        // A copy may start from any preset — the destination is the user root.
+        ...(authorable ? [{ id: 'copy', label: t('preset.actionCopy') }] : []),
+        ...(authorable && userOwned ? [
+          { id: 'rename', label: t('preset.actionRename') },
+          { id: 'describe', label: t('preset.actionDescribe') },
+          { id: 'delete', label: t('preset.actionDelete') },
+        ] : []),
+      ]
+      const actionAnswer = await this.askQuestion({
+        id: 'preset-action',
+        question: t('preset.wizardAction', { id: picked.id, name: picked.name ?? picked.id }),
+        options: actions.map(action => ({ label: action.label })),
+      })
+      const action = actions.find(candidate => candidate.label === actionAnswer.selected[0])?.id
+      if (action === undefined) return
+      if (action === 'show') {
+        await this.presetShow(service, picked.id)
+        return
+      }
+      if (action === 'copy') {
+        const id = await this.askPresetInput(t('preset.wizardNewId', { from: picked.id }))
+        if (id === undefined) return this.presetCancelled()
+        const name = await this.askPresetInput(t('preset.wizardNewName'))
+        if (name === undefined) return this.presetCancelled()
+        await this.presetCopy(service, picked.id, id.trim(), name.trim())
+        return
+      }
+      if (action === 'rename') {
+        const name = await this.askPresetInput(t('preset.wizardRename', { id: picked.id }))
+        if (name === undefined) return this.presetCancelled()
+        await this.presetWriteMetadata(service, picked.id, { name })
+        return
+      }
+      if (action === 'describe') {
+        const description = await this.askPresetInput(t('preset.wizardDescribe', { id: picked.id }))
+        if (description === undefined) return this.presetCancelled()
+        await this.presetWriteMetadata(service, picked.id, { description })
+        return
+      }
+      await this.presetDelete(service, picked.id)
+    } catch (error) {
+      if (error instanceof UserQuestionError) {
+        this.presetCancelled()
+        return
+      }
+      throw error
+    }
+  }
+
+  /** One free-form answer; `undefined` when the user cancels with Esc. */
+  private async askPresetInput(question: string): Promise<string | undefined> {
+    try {
+      const answer = await this.askQuestion({ id: 'preset-input', question, options: [] })
+      return answer.custom ?? answer.selected[0] ?? ''
+    } catch (error) {
+      if (error instanceof UserQuestionError) return undefined
+      throw error
+    }
+  }
+
+  /** A wizard step the user backed out of: nothing was written. */
+  private presetCancelled(): void {
+    this.pushRow({ kind: 'system', text: t('preset.cancelled') })
+    this.markDirty()
   }
 
   /** One row per preset: id, display name, trust, and what it is missing. */
