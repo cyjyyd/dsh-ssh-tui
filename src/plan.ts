@@ -361,7 +361,9 @@ export function todoSummary(value: unknown): string {
   const done = todos.filter(item => item.status === 'completed').length
   const active = todos.find(item => item.status === 'in_progress')
   const extra = todos.filter(item => item.status === 'in_progress').length
-  const head = t('plan.todoSummary', { done, total: todos.length })
+  // The collapsed card is the line a user actually watches during a long task,
+  // so the bar belongs here too — the expanded body repeats it beside the list.
+  const head = `${todoProgressBar(todos)} ${t('plan.todoSummary', { done, total: todos.length })}`
   if (active === undefined) return head
   return extra > 1
     ? t('plan.todoSummaryExtra', { head, active: active.content, extra: extra - 1 })

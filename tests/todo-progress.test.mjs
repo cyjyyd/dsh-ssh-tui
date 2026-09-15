@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { parsePlanTodos, todoItemKind, todoProgressBar, todoProgressLabel } from '../lib/plan.js'
+import { parsePlanTodos, todoItemKind, todoProgressBar, todoProgressLabel, todoSummary } from '../lib/plan.js'
 import { specializedToolBody } from '../lib/tool-present.js'
 
 /**
@@ -98,4 +98,45 @@ test('an empty plan says so instead of drawing an empty bar', () => {
     expanded: false,
   })
   assert.equal(lines?.[0]?.text.includes('⣀'), false, 'no bar when there is nothing to measure')
+})
+
+test('a narrow screen keeps the bar and never overflows the row', async () => {
+  const { displayWidth, stripAnsi } = await import('../lib/term-text.js')
+  const { SshTui } = await import('../lib/tui.js')
+  const tui = new SshTui(
+    { get: () => undefined, on() { return () => {} } },
+    { id: 's', options: {}, status: 'idle', session: { id: 's', events: [] }, cancel() {} },
+    { sessionId: 's', color: false, headlessDisplay: true },
+  )
+  const args = JSON.stringify({ todos: [
+    { content: '第一个很长的任务描述', status: 'completed' },
+    { content: '第二个任务', status: 'failed' },
+    { content: '第三个任务', status: 'pending' },
+  ] })
+  tui.rows.push({
+    kind: 'tool',
+    callId: 'narrow',
+    name: 'todo_write',
+    title: 'todo_write',
+    // A collapsed card shows the row's summary, which is built when the call
+    // arrives — that is where the bar has to be for the running card.
+    summary: todoSummary(args),
+    args,
+    status: 'done',
+    expanded: false,
+  })
+
+  // The header is wider than a narrow terminal; the paint clips it. What must
+  // hold is that nothing is painted past the edge, and that the clip keeps the
+  // graphic: the bar leads, so the counts are what gets cut.
+  for (const width of [24, 30, 40, 80]) {
+    const frame = tui.captureFrame(width, 24)
+    for (const line of frame) {
+      const cells = displayWidth(stripAnsi(line))
+      assert.ok(cells <= width, `width ${width}: a line is ${cells} cells wide`)
+    }
+    const header = frame.map(stripAnsi).find(line => line.includes('⣿') || line.includes('⣀'))
+    assert.ok(header !== undefined, `width ${width}: the bar is on screen`)
+    assert.ok(/[⣿⣀⠉⠋⠛⠞⠟⠿⡿]/u.test(header), `width ${width}: the bar survived the clip`)
+  }
 })

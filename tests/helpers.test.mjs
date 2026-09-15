@@ -2154,7 +2154,9 @@ test('parsePlanTodos and todoSummary keep parallel in-progress counts', () => {
     ],
   })
   assert.equal(todos.length, 3)
-  assert.equal(todoSummary(todos), '1/3 完成 · write tests +1')
+  // The bar leads the summary now: the running card shows it, and the count
+  // after it is unchanged.
+  assert.match(todoSummary(todos), /^[⣀⠉⠋⠛⠞⠟⠿⡿⣿]+ 1\/3 完成 · write tests \+1$/u)
 })
 
 test('askSummary names the first question and counts the rest', () => {
