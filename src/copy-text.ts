@@ -17,6 +17,7 @@ export function copyTextFromRow(row: Row | CollapsibleBlock | undefined): string
     case 'user':
     case 'reasoning':
     case 'system':
+    case 'diag':
     case 'error':
     case 'brand':
       return clipCopy(row.text)

@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForText } from './wait.mjs'
+import {
+  allText, diagText, errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForText,
+} from './wait.mjs'
 import { ROSTER_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { SshTui } from '../lib/tui.js'
 
@@ -46,7 +48,7 @@ async function writtenPatch(path, expect, tui, timeoutMs = 4_000) {
     const text = await readFile(path, 'utf8').catch(() => '')
     if (matches(text)) return text
     if (Date.now() >= deadline) {
-      assert.fail(`no patch matching ${expect} at ${path}\n--- last content ---\n${text}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
+      assert.fail(`no patch matching ${expect} at ${path}\n--- last content ---\n${text}\n--- transcript ---\n${allText(tui)}`)
     }
     await new Promise(resolve => setTimeout(resolve, 25))
   }
@@ -75,7 +77,7 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
 
   tui.runCommand('/doctor')
   await waitForText(tui, '名单未组合')
-  const report = systemText(tui)
+  const report = diagText(tui)
   assert.ok(report.includes('/doctor'), report)
   assert.ok(report.includes('名单未组合'), report)
   assert.ok(report.includes('缺少行：agent-presets'), report)
@@ -93,7 +95,8 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   assert.ok(written.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"), written)
   const backups = (await readdir(dir)).filter(name => name.includes('.bak-'))
   assert.equal(backups.length, 1)
-  assert.ok(systemText(tui).includes('重启 TUI 后生效'), systemText(tui))
+  // The fix notice is a system row; the report above it is a diag row.
+  assert.ok(allText(tui).includes('重启 TUI 后生效'), allText(tui))
 
   // The services stay missing for this launcher, so the report still fails, but
   // a second --fix has nothing left to write.
@@ -114,7 +117,7 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
 
   tui.runCommand('/doctor')
   await waitForText(tui, '名单未组合')
-  const report = systemText(tui)
+  const report = diagText(tui)
   assert.ok(report.includes('3 行被挂载两次'), report)
   // The second copy starts after the first block; the detail carries its line.
   const blockLines = ROSTER_PATCH_BLOCK.split('\n').length
@@ -157,7 +160,7 @@ test('/doctor lists two dsh-scope installs from its anchors', async t => {
 
   tui.runCommand('/doctor')
   await waitForText(tui, '名单未组合')
-  const report = systemText(tui)
+  const report = diagText(tui)
   assert.ok(report.includes(join(anchor, 'node_modules', '@deepseek-ai', 'dsh-scope')), report)
   // The test runner's own anchor may add the repository's copy; either way the
   // check must not claim a single install while the nested one is visible.

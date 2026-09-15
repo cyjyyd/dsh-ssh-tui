@@ -140,7 +140,7 @@ import {
   type SubagentSelectionRef,
 } from './subagent-model.js'
 import { resolveFreshSuperGrokToken } from './supergrok-token.js'
-import { copyTextFromTranscript } from './copy-text.js'
+import { copyTextFromRow, copyTextFromTranscript } from './copy-text.js'
 
 import {
   UserQuestionError,
@@ -1934,7 +1934,7 @@ export class SshTui {
       },
       ...(this.paintIntervalMs === undefined ? {} : { paintIntervalMs: this.paintIntervalMs }),
     })
-    this.pushRow({ kind: 'system', text: formatDiag(snapshot).join('\n') })
+    this.pushRow({ kind: 'diag', text: formatDiag(snapshot).join('\n') })
     this.markDirty()
   }
 
@@ -1993,7 +1993,7 @@ export class SshTui {
   private async runDoctorCommand(arg: string, fixRequested: boolean): Promise<void> {
     const profile = profileFromArgv()
     const facts = await this.collectDoctorFacts(profile)
-    this.pushRow({ kind: 'system', text: formatDoctorReport(facts, doctorChecks(facts)).join('\n') })
+    this.pushRow({ kind: 'diag', text: formatDoctorReport(facts, doctorChecks(facts)).join('\n') })
     this.markDirty()
     if (!fixRequested) return
     await this.repairProfilePatch(rowsToRepair(facts), facts)
@@ -4310,6 +4310,7 @@ export class SshTui {
       kind === 'todo-skipped' ? '2;33' :
       kind === 'todo-pending' ? '90' :
       kind === 'plan-dock' ? '38;5;180' :
+      kind === 'diag' ? '2;36' :
       kind === 'error' ? '31' :
       '90'
     return `\x1b[${code}m${safe}\x1b[0m`
@@ -8233,17 +8234,37 @@ export class SshTui {
     this.markDirty()
   }
 
-  copyFocusedCard(): boolean {
+  copyFocusedCard(arg = ''): boolean {
     if (this.dialog !== undefined) return false
-    const picked = copyTextFromTranscript(this.rows, this.focusedRow)
-    if (picked.text.trim() === '') {
-      this.pushRow({ kind: 'system', text: t('copy.empty') })
-      this.markDirty()
-      return false
+    // `error` copies the newest failure or diagnostic row: a long path or a
+    // command in one of those must reach the clipboard whole, which is exactly
+    // what copying the row's own text does (the wrapped screen lines a drag
+    // would join are not what the user wants to paste into a report).
+    if (arg.trim().toLowerCase() === 'error') {
+      const failed = this.rows.findLast(row => row.kind === 'error' || row.kind === 'diag')
+      const text = copyTextFromRow(failed)
+      if (text.trim() === '') {
+        this.pushRow({ kind: 'system', text: t('copy.noError') })
+        this.markDirty()
+        return false
+      }
+      this.copyPlainText(text, t('copy.ok', { chars: text.length, source: t('copy.sourceError') }))
+      return true
     }
-    const source = picked.source === 'focused' ? t('copy.sourceFocused') : t('copy.sourceAssistant')
-    this.copyPlainText(picked.text, t('copy.ok', { chars: picked.text.length, source }))
-    return true
+    if (arg.trim() === '') {
+      const picked = copyTextFromTranscript(this.rows, this.focusedRow)
+      if (picked.text.trim() === '') {
+        this.pushRow({ kind: 'system', text: t('copy.empty') })
+        this.markDirty()
+        return false
+      }
+      const source = picked.source === 'focused' ? t('copy.sourceFocused') : t('copy.sourceAssistant')
+      this.copyPlainText(picked.text, t('copy.ok', { chars: picked.text.length, source }))
+      return true
+    }
+    this.pushRow({ kind: 'system', text: t('copy.usage') })
+    this.markDirty()
+    return false
   }
 
   private scrollInspectOrTranscript(delta: number): void {
@@ -8462,7 +8483,7 @@ export class SshTui {
         })
         break
       case 'copy':
-        this.copyFocusedCard()
+        this.copyFocusedCard(arg)
         break
       case 'find':
         this.runFindCommand(arg)

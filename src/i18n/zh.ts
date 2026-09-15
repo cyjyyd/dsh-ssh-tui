@@ -800,7 +800,7 @@ export const zh: Record<string, string> = {
   'usage.goHttp': 'OpenCode Go 额度接口返回 HTTP {status}{detail}',
 
   'help.intro1': '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲连按两次 Ctrl+C 退出。',
-  'help.intro2': '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开（正文超出窗口则单独全览，Esc 返回）；Ctrl+R 展开最新一条（已选卡片时全部展开/收起）；Ctrl+T 折叠输入。/copy 复制焦点卡片（无焦点则最近回复）到本机剪贴板。斜杠联想和模型列表固定 12 行，↑/↓ 滑动窗口。',
+  'help.intro2': '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开（正文超出窗口则单独全览，Esc 返回）；Ctrl+R 展开最新一条（已选卡片时全部展开/收起）；Ctrl+T 折叠输入。/copy 复制焦点卡片（无焦点则最近回复）、/copy error 复制最近错误/诊断行到本机剪贴板。斜杠联想和模型列表固定 12 行，↑/↓ 滑动窗口。',
   'help.intro3': 'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
   'help.intro4': '/find [思考|计划|子代理|回复|提示词] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',
   'help.intro5': '/model 切换当前提供商的模型与思考强度；/provider 切换提供商并重选模型（下一次请求生效，无需重启）。',
@@ -889,6 +889,9 @@ export const zh: Record<string, string> = {
   'tool.readStats': '{chars} 字 · {lines} 行',
   'copy.selection': '已复制选中文本：{chars} 字符 / {lines} 行',
   'copy.ok': '已复制 {chars} 字到本机剪贴板（{source}）',
+  'copy.noError': '最近没有错误或诊断行可复制。',
+  'copy.sourceError': '最近错误/诊断',
+  'copy.usage': '用法：/copy 复制焦点卡片（无焦点则最近回复）；/copy error 复制最近一条错误或诊断行。',
   'copy.empty': '没有可复制的内容。先用空输入 ↑/↓ 选一张卡片，或等模型回复。',
   'copy.sourceFocused': '焦点卡片',
   'copy.sourceAssistant': '最近回复',

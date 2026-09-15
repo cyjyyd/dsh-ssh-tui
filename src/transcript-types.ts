@@ -124,6 +124,8 @@ export type Row =
       expanded: boolean
     }
   | { kind: 'system'; text: string }
+  /** A diagnostic report (`/diag`, `/doctor`): long, copyable whole. */
+  | { kind: 'diag'; text: string }
   | { kind: 'error'; text: string }
 
 /** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */

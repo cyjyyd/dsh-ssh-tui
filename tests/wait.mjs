@@ -35,7 +35,9 @@ export const rowText = (tui, kind) =>
   tui.rows.filter(row => row.kind === kind).map(row => String(row.text)).join('\n')
 export const systemText = tui => rowText(tui, 'system')
 export const errorText = tui => rowText(tui, 'error')
-export const allText = tui => `${systemText(tui)}\n${errorText(tui)}`
+/** `/diag` and `/doctor` reports: their own row kind, still plain text. */
+export const diagText = tui => rowText(tui, 'diag')
+export const allText = tui => `${systemText(tui)}\n${diagText(tui)}\n${errorText(tui)}`
 
 /** Wait until a system or error row contains the needle. */
 export function waitForText(tui, needle, options = {}) {
@@ -64,10 +66,12 @@ export function waitForDialog(tui, kind, options = {}) {
   })
 }
 
-/** The newest system row, which is what a command's report ends on. */
-export const lastSystemText = tui => String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+/** The newest report row, which is what a command ends on. */
+export const lastSystemText = tui => String(
+  tui.rows.findLast(row => row.kind === 'system' || row.kind === 'diag')?.text ?? '',
+)
 
-/** Wait for the last system row to contain the needle. */
+/** Wait for the last report row to contain the needle. */
 export function waitForLastSystem(tui, needle, options = {}) {
   return waitFor(() => lastSystemText(tui).includes(needle), {
     describe: `the last system row to contain ${JSON.stringify(needle)}`,
