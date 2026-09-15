@@ -211,12 +211,35 @@ async function runProbe({ sessionId, keep, home }) {
     check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
     check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
 
-    // 5. Typing still reaches the input line after all of that.
+    // 5. /preset lists the roster read-only. It never writes, so running it
+    //    against a real profile is safe; it also proves the authoring surface
+    //    sees the same presets /mode does.
+    const beforePreset = output.length
+    term.write('/preset\r')
+    await waitFor(text => {
+      const slice = text.slice(beforePreset)
+      return slice.includes('Agent presets') || slice.includes('preset authoring')
+    }, 30_000, 'the /preset list')
+    const preset = plain(output.slice(beforePreset))
+    check(/Agent presets/u.test(preset), '/preset must print the roster')
+    check(/standard/u.test(preset), '/preset must name the shipped presets')
+    check(/preset show|\/preset/u.test(preset), '/preset output must show its surface')
+
+    // 5b. /preset show reads one composition through the host's inventory.
+    const beforeShow = output.length
+    term.write('/preset show standard\r')
+    // The report is long enough that its title scrolls out of the painted
+    // viewport, so the rows themselves are the arrival signal.
+    await waitFor(text => /@deepseek-ai\//u.test(text.slice(beforeShow)), 30_000, 'the /preset show rows')
+    const shown = plain(output.slice(beforeShow))
+    check(/@deepseek-ai\//u.test(shown), '/preset show must list the composition rows')
+
+    // 6. Typing still reaches the input line after all of that.
     const beforeTyping = output.length
     term.write('hello probe')
     await waitFor(text => plain(text.slice(beforeTyping)).includes('hello probe'), 15_000, 'typed text on the prompt')
 
-    // 6. `/exit` hands the terminal back. The launcher's graceful shutdown only
+    // 7. `/exit` hands the terminal back. The launcher's graceful shutdown only
     //    sets process.exitCode, and a lingering watcher handle used to keep it
     //    alive in front of a shell that never got its prompt back — the user
     //    could only recover by dropping SSH. The relay must also leave the
@@ -228,7 +251,7 @@ async function runProbe({ sessionId, keep, home }) {
         clearTimeout(timer)
         resolve(code)
       })
-      // Ctrl+U clears the composer; step 5 left the probe text in it, and
+      // Ctrl+U clears the composer; step 6 left the probe text in it, and
       // `hello probe/exit` submits a message instead of running the command.
       term.write('\x15')
       term.write('/exit\r')
@@ -255,7 +278,7 @@ async function runProbe({ sessionId, keep, home }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: boot, resize repaint, /diag, /doctor, typing, and the /exit handback all behaved')
+  console.log('OK: boot, resize repaint, /diag, /doctor, /preset, typing, and the /exit handback all behaved')
   return 0
 }
 

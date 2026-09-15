@@ -26,7 +26,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import { METADATA_FILE, readPresetMetadata, type AgentPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -66,6 +66,15 @@ import { collectDiag, formatDiag } from './diag.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
+import {
+  isRefusal,
+  planCopy,
+  planDelete,
+  planMetadata,
+  presetDirectory,
+  type PresetAuthoringApi,
+  type PresetRefusal,
+} from './preset-authoring.js'
 import {
   ensureRosterRows,
   planDuplicateRepair,
@@ -486,6 +495,17 @@ export {
   toolStateLabel,
   wrappedToolBodyLineCount,
 } from './tool-present.js'
+
+/**
+ * The preset service as `/preset` uses it: the members every supported host
+ * has, plus the authoring ones 0.1.2-rc.1 may predate (feature-detected at
+ * each call site, never assumed).
+ */
+type PresetService = PresetAuthoringApi & {
+  list(): Promise<AgentPreset[]>
+  defaultId: string
+  roots?: readonly { path: string; trust: string }[]
+}
 
 /** One model an endpoint listing advertises, with whatever capacities it disclosed. */
 type DiscoveredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
@@ -3794,6 +3814,274 @@ export class SshTui {
     } catch {
       return false
     }
+  }
+
+  /**
+   * `/preset`: list, inspect, copy, rename, describe, and delete agent presets.
+   *
+   * The four operations the web client drives over the remote surface (list,
+   * read, copy, delete) plus display-metadata edits, which upstream has no
+   * method for and this command writes itself. Every write is either an
+   * upstream service call — which validates the id, the trust level, and the
+   * writable root — or a `preset.yml` written beside a backup. Nothing here
+   * throws: refusals and host errors become rows.
+   */
+  private async runPresetCommand(arg: string): Promise<void> {
+    const service = this.presetService()
+    if (service === undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: [
+          t('preset.missingService'),
+          t('mode.missingServiceHint', {
+            profile: profileFromArgv(),
+            patch: rosterPatchPath(resolveDshHome(), profileFromArgv()),
+          }),
+        ].join('\n'),
+      })
+      this.markDirty()
+      return
+    }
+    const parts = arg.trim().split(/\s+/u).filter(part => part !== '')
+    const sub = parts[0] ?? 'list'
+    const rest = parts.slice(1)
+    if (sub === 'list') return this.presetList(service)
+    if (sub === 'show') return this.presetShow(service, rest[0])
+    if (sub === 'copy') return this.presetCopy(service, rest[0], rest[1], rest.slice(2).join(' '))
+    if (sub === 'rename') return this.presetWriteMetadata(service, rest[0], { name: rest.slice(1).join(' ') })
+    if (sub === 'describe') return this.presetWriteMetadata(service, rest[0], { description: rest.slice(1).join(' ') })
+    if (sub === 'delete') return this.presetDelete(service, rest[0])
+    this.pushRow({ kind: 'error', text: t('preset.unknownSub', { sub }) })
+    this.markDirty()
+  }
+
+  /** The preset service, or undefined on a profile without the roster. */
+  private presetService(): PresetService | undefined {
+    return this.ctx.get('agentPresets') as unknown as PresetService | undefined
+  }
+
+  /** One row per preset: id, display name, trust, and what it is missing. */
+  private async presetList(service: PresetService): Promise<void> {
+    const presets = await service.list()
+    const authorable = service.authorable === true
+    const lines = [t('preset.listTitle', { count: presets.length, default: service.defaultId })]
+    for (const preset of presets) {
+      const flags = [
+        preset.trust === 'user' ? t('preset.trustUser') : t('preset.trustSystem'),
+        ...(preset.id === service.defaultId ? [t('preset.isDefault')] : []),
+        ...(preset.id === this.presetId ? [t('preset.isCurrent')] : []),
+      ].join(' · ')
+      lines.push(t('preset.listRow', { id: preset.id, name: preset.name ?? preset.id, flags }))
+      if (preset.broken !== undefined) lines.push(t('preset.listBroken', { reason: preset.broken }))
+    }
+    lines.push(authorable
+      ? t('preset.listWritable', { root: service.roots?.find(root => root.trust === 'user')?.path ?? '' })
+      : t('preset.listReadOnly'))
+    this.pushRow({ kind: 'system', text: lines.join('\n') })
+    this.markDirty()
+  }
+
+  /** One preset's metadata and the rows its composition mounts. */
+  private async presetShow(service: PresetService, id: string | undefined): Promise<void> {
+    const presets = await service.list()
+    const ids = presets.map(preset => preset.id).join(', ')
+    if (id === undefined || id === '') {
+      this.pushRow({ kind: 'error', text: t('preset.needId', { ids }) })
+      this.markDirty()
+      return
+    }
+    const preset = presets.find(candidate => candidate.id === id)
+    if (preset === undefined) {
+      this.pushRow({ kind: 'error', text: t('preset.unknownId', { id, ids }) })
+      this.markDirty()
+      return
+    }
+    const lines = [t('preset.showTitle', { id: preset.id, name: preset.name ?? preset.id })]
+    lines.push(t('preset.showMeta', {
+      trust: preset.trust === 'user' ? t('preset.trustUser') : t('preset.trustSystem'),
+      order: preset.order === undefined ? '—' : String(preset.order),
+      directory: presetDirectory(preset),
+    }))
+    if (preset.description !== undefined) lines.push(t('preset.showDescription', { description: preset.description }))
+    if (preset.broken !== undefined) {
+      lines.push(t('preset.showBroken', { reason: preset.broken }))
+    } else if (typeof service.compositionInventory === 'function') {
+      const composition = (await service.compositionInventory()).find(entry => entry.id === preset.id)
+      if (composition === undefined) {
+        lines.push(t('preset.showNoRows'))
+      } else {
+        for (const row of composition.rows) {
+          lines.push(t('preset.showRow', {
+            module: row.moduleName,
+            entry: row.entryId === null ? '' : t('preset.showRowId', { id: row.entryId }),
+            state: row.enabled === true
+              ? ''
+              : row.enabled === false
+                ? t('preset.rowDisabled')
+                : t('preset.rowConditional', { condition: row.condition ?? '' }),
+          }))
+        }
+      }
+    } else if (typeof service.read === 'function') {
+      // A host older than the inventory API still hands over the document.
+      const document = await service.read(preset.id)
+      lines.push(t('preset.showRawHint'))
+      for (const line of document.split('\n').slice(0, 40)) lines.push(`  ${line}`)
+    } else {
+      lines.push(t('preset.unsupported', { feature: 'read' }))
+    }
+    this.pushRow({ kind: 'system', text: lines.join('\n') })
+    this.markDirty()
+  }
+
+  /** Copy an existing preset (upstream's only creation path). */
+  private async presetCopy(
+    service: PresetService,
+    from: string | undefined,
+    id: string | undefined,
+    name: string,
+  ): Promise<void> {
+    if (typeof service.copy !== 'function') {
+      this.pushRow({ kind: 'error', text: t('preset.unsupported', { feature: 'copy' }) })
+      this.markDirty()
+      return
+    }
+    const presets = await service.list()
+    const plan = planCopy({
+      presets,
+      authorable: service.authorable === true,
+      from: from ?? '',
+      id: id ?? '',
+      name: name === '' ? undefined : name,
+    })
+    if (isRefusal(plan)) {
+      this.pushPresetRefusal(plan)
+      return
+    }
+    const copy = service.copy.bind(service)
+    await this.presetWrite(async () => {
+      await copy(plan.from, plan.id, plan.name)
+      return t('preset.copyDone', {
+        from: plan.from,
+        id: plan.id,
+        name: plan.name === undefined ? '' : ` · ${plan.name}`,
+        directory: presetDirectory(presets.find(candidate => candidate.id === plan.id) ?? presets[0]!),
+      })
+    })
+  }
+
+  /** Edit the display name or description: a `preset.yml` written beside a backup. */
+  private async presetWriteMetadata(
+    service: PresetService,
+    id: string | undefined,
+    patch: { name?: string; description?: string },
+  ): Promise<void> {
+    const presets = await service.list()
+    const preset = presets.find(candidate => candidate.id === id)
+    if (preset === undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: t('preset.unknownId', { id: id ?? '', ids: presets.map(candidate => candidate.id).join(', ') }),
+      })
+      this.markDirty()
+      return
+    }
+    if ((patch.name ?? patch.description ?? '').trim() === '') {
+      this.pushRow({ kind: 'error', text: t('preset.needValue', { id: preset.id }) })
+      this.markDirty()
+      return
+    }
+    // Merge with what the preset publishes now, so editing one field never
+    // drops the other and `order` survives.
+    const current = await readPresetMetadata(presetDirectory(preset))
+    const plan = planMetadata({ preset, current, patch })
+    if (isRefusal(plan)) {
+      this.pushPresetRefusal(plan)
+      return
+    }
+    const path = join(plan.directory, METADATA_FILE)
+    const field = patch.name === undefined ? t('preset.fieldDescription') : t('preset.fieldName')
+    await this.presetWrite(async () => {
+      const backup = await writePatchWithBackup(path, plan.text)
+      return [
+        t('preset.metadataDone', { id: plan.id, field }),
+        ...(backup === undefined ? [] : [t('preset.backupLine', { path: backup })]),
+      ].join('\n')
+    })
+  }
+
+  /** Delete a user preset after one confirmation. */
+  private async presetDelete(service: PresetService, id: string | undefined): Promise<void> {
+    if (typeof service.remove !== 'function') {
+      this.pushRow({ kind: 'error', text: t('preset.unsupported', { feature: 'delete' }) })
+      this.markDirty()
+      return
+    }
+    const presets = await service.list()
+    const preset = presets.find(candidate => candidate.id === id)
+    if (preset === undefined) {
+      this.pushRow({
+        kind: 'error',
+        text: t('preset.unknownId', { id: id ?? '', ids: presets.map(candidate => candidate.id).join(', ') }),
+      })
+      this.markDirty()
+      return
+    }
+    const plan = planDelete({
+      preset,
+      authorable: service.authorable === true,
+      current: preset.id === this.presetId,
+    })
+    if (isRefusal(plan)) {
+      this.pushPresetRefusal(plan)
+      return
+    }
+    const answer = await new Promise<'y' | 'n' | 'cancel'>(resolve => {
+      this.openConfirm(
+        t('preset.deleteConfirm', { id: plan.id }),
+        t('preset.deleteHint', { directory: presetDirectory(preset) }),
+        resolve,
+      )
+    })
+    if (answer !== 'y') {
+      this.pushRow({ kind: 'system', text: t('preset.deleteCancelled') })
+      this.markDirty()
+      return
+    }
+    const remove = service.remove.bind(service)
+    await this.presetWrite(async () => {
+      await remove(plan.id)
+      return t('preset.deleteDone', { id: plan.id })
+    })
+  }
+
+  /**
+   * Run one authoring call and report it.
+   *
+   * The service validates more than this command can (the writable root, an
+   * occupied id, the trust recorded on disk), so its message is what the user
+   * sees when it refuses.
+   */
+  private async presetWrite(call: () => Promise<string>): Promise<void> {
+    try {
+      this.pushRow({ kind: 'system', text: await call() })
+    } catch (error) {
+      this.pushRow({ kind: 'error', text: t('preset.failed', { error: errorChain(error) }) })
+    }
+    this.markDirty()
+  }
+
+  /** One refusal, in the user's language. */
+  private pushPresetRefusal(refusal: PresetRefusal): void {
+    this.pushRow({
+      kind: 'error',
+      text: t(`preset.refused.${refusal.error}`, {
+        id: refusal.id ?? '',
+        name: refusal.name ?? refusal.id ?? '',
+        root: this.presetService()?.roots?.find(root => root.trust === 'user')?.path ?? '',
+      }, refusal.error),
+    })
+    this.markDirty()
   }
 
   private styleLine(kind: DisplayKind, text: string): string {
@@ -8045,6 +8333,12 @@ export class SshTui {
         this.markDirty()
         break
       }
+      case 'preset':
+        void this.runPresetCommand(arg).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.markDirty()
+        })
+        break
       case 'setup':
         void this.runOnboarding()
         break
