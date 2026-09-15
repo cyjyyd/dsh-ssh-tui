@@ -49,9 +49,10 @@ jobs:
       # peer ranges do not resolve (that is why the family is pinned to rc.2
       # above): npm fights over dsh-invariants and gives up with ERESOLVE. This
       # leg installs with legacy peers, which skips them and nests a second
-      # @deepseek-ai/dsh-scope — enough for typecheck and the test suite, while
-      # the roster composition that nesting breaks is covered on the rc.2 leg
-      # and by `scripts/tui-probe.mjs` against a real profile.
+      # @deepseek-ai/dsh-scope. It covers typecheck and the plugin suite; the
+      # host-contract test skips itself there (no host can boot from a tree
+      # missing peers), while that contract and the roster composition are
+      # covered on the rc.2 leg and by `scripts/tui-probe.mjs` on a real profile.
       - name: Install (legacy peers for the rc.1 line)
         if: matrix.dsh == '0.1.5-rc.1'
         run: npm install --no-audit --no-fund --legacy-peer-deps

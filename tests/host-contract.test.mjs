@@ -21,6 +21,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -138,7 +139,37 @@ async function makeHome(t) {
   return home
 }
 
+/**
+ * The first `@deepseek-ai` package whose declared dependency or peer is absent.
+ *
+ * A tree installed with `--legacy-peer-deps` (the 0.1.5-rc.1 CI leg needs it:
+ * that line's own peer ranges do not resolve) omits peers entirely, so the
+ * headless host cannot boot — not a plugin regression, and not something this
+ * suite can exercise. The rc.2 leg installs peers normally and always has a
+ * complete tree, so a skip here only ever means "this leg cannot run a host".
+ * @returns the missing package and who wanted it, or `undefined` when complete.
+ */
+function incompleteTree() {
+  const root = join(import.meta.dirname, '..')
+  const dir = join(root, 'node_modules', '@deepseek-ai')
+  for (const name of readdirSync(dir)) {
+    const manifest = join(dir, name, 'package.json')
+    if (!existsSync(manifest)) continue
+    const pkg = JSON.parse(readFileSync(manifest, 'utf8'))
+    for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies })) {
+      if (!dep.startsWith('@deepseek-ai/')) continue
+      if (!existsSync(join(root, 'node_modules', dep))) return `${dep} (wanted by ${name})`
+    }
+  }
+  return undefined
+}
+
 test('the host streams a reply with the durable shapes this plugin renders', { timeout: 120_000 }, async t => {
+  const missing = incompleteTree()
+  if (missing !== undefined) {
+    t.skip(`the installed host tree is incomplete, so no host can boot: ${missing}`)
+    return
+  }
   const mock = await startMockLlmServer({ port: 0, sequence: ['success'], repeatLast: true })
   t.after(() => mock.close())
   const home = await makeHome(t)
