@@ -219,6 +219,76 @@ export function footerStatsGroups(stats: FooterStatsInput): string[] {
   return groups
 }
 
+/**
+ * One group in the status strip, with the graphic-only form a narrow terminal
+ * keeps. `priority` orders the losses: 0 is the last thing to go.
+ */
+export interface FooterChip {
+  id: string
+  /** Glyph plus text: what a wide terminal shows. */
+  long: string
+  /** Glyph only, or `''` for a group that is pure text. */
+  short: string
+  priority: number
+}
+
+/**
+ * Fit an ordered strip into `width` cells, losing text before graphics.
+ *
+ * The old fitter dropped whole groups from the end, so a narrow terminal lost
+ * the ⚠ and the context ring — the two signals that say something is wrong —
+ * while keeping long numeric groups. Two passes now: every chip trades its text
+ * for its glyph in reverse priority order, and only then do whole groups go,
+ * again lowest priority first. The result never exceeds the width.
+ */
+export function fitFooterChips(chips: readonly FooterChip[], width: number): string {
+  const limit = Math.max(1, width)
+  const state = chips
+    .filter(chip => chip.long !== '' || chip.short !== '')
+    .map(chip => ({ chip, full: true, present: true }))
+  const render = (): string => state
+    .filter(entry => entry.present)
+    .map(entry => (entry.full ? entry.chip.long : entry.chip.short))
+    .filter(text => text !== '')
+    .join(' │ ')
+  const byLeastImportant = [...state].sort((a, b) => b.chip.priority - a.chip.priority)
+  for (const entry of byLeastImportant) {
+    if (displayWidth(render()) <= limit) break
+    entry.full = false
+  }
+  for (const entry of byLeastImportant) {
+    if (displayWidth(render()) <= limit) break
+    entry.present = false
+  }
+  if (state.length > 0 && state.every(entry => !entry.present)) {
+    // Nothing fits, not even the glyphs. Keeping the most important group and
+    // letting the clip shorten it beats handing the user a blank row: a ⚠ cut
+    // to one cell still says the install is broken.
+    const best = [...state].sort((a, b) => a.chip.priority - b.chip.priority)[0]
+    if (best !== undefined) {
+      best.present = true
+      best.full = false
+    }
+  }
+  return truncateToWidth(render(), limit)
+}
+
+/**
+ * The roster's health as a chip: absent means `/mode` cannot switch presets and
+ * the preset-owned tools are missing. It leads the strip and keeps its glyph
+ * longest, because it is the one group that reports a broken install.
+ */
+export function footerHealthChip(missing: boolean, color = false): FooterChip | undefined {
+  if (!missing) return undefined
+  const glyph = color ? `\x1b[33m⚠\x1b[0m` : '⚠'
+  return {
+    id: 'health',
+    long: `${glyph} ${t('footer.rosterMissing')}`,
+    short: glyph,
+    priority: 0,
+  }
+}
+
 export function fitFooterStatsLine(chip: string, groups: readonly string[], width: number): string {
   const kept = [...groups]
   const render = (): string => kept.length === 0 ? chip : `${chip} │ ${kept.join(' │ ')}`

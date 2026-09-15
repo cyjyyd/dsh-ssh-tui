@@ -39,6 +39,7 @@ export const zh: Record<string, string> = {
   'footer.multiLine': '多行输入',
   'footer.queued': '排队 {count}',
   'footer.context': '上下文 {used}/{window} {percent}',
+  'footer.rosterMissing': '名单缺席（/doctor）',
   'footer.contextRing': '{ring} {used}/{window} {percent}%',
   'footer.balance': '余额 {amount}',
   'footer.cwdChip': '目录:{name}',

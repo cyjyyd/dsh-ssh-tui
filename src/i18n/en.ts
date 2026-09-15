@@ -39,6 +39,7 @@ export const en: Record<string, string> = {
   'footer.multiLine': 'multiline',
   'footer.queued': 'queued {count}',
   'footer.context': 'ctx {used}/{window} {percent}',
+  'footer.rosterMissing': 'roster missing (/doctor)',
   'footer.contextRing': '{ring} {used}/{window} {percent}%',
   'footer.balance': 'bal {amount}',
   'footer.cwdChip': 'dir:{name}',
