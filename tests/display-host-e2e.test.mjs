@@ -67,11 +67,11 @@ test('a host that dies before listening is reported with its stderr', async t =>
       () => waitForDisplaySock(spawned.sock, 15_000, spawned.pid, spawned.errFile, spawned.exitWatch),
       error => error instanceof Error
         && error.message.includes(`pid ${spawned.pid} exited before display socket appeared`)
+        && error.message.includes('(exit code 3)')
         && error.message.includes('boom from fixture'),
-      // `(exit code 3)` is part of the report only once the child's `exit`
-      // event has been delivered. A poll that observes the dead pid first
-      // (Windows does) reports the pid and the captured stderr at once but has
-      // no code yet, so the assertion covers the stable facts.
+      // The dead pid can be observed before the child's `exit` event lands
+      // (Windows does); the launcher waits a bounded moment for it, so the code
+      // is part of the report on every platform.
     )
   } finally {
     spawned.exitWatch.dispose()

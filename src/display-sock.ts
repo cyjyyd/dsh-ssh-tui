@@ -511,6 +511,13 @@ function watchHostExit(child: ChildProcess): HostExitWatch {
   }
 }
 
+/**
+ * How long a dead-pid report waits for the child's `exit` event before giving
+ * up on its code. The event is normally delivered within a tick; the bound only
+ * exists so a host that never reports still fails fast.
+ */
+export const HOST_EXIT_GRACE_MS = 250
+
 export async function waitForDisplaySock(
   path: string,
   timeoutMs = 15_000,
@@ -528,9 +535,12 @@ export async function waitForDisplaySock(
       return ''
     }
   }
-  const exitedWith = (detail: string): Error => {
+  const exitedWith = (detail: string, code: number | null): Error => {
+    const reason = code === null ? '' : ` (exit code ${code})`
     const suffix = detail !== '' ? `:\n${detail}` : ''
-    return new Error(`dsh-ssh-tui: host process pid ${pid ?? '?'} exited before display socket appeared${suffix}`)
+    return new Error(
+      `dsh-ssh-tui: host process pid ${pid ?? '?'} exited before display socket appeared${reason}${suffix}`,
+    )
   }
   const deadline = Date.now() + timeoutMs
   let hostExited = false
@@ -551,15 +561,22 @@ export async function waitForDisplaySock(
     if (hostExited) {
       // The pid may still answer kill(pid, 0) on Windows while the handle is
       // open, so trust the exit event: fail fast instead of waiting 15s.
-      const detail = await readDetail()
-      const reason = hostExitCode === null ? '' : ` (exit code ${hostExitCode})`
-      const suffix = detail !== '' ? `:\n${detail}` : ''
-      throw new Error(
-        `dsh-ssh-tui: host process pid ${pid ?? '?'} exited before display socket appeared${reason}${suffix}`,
-      )
+      throw exitedWith(await readDetail(), hostExitCode)
     }
     if (pid !== undefined && !isPidAlive(pid)) {
-      throw exitedWith(await readDetail())
+      // A poll can observe the dead pid before the child's `exit` event is
+      // delivered (observed on Windows), which used to report the pid and the
+      // captured stderr with no code. Wait a bounded moment for the event so
+      // the code reaches the message; a host that never reports still fails
+      // here rather than burning the full timeout.
+      let code: number | null = hostExitCode
+      if (exitWatch !== undefined && !hostExited) {
+        code = await Promise.race([
+          exitWatch.exited,
+          new Promise<null>(resolve => { setTimeout(resolve, HOST_EXIT_GRACE_MS, null) }),
+        ])
+      }
+      throw exitedWith(await readDetail(), code)
     }
     await new Promise(resolve => setTimeout(resolve, 50))
   }

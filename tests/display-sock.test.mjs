@@ -21,6 +21,7 @@ import {
   encodeRtt,
   decodeRtt,
   FRAME_RTT,
+  HOST_EXIT_GRACE_MS,
   hostArgvForSession,
   isPipePath,
   probeDisplaySock,
@@ -219,6 +220,47 @@ test('waitForDisplaySock reports host stderr when the pid dies first', async () 
       && error.message.includes(`pid ${deadPid} exited before display socket appeared`)
       && error.message.includes('host boom'),
   )
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a dead pid waits for the exit event so the code reaches the report', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const sock = join(home, 'missing.sock')
+  const errFile = `${sock}.err`
+  await writeFile(errFile, 'host boom\n')
+  const deadPid = 2 ** 22 - 1
+  // The poll sees the dead pid first and the `exit` event lands a moment later,
+  // which is the Windows ordering that used to drop `(exit code N)`.
+  const exitWatch = {
+    exited: new Promise(resolve => { setTimeout(resolve, 60, 7) }),
+    dispose: () => {},
+  }
+  const started = Date.now()
+  await assert.rejects(
+    () => waitForDisplaySock(sock, 5_000, deadPid, errFile, exitWatch),
+    error => error instanceof Error
+      && error.message.includes(`pid ${deadPid} exited before display socket appeared (exit code 7)`)
+      && error.message.includes('host boom'),
+  )
+  assert.ok(Date.now() - started < 2_000, 'the grace must stay bounded, not the whole timeout')
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a dead pid whose exit event never arrives still fails within the grace', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const sock = join(home, 'missing.sock')
+  const deadPid = 2 ** 22 - 1
+  const exitWatch = { exited: new Promise(() => {}), dispose: () => {} }
+  const started = Date.now()
+  await assert.rejects(
+    () => waitForDisplaySock(sock, 5_000, deadPid, undefined, exitWatch),
+    error => error instanceof Error
+      && error.message.includes(`pid ${deadPid} exited before display socket appeared`)
+      && !error.message.includes('exit code'),
+  )
+  const elapsed = Date.now() - started
+  assert.ok(elapsed >= HOST_EXIT_GRACE_MS - 20, `waited for the grace (${elapsed}ms)`)
+  assert.ok(elapsed < 2_000, `bounded by the grace, not the timeout (${elapsed}ms)`)
   await rm(home, { recursive: true, force: true })
 })
 
