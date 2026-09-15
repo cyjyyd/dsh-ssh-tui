@@ -195,6 +195,7 @@ import {
   probeTerminalRttMs,
   releaseHangupSignals,
   resolvePaintIntervalMs,
+  toolBodyLineLimit,
   waitUntilIdleOrTimeout,
   type PaintLinkKind,
 } from './paint.js'
@@ -3016,8 +3017,19 @@ export class SshTui {
         for (const wrapped of expandedHeaderLines) {
           addDisplay(wrapped, row)
         }
-        for (const line of toolBodyLines(row, Number.MAX_SAFE_INTEGER)) {
+        // On a measured slow link an expanded body is capped and points at the
+        // overlay instead; every other link shows it in full, exactly as it has
+        // since the 0.3.9 card pass.
+        const bodyLimit = toolBodyLineLimit(linkQualityOf(this.paintLink, this.paintRttMs))
+        const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
+        for (const line of body.slice(0, bodyLimit)) {
           this.paintToolBodyLine(addDisplay, row, line, width)
+        }
+        if (body.length > bodyLimit) {
+          addDisplay(this.styleLine('tool-result', truncateToWidth(
+            t('tool.bodyMoreLines', { count: body.length - bodyLimit }),
+            width,
+          )), row)
         }
         continue
       }

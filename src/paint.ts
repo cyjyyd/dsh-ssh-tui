@@ -155,6 +155,30 @@ export function frameByteBudget(quality: LinkQuality): number {
   return FRAME_BYTE_BUDGETS[quality] ?? Number.POSITIVE_INFINITY
 }
 
+/**
+ * How many body lines an expanded card may show before it points at the
+ * overlay, by link quality.
+ *
+ * A measured slow link is the only case that truncates: there, every body line
+ * is bytes the user waits for, and the overlay is one key away (`Enter`). Fast
+ * and unmeasured links keep the behavior 0.3.9 settled on — an expanded body
+ * shows in full, or opens in the overlay when it cannot fit the workspace — so
+ * nothing changes for a local terminal or a link whose RTT could not be probed.
+ */
+export const TOOL_BODY_LINES_BY_QUALITY: Record<LinkQuality, number> = {
+  local: Number.POSITIVE_INFINITY,
+  good: Number.POSITIVE_INFINITY,
+  ok: Number.POSITIVE_INFINITY,
+  slow: 6,
+  poor: 3,
+  unknown: Number.POSITIVE_INFINITY,
+}
+
+/** The body-line cap for a link quality; `Infinity` means "show it all". */
+export function toolBodyLineLimit(quality: LinkQuality): number {
+  return TOOL_BODY_LINES_BY_QUALITY[quality] ?? Number.POSITIVE_INFINITY
+}
+
 const LINK_PIP_COLOR: Record<number, string> = {
   0: '90',
   1: '31',

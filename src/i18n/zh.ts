@@ -138,6 +138,7 @@ export const zh: Record<string, string> = {
   'toolTitle.bash': '终端',
   'toolTitle.pwsh': '终端',
   'toolTitle.present': '交付文件',
+  'tool.bodyMoreLines': '    … 还有 {count} 行（Enter 全览；弱网只画前几行）',
   'toolTitle.read_image': '读取图片',
   'toolTitle.run_code': '运行代码',
   'toolTitle.list_subagent_models': '子代理模型',

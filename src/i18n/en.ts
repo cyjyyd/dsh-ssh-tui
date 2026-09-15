@@ -138,6 +138,7 @@ export const en: Record<string, string> = {
   'toolTitle.bash': 'terminal',
   'toolTitle.pwsh': 'terminal',
   'toolTitle.present': 'deliver files',
+  'tool.bodyMoreLines': '    … {count} more lines (Enter for the full view; a slow link draws only the first few)',
   'toolTitle.read_image': 'read image',
   'toolTitle.run_code': 'run code',
   'toolTitle.list_subagent_models': 'subagent models',
