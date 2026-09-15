@@ -206,6 +206,20 @@ export function classifyCommand(command: string): ApprovalDecision {
 
 const INTERPRETER_WRAPPER = /^(?:python3?|node|nodejs|perl|ruby|php|lua|bash|sh|zsh)\s+-[ce]\b/u
 
+/**
+ * Whether a command is an opaque interpreter payload (`bash -c …`, `python -e …`).
+ *
+ * The rule table asks about these instead of denying them (a quoted `rm -rf`
+ * must not match `DANGER_PATTERNS`), and the AI reviewer judges the script it is
+ * shown — so its verdict says nothing about the next invocation of the same
+ * wrapper. The approval cache uses this to refuse to remember them.
+ * @param command - the command string a request carried.
+ * @returns whether the payload, not the command line, decides the risk.
+ */
+export function isOpaqueInterpreterCommand(command: string): boolean {
+  return INTERPRETER_WRAPPER.test(command.trim())
+}
+
 export function classifyCommandDetailed(command: string): ClassifiedApproval {
   const trimmed = command.trim()
   if (trimmed === '') return classified('ask', 'medium', 'empty')

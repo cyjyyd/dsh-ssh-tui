@@ -63,6 +63,7 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
+import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import {
@@ -729,6 +730,17 @@ export interface TuiController {
   disconnectPolicy(): DisconnectPolicyName
 }
 
+/**
+ * How long ago a cached verdict was produced, in the shortest useful unit.
+ * Locale-neutral on purpose: `12s` / `3m` / `1h` read the same in both catalogs.
+ */
+function formatCacheAge(ageMs: number): string {
+  const seconds = Math.max(0, Math.round(ageMs / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.round(seconds / 60)
+  return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`
+}
+
 const PLUGIN_VERSION = ((): string => {
   try {
     const require = createRequire(import.meta.url)
@@ -1023,6 +1035,9 @@ export class SshTui {
   private autoAllowedCount = 0
   private autoDeniedCount = 0
   private aiReviewCount = 0
+  private cacheHitCount = 0
+  /** Verdicts this TUI already reviewed, reusable for a bounded time. */
+  private readonly approvalCache = new ApprovalVerdictCache()
   /** Host knobs folded from the session log: auto mode needs approval=ask to see requests. */
   private hostSandboxMode: string | undefined
   private hostApprovalPolicy: string | undefined
@@ -4814,6 +4829,47 @@ export class SshTui {
     return ''
   }
 
+  /**
+   * The route the AI approval reviewer runs on: the subagent selection when it
+   * matches the parent provider, else that provider's light model. Shared with
+   * the verdict cache, whose key has to name the reviewer that produced a
+   * verdict — a different model may decide differently.
+   */
+  private reviewerRoute(): { provider: string; model: string } {
+    const selection = this.subagentSelection.current
+    const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
+    const provider = selection.provider ?? parentProvider
+    const model = subagentModelMatchesProvider(provider, selection.model)
+      ? selection.model
+      : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
+    return { provider, model }
+  }
+
+  /**
+   * The cache key for one `ask`-shaped request, or `undefined` when the shape
+   * must not be remembered (no command, or an opaque interpreter payload).
+   */
+  private approvalCacheKey(
+    request: ApprovalRequest,
+    command: string | undefined,
+    args: string | undefined,
+  ): string | undefined {
+    if (command === undefined) return undefined
+    const input: VerdictKeyInput = {
+      toolName: request.toolName,
+      command,
+      args,
+      reason: request.reason,
+      sandboxMode: this.hostSandboxMode,
+      agentId: String(request.agent.id),
+      workspaceCwd: this.workspaceCwd(),
+      locale: getLocale(),
+      reviewer: this.reviewerRoute(),
+      authorization: this.latestUserAuthorizationText(request.agent),
+    }
+    return cacheableShape(input) ? verdictKey(input) : undefined
+  }
+
   private async reviewUnknownWithModel(
     request: ApprovalRequest,
     command: string | undefined,
@@ -4821,12 +4877,7 @@ export class SshTui {
   ): Promise<ReviewVerdict | undefined> {
     const llm = this.ctx.get('llm')
     if (llm === undefined) return undefined
-    const selection = this.subagentSelection.current
-    const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
-    const provider = selection.provider ?? parentProvider
-    const model = subagentModelMatchesProvider(provider, selection.model)
-      ? selection.model
-      : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
+    const { provider, model } = this.reviewerRoute()
     // 最近模型输出/思考（≤2 段）与会话日志里最新用户消息（跳过 plugin notice）
     const segments: string[] = []
     for (let i = this.rows.length - 1; i >= 0 && segments.length < 2; i -= 1) {
@@ -4903,6 +4954,7 @@ export class SshTui {
     toolName: string,
     command: string | undefined,
     reason: string,
+    fromCache?: { fromCache: true; ageMs: number },
   ): void {
     if (decision === 'allow') this.autoAllowedCount += 1
     else this.autoDeniedCount += 1
@@ -4912,12 +4964,20 @@ export class SshTui {
     const clipped = Array.from(subject).length > 160
       ? `${Array.from(subject).slice(0, 160).join('')}…`
       : subject
-    const rowText = t('approval.decisionRow', {
-      verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
-      command: clipped,
-      risk,
-      reason,
-    })
+    const rowText = fromCache === undefined
+      ? t('approval.decisionRow', {
+          verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+          command: clipped,
+          risk,
+          reason,
+        })
+      : t('approval.cacheHitRow', {
+          age: formatCacheAge(fromCache.ageMs),
+          verdict: decision === 'allow' ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+          command: clipped,
+          risk,
+          reason,
+        })
     this.pushRow({ kind: 'system', text: rowText })
     this.markDirty()
     if (decision === 'deny') this.tellModelApprovalDenied(clipped, reason, rowText)
@@ -4979,10 +5039,28 @@ export class SshTui {
         return 'rejected'
       }
       // Unknown shape: the rule table cannot judge it — hand it to the
-      // subagent-configured model with compact context (AI review). Without
-      // a display there is nobody to fall back on, so unreviewable asks
-      // reject and the turn completes instead of stalling.
+      // subagent-configured model with compact context (AI review). A verdict
+      // this TUI already produced for the exact same request (tool, command,
+      // arguments, workspace, reviewer, and the user message that authorized
+      // it) is reused inside its TTL instead of paying for the review again.
+      const cacheKey = this.approvalCacheKey(request, command, row?.args)
+      const cached = cacheKey === undefined ? undefined : this.approvalCache.lookup(cacheKey)
+      if (cached !== undefined) {
+        this.cacheHitCount += 1
+        this.recordAutoApproval(
+          cached.verdict.approved ? 'allow' : 'deny',
+          cached.verdict.risk,
+          request.toolName,
+          command,
+          cached.verdict.reason === ''
+            ? cached.verdict.approved ? t('approval.reviewApproved') : t('approval.reviewRejected')
+            : cached.verdict.reason,
+          { fromCache: true, ageMs: cached.ageMs },
+        )
+        return cached.verdict.approved ? 'allowed-once' : 'rejected'
+      }
       const reviewed = await this.reviewUnknownWithModel(request, command, row?.args)
+      if (reviewed !== undefined && cacheKey !== undefined) this.approvalCache.store(cacheKey, reviewed)
       if (reviewed?.approved === true) {
         this.recordAutoApproval(
           'allow',
@@ -7862,9 +7940,31 @@ export class SshTui {
                 allowed: this.autoAllowedCount,
                 denied: this.autoDeniedCount,
                 reviewed: this.aiReviewCount,
+                cacheHits: this.cacheHitCount,
+                cached: this.approvalCache.size,
               })
               : t('approval.statusOff'),
           })
+          this.markDirty()
+          break
+        }
+        // The cache is the one piece of auto-approval state the user can
+        // inspect and drop on demand: `/approval cache` reports it,
+        // `/approval cache clear` forgets every remembered verdict.
+        if (requested === 'cache' || requested === 'cache clear' || requested === 'cache status') {
+          if (requested === 'cache clear') {
+            const dropped = this.approvalCache.clear()
+            this.pushRow({ kind: 'system', text: t('approval.cacheCleared', { count: dropped }) })
+          } else {
+            this.pushRow({
+              kind: 'system',
+              text: t('approval.cacheStatus', {
+                cached: this.approvalCache.size,
+                cacheHits: this.cacheHitCount,
+                minutes: this.approvalCache.ttlMinutes,
+              }),
+            })
+          }
           this.markDirty()
           break
         }
@@ -7877,6 +7977,9 @@ export class SshTui {
           break
         }
         this.autoApprovalMode = next
+        // A remembered verdict belongs to the mode that produced it; leaving
+        // auto mode (or re-entering it) starts from an empty cache.
+        this.approvalCache.clear()
         void this.mergeUiSettings({ autoApproval: next }).catch((error: unknown) => {
           this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'approval', error: errorChain(error) }) })
           this.markDirty()

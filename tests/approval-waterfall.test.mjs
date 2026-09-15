@@ -312,3 +312,108 @@ test('sandbox-escalation copy into a home directory auto-allows from the reason 
   assert.match(card, /自动审批 通过/)
   assert.match(card, /cp \/www\/wwwroot\/blog.wdsky.top\/silian.txt/)
 })
+
+/**
+ * The verdict cache: a second identical request inside the TTL is answered
+ * from the first review instead of paying for another model call. The cases
+ * below pin both halves — what may be reused, and what never may.
+ */
+function reviewerTui(verdictJson, counters = { reviews: 0 }) {
+  const ctx = {
+    get(name) {
+      if (name === 'llm') {
+        return {
+          stream: async function* () {
+            counters.reviews += 1
+            yield { type: 'text-delta', text: verdictJson }
+          },
+        }
+      }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  return approvalTui(ctx)
+}
+
+const APPROVE_LOW = '{"risk":"low","authorization":"yes","decision":"approved","reason":"工作区内只读检查"}'
+
+test('an identical unrecognized shape is answered from the cache the second time', async () => {
+  const counters = { reviews: 0 }
+  const { tui, agent } = reviewerTui(APPROVE_LOW, counters)
+  const first = await decide(tui, bashCall(tui, agent, 'c-1', 'python deploy.py'))
+  assert.equal(first, 'allowed-once')
+  const second = await decide(tui, bashCall(tui, agent, 'c-2', 'python deploy.py'))
+  assert.equal(second, 'allowed-once', 'the cached verdict decides the same way')
+
+  assert.equal(counters.reviews, 1, 'the reviewer ran once')
+  assert.ok(
+    tui.rows.some(row => row.kind === 'system' && String(row.text).includes('缓存命中')),
+    'the transcript says the second decision came from the cache',
+  )
+  tui.runCommand('/approval status')
+  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  assert.match(status, /AI 复核 1 次/)
+  assert.match(status, /缓存命中 1 次/)
+  assert.match(status, /1 条/)
+})
+
+test('different arguments, workspace, or authorization never reuse a verdict', async () => {
+  const counters = { reviews: 0 }
+  const { tui, agent } = reviewerTui(APPROVE_LOW, counters)
+  await decide(tui, bashCall(tui, agent, 'c-1', 'python deploy.py'))
+  await decide(tui, bashCall(tui, agent, 'c-2', 'python deploy.py --env prod'))
+  assert.equal(counters.reviews, 2, 'a different command line is a different request')
+
+  tui.runCommand('/approval status')
+  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  assert.match(status, /缓存命中 0 次/)
+})
+
+test('an opaque interpreter payload is never remembered', async () => {
+  const counters = { reviews: 0 }
+  const { tui, agent } = reviewerTui(APPROVE_LOW, counters)
+  await decide(tui, bashCall(tui, agent, 'c-1', "bash -c 'echo hello'"))
+  await decide(tui, bashCall(tui, agent, 'c-2', "bash -c 'echo hello'"))
+  assert.equal(counters.reviews, 2, 'the payload, not the wrapper, decides the risk')
+
+  tui.runCommand('/approval status')
+  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  assert.match(status, /缓存命中 0 次/)
+})
+
+test('a cached verdict never answers a shape the rule table refuses', async () => {
+  const counters = { reviews: 0 }
+  const { tui, agent } = reviewerTui(APPROVE_LOW, counters)
+  await decide(tui, bashCall(tui, agent, 'c-1', 'python deploy.py'))
+  const denied = await decide(tui, bashCall(tui, agent, 'c-2', 'rm -rf /tmp/x'))
+  assert.equal(denied, 'rejected')
+  const row = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  assert.match(row, /自动审批 拒绝/)
+  assert.doesNotMatch(row, /缓存命中/)
+
+  tui.runCommand('/approval status')
+  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  assert.match(status, /缓存命中 0 次/)
+})
+
+test('/approval cache clear drops the verdicts and the next call reviews again', async () => {
+  const counters = { reviews: 0 }
+  const { tui, agent } = reviewerTui(APPROVE_LOW, counters)
+  await decide(tui, bashCall(tui, agent, 'c-1', 'python deploy.py'))
+  await decide(tui, bashCall(tui, agent, 'c-2', 'python deploy.py'))
+  assert.equal(counters.reviews, 1)
+
+  tui.runCommand('/approval cache clear')
+  assert.ok(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '').includes('已清空'))
+  tui.runCommand('/approval cache')
+  assert.match(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? ''), /0 条/)
+
+  await decide(tui, bashCall(tui, agent, 'c-3', 'python deploy.py'))
+  assert.equal(counters.reviews, 2, 'a cleared cache pays for a fresh review')
+
+  // Leaving auto mode also drops what was remembered.
+  tui.runCommand('/approval off')
+  tui.runCommand('/approval cache')
+  assert.match(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? ''), /0 条/)
+})
