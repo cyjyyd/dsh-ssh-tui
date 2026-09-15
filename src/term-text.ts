@@ -362,7 +362,7 @@ export function visibleWidth(text: string): number {
 }
 
 /** Advance past one ESC sequence starting at `index`. */
-function skipAnsiSequence(text: string, index: number): number {
+export function skipAnsiSequence(text: string, index: number): number {
   let seqEnd = index + 1
   if (seqEnd >= text.length) return text.length
   const intro = text.charCodeAt(seqEnd)
@@ -546,6 +546,55 @@ export interface PaintedLinkHit {
   href: string
   startCol: number
   endCol: number
+}
+
+/**
+ * Wrap every occurrence of `needle` in a painted line with reverse video.
+ *
+ * The line carries escape sequences, so the search runs over its visible text
+ * and the markers are inserted between them: a wrapped long line is highlighted
+ * per screen line, which is why the highlight cannot drift out of position the
+ * way source offsets would after a wrap.
+ */
+export function highlightAnsiNeedle(line: string, needle: string): string {
+  if (needle === '') return line
+  let out = ''
+  let index = 0
+  let plainIndex = 0
+  // Walk the visible characters, remembering where each one sits in the raw
+  // string, so a match found in plain text maps back to the painted line.
+  const positions: number[] = []
+  let plain = ''
+  while (index < line.length) {
+    if (line.charCodeAt(index) === 0x1b) {
+      index = skipAnsiSequence(line, index)
+      continue
+    }
+    const cp = line.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    positions[plainIndex] = index
+    plain += char
+    plainIndex += 1
+    index += char.length
+  }
+  if (plain === '') return line
+  let cursor = 0
+  let searchFrom = 0
+  for (;;) {
+    const at = plain.indexOf(needle, searchFrom)
+    if (at === -1) break
+    const fromRaw = positions[at] ?? 0
+    const afterRaw = at + needle.length < positions.length
+      ? positions[at + needle.length] ?? line.length
+      : line.length
+    out += line.slice(cursor, fromRaw)
+    out += `\x1b[7m${line.slice(fromRaw, afterRaw)}\x1b[27m`
+    cursor = afterRaw
+    searchFrom = at + needle.length
+  }
+  if (out === '') return line
+  return out + line.slice(cursor)
 }
 
 export function osc8Open(href: string): string {

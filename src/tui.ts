@@ -168,6 +168,7 @@ import {
   displayWidth,
   foldInputView,
   fmtElapsedCompact,
+  highlightAnsiNeedle,
   lastCodePoints,
   padToWidth,
   sliceCodePoints,
@@ -1250,6 +1251,8 @@ export class SshTui {
   private searchHits: Row[] = []
   private searchIndex = -1
   private searchQuery = ''
+  /** The plain text the user searched for, which is what gets highlighted. */
+  private searchNeedle = ''
   private planNudgePending = false
   private pendingReveal: Row | CollapsibleBlock | undefined
 
@@ -2896,7 +2899,13 @@ export class SshTui {
 
   private highlightSearchLine(line: string): string {
     if (line.includes('\x1b[7m')) return line
-    return this.color ? `\x1b[7m${line}\x1b[27m` : `» ${line}`
+    const needle = this.searchNeedle
+    // Only the lines that actually show the match are marked: highlighting the
+    // whole card made a hit look like the card was selected, and on a narrow
+    // screen the reader could not tell which word had matched.
+    const plain = stripAnsi(line)
+    if (needle === '' || !plain.includes(needle)) return line
+    return this.color ? highlightAnsiNeedle(line, needle) : `» ${line}`
   }
 
   private revealRow(row: Row | CollapsibleBlock | undefined): void {
@@ -2982,6 +2991,8 @@ export class SshTui {
     const parsed = parseFindQuery(arg)
     const label = parsed.category === undefined ? '' : `${cardCategoryLabel(parsed.category)} `
     const hits = matchTranscriptRows(this.rows, arg)
+    // The step message says "回复 deploy"; the highlight must look for "deploy".
+    this.searchNeedle = parsed.category === undefined ? arg.trim() : parsed.query
     this.applySearchHits(`${label}${parsed.query}`.trim(), hits)
   }
 
