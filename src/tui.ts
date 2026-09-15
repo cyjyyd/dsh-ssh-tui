@@ -67,7 +67,7 @@ import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput 
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
-import { flattenGroups, groupPresets, type PresetPickerOption } from './preset-picker.js'
+import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
   isRefusal,
   planCopy,
@@ -6927,6 +6927,9 @@ export class SshTui {
     const options: PresetPickerOption[] = flattenGroups(groupPresets(presets, this.presetId))
     const matchesDirect = (option: (typeof options)[number]): boolean =>
       option.id.toLowerCase() === direct || option.label.toLowerCase() === direct
+      // A published name still selects its preset even when the label resolves
+      // through the dictionary instead.
+      || optionMatches(option, direct)
     let index = direct === ''
       ? -1
       : options.findIndex(option => matchesDirect(option))

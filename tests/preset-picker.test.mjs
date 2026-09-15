@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import {
   comparePresets,
+  optionMatches,
   filterPresets,
   flattenGroups,
   groupPresets,
@@ -80,4 +81,22 @@ test('a typed query narrows by id, name, or description', () => {
   assert.deepEqual(filterPresets(list, '我的').map(item => item.id), ['mine'], 'by name')
   assert.deepEqual(filterPresets(list, 'PLAN-THEN').map(item => item.id), ['ptc'], 'by description, case-insensitively')
   assert.deepEqual(filterPresets(list, 'nothing'), [])
+})
+
+test('a preset answers to its id, its published name, and its label', () => {
+  const groups = groupPresets([preset('standard', { name: 'Standard Mode' })], 'standard')
+  const option = groups[0]?.options[0]
+  assert.ok(option !== undefined)
+  assert.equal(optionMatches(option, 'standard'), true, 'by id')
+  assert.equal(optionMatches(option, 'Standard Mode'), true, 'by the name it published')
+  assert.equal(optionMatches(option, '标准模式'), true, 'and by the label it shows')
+  assert.equal(optionMatches(option, 'nope'), false)
+  assert.equal(optionMatches(option, ''), false, 'an empty query selects nothing')
+})
+
+test('a user preset keeps its published name among the aliases', () => {
+  const groups = groupPresets([preset('mine', { trust: 'user', name: '我的模式' })], 'standard')
+  const option = groups[0]?.options[0]
+  assert.ok(option !== undefined)
+  assert.deepEqual(option.aliases, ['mine', '我的模式'], 'no duplicate for label === name')
 })

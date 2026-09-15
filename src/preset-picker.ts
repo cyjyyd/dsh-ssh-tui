@@ -22,6 +22,13 @@ export interface PresetPickerOption {
   description: string
   /** Why this preset cannot run, carried so the dialog can refuse it on pick. */
   broken?: string
+  /**
+   * Every name this preset answers to: the id, and the name it published even
+   * when the display label resolves elsewhere. `/mode <name>` matched a
+   * published name before the list was grouped, and dropping that would break
+   * a script that uses one.
+   */
+  aliases: string[]
 }
 
 /** The shipped presets, then the locally authored ones. */
@@ -91,6 +98,11 @@ export function groupPresets(
         label: presetOptionLabel(preset),
         description: presetOptionDescription(preset, currentId),
         ...(preset.broken === undefined ? {} : { broken: preset.broken }),
+        aliases: [...new Set([
+          preset.id,
+          ...(preset.name === undefined || preset.name.trim() === '' ? [] : [preset.name.trim()]),
+          presetOptionLabel(preset),
+        ])],
       })),
     })
   }
@@ -100,6 +112,12 @@ export function groupPresets(
 /** The same list, flattened the way the dialog takes it. */
 export function flattenGroups(groups: readonly PresetPickerGroup[]): PresetPickerOption[] {
   return groups.flatMap(group => group.options)
+}
+
+/** Whether a preset answers to the name a caller typed. */
+export function optionMatches(option: PresetPickerOption, query: string): boolean {
+  const needle = query.trim().toLowerCase()
+  return needle !== '' && option.aliases.some(alias => alias.toLowerCase() === needle)
 }
 
 /**
