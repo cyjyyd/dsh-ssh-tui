@@ -35,9 +35,11 @@ const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const ROOT = process.cwd()
 
-const USAGE = `usage: node scripts/tui-mock-probe.mjs [--keep]
+const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy] [--keep]
 
   (no args)   synthesize a profile, run a scripted turn, verify copy and find
+  --busy      run the busy-drop scenario instead: kill the window mid-turn and
+              check the Host survives, then that the reconnected window says so
   --keep      leave the throwaway home behind (its path is printed)`
 
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
@@ -112,6 +114,16 @@ async function synthesizeHome() {
   return home
 }
 
+/** True when the pid still exists (signal 0 is the portable liveness probe). */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function killHostByLock(sessionId, home) {
   try {
     const lock = JSON.parse(await readFile(join(home, 'tui-locks', `${sessionId}.json`), 'utf8'))
@@ -144,7 +156,68 @@ function assertHomeIsCoherent(home) {
   }
 }
 
-async function runProbe({ keep }) {
+/**
+ * The busy drop: kill the window while a turn is in flight, then come back.
+ *
+ * This is the half `tui-drop-probe.mjs` cannot reach — it kills an *idle*
+ * session, whose Host exits by policy. Here the Host must survive, and the
+ * reconnected window must say what happened: that it was reconnected, and that
+ * an approval arrived while nobody could confirm it.
+ */
+async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, check, waitFor, delay, plain, output }) {
+  firstWindow.write('describe the deployment\r')
+  await waitFor(() => plain(output()).includes('BUSY-STREAM'), 60_000, 'the streamed reply to start')
+
+  // The drop: SIGKILL, so the launcher never gets to hand the terminal back.
+  firstWindow.kill('SIGKILL')
+  await delay(2_000)
+  const lockPath = join(home, 'tui-locks', `${sessionId}.json`)
+  // The lock file alone is not proof: a Host that died leaves one behind. Ask
+  // the pid whether it is still there.
+  const lockPid = await readFile(lockPath, 'utf8')
+    .then(text => JSON.parse(text).pid ?? 0, () => 0)
+  const survived = Number.isInteger(lockPid) && lockPid > 0 && isAlive(lockPid)
+  check(survived, `a busy drop must leave the Host running (pid ${lockPid} is gone)`)
+  console.log(`host after the busy drop: ${survived ? 'still running (lock held)' : 'exited — the keep-alive policy failed'}`)
+
+  const second = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {
+    name: 'xterm-256color',
+    cols: 110,
+    rows: 32,
+    cwd: home,
+    env,
+  })
+  let secondOutput = ''
+  second.onData(chunk => { secondOutput += chunk })
+  try {
+    await waitFor(() => secondOutput.includes('DeepSeek Harness'), 60_000, 'the boot banner in the new window')
+    await waitFor(() => plain(secondOutput).includes('已重连 1 次'), 30_000, 'the reconnect notice')
+    check(plain(secondOutput).includes('已重连 1 次'), 'the resumed window must say the user was away')
+    // The turn kept running in the Host while nobody was attached, so its output
+    // is in the transcript the new window repaints.
+    check(
+      plain(secondOutput).includes('BUSY-STREAM'),
+      'the turn that kept running during the gap must be in the repainted transcript',
+    )
+    const notice = plain(secondOutput).split('\n').find(line => line.includes('已重连 1 次'))
+    console.log(`reconnect notice: ${notice?.trim().slice(0, 80)}`)
+
+    second.write('\x15')
+    second.write('/exit\r')
+    const exitCode = await new Promise(resolve => {
+      const timer = setTimeout(() => resolve(undefined), 15_000)
+      second.onExit(({ exitCode: code }) => {
+        clearTimeout(timer)
+        resolve(code)
+      })
+    })
+    check(exitCode === 0, `the resumed window must exit on /exit (got ${exitCode ?? 'no exit'})`)
+  } finally {
+    try { second.kill() } catch { /* already gone */ }
+  }
+}
+
+async function runProbe({ keep, busy }) {
   const pty = await loadModule('node-pty')
   if (pty === undefined) {
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
@@ -158,13 +231,27 @@ async function runProbe({ keep }) {
 
   const home = await synthesizeHome()
   assertHomeIsCoherent(home)
-  const mock = await mockModule.startMockLlmServer({
-    port: 0,
-    apiKey: 'sk-tui-mock-probe',
-    sequence: ['success'],
-    successText: REPLY_TEXT,
-    repeatLast: true,
-  })
+  // Busy-drop scenario: the turn is a slow stream, so it is genuinely in flight
+  // when the window dies — the state the keep-alive policy exists for.
+  const mock = await mockModule.startMockLlmServer(busy
+    ? {
+        port: 0,
+        apiKey: 'sk-tui-mock-probe',
+        // A slow stream keeps the turn genuinely in flight while the window dies
+        // — the state the keep-alive policy exists for.
+        sequence: ['slow_success'],
+        successText: `BUSY-STREAM ${'streaming '.repeat(80)}end`,
+        chunkSize: 4,
+        chunkDelayMs: 120,
+        repeatLast: true,
+      }
+    : {
+        port: 0,
+        apiKey: 'sk-tui-mock-probe',
+        sequence: ['success'],
+        successText: REPLY_TEXT,
+        repeatLast: true,
+      })
   const sessionId = `main-session-${randomUUID()}`
   const env = {
     ...process.env,
@@ -216,6 +303,23 @@ async function runProbe({ keep }) {
     // 1. Boot, then start a real turn against the scripted model.
     await waitFor(text => text.includes('DeepSeek Harness'), 60_000, 'the boot banner')
     await waitFor(text => /空闲|idle/u.test(text), 60_000, 'the idle status line')
+
+    if (busy) {
+      await runBusyDrop({
+        pty, CLI, env, home, sessionId, output: () => output, firstWindow: term, check, waitFor, delay, plain,
+      })
+      // The verdict is printed here too: returning straight out of the scenario
+      // would skip it, and a probe that swallows its own failures is worse than
+      // no probe.
+      if (problems.length > 0) {
+        console.error('FAIL')
+        for (const problem of problems) console.error(`  - ${problem}`)
+        return 1
+      }
+      console.log('OK: a turn survived the window being killed mid-flight, and the resumed window reported it')
+      return 0
+    }
+
     term.write('describe the deployment\r')
     await waitFor(text => plain(text).includes(REPLY_TOKEN), 60_000, 'the scripted reply')
     console.log('reply painted')
@@ -295,9 +399,10 @@ async function runProbe({ keep }) {
 }
 
 function parseArgs(argv) {
-  const parsed = { keep: false }
+  const parsed = { keep: false, busy: false }
   for (const arg of argv) {
     if (arg === '--keep') parsed.keep = true
+    else if (arg === '--busy') parsed.busy = true
     else if (arg === '--help' || arg === '-h') {
       console.log(USAGE)
       process.exit(0)

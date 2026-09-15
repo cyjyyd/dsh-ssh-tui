@@ -117,4 +117,5 @@ DSH_TUI_IDLE_EXIT_MS=600000 dsh --profile tui --resume
 - 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//copy error//preset/鼠标模式/退出）、
   `node scripts/tui-drop-probe.mjs`（杀掉窗口再接管，断言转录保留、可输入、无乱码）与
   `node scripts/tui-mock-probe.mjs`（**合成临时 profile + 脚本化模型**，跑一个真实轮次后验证"拖选复制"
-  与 `/find` 高亮；不碰你的 profile、不花额度）。
+  与 `/find` 高亮；不碰你的 profile、不花额度）、同一脚本的 `--busy`（**忙碌断线**：轮次在飞时杀掉窗口，
+  断言 Host 仍持有会话、重连窗口打出「已重连 N 次」）；`node scripts/verify-batch.mjs --batch <批>` 一次跑完全部证据。

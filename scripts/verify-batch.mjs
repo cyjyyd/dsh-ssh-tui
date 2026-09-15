@@ -27,6 +27,7 @@ const STEPS = [
   { id: 'probe', label: 'pty probe (real profile)', command: 'node', args: ['scripts/tui-probe.mjs'], timeoutMs: 300_000 },
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
+  { id: 'busy', label: 'pty busy-drop probe', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy'], timeoutMs: 300_000 },
 ]
 
 function runStep(step) {
@@ -93,7 +94,7 @@ function parseArgs(argv) {
     if (arg === '--batch') parsed.batch = argv[++index]
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,busy]')
       process.exit(0)
     } else {
       console.error(`unknown argument: ${arg}`)
