@@ -196,12 +196,27 @@ async function runProbe({ sessionId, keep, home }) {
       check(variants.some(needle => diag.includes(needle)), `/diag output must mention ${variants.join(' / ')}`)
     }
 
-    // 4. Typing still reaches the input line after all of that.
+    // 4. /doctor judges the deployment composition, read-only: a report with a
+    //    status mark per check and the patch path it read.
+    const beforeDoctor = output.length
+    term.write('/doctor\r')
+    await waitFor(text => {
+      const slice = text.slice(beforeDoctor)
+      return slice.includes('部署体检') || slice.includes('deployment checkup')
+    }, 30_000, 'the /doctor report')
+    const doctor = plain(output.slice(beforeDoctor))
+    for (const variants of [['结论', 'verdicts'], ['profile 补丁', 'profile patch']]) {
+      check(variants.some(needle => doctor.includes(needle)), `/doctor output must mention ${variants.join(' / ')}`)
+    }
+    check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
+    check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
+
+    // 5. Typing still reaches the input line after all of that.
     const beforeTyping = output.length
     term.write('hello probe')
     await waitFor(text => plain(text.slice(beforeTyping)).includes('hello probe'), 15_000, 'typed text on the prompt')
 
-    // 5. `/exit` hands the terminal back. The launcher's graceful shutdown only
+    // 6. `/exit` hands the terminal back. The launcher's graceful shutdown only
     //    sets process.exitCode, and a lingering watcher handle used to keep it
     //    alive in front of a shell that never got its prompt back — the user
     //    could only recover by dropping SSH. The relay must also leave the
@@ -213,7 +228,7 @@ async function runProbe({ sessionId, keep, home }) {
         clearTimeout(timer)
         resolve(code)
       })
-      // Ctrl+U clears the composer; step 4 left the probe text in it, and
+      // Ctrl+U clears the composer; step 5 left the probe text in it, and
       // `hello probe/exit` submits a message instead of running the command.
       term.write('\x15')
       term.write('/exit\r')
@@ -240,7 +255,7 @@ async function runProbe({ sessionId, keep, home }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: boot, resize repaint, /diag, typing, and the /exit handback all behaved')
+  console.log('OK: boot, resize repaint, /diag, /doctor, typing, and the /exit handback all behaved')
   return 0
 }
 
