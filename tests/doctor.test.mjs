@@ -14,6 +14,8 @@ import {
   rosterPatchPath,
   writePatchWithBackup,
 } from '../lib/preset-rows.js'
+const root = join(import.meta.dirname, '..')
+
 import {
   collectDoctor,
   copyTrapHint,
@@ -29,7 +31,7 @@ const WEB_ROW = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-h
 function facts(overrides = {}) {
   const patchText = overrides.patchText ?? WEB_ROW
   return {
-    pluginVersion: '0.6.4',
+    pluginVersion: '0.6.4', // synthetic facts: the value is not the point here
     hostVersion: '0.1.5-rc.1',
     nodeVersion: 'v24.0.0',
     profile: 'tui',
@@ -310,7 +312,9 @@ test('collectDoctor reads the real patch, manifest, and bundle rows', async () =
     })
     assert.equal(snapshot.patch.readable, true)
     assert.equal(snapshot.patchPath, path)
-    assert.equal(snapshot.pluginVersion, '0.6.4')
+    // The reported version is the manifest's, so a release bump never breaks
+    // this: hard-coding it here made every version bump a failing test.
+    assert.equal(snapshot.pluginVersion, JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version)
     assert.equal(snapshot.compatibility.releases['0.1.5-rc.1'], 'compatible')
     // The shipped bundle patch is read from the package root, next to lib/.
     assert.ok(Array.isArray(snapshot.bundleRows))
