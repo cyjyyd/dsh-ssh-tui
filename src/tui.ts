@@ -178,13 +178,17 @@ import {
 } from './term-text.js'
 import {
   captureHangupSignals,
+  advancePaintedRows,
+  composePaintFrame,
   composePaintOutput,
+  frameByteBudget,
   detectSshSession,
   formatLinkQualityChip,
   HANGUP_CANCEL_TIMEOUT_MS,
   ignoreFurtherHangupSignals,
   isEscapePrefix,
   isHangupErrno,
+  linkQualityOf,
   parseCursorPositionReply,
   PICKER_WINDOW,
   pickerWindowStart,
@@ -751,6 +755,8 @@ const PLUGIN_VERSION = ((): string => {
   }
 })()
 const STALL_WARNING_MS = 60000
+/** Bytes already queued for the terminal before a frame is skipped instead. */
+const STDOUT_BACKLOG_BYTES = 32 * 1024
 const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
 /**
  * How long a leftover Host that has finished its work waits, with no display,
@@ -1167,6 +1173,8 @@ export class SshTui {
   private cwdChipRow: number | undefined
   /** Set when a card expand/collapse moves chrome; next paint full-redraws. */
   private forceFullPaint = false
+  /** Highest row the last budgeted frame could not paint, resumed next tick. */
+  private paintResume: number | undefined
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -3598,10 +3606,13 @@ export class SshTui {
 
     // One stdout write per frame: dirty rows only, so jump-host SSH sees a
     // single packet instead of one write per line. Clip/pad so leftover
-    // wide glyphs cannot wrap into the input box.
+    // wide glyphs cannot wrap into the input box. The frame is bounded by the
+    // link's byte budget: the tail goes first and rows that do not fit stay
+    // dirty for the next tick (tracked through `paintResume`), so a big repaint
+    // arrives in a few ordered pieces instead of one long freeze.
     const inputTopRow = visible.length + planDockLines.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
     const row = Math.min(height, inputTopRow + cursorRowOffset)
-    this.write(composePaintOutput({
+    const frame = composePaintFrame({
       width,
       height,
       paintRows,
@@ -3612,10 +3623,22 @@ export class SshTui {
       previousChromeStart: this.lastChromeStart,
       cursorRow: row,
       cursorColumn: column,
-    }))
+      // A size change starts with a full clear, so splitting it would leave the
+      // user looking at a half-empty screen for a frame or two; that one frame
+      // stays whole. Everything incremental is budgeted.
+      maxBytes: sizeChanged ? undefined : frameByteBudget(linkQualityOf(this.paintLink, this.paintRttMs)),
+      ...(this.paintResume === undefined ? {} : { from: this.paintResume }),
+    })
+    this.paintResume = frame.resume
+    this.write(frame.output)
     this.lastPaintCursorRow = row
     this.lastPaintCursorColumn = Math.min(width, Math.max(1, column))
-    this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
+    const snapshot = paintRows.length > height ? paintRows.slice(0, height) : paintRows
+    // Only the rows this frame wrote are up to date; a deferred row keeps its
+    // old entry so the next frame still sees it as changed.
+    this.lastPaintRows = frame.deferred.length === 0
+      ? snapshot
+      : advancePaintedRows(this.lastPaintRows, snapshot, frame.painted)
     this.lastChromeKey = chromeKey
     this.lastPaintWidth = width
     this.lastPaintHeight = height
@@ -3727,6 +3750,12 @@ export class SshTui {
   private render = (): void => {
     if (!this.dirty || this.exiting) return
     if ((this.displayDetached || this.headlessDisplay) && this.displayHost?.attached !== true) return
+    // Burst merging on a slow link: the previous frames have not drained yet,
+    // so another one would only queue behind them and delay the newest state.
+    // The paint is skipped, not lost — `dirty` stays set and the next tick
+    // draws what is current. The bound keeps a genuinely stuck pipe from
+    // freezing the screen forever: after four cadences we paint regardless.
+    if (this.stdoutBacklogged() && Date.now() - this.lastPaintAt < 4 * this.paintIntervalMs) return
     if (
       this.agent.status === 'running'
       && Date.now() - this.lastActivity > STALL_WARNING_MS
@@ -3741,6 +3770,18 @@ export class SshTui {
     }
     this.dirty = false
     this.paint()
+  }
+
+  /** Whether the previous frames have not drained yet (slow link, big burst). */
+  private stdoutBacklogged(): boolean {
+    // Only the direct-stdout path can be measured here; a detached display
+    // sends through its own socket and keeps its own queue.
+    if (this.displayHost?.attached === true || this.displayDetached) return false
+    try {
+      return process.stdout.writableLength > STDOUT_BACKLOG_BYTES
+    } catch {
+      return false
+    }
   }
 
   private styleLine(kind: DisplayKind, text: string): string {

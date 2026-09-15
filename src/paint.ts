@@ -132,6 +132,29 @@ export function linkSignalPips(quality: LinkQuality): number {
   return 0
 }
 
+/**
+ * How many bytes one frame may carry before the rest waits for the next tick.
+ *
+ * A 100x30 full repaint costs about 3.7 kB, which on a 400ms link is a third of
+ * a second of serialization the user waits through before anything moves. The
+ * cadence already follows the measured RTT; the budget bounds what each of
+ * those ticks may spend, so a resize or a burst of streaming output degrades
+ * into a few ordered frames instead of one long freeze and a queue behind it.
+ */
+export const FRAME_BYTE_BUDGETS: Record<LinkQuality, number> = {
+  local: Number.POSITIVE_INFINITY,
+  good: 16_384,
+  ok: 8_192,
+  slow: 4_096,
+  poor: 2_048,
+  unknown: 8_192,
+}
+
+/** The per-frame byte budget for a link quality. */
+export function frameByteBudget(quality: LinkQuality): number {
+  return FRAME_BYTE_BUDGETS[quality] ?? Number.POSITIVE_INFINITY
+}
+
 const LINK_PIP_COLOR: Record<number, string> = {
   0: '90',
   1: '31',
@@ -162,8 +185,7 @@ export function formatLinkQualityChip(
 }
 
 
-/** One incremental paint as a single stdout write (one SSH packet when corked). */
-export function composePaintOutput(options: {
+export interface PaintOptions {
   width: number
   height: number
   paintRows: readonly string[]
@@ -176,7 +198,51 @@ export function composePaintOutput(options: {
   cursorColumn: number
   /** Keep the cursor hidden (session picker). Default shows it on the input. */
   hideCursor?: boolean
-}): string {
+}
+
+export interface PaintFrame {
+  /** The single stdout write for this frame. */
+  output: string
+  /** Row indices actually written, ascending. Only these are now up to date. */
+  painted: number[]
+  /** Rows that needed a paint but did not fit the byte budget. */
+  deferred: number[]
+  /** Highest deferred row, to pass back as `from` on the next frame. */
+  resume: number | undefined
+  /** Bytes this frame carried, for the ledger `/diag` and the tests read. */
+  bytes: number
+}
+
+/**
+ * Which dirty rows to paint first when a byte budget applies.
+ *
+ * Rows at or below `from` were deferred by the previous frame and go first so
+ * they cannot starve; everything above is the tail the user is looking at,
+ * painted newest-row-first so the input area is current even when the budget
+ * runs out. Without a `from`, the order is simply tail-first.
+ * @param dirty - row indices that need a paint, ascending.
+ * @param from - highest row the previous frame deferred, if any.
+ * @returns indices in paint order.
+ */
+export function paintOrder(dirty: readonly number[], from?: number): number[] {
+  const descending = (values: readonly number[]): number[] => [...values].sort((left, right) => right - left)
+  if (from === undefined) return descending(dirty)
+  return [...descending(dirty.filter(index => index <= from)), ...descending(dirty.filter(index => index > from))]
+}
+
+/**
+ * Compose one incremental paint, optionally bounded by a byte budget.
+ *
+ * Every row is addressed absolutely, so the paint order is free: with a budget
+ * the frame spends it on the tail first and reports what it could not reach, so
+ * the caller keeps those rows dirty instead of forgetting them.
+ * @param options - the frame to paint, plus the budget and resume point.
+ * @returns the write, what it covered, and what is left for the next tick.
+ */
+export function composePaintFrame(options: PaintOptions & {
+  maxBytes?: number
+  from?: number
+}): PaintFrame {
   const { width, height, paintRows, previousRows, sizeChanged, chromeChanged, chromeStart } = options
   const previousChromeStart = options.previousChromeStart ?? chromeStart
   // When a card expands, the input box moves up. Rows that used to be
@@ -190,23 +256,42 @@ export function composePaintOutput(options: {
   // Never address row height+1: that scrolls the SSH viewport and leaves
   // thinking/tool/assistant glyphs sitting on the next card.
   const rowCount = Math.min(height, paintRows.length)
-  let painted = sizeChanged
+  const dirty: number[] = []
+  for (let index = 0; index < rowCount; index += 1) {
+    const current = paintRows[index] ?? ''
+    if (current === prev[index] && !(chromeChanged && index >= dirtyChromeStart)) continue
+    dirty.push(index)
+  }
+  const budgeted = options.maxBytes !== undefined && Number.isFinite(options.maxBytes)
+  // Without a budget the order stays ascending, byte for byte what the
+  // unbudgeted painter always wrote.
+  const order = budgeted ? paintOrder(dirty, options.from) : [...dirty].sort((left, right) => left - right)
+  const limit = options.maxBytes ?? Number.POSITIVE_INFINITY
+  const painted: number[] = []
+  const deferred: number[] = []
   let rows = ''
-  for (let i = 0; i < rowCount; i++) {
-    const current = paintRows[i] ?? ''
-    if (current === prev[i] && !(chromeChanged && i >= dirtyChromeStart)) continue
-    painted = true
-    const clipped = pinEmojiCells(padAnsiToWidth(current, width))
-    // EL2 *before* the glyphs, from column 1. A full-width write followed
-    // by EL hits DEC auto-margin: the cursor wraps, and EL then blanks the
-    // next card instead of the row we just drew.
-    rows += `\x1b[${i + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
+  let used = out.length
+  for (const index of order) {
+    const clipped = pinEmojiCells(padAnsiToWidth(paintRows[index] ?? '', width))
+    const row = `\x1b[${index + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
+    // Always paint one row, however small the budget: a frame that draws
+    // nothing would leave the terminal stale for as long as the burst lasts.
+    if (painted.length > 0 && used + row.length > limit) {
+      deferred.push(index)
+      continue
+    }
+    rows += row
+    used += row.length
+    painted.push(index)
   }
   if (rowCount < height && (sizeChanged || previousRows.length !== paintRows.length)) {
-    painted = true
     rows += `\x1b[${rowCount + 1};1H\x1b[J`
   }
-  if (!painted && options.hideCursor === true) return ''
+  painted.sort((left, right) => left - right)
+  const paintedAny = painted.length > 0 || sizeChanged
+  if (!paintedAny && options.hideCursor === true) {
+    return { output: '', painted, deferred, resume: undefined, bytes: 0 }
+  }
   if (rows !== '') {
     // DECAWM off for the row batch. A glyph the width table under-counts (a
     // terminal drawing some emoji wider than wcwidth says) then loses its
@@ -216,17 +301,53 @@ export function composePaintOutput(options: {
     out += `\x1b[?7l${rows}\x1b[?7h`
   }
   out += '\x1b[0m'
-  if (options.hideCursor === true) return out
-  const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
-  // Column `width + 1` (and writing into the last cell then parking past
-  // it) trips DEC auto-margin: the hardware cursor wraps onto the next
-  // row and the caret punches through the last glyph. Keep the caret on
-  // this row, in a real cell.
-  const cursorColumn = Math.min(width, Math.max(1, options.cursorColumn))
-  out += `\x1b[${cursorRow};${cursorColumn}H\x1b[?25h`
-  return out
+  if (options.hideCursor !== true) {
+    const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
+    // Column `width + 1` (and writing into the last cell then parking past
+    // it) trips DEC auto-margin: the hardware cursor wraps onto the next
+    // row and the caret punches through the last glyph. Keep the caret on
+    // this row, in a real cell.
+    const cursorColumn = Math.min(width, Math.max(1, options.cursorColumn))
+    out += `\x1b[${cursorRow};${cursorColumn}H\x1b[?25h`
+  }
+  return {
+    output: out,
+    painted,
+    deferred,
+    resume: deferred.length === 0 ? undefined : Math.max(...deferred),
+    bytes: out.length,
+  }
 }
 
+/**
+ * The snapshot for the next frame: only the rows a frame painted become clean.
+ *
+ * A deferred row has to keep its previous content in the snapshot, or the next
+ * frame would compare it against itself, call it unchanged, and never paint it:
+ * the row would simply stay wrong. The array also keeps its old length while
+ * anything is owed, so the "row count changed" clear keeps firing until the
+ * frame is complete.
+ * @param previous - the snapshot the frame painted against.
+ * @param current - the rows the frame wanted to show.
+ * @param painted - indices the frame actually wrote.
+ * @returns the snapshot to hand to the next frame.
+ */
+export function advancePaintedRows(
+  previous: readonly string[],
+  current: readonly string[],
+  painted: readonly number[],
+): string[] {
+  const next = previous.slice()
+  for (const index of painted) {
+    if (index < next.length) next[index] = current[index] ?? ''
+  }
+  return next
+}
+
+/** One incremental paint as a single stdout write (one SSH packet when corked). */
+export function composePaintOutput(options: PaintOptions): string {
+  return composePaintFrame(options).output
+}
 
 /** Whether `text` could still grow into a recognized escape sequence. */
 export function isEscapePrefix(text: string): boolean {
