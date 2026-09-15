@@ -40,6 +40,25 @@ function fixture(ctxOverrides = {}) {
 }
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 20))
+
+/**
+ * Wait for `/mode fix` to land its write instead of sleeping once.
+ *
+ * The repair reads the patch, plans, and writes; a fixed tick read the file
+ * before the write on a slow Windows runner and reported ENOENT for a repair
+ * that had succeeded.
+ */
+async function waitForPatch(path, pattern, tui, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const text = await readFile(path, 'utf8').catch(() => '')
+    if (pattern.test(text)) return text
+    if (Date.now() >= deadline) {
+      assert.fail(`timed out waiting for ${pattern} in ${path}; last content:\n${text}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
 const systemText = tui => tui.rows.filter(row => row.kind === 'system').map(row => String(row.text)).join('\n')
 const errorText = tui => tui.rows.filter(row => row.kind === 'error').map(row => String(row.text)).join('\n')
 
@@ -65,9 +84,8 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     assert.ok(report.includes('ensure-profile-rows.sh'), report)
 
     tui.runCommand('/mode fix')
-    await tick()
     const patch = join(home, 'profiles', 'tui', 'cordis.patch.yml')
-    const written = await readFile(patch, 'utf8')
+    const written = await waitForPatch(patch, /agent-presets/u, tui)
     assert.ok(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), written)
     assert.ok(written.includes('id: code-runtime'), written)
     assert.ok(systemText(tui).includes(patch), systemText(tui))
@@ -77,7 +95,7 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     tui.runCommand('/mode fix')
     await tick()
     assert.ok(tui.rows.length > before)
-    assert.equal(await readFile(patch, 'utf8'), written)
+    assert.equal(await readFile(patch, 'utf8'), written, 'a second repair is a no-op, not a duplicate row')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
