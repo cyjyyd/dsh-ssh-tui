@@ -3,7 +3,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { displayWidth, truncateToWidth } from './term-text.js'
+import { displayWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
 import { describeSubagentFit } from './subagent-model.js'
 import { formatQuotaStatusLine, type QuotaSnapshot } from './quota.js'
 import type { DisconnectPolicyName } from './transcript-types.js'
@@ -251,13 +251,18 @@ export function fitFooterChips(chips: readonly FooterChip[], width: number): str
     .map(entry => (entry.full ? entry.chip.long : entry.chip.short))
     .filter(text => text !== '')
     .join(' │ ')
+  // Budget the way it will be painted: the frame pins a symbol like ⚠ with a
+  // variation selector and a reserving space, so the raw string measures one or
+  // two cells narrower than the row it becomes. Fitting the unpinned text left
+  // a row that overflowed the terminal by exactly that much.
+  const used = (): number => displayWidth(pinEmojiCells(render()))
   const byLeastImportant = [...state].sort((a, b) => b.chip.priority - a.chip.priority)
   for (const entry of byLeastImportant) {
-    if (displayWidth(render()) <= limit) break
+    if (used() <= limit) break
     entry.full = false
   }
   for (const entry of byLeastImportant) {
-    if (displayWidth(render()) <= limit) break
+    if (used() <= limit) break
     entry.present = false
   }
   if (state.length > 0 && state.every(entry => !entry.present)) {

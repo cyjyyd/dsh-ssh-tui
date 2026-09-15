@@ -229,12 +229,16 @@ import {
   contextPressureView,
   formatContextPressureRing,
   describeProviderRoute,
+  fitFooterChips,
   fitFooterStatsLine,
   fitFooterStatusLine,
   footerActivity,
+  footerHealthChip,
   footerIdentityParts,
   footerStatsGroups,
   formatContextPressureChip,
+  formatFooterQuota,
+  formatQuotaBar,
   formatStatusReport,
   formatTokens,
   parseContextPressure,
@@ -242,6 +246,7 @@ import {
   providerUsesLocalOAuth,
   shouldIdleAutoCompact,
   type ContextPressureView,
+  type FooterChip,
   type FooterStatsInput,
   type FooterStatusInput,
 } from './footer.js'
@@ -1234,6 +1239,14 @@ export class SshTui {
   private displayDrops = 0
   /** When the display went away, so the reconnect can say how long it was gone. */
   private detachedAt: number | undefined
+  /**
+   * Whether the agent-preset roster service is mounted. Read once at boot and
+   * after a repair — never per frame: answering it from the composition would
+   * mean touching the filesystem on every repaint.
+   */
+  private rosterMissing = false
+  /** Screen row of the health chip in the status strip, for click-to-doctor. */
+  private healthChipRow: number | undefined
   /** The counters as they stood when the display went away, for the summary. */
   private awaySnapshot: { allowed: number; denied: number; detached: number } | undefined
   /** Approvals refused because nobody could confirm them (a subset of denials). */
@@ -1300,7 +1313,8 @@ export class SshTui {
     // in-app update, which only runs `dsh plugin add`) boots without one. Say
     // so at boot: the banner's localized default hides the missing service, and
     // the loss is not only `/mode` — the preset-owned tools are absent too.
-    if (this.ctx.get('agentPresets') === undefined) {
+    this.refreshRosterHealth()
+    if (this.rosterMissing) {
       this.pushRow({ kind: 'system', text: t('mode.bootMissing') })
     }
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
@@ -3657,15 +3671,6 @@ export class SshTui {
       this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color,
     )
     const statsGroups = footerStatsGroups(statsRowOf(this.statsTracker.snapshot()))
-    const statsPlain = fitFooterStatsLine(
-      formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false),
-      statsGroups,
-      Math.max(1, width),
-    )
-    const chipVisible = formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false)
-    const statsLine = statsPlain.startsWith(chipVisible)
-      ? clipAnsiToWidth(`${linkChip}${this.styleLine('system', statsPlain.slice(chipVisible.length))}`, Math.max(1, width))
-      : this.styleLine('system', statsPlain)
 
     const idleMs = Date.now() - this.lastActivity
     const livePlan = this.findLivePlanRow()
@@ -3703,12 +3708,9 @@ export class SshTui {
       subModel: sub.model,
       ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
       ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
-      ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
-        ? {}
-        : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
-      ...(this.contextPressure === undefined
-        ? {}
-        : { contextChip: formatContextPressureChip(this.contextPressure, false) }),
+      // Quota and context pressure moved to the status strip, which owns the
+      // loss order for a narrow terminal.
+
       ...(balanceText === undefined ? {} : { balanceText }),
       ...(this.searchHits.length > 0 && this.searchIndex >= 0
         ? { search: { index: this.searchIndex, total: this.searchHits.length } }
@@ -3734,6 +3736,41 @@ export class SshTui {
         `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${formatContextPressureRing(this.contextPressure.percent)}\x1b[0m\x1b[90m`,
       )
 
+    // The strip: one loss order for everything a narrow terminal can do without.
+    // Health leads because it is the only group that reports a broken install;
+    // the session counters go before the operational signals.
+    const strip: FooterChip[] = []
+    const health = footerHealthChip(this.rosterMissing, this.color)
+    if (health !== undefined) strip.push(health)
+    strip.push({
+      id: 'link',
+      long: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color),
+      short: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false)
+        .replace(/\s*\d+ms$/u, ''),
+      priority: 1,
+    })
+    statsGroups.forEach((text, index) => {
+      strip.push({ id: `stat${index}`, long: text, short: '', priority: 4 + index })
+    })
+    if (this.contextPressure !== undefined) {
+      strip.push({
+        id: 'context',
+        long: formatContextPressureChip(this.contextPressure, this.color),
+        short: formatContextPressureRing(this.contextPressure.percent),
+        priority: 2,
+      })
+    }
+    if (quotaWindow !== undefined && this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) {
+      strip.push({
+        id: 'quota',
+        long: formatFooterQuota(quotaWindow.remainingPercent, this.quotaSnapshot.plan),
+        short: formatQuotaBar(quotaWindow.remainingPercent),
+        priority: 3,
+      })
+    }
+    const statsLine = clipAnsiToWidth(fitFooterChips(strip, Math.max(1, width)), Math.max(1, width))
+    this.healthChipRow = undefined
+
     const paintRows: string[] = [
       ...headerLines,
       ...visibleWithSelection,
@@ -3746,6 +3783,7 @@ export class SshTui {
       `${statusLine}\x1b[0m`,
     ]
 
+    if (health !== undefined) this.healthChipRow = paintRows.length - 1
     // Bottom chrome is force-repainted whenever its state changes while the
     // agent is working; this clears any stale cell left behind by a previous
     // frame even when the row strings happen to be identical.
@@ -3754,7 +3792,7 @@ export class SshTui {
       this.status,
       this.agent.status,
       this.scrollOffset,
-      statsPlain,
+      statsLine,
       statusText,
       inputView.text,
       inputView.folded,
@@ -6912,11 +6950,17 @@ export class SshTui {
    * patch tree once at boot — so the report says so instead of pretending the
    * running session gained a roster.
    */
+  /** Re-read the roster fact this process was composed with (cheap, no IO). */
+  private refreshRosterHealth(): void {
+    this.rosterMissing = this.ctx.get('agentPresets') === undefined
+  }
+
   private async repairRoster(): Promise<void> {
     const profile = profileFromArgv()
     const patch = rosterPatchPath(resolveDshHome(), profile)
     try {
       const result = await ensureRosterRows(resolveDshHome(), profile)
+      this.refreshRosterHealth()
       this.pushRow({
         kind: 'system',
         text: result === 'present' ? t('mode.fixPresent', { patch }) : t('mode.fixWritten', { patch }),
@@ -8291,6 +8335,12 @@ export class SshTui {
 
   handleMouseClick(y: number, x = 1): void {
     if (this.dialog !== undefined) return
+    // The health chip is a standing warning, so clicking it opens the report
+    // that explains it — the row is the strip, and the chip leads it.
+    if (this.healthChipRow !== undefined && y === this.healthChipRow) {
+      this.runCommand('/doctor')
+      return
+    }
     const hits = this.paintedLinkHitsByRow.get(y)
     const href = hits === undefined ? undefined : hrefAtColumn(hits, Math.max(0, x - 1))
     if (href !== undefined && href.trim() !== '') {

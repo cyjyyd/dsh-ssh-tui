@@ -296,7 +296,11 @@ export function composePaintFrame(options: PaintOptions & {
   let rows = ''
   let used = out.length
   for (const index of order) {
-    const clipped = pinEmojiCells(padAnsiToWidth(paintRows[index] ?? '', width))
+    // Pin first, then pad: the padder measures with `visibleWidth`, which does
+    // not know that a symbol like ⚠ will gain a variation selector and a
+    // reserving space. Padding the unpinned form and pinning afterwards pushed
+    // rows that reach the right edge two cells past the terminal.
+    const clipped = padAnsiToWidth(pinEmojiCells(paintRows[index] ?? ''), width)
     const row = `\x1b[${index + 1};1H\x1b[0m\x1b[2K${clipped}\x1b[0m`
     // Always paint one row, however small the budget: a frame that draws
     // nothing would leave the terminal stale for as long as the burst lasts.
