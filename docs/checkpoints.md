@@ -58,6 +58,55 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 ① 去掉 `nudged` 判据 → 红；② 关闭列表时不复位 episode（重开的列表永远不会被提醒）→ 红；
 ③ 重放 notice 时不标记已提醒 → 红。
 
+## 状态行不再显示 `提供商/模型`（用户要求，2026-09-16）
+
+**要求**：部分提供商的模型 id 带厂商前缀（`xai/grok-4.6`、`deepseek-official/deepseek-v4-flash`），
+在状态行里白占格子；这种格式要截断成模型名。
+
+**实现**：`shortModelName()`（`src/footer.ts`）取最后一个 `/` 之后的部分并 trim；没有 `/` 原样返回；
+`/` 之后为空（如 `trailing/`）也原样返回，避免把模型名变成空串。`footerIdentityParts()` 用它，
+`effort` 为空白时不再留下尾随空格。
+
+**有意保留**：顶栏与会话头部的完整路由、`/status` 的完整路由不变；`sub:` 路由**保留**提供商前缀
+（`sub:xai/grok-4.5`）——子是**另一条**路由，抹掉它就分不清父子走的是不是同一条。
+
+**人工核对**：模型为 `xai/grok-4.6` 时，状态行应显示 `grok-4.6 xhigh`，且同一行不出现 `xai/grok-4.6`。
+
+**自动证据**：`tests/helpers.test.mjs` 新增 1 条（含多级路径、无斜杠、尾斜杠、空白 effort、`sub:` 保留前缀）；
+`scripts/capture-footer-frames.mjs` 新增 `footer-model-route` 帧（真实 painter，断言存在 `grok-4.6 xhigh`、不存在 `xai/grok-4.6`）。
+
+**截图证据**：`docs/screenshots/footer-model-route.png`。
+
+**mutation（2 组，均 unit+帧双红）**：① 状态行退回直接用 `input.model`；② 取第一个 `/` 之前而不是之后。
+
+## 额度显示细化（用户要求，2026-09-16）
+
+**要求**：底栏额度只显示**套餐名**（`SuperGrok` / `OC·GO`＝OpenCode Go / `CC·GOAT`＝Command Code Goat），
+额度条**按时间窗口细分**：默认显示**最小时间窗口**那一档，并标注窗口（`5Hr` / `1Wk` / `1Mo`）。
+
+**实现**：
+- `QuotaSnapshot.source`（`supergrok` / `opencode-go` / `command-code`）由三个解析器各自标注；
+  `shortQuotaPlanName()` 给出短徽标（`CC·` 前缀 + 档位，如 `CC·GOAT` / `CC·PRO`；无 `source` 的手工快照按文案兜底）。
+- `preferredQuotaWindow()`：**按窗口精细度**取（hourly → weekly → monthly → unknown），同档取剩余更低者；
+  与原有的 `tightestQuotaWindow()`（取剩余最低，供告警与刷新节奏使用）并存、互不影响。
+- `formatFooterQuota(percent, badge, period)` → `SuperGrok 5Hr ███████░ 91%`；
+  窗口标签是固定技术串（`5Hr`/`1Wk`/`1Mo`），**不随语言变化**——它要在截图与问题报告里保持可读。
+- 窄行丢失顺序不变，但**标签不跟着徽标一起丢**：`SuperGrok 5Hr ███ 82%` → `5Hr ███ 82%`（`dropFooterQuotaPlanName` 已更新）。
+
+**人工核对**（三种套餐各看一眼底栏身份行）：
+`SuperGrok 5Hr ███████░ 91%`（同时有 1Wk 12% 时**仍显示 5Hr**）、`OC·GO 1Wk …`、`CC·GOAT 5Hr …`；
+把终端收窄：先丢套餐名，`5Hr` 与额度条必须留下。
+
+**自动证据**：`tests/helpers.test.mjs` 新增 1 条（窗口优选六种情形 + 三个徽标 + 无 source 兜底 + 标签格式 + 窄行保标签）；
+`tests/footer-chips.test.mjs` 的身份行帧用例改为"两窗口、更紧的是粗窗口"，断言渲染出 `SuperGrok 5Hr … 91%`。
+
+**截图证据**：`docs/screenshots/footer-quota.png`（四段：SuperGrok / OC·GO / CC·GOAT / 窄行丢徽标保标签）。
+`scripts/capture-footer-frames.mjs` 扩到 **9 帧**（新增三种套餐 + 窄行），断言徽标与标签，并进了 `verify-batch`。
+
+**mutation（4 组，全部验红）**：① 窗口优选退回"取剩余最低"（unit+帧双红）；② command-code 不归一化徽标（unit 红，
+用 `PRO` 档区分——`GOAT` 与文案兜底等价）；③ 丢徽标时把标签一起丢（unit+帧双红）；④ `weekly` 标成 `1Mo`（unit+帧双红）。
+过程中发现两处**等价变异**（`known` 过滤是死代码、`GOAT` 走兜底与走 source 同结果），已删掉死代码并改用真正有区分度的变异。
+
 ## 0.7.0-rc.2 · B-1 两个回归的修复（用户复验发现）
 
 **用户看到的现象**：底栏状态行出现 `[33m⚠[0m`、`[90m●●●●[0m` 一类**乱码**（颜色序列的转义符被吃掉、只剩 `[32m` 这种字面量）；且**额度条不见了**——终端拉宽后才看到它跑到了上面一行。

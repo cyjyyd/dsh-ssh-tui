@@ -180,16 +180,28 @@ const stripRowOf = frame => frame.at(-2) ?? ''
 test('quota and the context ring live on the identity line, never the strip', async () => {
   const tui = await footerTui({ color: true, provider: 'xai', model: 'grok-4.6' })
   tui.contextPressure = { percent: 25, usedTokens: 250_000, contextWindow: 1_000_000, level: 'ok' }
+  // Two windows, and the *tightest* one is the coarser one: the footer must show
+  // the finest window (`5Hr`), short badge included, not `1Wk 12%`.
   tui.quotaSnapshot = {
-    provider: 'xai', plan: 'SuperGrok',
-    windows: [{ label: '每周', period: 'week', remainingPercent: 82 }],
+    provider: 'xai', plan: 'SuperGrok', source: 'supergrok',
+    windows: [
+      { label: '本周', period: 'weekly', remainingPercent: 12 },
+      { label: '滚动 5 小时', period: 'hourly', remainingPercent: 91 },
+    ],
   }
-  const frame = tui.captureFrame(100, 24)
+  // Wide enough for the badge *and* the tag: at 110 the fitter legitimately
+  // trades the badge for the window, which the helpers test covers.
+  const frame = tui.captureFrame(130, 24)
   const plain = frame.map(stripAnsi)
   const identity = plain.at(-1) ?? ''
   const strip = stripRowOf(plain)
   assert.match(identity, /grok-4\.6/u, `the model leads the identity line: ${JSON.stringify(identity)}`)
   assert.match(identity, BAR_RE, `the quota bar is on the identity line: ${JSON.stringify(identity)}`)
+  assert.match(
+    identity,
+    /SuperGrok 5Hr [█░]{8} 91%/u,
+    `the finest window is the one shown: ${JSON.stringify(identity)}`,
+  )
   assert.ok(identity.indexOf('grok-4.6') < identity.search(BAR_RE), 'quota sits after the model')
   assert.match(identity, RING_RE, `the context ring is on the identity line: ${JSON.stringify(identity)}`)
   assert.notEqual(strip, '', `the strip row exists: ${JSON.stringify(plain)}`)

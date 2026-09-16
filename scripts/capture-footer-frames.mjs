@@ -37,33 +37,41 @@ const OUT_DIR = outIndex >= 0 && argv[outIndex + 1] !== undefined
 const ESCAPE_BODY_RE = /\[(?:\d{1,3}(?:;\d{1,3})*)?m/u
 const RING_RE = /[⣀⠉⠋⠛⠞⠟⠿⡿⣿]/u
 
-function mockAgent() {
+function mockAgent(provider = 'xai', model = 'grok-4.6') {
   return {
     id: 'main-session',
-    options: { provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' },
+    options: { provider, model, reasoningEffort: 'xhigh' },
     status: 'idle',
     session: { id: 'main-session', events: [] },
     cancel() {},
   }
 }
 
-function makeTui({ roster = true, quota = true } = {}) {
+function makeTui({ roster = true, quota = true, windows, provider = 'xai', model = 'grok-4.6' } = {}) {
   process.env.TERM = 'xterm-256color'
   process.env.DSH_TUI_COLOR_DEPTH = 'truecolor'
   delete process.env.NO_COLOR
   const ctx = { get: name => (roster && name === 'agentPresets' ? {} : undefined), on() { return () => {} } }
-  const tui = new SshTui(ctx, mockAgent(), {
+  const tui = new SshTui(ctx, mockAgent(provider, model), {
     sessionId: 'main-session',
     color: true,
-    provider: 'xai',
+    provider,
     presetId: 'standard',
     presetName: '标准模式',
-    selectionRef: { current: { provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' } },
+    selectionRef: { current: { provider, model, reasoningEffort: 'xhigh' } },
     subagentSelection: { current: { model: 'grok-4.5' } },
   })
   tui.rows.splice(0, tui.rows.length)
   seedStats(tui)
-  if (quota) tui.quotaSnapshot = { provider: 'xai', plan: 'SuperGrok', windows: [{ label: '每周', period: 'week', remainingPercent: 82 }] }
+  if (quota) {
+    tui.quotaSnapshot = windows ?? {
+      provider: 'xai', plan: 'SuperGrok', source: 'supergrok',
+      windows: [
+        { label: '本周', period: 'weekly', remainingPercent: 12 },
+        { label: '滚动 5 小时', period: 'hourly', remainingPercent: 91 },
+      ],
+    }
+  }
   tui.contextPressure = { usedTokens: 120_000, contextWindow: 200_000, percent: 60, level: 'ok' }
   tui.paintLink = 'ssh'
   tui.paintProbed = true
@@ -127,6 +135,47 @@ const CASES = [
   { name: 'footer-narrow', cols: baseWidth + 2, rows: 26, options: { quota: 'gone' } },
   { name: 'footer-roster-missing', cols: fullWidth + 4, rows: 26, options: { roster: false, quota: 'plan' } },
   { name: 'footer-strip-tight', cols: stripWidth + 1, rows: 26, options: { identity: false, quota: 'plan', completeStrip: true } },
+  {
+    name: 'footer-quota-supergrok', cols: 130, rows: 26, options: { badge: 'SuperGrok 5Hr' },
+  },
+  // Just too narrow for the badge: the window tag must survive it, because the
+  // number means nothing without the window it belongs to.
+  // A provider that carries the vendor in the model id: the status line shows
+  // the model, not the route.
+  {
+    name: 'footer-model-route', cols: 130, rows: 26,
+    options: { model: 'xai/grok-4.6', expectModel: 'grok-4.6 xhigh', absent: 'xai/grok-4.6' },
+  },
+  {
+    name: 'footer-quota-narrow', cols: fullWidth - visibleWidth('SuperGrok '), rows: 26,
+    options: { quota: 'bar', badgeDrop: true },
+  },
+  {
+    name: 'footer-quota-ocgo', cols: 130, rows: 26,
+    options: {
+      provider: 'opencode',
+      windows: {
+        provider: 'opencode', plan: 'OpenCode Go', source: 'opencode-go',
+        windows: [{ label: '本周', period: 'weekly', remainingPercent: 62 }],
+      },
+      badge: 'OC·GO 1Wk',
+    },
+  },
+  {
+    name: 'footer-quota-ccgoat', cols: 130, rows: 26,
+    options: {
+      provider: 'command-code',
+      windows: {
+        provider: 'command-code', plan: 'GOAT', source: 'command-code',
+        windows: [
+          { label: '本月', period: 'monthly', remainingPercent: 74 },
+          { label: '本周', period: 'weekly', remainingPercent: 58 },
+          { label: '滚动 5 小时', period: 'hourly', remainingPercent: 43 },
+        ],
+      },
+      badge: 'CC·GOAT 5Hr',
+    },
+  },
 ]
 
 /**
@@ -191,11 +240,29 @@ function check(tui, name, cols, { frame, plain, stripIndex, identityIndex }, opt
   } else {
     if (quotaAt < modelAt) problems.push('the quota bar moved ahead of the model')
     if (subAt >= 0 && quotaAt > subAt) problems.push('the quota bar moved behind the subagent route')
-    const planName = identity.includes('SuperGrok')
+    // The badge is per billing surface: SuperGrok / OC·GO / CC·GOAT.
+    const planName = identity.includes((options.badge ?? 'SuperGrok').split(' ')[0])
     if (wanted === 'plan' && !planName) problems.push('the plan name was dropped although the row has room for it')
-    if (wanted === 'bar' && planName) problems.push('the plan name survived a row that only fits the bar')
+    if (wanted === 'bar' && planName && options.badgeDrop !== true) {
+      problems.push('the plan name survived a row that only fits the bar')
+    }
   }
   if (strip.includes('SuperGrok') || /[█░]{8} \d+%/u.test(strip)) problems.push('the quota bar is on the strip')
+  if (options.expectModel !== undefined && !identity.includes(options.expectModel)) {
+    problems.push(`the status line lost the model "${options.expectModel}": ${JSON.stringify(identity)}`)
+  }
+  if (options.absent !== undefined && identity.includes(options.absent)) {
+    problems.push(`"${options.absent}" should not be on the status line: ${JSON.stringify(identity)}`)
+  }
+  if (options.badgeDrop === true) {
+    const badgeName = (options.badge ?? 'SuperGrok').split(' ')[0]
+    if (identity.includes(badgeName)) problems.push(`the badge survived a row that must trade it: ${JSON.stringify(identity)}`)
+    if (!/(?:5Hr|1Wk|1Mo)/u.test(identity)) problems.push(`the window tag went with the badge: ${JSON.stringify(identity)}`)
+  }
+  // The plan badge and window tag: `SuperGrok 5Hr`, `OC·GO 1Mo`, `CC·GOAT 5Hr`.
+  if (options.badge !== undefined && !identity.includes(options.badge)) {
+    problems.push(`the quota badge lost "${options.badge}": ${JSON.stringify(identity)}`)
+  }
   if (options.roster === false && !strip.includes('⚠')) problems.push('a missing roster lost its ⚠')
   return problems
 }

@@ -200,6 +200,13 @@ function formatOpenCodeGoWindow(label: string, value: unknown): string {
 
 export type QuotaPeriod = 'hourly' | 'weekly' | 'monthly' | 'unknown'
 
+/**
+ * Which billing surface a snapshot came from. The footer shows a short plan
+ * badge (`SuperGrok` / `OC·GO` / `CC·GOAT`), and the provider string alone is
+ * not enough to tell the three apart.
+ */
+export type QuotaSource = 'supergrok' | 'opencode-go' | 'command-code'
+
 export interface QuotaWindow {
   label: string
   period: QuotaPeriod
@@ -213,6 +220,8 @@ export interface QuotaWindow {
 export interface QuotaSnapshot {
   provider: string
   plan: string
+  /** Billing surface, for the footer's short badge. Absent on hand-built snapshots. */
+  source?: QuotaSource
   windows: QuotaWindow[]
 }
 
@@ -303,6 +312,7 @@ export function parseSuperGrokBilling(payload: unknown): QuotaSnapshot {
   return {
     provider: 'xai',
     plan,
+    source: 'supergrok',
     windows: [{
       label: period === 'monthly' ? t('quota.windowMonthly') : t('quota.windowWeekly'),
       period: period === 'unknown' ? 'weekly' : period,
@@ -331,7 +341,7 @@ export function parseOpenCodeGoQuota(payload: unknown, provider: string): QuotaS
   push(t('quota.windowWeekly'), 'weekly', usage.weekly)
   push(t('quota.windowMonthly'), 'monthly', usage.monthly)
   if (windows.length === 0) throw new Error(t('quota.unrecognized'))
-  return { provider, plan: 'OpenCode Go', windows }
+  return { provider, plan: 'OpenCode Go', source: 'opencode-go', windows }
 }
 
 /** One Command Code rolling window: `{ cap, used, resetAt }` off /alpha/billing/credits. */
@@ -448,7 +458,7 @@ export function parseCommandCodeQuota(payload: CommandCodeQuotaPayload, provider
     })
   }
   if (windows.length === 0) throw new Error(t('quota.unrecognized'))
-  return { provider, plan: commandCodePlanLabel(payload.subscription), windows }
+  return { provider, plan: commandCodePlanLabel(payload.subscription), source: 'command-code', windows }
 }
 
 export function formatQuotaSnapshot(snapshot: QuotaSnapshot): string {
@@ -489,6 +499,25 @@ export function tightestQuotaWindow(snapshot: QuotaSnapshot): QuotaWindow | unde
   return snapshot.windows.reduce<QuotaWindow | undefined>((best, window) => {
     if (best === undefined || window.remainingPercent < best.remainingPercent) return window
     return best
+  }, undefined)
+}
+
+/**
+ * The window the footer shows by default: the *finest* one, not the tightest.
+ *
+ * A five-hour cap is what runs out first inside a working session, so it is the
+ * number a glance should find; a monthly window at 12% would otherwise hide a
+ * five-hour window at 3%. Ties (and a provider that reports only one window)
+ * fall back to the lowest remaining percent.
+ */
+export function preferredQuotaWindow(snapshot: QuotaSnapshot): QuotaWindow | undefined {
+  // `unknown` ranks last, so a provider that reports one unnamed window never
+  // shadows a named one; it is only shown when it is all there is.
+  const rank: Record<QuotaPeriod, number> = { hourly: 0, weekly: 1, monthly: 2, unknown: 3 }
+  return snapshot.windows.reduce<QuotaWindow | undefined>((best, window) => {
+    if (best === undefined) return window
+    if (rank[window.period] !== rank[best.period]) return rank[window.period] < rank[best.period] ? window : best
+    return window.remainingPercent < best.remainingPercent ? window : best
   }, undefined)
 }
 

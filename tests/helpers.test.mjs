@@ -30,6 +30,10 @@ import {
   quotaAlertText,
   quotaRefreshEveryTurns,
   quotaRefreshEverySteps,
+  preferredQuotaWindow,
+  shortModelName,
+  shortQuotaPlanName,
+  quotaWindowTag,
   tightestQuotaWindow,
   friendlyJsonLines,
   hrefAtColumn,
@@ -1114,6 +1118,97 @@ test('footer keeps the subagent route visible when it repeats the parent model',
   assert.equal(subagentRouteLabel('grok-4.5', undefined, 'high'), 'sub:grok-4.5(high)')
   assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:xai/grok-4.5')
   assert.equal(subagentRouteLabel(''), '')
+})
+
+/**
+ * A `provider/model` id in the status bar spent cells on the route the reader
+ * already knows. The footer keeps the model name; the header and `/status` keep
+ * the full route, and a `sub:` route keeps its provider because it *is* a
+ * different route from the parent's.
+ */
+test('the status line shows the model name, not the provider route', () => {
+  assert.equal(shortModelName('xai/grok-4.6'), 'grok-4.6')
+  assert.equal(shortModelName('deepseek-official/deepseek-v4-flash'), 'deepseek-v4-flash')
+  assert.equal(shortModelName('openrouter/anthropic/claude-sonnet'), 'claude-sonnet')
+  assert.equal(shortModelName('grok-4.6'), 'grok-4.6')
+  assert.equal(shortModelName('  xai/grok-4.6  '), 'grok-4.6')
+  assert.equal(shortModelName(''), '')
+  // Nothing after the slash: keep what the caller gave us.
+  assert.equal(shortModelName('trailing/'), 'trailing/')
+
+  const base = {
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, provider: 'xai', parentModel: 'xai/grok-4.6', subModel: 'grok-4.5',
+    foldedInput: false, multiLineInput: false, queued: 0,
+  }
+  const routed = footerIdentityParts({ ...base, model: 'xai/grok-4.6', effort: 'xhigh', subModel: 'grok-4.5' })
+  assert.ok(routed.includes('grok-4.6 xhigh'), routed.join(' · '))
+  assert.equal(routed.some(part => part.includes('xai/grok-4.6')), false, routed.join(' · '))
+  // The child's route is a different route: it keeps its provider.
+  const explicit = footerIdentityParts({ ...base, model: 'xai/grok-4.6', subModel: 'grok-4.5', subProvider: 'xai' })
+  assert.ok(explicit.includes('sub:xai/grok-4.5'), explicit.join(' · '))
+  // An effort that is only whitespace must not leave a trailing space.
+  const plain = footerIdentityParts({ ...base, model: 'xai/grok-4.6', effort: '  ' })
+  assert.ok(plain.includes('grok-4.6'), plain.join(' · '))
+  assert.equal(plain.some(part => part.endsWith(' ')), false, JSON.stringify(plain))
+})
+
+/**
+ * The footer's quota widget: a short plan badge, the window the number belongs
+ * to, then the bar. The window shown by default is the *finest* one the provider
+ * reports — a five-hour cap is what a working session runs into first.
+ */
+test('the footer quota shows the short badge and the finest window it has', () => {
+  const snap = (windows, extra = {}) => ({ provider: 'xai', plan: 'SuperGrok', source: 'supergrok', windows, ...extra })
+  const w = (period, remainingPercent) => ({ label: period, period, remainingPercent })
+  // Hourly wins even when a coarser window is tighter: 12% monthly would hide a
+  // 3% five-hour cap, which is the one about to bite.
+  assert.equal(preferredQuotaWindow(snap([w('monthly', 12), w('hourly', 91), w('weekly', 40)]))?.period, 'hourly')
+  assert.equal(preferredQuotaWindow(snap([w('monthly', 12), w('weekly', 40)]))?.period, 'weekly')
+  assert.equal(preferredQuotaWindow(snap([w('monthly', 12)]))?.period, 'monthly')
+  // Same period twice (a provider that reports two 5-hour pools): the lower one.
+  assert.equal(preferredQuotaWindow(snap([w('hourly', 80), w('hourly', 25)]))?.remainingPercent, 25)
+  // An unknown period is only used when nothing else exists.
+  assert.equal(preferredQuotaWindow(snap([w('unknown', 5), w('monthly', 60)]))?.period, 'monthly')
+  assert.equal(preferredQuotaWindow(snap([w('unknown', 5)]))?.period, 'unknown')
+  assert.equal(preferredQuotaWindow(snap([])), undefined)
+
+  // The badge: three billing surfaces, plus what a hand-built snapshot gets.
+  assert.equal(shortQuotaPlanName({ plan: 'SuperGrok Heavy', source: 'supergrok' }), 'SuperGrok')
+  assert.equal(shortQuotaPlanName({ plan: 'OpenCode Go', source: 'opencode-go' }), 'OC·GO')
+  assert.equal(shortQuotaPlanName({ plan: 'GOAT', source: 'command-code' }), 'CC·GOAT')
+  assert.equal(shortQuotaPlanName({ plan: 'PRO', source: 'command-code' }), 'CC·PRO')
+  assert.equal(shortQuotaPlanName({ plan: 'Command Code', source: 'command-code' }), 'CC')
+  assert.equal(shortQuotaPlanName({ plan: 'SuperGrok' }), 'SuperGrok')
+  assert.equal(shortQuotaPlanName({ plan: 'OpenCode Go' }), 'OC·GO')
+  assert.equal(shortQuotaPlanName({ plan: 'goat' }), 'CC·GOAT')
+  assert.equal(shortQuotaPlanName({ plan: '自建套餐' }), '自建套餐')
+
+  // The widget itself, with and without a window.
+  assert.equal(formatFooterQuota(82, 'SuperGrok', 'hourly'), 'SuperGrok 5Hr ███████░ 82%')
+  assert.equal(formatFooterQuota(62, 'OC·GO', 'weekly'), 'OC·GO 1Wk █████░░░ 62%')
+  assert.equal(formatFooterQuota(6, 'CC·GOAT', 'monthly'), 'CC·GOAT 1Mo ░░░░░░░░ 6%')
+  assert.equal(formatFooterQuota(82, 'SuperGrok'), 'SuperGrok ███████░ 82%')
+  assert.equal(formatFooterQuota(82, undefined, 'hourly'), '5Hr ███████░ 82%')
+  assert.equal(formatFooterQuota(82), '███████░ 82%')
+  assert.equal(quotaWindowTag(undefined), '')
+  assert.equal(quotaWindowTag('unknown'), '')
+
+  // Widening one row must not lose the window: the badge goes first, the tag stays.
+  const identity = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.5',
+    quotaCode: 'SuperGrok', quotaPercent: 82, quotaPeriod: 'hourly',
+    foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.ok(identity.includes('SuperGrok 5Hr ███████░ 82%'), identity.join(' · '))
+  const narrowed = [...identity]
+  assert.equal(dropFooterQuotaPlanName(narrowed), true)
+  assert.ok(narrowed.includes('5Hr ███████░ 82%'), narrowed.join(' · '))
+  assert.equal(narrowed.some(part => part.includes('SuperGrok')), false)
 })
 
 test('narrow footer drops the quota plan name before the remaining bar', () => {

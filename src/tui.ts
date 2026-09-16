@@ -246,6 +246,7 @@ import {
   footerStatsGroups,
   formatContextPressureChip,
   formatStatusReport,
+  shortQuotaPlanName,
   formatTokens,
   parseContextPressure,
   promptPressureTokens,
@@ -278,6 +279,7 @@ import {
   parseOpenAiCompatibleBalance,
   parseOpenCodeGoQuota,
   parseSuperGrokBilling,
+  preferredQuotaWindow,
   quotaAlertText,
   quotaRefreshEverySteps,
   reasoningEffortsForDefault,
@@ -419,6 +421,9 @@ export {
   formatFooterQuota,
   formatQuotaBar,
   formatStatusReport,
+  quotaWindowTag,
+  shortModelName,
+  shortQuotaPlanName,
   formatTokens,
   formatTokensPerSecond,
   parseContextPressure,
@@ -450,6 +455,7 @@ export {
   parseOpenAiCompatibleBalance,
   parseOpenCodeGoQuota,
   parseSuperGrokBilling,
+  preferredQuotaWindow,
   quotaAlertText,
   quotaRefreshEverySteps,
   quotaRefreshEveryTurns,
@@ -3887,7 +3893,9 @@ export class SshTui {
     const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
     const current = this.selectionRef?.current
     const provider = this.currentProviderId()
-    const quotaWindow = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
+    // The footer shows the finest window the provider reports (5-hour first),
+    // not the tightest percent: that is the number a working session hits first.
+    const quotaWindow = this.quotaSnapshot === undefined ? undefined : preferredQuotaWindow(this.quotaSnapshot)
     const balanceText = this.balanceSnapshot !== undefined && this.balanceSnapshot.provider === provider
       ? formatFooterBalance(this.balanceSnapshot)
       : undefined
@@ -3924,7 +3932,11 @@ export class SshTui {
       // the loss order for the groups it does own.
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
         ? {}
-        : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
+        : {
+          quotaCode: shortQuotaPlanName(this.quotaSnapshot),
+          quotaPercent: quotaWindow.remainingPercent,
+          quotaPeriod: quotaWindow.period,
+        }),
       ...(this.contextPressure === undefined
         ? {}
         : { contextChip: formatContextPressureChip(this.contextPressure, false) }),

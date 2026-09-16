@@ -5,7 +5,7 @@
 import { t } from './i18n/index.js'
 import { pinEmojiCells, truncateAnsiToWidth, visibleWidth } from './term-text.js'
 import { describeSubagentFit } from './subagent-model.js'
-import { formatQuotaStatusLine, type QuotaSnapshot } from './quota.js'
+import { formatQuotaStatusLine, type QuotaPeriod, type QuotaSnapshot, type QuotaSource } from './quota.js'
 import type { DisconnectPolicyName } from './transcript-types.js'
 
 export const WAIT_INDICATOR_MS = 8000
@@ -344,6 +344,8 @@ export interface FooterStatusInput {
   subEffort?: string
   quotaCode?: string
   quotaPercent?: number
+  /** Which rolling window `quotaPercent` belongs to: tagged `5Hr`/`1Wk`/`1Mo`. */
+  quotaPeriod?: QuotaPeriod
   contextChip?: string
   balanceText?: string
   search?: { index: number; total: number }
@@ -397,18 +399,40 @@ export function subagentRouteLabel(model: string, provider?: string, effort?: st
   return `sub:${route}${suffix}`
 }
 
+/**
+ * The model as the footer shows it: the model's own name, without a
+ * `provider/model` route prefix.
+ *
+ * Some providers carry the vendor in the model id (`xai/grok-4.6`,
+ * `deepseek-official/deepseek-v4-flash`). The route is worth a row in the header
+ * and in `/status`; in the status line it spent cells on something the reader
+ * already knows, and it pushed the quota badge towards the drop edge.
+ * `sub:` routes keep their provider on purpose — that is a *different* route
+ * from the parent's, and hiding it would make the two indistinguishable.
+ */
+export function shortModelName(model: string): string {
+  const id = model.trim()
+  const slash = id.lastIndexOf('/')
+  if (slash < 0) return id
+  const tail = id.slice(slash + 1).trim()
+  // A trailing slash (or a bare `/`) leaves nothing to show: keep the original.
+  return tail === '' ? id : tail
+}
+
 export function footerIdentityParts(input: FooterStatusInput): string[] {
   const parts: string[] = []
   if (input.compactView === true) parts.push(`[${t('view.footerCompact')}]`)
   if (input.preset !== undefined && input.preset !== '') parts.push(`[${input.preset}]`)
   if (input.cwdLabel !== undefined && input.cwdLabel !== '') parts.push(input.cwdLabel)
-  const model = input.effort === undefined ? input.model : `${input.model} ${input.effort}`
+  const modelName = shortModelName(input.model)
+  const effort = input.effort === undefined || input.effort.trim() === '' ? '' : input.effort.trim()
+  const model = [modelName, effort].filter(part => part !== '').join(' ')
   if (model !== '') parts.push(model)
   if (input.balanceText !== undefined && input.balanceText !== '') {
     parts.push(input.balanceText)
   }
   if (input.quotaPercent !== undefined) {
-    parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode))
+    parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode, input.quotaPeriod))
   }
   if (input.contextChip !== undefined && input.contextChip !== '') parts.push(input.contextChip)
   // The subagent route is what every child inherits, so it is always on the
@@ -424,10 +448,51 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   return parts
 }
 
-/** `SuperGrok ███████░ 82%`, or just the bar + percent when `code` is omitted. */
-export function formatFooterQuota(percent: number, code?: string): string {
+/**
+ * `SuperGrok 5Hr ███████░ 82%` — short plan badge, the window the number belongs
+ * to, then the bar.
+ *
+ * The tags are fixed technical labels (`5Hr` / `1Wk` / `1Mo`) rather than
+ * localized words: they sit in a footer that is already fighting for cells, and
+ * a window tag that changes with the locale would be unreadable in a screenshot
+ * or a bug report. Everything else about the window (label, reset time, detail)
+ * stays in `/quota`.
+ */
+export function formatFooterQuota(percent: number, code?: string, period?: QuotaPeriod): string {
   const bar = `${formatQuotaBar(percent)} ${percent.toFixed(0)}%`
-  return code !== undefined && code.trim() !== '' ? `${code.trim()} ${bar}` : bar
+  const tag = quotaWindowTag(period)
+  const name = code === undefined ? '' : code.trim()
+  return [name, tag, bar].filter(part => part !== '').join(' ')
+}
+
+/** Fixed-width tag for the window a footer quota number belongs to. */
+export function quotaWindowTag(period: QuotaPeriod | undefined): string {
+  if (period === 'hourly') return '5Hr'
+  if (period === 'weekly') return '1Wk'
+  if (period === 'monthly') return '1Mo'
+  return ''
+}
+
+/**
+ * The badge the footer shows instead of the billing plan's own label:
+ * `SuperGrok`, `OC·GO` (OpenCode Go), `CC·GOAT` (Command Code Goat).
+ *
+ * The long names live in `/quota`; this one has to survive next to a model id.
+ * Without a `source` (a hand-built snapshot) the plan label is matched instead,
+ * so old callers and tests keep a sensible badge.
+ */
+export function shortQuotaPlanName(snapshot: { plan: string; source?: QuotaSource }): string {
+  const plan = snapshot.plan.trim()
+  if (snapshot.source === 'supergrok') return 'SuperGrok'
+  if (snapshot.source === 'opencode-go') return 'OC·GO'
+  if (snapshot.source === 'command-code') {
+    const tier = plan === '' || plan.toLowerCase() === 'command code' ? '' : plan.toUpperCase()
+    return tier === '' ? 'CC' : `CC·${tier}`
+  }
+  if (/supergrok/iu.test(plan)) return 'SuperGrok'
+  if (/opencode/iu.test(plan)) return 'OC·GO'
+  if (/goat/iu.test(plan)) return 'CC·GOAT'
+  return plan
 }
 
 /**
@@ -438,9 +503,12 @@ export function dropFooterQuotaPlanName(parts: string[]): boolean {
   for (let index = 0; index < parts.length; index++) {
     const part = parts[index]
     if (part === undefined) continue
-    const barAt = part.search(/ [█░]+ \d+%$/)
+    const barAt = part.search(/[█░]{8} \d+%$/)
     if (barAt <= 0) continue
-    parts[index] = part.slice(barAt + 1)
+    // The window tag is the last thing before the bar and survives the badge:
+    // `SuperGrok 5Hr ███ 82%` narrows to `5Hr ███ 82%`, not to a bare bar.
+    const tag = /(?:5Hr|1Wk|1Mo)$/u.exec(part.slice(0, barAt).trimEnd())?.[0]
+    parts[index] = tag === undefined ? part.slice(barAt) : `${tag} ${part.slice(barAt)}`
     return true
   }
   return false
