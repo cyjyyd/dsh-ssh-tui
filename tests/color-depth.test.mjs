@@ -25,6 +25,33 @@ test('the environment decides the depth, override first', () => {
   assert.equal(colorDepth(env({ DSH_TUI_COLOR_DEPTH: 'off' })), 'none')
 })
 
+/**
+ * Windows leaves `TERM` unset — PowerShell, ConHost and even Windows Terminal do
+ * not set it — and the palette used to read an empty TERM as "no terminal at
+ * all", so a Windows session came up black and white. Platform decides what an
+ * empty TERM means: a pipe on POSIX, the normal case on Windows.
+ */
+test('an unset TERM is monochrome on POSIX and colour on Windows', () => {
+  // POSIX, no TERM: the historical pipe/CI case, still no colour.
+  assert.equal(colorDepth({}, 'linux'), 'none')
+  assert.equal(colorDepth({ TERM: '' }, 'darwin'), 'none')
+  // Windows, no TERM: PowerShell 7 / ConHost. The 16-colour palette carries the
+  // diff colours; a Windows console understands those escapes.
+  assert.equal(colorDepth({}, 'win32'), '8')
+  assert.equal(colorDepth({ TERM: '' }, 'win32'), '8')
+  // Windows Terminal advertises itself, and supports 24-bit colour.
+  assert.equal(colorDepth({ WT_SESSION: '4a1b…' }, 'win32'), 'truecolor')
+  // Capability variables win over the platform default, on both platforms.
+  assert.equal(colorDepth({ TERM: 'xterm-256color' }, 'win32'), '256')
+  assert.equal(colorDepth({ COLORTERM: 'truecolor' }, 'win32'), 'truecolor')
+  assert.equal(colorDepth({ TERM: 'xterm-256color' }, 'linux'), '256')
+  // An explicit "no capability" marker still means none, and the opt-outs keep
+  // working everywhere.
+  assert.equal(colorDepth({ TERM: 'dumb' }, 'win32'), 'none')
+  assert.equal(colorDepth({ NO_COLOR: '1' }, 'win32'), 'none')
+  assert.equal(colorDepth({ TERM: 'dumb', DSH_TUI_COLOR_DEPTH: 'truecolor' }, 'win32'), 'truecolor')
+})
+
 test('the diff pair keeps its hue at 8 colours instead of collapsing to grey', () => {
   // The muted add/del colours from styleLine.
   assert.equal(basicSgrFor(122, 168, 116), 32, 'muted green stays green')

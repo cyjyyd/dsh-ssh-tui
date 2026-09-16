@@ -2068,6 +2068,14 @@ export class SshTui {
         probeState: this.paintProbed ? 'measured' : this.paintLink === 'ssh' ? 'unknown' : 'unprobed',
       },
       ...(this.paintIntervalMs === undefined ? {} : { paintIntervalMs: this.paintIntervalMs }),
+      // The depth this process actually paints with, plus the hints behind it:
+      // on Windows TERM is normally unset, which used to read as "no colour".
+      color: {
+        depth: this.colorDepth,
+        ...((process.env.TERM ?? '') === '' ? {} : { term: process.env.TERM }),
+        ...((process.env.COLORTERM ?? '') === '' ? {} : { colorTerm: process.env.COLORTERM }),
+        windowsTerminal: (process.env.WT_SESSION ?? '') !== '',
+      },
     })
     this.pushRow({ kind: 'diag', text: formatDiag(snapshot).join('\n') })
     this.markDirty()

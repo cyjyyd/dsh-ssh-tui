@@ -610,6 +610,10 @@ Find your symptom; each answer is what to do, not a change log.
 
 ### Display and terminal
 
+- **Windows: no colour at all, just black and white** — 0.7.0 read the unset `TERM` of a
+  Windows session as "no terminal". Pin the palette to recover it:
+  `set DSH_TUI_COLOR_DEPTH=8` (or `256` / `truecolor`); `/diag` prints the resolved palette
+  and the hints behind it.
 - **Colours look wrong, or a diff is one solid block you cannot read** — pin the palette
   with `DSH_TUI_COLOR_DEPTH=truecolor|256|8|none`. At `256` a diff is dark grey with green
   or red text; at `none` there is no colour at all, but `+`/`-`, `●`, `⚠` and `✖` remain —

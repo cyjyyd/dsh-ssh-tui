@@ -251,6 +251,8 @@ export const zh: Record<string, string> = {
   'diag.logMissing': '缺少（会话未落盘）',
   'diag.logPresent': '{format} · {bytes} 字节 · seq {seq} · 事件 {events}',
   'diag.rowVersions': '版本：插件 {plugin} · dsh {dsh} · node {node}',
+  'diag.colorUnset': '（未设置）',
+  'diag.rowColor': '配色：{depth} · TERM {term} · COLORTERM {colorTerm} · Windows Terminal {wt}',
   'diag.rowPlatform': '平台：{platform}',
   'diag.rowSession': '会话：{session}',
   'diag.rowRole': '角色：{role} · DSH_HOME {home}',

@@ -251,6 +251,8 @@ export const en: Record<string, string> = {
   'diag.logMissing': 'missing (session never materialized)',
   'diag.logPresent': '{format} · {bytes} bytes · seq {seq} · {events} events',
   'diag.rowVersions': 'versions: plugin {plugin} · dsh {dsh} · node {node}',
+  'diag.colorUnset': '(unset)',
+  'diag.rowColor': 'Palette: {depth} · TERM {term} · COLORTERM {colorTerm} · Windows Terminal {wt}',
   'diag.rowPlatform': 'platform: {platform}',
   'diag.rowSession': 'session: {session}',
   'diag.rowRole': 'role: {role} · DSH_HOME {home}',

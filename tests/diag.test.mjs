@@ -25,6 +25,7 @@ function snapshot(overrides = {}) {
     sockFilePresent: true,
     host: { kind: 'live', pid: 4242, state: 'attached', agentStatus: 'idle', path: '/root/.dsh/tui-socks/main-session-abc.sock' },
     link: { kind: 'ssh', rttMs: 55, probeState: 'measured' },
+    color: { depth: '256', term: 'xterm-256color', windowsTerminal: false },
     lockHeldByThisProcess: false,
     otherLocks: [],
     ...overrides,
@@ -98,6 +99,32 @@ test('the report carries the facts a bug report needs', () => {
     assert.equal(lines.includes(needle), true, `report must include ${needle}`)
   }
   assert.equal(DIAG_ERR_TAIL_BYTES > 0, true)
+})
+
+/**
+ * The palette row exists because "colours are missing" is otherwise guesswork:
+ * Windows leaves TERM unset, and the report should show which hints decided the
+ * depth (and that the platform, not the user, picked it).
+ */
+test('the report says which palette it resolved and why', () => {
+  const posix = formatDiag(snapshot()).join('\n')
+  assert.equal(posix.includes('Palette: 256'), true, posix)
+  assert.equal(posix.includes('TERM xterm-256color'), true, posix)
+
+  const windows = formatDiag(snapshot({
+    platform: 'win32 x64',
+    color: { depth: '8', windowsTerminal: false },
+  })).join('\n')
+  assert.equal(windows.includes('Palette: 8'), true, windows)
+  assert.equal(windows.includes('TERM (unset)'), true, windows)
+  assert.equal(windows.includes('Windows Terminal no'), true, windows)
+
+  const windowsTerminal = formatDiag(snapshot({
+    platform: 'win32 x64',
+    color: { depth: 'truecolor', windowsTerminal: true },
+  })).join('\n')
+  assert.equal(windowsTerminal.includes('Palette: truecolor'), true, windowsTerminal)
+  assert.equal(windowsTerminal.includes('Windows Terminal yes'), true, windowsTerminal)
 })
 
 test('the session log format never doubles the version prefix', () => {

@@ -542,6 +542,8 @@ npm run build
 
 ### 显示与终端
 
+- **Windows 下完全没有颜色（只有黑白）**：0.7.0 在 Windows 上把"未设置 `TERM`"误判为无终端。指定色深即可恢复：
+  `set DSH_TUI_COLOR_DEPTH=8`（或 `256` / `truecolor`），也可以先看 `/diag` 的**配色**一行确认判定结果。
 - **颜色不对，或 diff 整块一个颜色、看不清字**：显式指定色深 `DSH_TUI_COLOR_DEPTH=truecolor|256|8|none`。
   `256` 下 diff 是深灰底 + 绿/红字；`none` 完全没有颜色，但 `+`/`-`、`●`、`⚠`、`✖` 仍在，状态不只靠颜色表达。
 - **中文 / emoji 挤压相邻字符**：换一款覆盖这些字形的等宽字体（如 Noto Sans Mono CJK）。程序按 2 格预算这些符号

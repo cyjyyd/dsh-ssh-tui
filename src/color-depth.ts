@@ -27,7 +27,10 @@ export type ColorDepth = 'truecolor' | '256' | '8' | 'none'
  * @param env - the environment to read (tests pass their own).
  * @returns the palette to paint with.
  */
-export function colorDepth(env: NodeJS.ProcessEnv = process.env): ColorDepth {
+export function colorDepth(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): ColorDepth {
   const forced = (env.DSH_TUI_COLOR_DEPTH ?? '').trim().toLowerCase()
   if (forced === 'truecolor' || forced === '24bit' || forced === '16m') return 'truecolor'
   if (forced === '256' || forced === '256color') return '256'
@@ -37,11 +40,24 @@ export function colorDepth(env: NodeJS.ProcessEnv = process.env): ColorDepth {
   const noColor = (env.NO_COLOR ?? '').trim()
   if (noColor !== '') return 'none'
   const term = (env.TERM ?? '').trim().toLowerCase()
-  if (term === '' || term === 'dumb' || term === 'linux' || term === 'vt100' || term === 'vt220') return 'none'
+  // What an empty TERM means depends on the platform. On POSIX it is the pipe /
+  // CI case and there is nothing to paint with. On Windows it is simply the
+  // normal state — PowerShell, ConHost and Windows Terminal all leave TERM unset
+  // — and reading it as "no colour" is what turned a Windows session black and
+  // white. The explicit markers below still decide the palette there.
+  if (term === '') {
+    if (platform !== 'win32') return 'none'
+  } else if (term === 'dumb' || term === 'linux' || term === 'vt100' || term === 'vt220') {
+    return 'none'
+  }
   const colorTerm = (env.COLORTERM ?? '').trim().toLowerCase()
   if (colorTerm === 'truecolor' || colorTerm === '24bit') return 'truecolor'
   if (term.includes('256color')) return '256'
   if (term.startsWith('screen') || term.startsWith('tmux')) return '256'
+  // Windows Terminal sets WT_SESSION and paints 24-bit colour; a plain Windows
+  // console falls through to the 16-colour palette, which still carries the
+  // diff colours (and `DSH_TUI_COLOR_DEPTH` overrides either way).
+  if (platform === 'win32' && (env.WT_SESSION ?? '').trim() !== '') return 'truecolor'
   return '8'
 }
 

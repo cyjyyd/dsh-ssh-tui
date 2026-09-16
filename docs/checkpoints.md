@@ -80,6 +80,32 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 
 **mutation（2 组，均 unit+帧双红）**：① 状态行退回直接用 `input.model`；② 取第一个 `/` 之前而不是之后。
 
+## 修复 · Windows 上颜色丢失（只有黑白）（用户实测发现，2026-09-16，只提交不发版）
+
+**现象**：0.7.0 在 Windows + PowerShell 7.6.6 下完全没有颜色。
+
+**根因**：色深推断把**空的 `TERM`** 当成"没有终端"（`term === '' → 'none'`）。这条规则来自 POSIX 的管道/CI 场景，
+但 **Windows 上 `TERM` 默认就是不设置的**（PowerShell、ConHost、Windows Terminal 都不设；`TERM` 是 POSIX 习惯），
+于是彩色终端被判定成单色。`/diag` 之前也不报色深，所以只能靠猜。
+
+**修复**（`src/color-depth.ts`）：`colorDepth(env, platform)` 增加平台参数——**空 `TERM` 的含义按平台区分**：
+POSIX 仍是"无终端 → none"，Windows 则继续按能力提示判定：`COLORTERM=truecolor` → truecolor；
+`TERM=*256color` / `screen*` / `tmux*` → 256；`WT_SESSION`（Windows Terminal，支持 24 位）→ truecolor；
+否则 16 色（ConHost 能正确解释这些转义，diff 的绿/红仍在）。`TERM=dumb`、`NO_COLOR`、
+`DSH_TUI_COLOR_DEPTH` 与 `--no-color` 的语义一律不变。
+
+**顺带**：`/diag` 新增**配色**一行——实际色深 + `TERM` / `COLORTERM` / `WT_SESSION` 三个依据（未设置显示"（未设置）"），
+这类"看不到颜色"的报告以后一眼可判。
+
+**人工核对**（Windows）：不设任何环境变量启动，界面应有颜色（16 色档）；Windows Terminal 里应更多
+（truecolor）；`--no-color` 与 `DSH_TUI_COLOR_DEPTH=none` 仍为黑白；`/diag` 的配色一行与预期一致。
+
+**自动证据**：`tests/color-depth.test.mjs` 新增 1 条（空 TERM 在 linux/darwin 为 none、在 win32 为 8；
+`WT_SESSION` → truecolor；`TERM=*256color`/`COLORTERM` 压过平台默认；`dumb`/`NO_COLOR` 仍为 none；
+显式覆盖优先）；`tests/diag.test.mjs` 新增 1 条（配色行的 POSIX / Windows / Windows Terminal 三种形态）。
+
+**mutation（2 组，全部验红）**：① 空 TERM 一律 none（即原缺陷）；② 忽略 `WT_SESSION` 提示。
+
 ## 修复 · Windows 应用内更新 `spawn dsh ENOENT`（用户实测发现，2026-09-16，只提交不发版）
 
 **现象**：Windows 上点应用内更新 → `spawn dsh ENOENT`。

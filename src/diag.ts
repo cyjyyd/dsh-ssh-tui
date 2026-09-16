@@ -16,6 +16,7 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { colorDepth } from './color-depth.js'
 import { t } from './i18n/index.js'
 import {
   displaySockExists,
@@ -52,6 +53,16 @@ export interface DiagSnapshot {
   hostVersion: string
   nodeVersion: string
   platform: string
+  /**
+   * What the palette resolved to and which hints decided it. A "no colour on
+   * Windows" report is otherwise guesswork: `TERM` is unset there by default.
+   */
+  color: {
+    depth: string
+    term?: string
+    colorTerm?: string
+    windowsTerminal: boolean
+  }
   sessionId: string
   /** This process is the detached Host rather than the launcher. */
   hostProcess: boolean
@@ -160,6 +171,14 @@ export function formatDiag(snapshot: DiagSnapshot): string[] {
     node: snapshot.nodeVersion,
   }))
   lines.push(t('diag.rowPlatform', { platform: snapshot.platform }))
+  lines.push(t('diag.rowColor', {
+    depth: snapshot.color.depth,
+    term: snapshot.color.term === undefined || snapshot.color.term === '' ? t('diag.colorUnset') : snapshot.color.term,
+    colorTerm: snapshot.color.colorTerm === undefined || snapshot.color.colorTerm === ''
+      ? t('diag.colorUnset')
+      : snapshot.color.colorTerm,
+    wt: snapshot.color.windowsTerminal ? yes : no,
+  }))
   lines.push(t('diag.rowSession', { session: snapshot.sessionId }))
   lines.push(t('diag.rowRole', {
     role: snapshot.hostProcess ? t('diag.roleHost') : t('diag.roleLauncher'),
@@ -232,6 +251,7 @@ export async function collectDiag(options: {
   link: DiagSnapshot['link']
   paintIntervalMs?: number
   dshHome?: string
+  color?: DiagSnapshot['color']
 }): Promise<DiagSnapshot> {
   const dshHome = options.dshHome ?? resolveDshHome()
   const sockPath = sessionSockPath(options.sessionId, dshHome)
@@ -285,6 +305,12 @@ export async function collectDiag(options: {
     hostVersion: options.hostVersion,
     nodeVersion: process.version,
     platform: `${process.platform} ${process.arch}`,
+    color: options.color ?? {
+      depth: String(colorDepth(process.env)),
+      ...((process.env.TERM ?? '') === '' ? {} : { term: process.env.TERM }),
+      ...((process.env.COLORTERM ?? '') === '' ? {} : { colorTerm: process.env.COLORTERM }),
+      windowsTerminal: (process.env.WT_SESSION ?? '') !== '',
+    },
     sessionId: options.sessionId,
     hostProcess: options.hostProcess,
     locksDisabled: sessionLockDisabled(),
