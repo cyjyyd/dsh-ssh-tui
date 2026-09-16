@@ -108,6 +108,12 @@ function seedStats(tui) {
 const probe = makeTui({})
 const probeShot = footerRows(probe, 400, 26)
 const probeLine = (probeShot.plain[probeShot.identityIndex] ?? '').trimEnd()
+// What the strip shows when nothing can be lost. The tight case below asks for
+// exactly that row one cell wider than it needs: a fitter that measures a styled
+// chip by its escapes spends those cells on invisible characters and quietly
+// drops a counter group instead.
+const fullStrip = (probeShot.plain[probeShot.stripIndex] ?? '').trimEnd()
+const stripWidth = visibleWidth(fullStrip)
 // Cells, not UTF-16 units: a CJK label is one unit and two cells.
 const fullWidth = visibleWidth(probeLine)
 const quotaAt = probeLine.indexOf(' · SuperGrok ')
@@ -119,6 +125,7 @@ const CASES = [
   { name: 'footer-mid', cols: barWidth + 2, rows: 26, options: { quota: 'bar' } },
   { name: 'footer-narrow', cols: baseWidth + 2, rows: 26, options: { quota: 'gone' } },
   { name: 'footer-roster-missing', cols: fullWidth + 4, rows: 26, options: { roster: false, quota: 'plan' } },
+  { name: 'footer-strip-tight', cols: stripWidth + 1, rows: 26, options: { identity: false, quota: 'plan', completeStrip: true } },
 ]
 
 function footerRows(tui, cols, rows) {
@@ -130,6 +137,7 @@ function footerRows(tui, cols, rows) {
 }
 
 function check(name, cols, { frame, plain, stripIndex, identityIndex }, options) {
+  const identityExpected = options.identity !== false
   const problems = []
   for (const [index, line] of frame.entries()) {
     if (ESCAPE_BODY_RE.test(stripAnsi(line))) {
@@ -141,7 +149,10 @@ function check(name, cols, { frame, plain, stripIndex, identityIndex }, options)
   const strip = plain[stripIndex] ?? ''
   const identity = plain[identityIndex] ?? ''
   if (stripIndex < 0) problems.push('the status strip row is missing')
-  if (identityIndex < 0) problems.push('the identity row is missing')
+  if (identityExpected && identityIndex < 0) problems.push('the identity row is missing')
+  if (options.completeStrip === true && strip.trimEnd() !== fullStrip) {
+    problems.push(`a group was lost on a row with room for all of them: ${JSON.stringify(strip.trimEnd())}`)
+  }
   // The strip keeps the muted style; losing it turned the whole footer white.
   if (stripIndex >= 0 && !frame[stripIndex].includes('\x1b[90m')) problems.push('the strip lost its muted style')
   // The link chip keeps the default foreground and leads, unless the roster
@@ -153,7 +164,7 @@ function check(name, cols, { frame, plain, stripIndex, identityIndex }, options)
   // quota: it is dropped with it when the row cannot even hold the bar.
   if (stripIndex >= 0 && RING_RE.test(strip)) problems.push('the context ring moved back onto the strip')
   const wantedRing = (options.quota ?? 'plan') !== 'gone'
-  if (identityIndex >= 0 && wantedRing && !RING_RE.test(identity)) {
+  if (identityExpected && identityIndex >= 0 && wantedRing && !RING_RE.test(identity)) {
     problems.push(`the context ring left the identity line: ${JSON.stringify(identity)}`)
   }
   // Quota stays on the identity line, after the model, before the sub route.
@@ -162,7 +173,9 @@ function check(name, cols, { frame, plain, stripIndex, identityIndex }, options)
   const modelAt = identity.indexOf('grok-4.6 xhigh')
   const subAt = identity.indexOf('sub:')
   const wanted = options.quota ?? 'plan'
-  if (wanted === 'gone') {
+  if (!identityExpected) {
+    // no identity contract for this width
+  } else if (wanted === 'gone') {
     if (quotaAt >= 0) problems.push(`the quota bar must be dropped at ${cols} cells, not reshuffled: ${JSON.stringify(identity)}`)
   } else if (quotaAt < 0) {
     problems.push(`the quota bar left the identity line: ${JSON.stringify(identity)}`)

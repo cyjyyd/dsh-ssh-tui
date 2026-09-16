@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { fitFooterChips, footerHealthChip } from '../lib/footer.js'
+import { fitFooterChips, footerHealthChip, footerStatsGroups } from '../lib/footer.js'
+import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
 
 /**
@@ -232,11 +233,19 @@ test('the strip is muted like the identity line, accents excepted', async () => 
   tui.paintProbed = true
   tui.paintRttMs = 90
   seedCounters(tui)
-  const frame = tui.captureFrame(80, 24)
+  // Wide enough for every counter group: the point is the style, and a narrow
+  // row legitimately drops the last group before it can be styled.
+  const frame = tui.captureFrame(120, 24)
   // Anchored: the header line also contains `SSH TUI`.
   const strip = frame.find(line => /^(?:SSH|本地|local)\b/u.test(stripAnsi(line))) ?? ''
   const identity = frame.at(-1) ?? ''
-  assert.ok(strip.includes('\x1b[90m'), `the counters are muted: ${JSON.stringify(strip)}`)
+  // Each group, not just the row: a muted separator alone would satisfy a
+  // row-wide check while the counters themselves stayed at the default colour.
+  const groups = footerStatsGroups(statsRowOf(tui.statsTracker.snapshot()))
+  assert.ok(groups.length > 0, 'the tracker produced counter groups to style')
+  for (const group of groups) {
+    assert.ok(strip.includes(`\x1b[90m${group}`), `the counter group is muted: ${JSON.stringify(group)} in ${JSON.stringify(strip)}`)
+  }
   assert.match(strip, /^(?:SSH|本地|local)\b/u, `the link text leads, unmuted: ${JSON.stringify(strip)}`)
   assert.ok(identity.includes('\x1b[90m'), 'the identity line is muted too')
 })
