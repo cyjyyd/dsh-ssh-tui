@@ -117,6 +117,18 @@ export function resolveDshInvocation(options: {
   return { command: 'dsh', prefix: [], shell: platform === 'win32' }
 }
 
+/**
+ * The profile argument as the shell path needs it.
+ *
+ * `shell: true` joins argv with spaces and escapes nothing (Node documents
+ * this), so a profile whose name contains whitespace would arrive as two
+ * arguments. The no-shell path passes it through untouched, so this only has to
+ * hold the fallback together.
+ */
+export function shellSafeProfile(profile: string): string {
+  return /\s/u.test(profile) ? `"${profile.replaceAll('"', '')}"` : profile
+}
+
 export async function installPluginLatest(
   profile = resolvePluginProfileName(),
   deps: { invocation?: DshInvocation; spawnFn?: typeof spawn } = {},
@@ -126,10 +138,11 @@ export async function installPluginLatest(
 }> {
   const invocation = deps.invocation ?? resolveDshInvocation()
   const spawnFn = deps.spawnFn ?? spawn
+  const profileArg = invocation.shell ? shellSafeProfile(profile) : profile
   return await new Promise(resolve => {
     const child = spawnFn(
       invocation.command,
-      [...invocation.prefix, 'plugin', '--profile', profile, 'add', `${PLUGIN_PACKAGE}@latest`],
+      [...invocation.prefix, 'plugin', '--profile', profileArg, 'add', `${PLUGIN_PACKAGE}@latest`],
       {
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],

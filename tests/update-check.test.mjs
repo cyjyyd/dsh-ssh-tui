@@ -12,6 +12,7 @@ import {
   fetchLatestNpmVersion,
   installPluginLatest,
   pluginUpgradeCommand,
+  shellSafeProfile,
   resolveDshInvocation,
   resolvePluginProfileName,
 } from '../lib/update-check.js'
@@ -122,4 +123,36 @@ test('installPluginLatest spawns the resolved command and reports its exit', asy
   })
   assert.equal(failed.ok, false)
   assert.match(failed.output, /ENOENT/)
+})
+
+/**
+ * `shell: true` joins argv with spaces and escapes nothing, so a profile whose
+ * name contains whitespace has to be quoted on that path — the no-shell path
+ * (our own entry) passes it through untouched.
+ */
+test('a profile with whitespace survives the shell fallback', async () => {
+  assert.equal(shellSafeProfile('tui'), 'tui')
+  assert.equal(shellSafeProfile('工作 区'), '"工作 区"')
+  assert.equal(shellSafeProfile('a"b c'), '"ab c"')
+
+  const calls = []
+  const child = new EventEmitter()
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  const spawnFn = (command, args, options) => {
+    calls.push({ command, args, options })
+    queueMicrotask(() => child.emit('close', 0))
+    return child
+  }
+  await installPluginLatest('work space', {
+    invocation: { command: 'dsh', prefix: [], shell: true },
+    spawnFn,
+  })
+  assert.deepEqual(calls[0].args, ['plugin', '--profile', '"work space"', 'add', 'dsh-ssh-tui@latest'])
+
+  await installPluginLatest('work space', {
+    invocation: { command: '/usr/bin/node', prefix: ['/dsh/bin.js'], shell: false },
+    spawnFn,
+  })
+  assert.deepEqual(calls[1].args, ['/dsh/bin.js', 'plugin', '--profile', 'work space', 'add', 'dsh-ssh-tui@latest'])
 })

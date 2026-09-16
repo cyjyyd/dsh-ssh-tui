@@ -28,6 +28,9 @@ const BARE_SPAWN_ALLOWED = new Map([
   ['tui.ts:setx', 'Windows-only system .exe; no shim, no shell needed'],
 ])
 
+// Block comments and whole-line comments are removed; a *trailing* comment that
+// happens to mention a bare spawn would be reported, which is the safe direction
+// (rename it in the comment) and cheap enough to live with.
 function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '')
 }

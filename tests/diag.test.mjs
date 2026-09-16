@@ -106,6 +106,16 @@ test('the report carries the facts a bug report needs', () => {
  * Windows leaves TERM unset, and the report should show which hints decided the
  * depth (and that the platform, not the user, picked it).
  */
+test('a snapshot without a palette still renders', () => {
+  // `DiagSnapshot` is exported: a library user or an older caller must not crash
+  // a patch release because a new field is missing.
+  const withoutColor = snapshot()
+  delete withoutColor.color
+  const lines = formatDiag(withoutColor).join('\n')
+  assert.equal(lines.includes('session: main-session-abc'), true)
+  assert.equal(lines.includes('Palette:'), false)
+})
+
 test('the report says which palette it resolved and why', () => {
   const posix = formatDiag(snapshot()).join('\n')
   assert.equal(posix.includes('Palette: 256'), true, posix)

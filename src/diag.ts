@@ -57,7 +57,7 @@ export interface DiagSnapshot {
    * What the palette resolved to and which hints decided it. A "no colour on
    * Windows" report is otherwise guesswork: `TERM` is unset there by default.
    */
-  color: {
+  color?: {
     depth: string
     term?: string
     colorTerm?: string
@@ -171,14 +171,18 @@ export function formatDiag(snapshot: DiagSnapshot): string[] {
     node: snapshot.nodeVersion,
   }))
   lines.push(t('diag.rowPlatform', { platform: snapshot.platform }))
-  lines.push(t('diag.rowColor', {
-    depth: snapshot.color.depth,
-    term: snapshot.color.term === undefined || snapshot.color.term === '' ? t('diag.colorUnset') : snapshot.color.term,
-    colorTerm: snapshot.color.colorTerm === undefined || snapshot.color.colorTerm === ''
-      ? t('diag.colorUnset')
-      : snapshot.color.colorTerm,
-    wt: snapshot.color.windowsTerminal ? yes : no,
-  }))
+  // Optional so a caller that builds its own snapshot (a library user, an older
+  // test) still renders; an absent palette is reported as unknown, not thrown.
+  if (snapshot.color !== undefined) {
+    lines.push(t('diag.rowColor', {
+      depth: snapshot.color.depth,
+      term: snapshot.color.term === undefined || snapshot.color.term === '' ? t('diag.colorUnset') : snapshot.color.term,
+      colorTerm: snapshot.color.colorTerm === undefined || snapshot.color.colorTerm === ''
+        ? t('diag.colorUnset')
+        : snapshot.color.colorTerm,
+      wt: snapshot.color.windowsTerminal ? yes : no,
+    }))
+  }
   lines.push(t('diag.rowSession', { session: snapshot.sessionId }))
   lines.push(t('diag.rowRole', {
     role: snapshot.hostProcess ? t('diag.roleHost') : t('diag.roleLauncher'),
