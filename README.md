@@ -513,6 +513,10 @@ npm run typecheck
 npm run build
 ```
 
+改到环境变量、子进程、路径或终端能力时，先读 [docs/platform.md](docs/platform.md)：平台判断要写成可注入的纯函数并在用例里
+显式跑 Windows 分支（`tests/platform-guards.test.mjs` 会静态拦住新的裸名 `spawn`），真实 Windows 由 CI 的
+`test-windows` 腿覆盖。
+
 ## 常见问题（QA）
 
 按现象查；每条只讲怎么办，不讲版本历史。

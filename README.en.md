@@ -677,6 +677,12 @@ Find your symptom; each answer is what to do, not a change log.
 
 ## Development
 
+Platform-sensitive changes (environment variables, child processes, paths, terminal
+capability) have their own note: [docs/platform.md](docs/platform.md). The rule is to put the
+platform decision in an injectable pure function and assert the Windows branch in a test, so
+it reddens on Linux too; `tests/platform-guards.test.mjs` statically rejects a new bare
+`spawn('name')`, and CI's `test-windows` leg runs the same suite on a real Windows runner.
+
 ```text
 src/picker.ts             launch history picker (9-row page, uncapped list, filter)
 src/tui.ts                SshTui (re-exports leaf helpers)

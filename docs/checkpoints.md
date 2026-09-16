@@ -80,6 +80,27 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 
 **mutation（2 组，均 unit+帧双红）**：① 状态行退回直接用 `input.model`；② 取第一个 `/` 之前而不是之后。
 
+## 预防 · 平台敏感改动的护栏（用户提问"如何避免以后再出现"，2026-09-16，只提交不发版）
+
+**问题**：Windows 只能靠用户实测发现（本轮两个 bug：`spawn dsh ENOENT`、空 `TERM` 判成单色）。装本机 PowerShell 有用吗？
+
+**结论：不装**。Linux 上的 `pwsh` 是 POSIX 进程——有 `TERM`、走 POSIX spawn、没有 `.cmd` 垫片与命名管道，
+这两个 bug 它一个都复现不了。真正的缺口不是"没有 Windows 可跑"，而是**从没在 Windows 上执行过的那几行判断**。
+
+**落地的三道护栏**（`tests/platform-guards.test.mjs` + `docs/platform.md`）：
+1. **静态扫描**：`src/` 里任何 `spawn/execFile/exec` 的**裸命令名**都必须登记在
+   `BARE_SPAWN_ALLOWED` 并写明理由；名单**双向校验**（新增会红，代码里没了却还挂着也会红）——
+   写这条时它当场抓出自己名单里的过期项。Linux 上即可变红，正是 `spawn('dsh')` 那一类。
+2. **平台分支断言**：`colorDepth(env, platform)`、`resolveDshInvocation({platform,…})` 已改为可注入纯函数，
+   用例显式跑 win32 分支；`platform-guards` 还在**真实环境**上断言"Windows 下色深不为 none""本平台调用可执行"。
+3. **真实平台交给 CI**：`test-windows` 腿跑同一套用例（含上面两条），所以这些断言在真 Windows 上也会执行。
+
+**规则**（写进 `docs/platform.md`，README 两语言指过去）：平台判断写成可注入纯函数并断言 Windows 分支；
+起进程不用裸命令名（首选 `process.execPath` + 自身入口）；环境语义按平台读（`TERM` 是 POSIX 习惯，
+Windows 看 `WT_SESSION`/`COLORTERM`）；无法纯化的（ConPTY、命名管道）在 PR 里写明只能靠 CI 腿与真机。
+
+**证据**：套件 **739 项 / 737 通过 / 0 失败 / 2 跳过**（新增 3 条平台护栏用例）。
+
 ## 修复 · Windows 上颜色丢失（只有黑白）（用户实测发现，2026-09-16，只提交不发版）
 
 **现象**：0.7.0 在 Windows + PowerShell 7.6.6 下完全没有颜色。
