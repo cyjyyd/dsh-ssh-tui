@@ -2,10 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { fitFooterChips, footerHealthChip, footerStatsGroups } from '../lib/footer.js'
+import {
+  fitFooterChips, footerHealthChip, footerIdentityParts, footerStatsGroups, formatQuotaUnknown,
+  providerHasQuotaSurface,
+} from '../lib/footer.js'
 import { formatLinkQualityChip } from '../lib/paint.js'
 import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
+import { formatQuotaBar } from '../lib/tui.js'
 
 /**
  * B-1: the status strip loses text before graphics, lowest priority first.
@@ -69,10 +73,10 @@ test('a glyph wider than the terminal is clipped, not allowed to overflow', () =
 })
 
 /** A TUI whose roster service is missing (the default) or present. */
-async function footerTui({ presets, color = false, provider = '', model = '' } = {}) {
+async function footerTui({ presets, color = false, provider = '', model = '', settings } = {}) {
   const { SshTui } = await import('../lib/tui.js')
   const ctx = {
-    get: name => (name === 'agentPresets' ? presets : undefined),
+    get: name => (name === 'agentPresets' ? presets : name === 'settings' ? settings : undefined),
     on() { return () => {} },
   }
   const agent = {
@@ -159,6 +163,123 @@ test('a styled chip is measured and cut by its cells, not by its escapes', () =>
   const clipped = fitFooterChips([chip('ring', '\x1b[33m⠿⠿⠿⠿\x1b[0m', '\x1b[33m⠿⠿⠿⠿\x1b[0m', 0)], 3)
   assert.ok(clipped.endsWith('\x1b[0m'), `a cut style is closed: ${JSON.stringify(clipped)}`)
   assert.ok(visibleWidth(clipped) <= 3, `the clipped row fits: ${JSON.stringify(clipped)}`)
+})
+
+/**
+ * The quota widget is on screen from the first frame. Before a reading it is an
+ * empty bar and `?%` — never `0%`, which would claim a used-up quota — and the
+ * TUI keeps asking until a reading lands, then hands over to the normal cadence.
+ */
+test('the quota bar is on screen before any reading, as an empty bar and a ?', () => {
+  assert.equal(formatQuotaUnknown(), `${formatQuotaBar(0)} ?%`)
+  assert.match(formatQuotaUnknown(), /^[░]{8} \?%$/u)
+
+  // Which providers get the widget at all: the three with a quota surface, not
+  // the one that reports a balance, and not an unknown provider id.
+  const llmPiAi = { providers: {
+    'opencode-go': { apiKeyEnv: 'OPENCODE_GO_API_KEY', baseURL: 'https://opencode.ai/zen/go/v1' },
+    'command-code': { apiKeyEnv: 'COMMAND_CODE_API_KEY', baseURL: 'https://api.commandcode.ai/provider/v1' },
+    'opencode': { apiKeyEnv: 'OPENCODE_API_KEY', baseURL: 'https://opencode.ai/zen/v1' },
+  } }
+  assert.equal(providerHasQuotaSurface('xai', llmPiAi), true)
+  assert.equal(providerHasQuotaSurface('opencode-go', llmPiAi), true)
+  assert.equal(providerHasQuotaSurface('command-code', llmPiAi), true)
+  assert.equal(providerHasQuotaSurface('opencode', llmPiAi), false, 'Zen is metered, not quota')
+  assert.equal(providerHasQuotaSurface('deepseek-official', llmPiAi), false, 'DeepSeek reports a balance')
+  assert.equal(providerHasQuotaSurface('', llmPiAi), false)
+
+  const identity = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'grok-4.6', provider: 'xai', parentModel: 'grok-4.6', subModel: 'grok-4.5',
+    quotaUnknown: true, foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.ok(identity.includes('░░░░░░░░ ?%'), identity.join(' · '))
+  // It sits where the reading will appear, before the subagent route.
+  assert.ok(
+    identity.indexOf('░░░░░░░░ ?%') < identity.findIndex(part => part.startsWith('sub:')),
+    identity.join(' · '),
+  )
+  // A provider without a quota surface keeps its row clean.
+  const noQuota = footerIdentityParts({
+    running: false, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
+    idleMs: 0, model: 'deepseek-v4-flash', provider: 'deepseek-official',
+    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash',
+    foldedInput: false, multiLineInput: false, queued: 0,
+  })
+  assert.equal(noQuota.some(part => part.includes('?%')), false, noQuota.join(' · '))
+})
+
+/** The boot frame of a quota-capable provider, before the first reading. */
+test('a booting TUI paints the placeholder where the reading will go', async () => {
+  const settings = { get: () => ({ providers: { 'command-code': { apiKeyEnv: 'MISSING_KEY' } } }) }
+  const tui = await footerTui({ color: true, provider: 'command-code', model: 'claude-sonnet-5', settings })
+  const identity = tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? ''
+  assert.match(identity, /[░]{8} \?%/u, `the bar is there from the first frame: ${JSON.stringify(identity)}`)
+  assert.equal(/\d+%/u.test(identity), false, `and no number is invented: ${JSON.stringify(identity)}`)
+})
+
+/**
+ * Retry until the first reading: a quota API that was down at boot is usually up
+ * seconds later, and waiting for the next step would leave `?%` on screen for a
+ * whole turn. Once a reading lands — by retry or by the normal cadence — the
+ * retry is cancelled rather than firing an extra fetch later.
+ */
+test('a reading from the normal cadence cancels the waiting retry', async () => {
+  const settings = { get: () => ({ providers: { 'command-code': { apiKeyEnv: 'MISSING_KEY' } } }) }
+  const tui = await footerTui({ provider: 'command-code', model: 'claude-sonnet-5', settings })
+  tui.quotaRetryMs = 120
+  // The attempt the Host performs at start-up. The credential is missing, so it
+  // fails fast without touching the network, and nothing is invented for it.
+  await tui.refreshQuota({ reason: 'start', announce: false }).catch(() => {})
+  assert.equal(tui.quotaSnapshot, undefined)
+  assert.match(tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? '', /[░]{8} \?%/u)
+
+  // A reading arrives through the normal cadence before the retry fires.
+  let attempts = 0
+  tui.fetchQuotaSnapshot = async () => {
+    attempts += 1
+    return { provider: 'command-code', plan: 'GOAT', source: 'command-code', windows: [
+      { label: '滚动 5 小时', period: 'hourly', remainingPercent: 42 },
+    ] }
+  }
+  await tui.refreshQuota({ reason: 'step', announce: false })
+  assert.ok(tui.quotaSnapshot !== undefined, 'the normal refresh took the reading')
+  assert.equal(attempts, 1)
+
+  // The armed retry must be gone: no second fetch after its interval.
+  await new Promise(resolve => setTimeout(resolve, 250))
+  assert.equal(attempts, 1, 'the retry stops once the footer has a reading')
+  const identity = tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? ''
+  assert.match(identity, /CC·GOAT 5Hr [█░]{8} 42%/u, `the reading replaced the placeholder: ${JSON.stringify(identity)}`)
+})
+
+/**
+ * …and the retry has to actually fetch on its own: if the API comes back between
+ * two steps, nobody else would ask, and the footer would sit on `?%` until the
+ * next turn.
+ */
+test('the retry picks up a reading that arrives after the boot attempt failed', async () => {
+  const settings = { get: () => ({ providers: { 'command-code': { apiKeyEnv: 'MISSING_KEY' } } }) }
+  const tui = await footerTui({ provider: 'command-code', model: 'claude-sonnet-5', settings })
+  tui.quotaRetryMs = 20
+  await tui.refreshQuota({ reason: 'start', announce: false }).catch(() => {})
+  assert.equal(tui.quotaSnapshot, undefined)
+  // No step, no command: only the retry can find this reading.
+  tui.fetchQuotaSnapshot = async () => ({
+    provider: 'command-code', plan: 'GOAT', source: 'command-code',
+    windows: [{ label: '滚动 5 小时', period: 'hourly', remainingPercent: 42 }],
+  })
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline && tui.quotaSnapshot === undefined) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.ok(tui.quotaSnapshot !== undefined, 'the retry fetched the reading by itself')
+  assert.match(
+    tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? '',
+    /CC·GOAT 5Hr [█░]{8} 42%/u,
+  )
 })
 
 const RING_RE = /[⣀⠉⠋⠛⠞⠟⠿⡿⣿]/u

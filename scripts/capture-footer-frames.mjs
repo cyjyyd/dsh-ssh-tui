@@ -142,6 +142,11 @@ const CASES = [
   // number means nothing without the window it belongs to.
   // A provider that carries the vendor in the model id: the status line shows
   // the model, not the route.
+  // The first frames of a session: the provider has a quota surface but no
+  // reading has landed, so the widget is an empty bar and a `?` — never `0%`.
+  {
+    name: 'footer-quota-pending', cols: 130, rows: 26, options: { quota: false, placeholder: true },
+  },
   {
     name: 'footer-model-route', cols: 130, rows: 26,
     options: { model: 'xai/grok-4.6', expectModel: 'grok-4.6 xhigh', absent: 'xai/grok-4.6' },
@@ -238,8 +243,10 @@ function check(tui, name, cols, { frame, plain, stripIndex, identityIndex }, opt
   const quotaAt = barAt < 0 ? -1 : barAt
   const modelAt = identity.indexOf('grok-4.6 xhigh')
   const subAt = identity.indexOf('sub:')
-  const wanted = options.quota ?? 'plan'
-  if (!identityExpected) {
+  // `quota: false` means "this case makes no claim about the widget" (the
+  // pending case asserts the placeholder instead); `??` would treat it as set.
+  const wanted = options.quota === undefined ? 'plan' : options.quota
+  if (!identityExpected || wanted === false) {
     // no identity contract for this width
   } else if (wanted === 'gone') {
     if (quotaAt >= 0) problems.push(`the quota bar must be dropped at ${cols} cells, not reshuffled: ${JSON.stringify(identity)}`)
@@ -261,6 +268,13 @@ function check(tui, name, cols, { frame, plain, stripIndex, identityIndex }, opt
   }
   if (options.absent !== undefined && identity.includes(options.absent)) {
     problems.push(`"${options.absent}" should not be on the status line: ${JSON.stringify(identity)}`)
+  }
+  if (options.placeholder === true) {
+    if (!/[░]{8} \?%/u.test(identity)) problems.push(`the placeholder is missing: ${JSON.stringify(identity)}`)
+    // Only a number attached to a bar counts: the context chip's own `60%` is
+    // a different reading and is expected to be there.
+    if (/[█░]{8} \d+%/u.test(identity)) problems.push(`a number was invented before any reading: ${JSON.stringify(identity)}`)
+    if (strip.includes('?%')) problems.push('the placeholder belongs on the identity line')
   }
   if (options.badgeDrop === true) {
     const badgeName = (options.badge ?? 'SuperGrok').split(' ')[0]

@@ -245,6 +245,7 @@ import {
   footerIdentityParts,
   footerStatsGroups,
   formatContextPressureChip,
+  providerHasQuotaSurface,
   formatStatusReport,
   shortQuotaPlanName,
   formatTokens,
@@ -420,7 +421,9 @@ export {
   formatDuration,
   formatFooterQuota,
   formatQuotaBar,
+  formatQuotaUnknown,
   formatStatusReport,
+  providerHasQuotaSurface,
   quotaWindowTag,
   shortModelName,
   shortQuotaPlanName,
@@ -859,6 +862,13 @@ const DEFAULT_IDLE_EXIT_MS = 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
+/**
+ * How often to ask again while the footer still has no quota reading. A quota
+ * API that was down at boot is usually up seconds later, and the widget shows
+ * `?%` until then; once a reading lands, the normal step/idle cadence takes over.
+ */
+const QUOTA_RETRY_MS = 15_000
+
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
 const IS_WINDOWS = process.platform === 'win32'
 
@@ -1319,6 +1329,13 @@ export class SshTui {
   private quotaAlerted = new Set<string>()
   private quotaStepsSinceRefresh = 0
   private quotaRefreshInFlight = false
+  /**
+   * While the first reading is missing, ask again on this cadence instead of
+   * waiting for the next step: a quota API that was down at boot is usually up a
+   * few seconds later, and until then the footer shows `?%`.
+   */
+  private quotaRetryMs = QUOTA_RETRY_MS
+  private quotaRetryTimer: ReturnType<typeof setTimeout> | undefined
   private contextPressure: ContextPressureView | undefined
   private contextAlertLevel: ContextPressureView['level'] | undefined
   private idleCompactInFlight = false
@@ -1475,7 +1492,8 @@ export class SshTui {
       this.markDirty()
     })
     void this.refreshQuota({ reason: 'start', announce: false }).catch(() => {
-      // Start-up quota is silent; /usage and threshold alerts still report.
+      // Start-up quota is silent; /usage and threshold alerts still report. The
+      // retry keeps asking, so the footer's `?%` turns into a reading by itself.
     })
     void this.notifyPluginUpdate().catch(() => {
       // Update check is best-effort and never blocks the TUI.
@@ -2000,6 +2018,7 @@ export class SshTui {
     this.exiting = true
     this.clearDetachedIdleTimer()
     this.clearIdleExitTimer()
+    this.clearQuotaRetry()
     const dialog = this.dialog
     const queued = this.dialogQueue.splice(0)
     this.dialog = undefined
@@ -3931,7 +3950,10 @@ export class SshTui {
       // looking at a wide terminal read that as "额度条没了". The strip keeps
       // the loss order for the groups it does own.
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
-        ? {}
+        // No reading for this provider: show the empty bar with a `?` rather
+        // than a number nobody measured. A balance-only provider (DeepSeek)
+        // shows nothing here; its balance line is the reading.
+        ? (this.hasQuotaSurface(provider) ? { quotaUnknown: true } : {})
         : {
           quotaCode: shortQuotaPlanName(this.quotaSnapshot),
           quotaPercent: quotaWindow.remainingPercent,
@@ -7380,15 +7402,43 @@ export class SshTui {
     this.markDirty()
   }
 
+  /** Stop the first-reading retry; the normal cadence owns the refresh now. */
+  private clearQuotaRetry(): void {
+    if (this.quotaRetryTimer !== undefined) clearTimeout(this.quotaRetryTimer)
+    this.quotaRetryTimer = undefined
+  }
+
+  /** Ask again soon, but only while the footer still has nothing to show. */
+  private armQuotaRetry(provider: string): void {
+    if (this.disposed || this.quotaRetryTimer !== undefined) return
+    if (!this.hasQuotaSurface(provider)) return
+    if (this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) return
+    this.quotaRetryTimer = setTimeout(() => {
+      this.quotaRetryTimer = undefined
+      void this.refreshQuota({ reason: 'start', announce: false }).catch(() => {})
+    }, this.quotaRetryMs)
+  }
+
+  /**
+   * Whether this provider has a quota surface at all. `false` means the footer
+   * shows no quota widget — a balance line covers DeepSeek, and a provider with
+   * neither gets nothing.
+   */
+  private hasQuotaSurface(provider: string): boolean {
+    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    return providerHasQuotaSurface(provider, llmPiAi)
+  }
+
   private async refreshQuota(options: { reason: 'start' | 'step' | 'command'; announce: boolean }): Promise<QuotaSnapshot | undefined> {
     if (this.quotaRefreshInFlight && options.reason !== 'command') return this.quotaSnapshot
     this.quotaRefreshInFlight = true
+    const provider = this.currentProviderId()
     try {
-      const provider = this.currentProviderId()
       const snapshot = await this.fetchQuotaSnapshot(provider)
       if (snapshot !== undefined) {
         this.balanceSnapshot = undefined
         this.applyQuotaSnapshot(snapshot, options.announce)
+        this.clearQuotaRetry()
         return snapshot
       }
       try {
@@ -7418,6 +7468,10 @@ export class SshTui {
       return undefined
     } finally {
       this.quotaRefreshInFlight = false
+      // One place covers every outcome: a successful reading clears the retry
+      // (and this check then sees a snapshot for the provider), while a throw,
+      // an empty reply or another provider's snapshot keeps it asking.
+      if (this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider) this.armQuotaRetry(provider)
     }
   }
 

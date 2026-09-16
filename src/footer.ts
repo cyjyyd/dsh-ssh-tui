@@ -5,7 +5,10 @@
 import { t } from './i18n/index.js'
 import { pinEmojiCells, truncateAnsiToWidth, visibleWidth } from './term-text.js'
 import { describeSubagentFit } from './subagent-model.js'
-import { formatQuotaStatusLine, type QuotaPeriod, type QuotaSnapshot, type QuotaSource } from './quota.js'
+import {
+  commandCodeSourceFor, formatQuotaStatusLine, openCodeSourceFor,
+  type QuotaPeriod, type QuotaSnapshot, type QuotaSource,
+} from './quota.js'
 import type { DisconnectPolicyName } from './transcript-types.js'
 
 export const WAIT_INDICATOR_MS = 8000
@@ -346,6 +349,8 @@ export interface FooterStatusInput {
   quotaPercent?: number
   /** Which rolling window `quotaPercent` belongs to: tagged `5Hr`/`1Wk`/`1Mo`. */
   quotaPeriod?: QuotaPeriod
+  /** The provider has a quota surface but no reading yet: paint `░░░░░░░░ ?%`. */
+  quotaUnknown?: boolean
   contextChip?: string
   balanceText?: string
   search?: { index: number; total: number }
@@ -433,7 +438,9 @@ export function footerIdentityParts(input: FooterStatusInput): string[] {
   if (input.balanceText !== undefined && input.balanceText !== '') {
     parts.push(input.balanceText)
   }
-  if (input.quotaPercent !== undefined) {
+  if (input.quotaUnknown === true) {
+    parts.push(formatQuotaUnknown())
+  } else if (input.quotaPercent !== undefined) {
     parts.push(formatFooterQuota(input.quotaPercent, input.quotaCode, input.quotaPeriod))
   }
   if (input.contextChip !== undefined && input.contextChip !== '') parts.push(input.contextChip)
@@ -465,6 +472,18 @@ export function formatFooterQuota(percent: number, code?: string, period?: Quota
   const tag = quotaWindowTag(period)
   const name = code === undefined ? '' : code.trim()
   return [name, tag, bar].filter(part => part !== '').join(' ')
+}
+
+/**
+ * The quota widget before the first reading arrives, or while the provider
+ * cannot be reached: an empty bar and a question mark.
+ *
+ * Deliberately not `0%`: an unreachable quota API is not a used-up quota, and a
+ * number the footer cannot back up is worse than no number. The bar is there
+ * from the first frame so the row does not jump when the reading lands.
+ */
+export function formatQuotaUnknown(): string {
+  return `${formatQuotaBar(0)} ?%`
 }
 
 /** Fixed-width tag for the window a footer quota number belongs to. */
@@ -592,4 +611,21 @@ export function describeProviderRoute(provider: string): { kind: string; short: 
 export function providerUsesLocalOAuth(provider: string): boolean {
   const id = provider.trim()
   return id === 'xai' || id === 'grok' || id.startsWith('xai-')
+}
+
+/**
+ * Whether a provider has a quota surface at all, without asking it.
+ *
+ * The footer paints a quota widget from the first frame — an empty bar and `?%`
+ * until a reading arrives — so it needs to tell "this provider will have one"
+ * from "this provider reports a balance instead" (DeepSeek) or nothing at all.
+ * Every branch is a synchronous settings read, so a repaint never does IO.
+ */
+export function providerHasQuotaSurface(provider: string, llmPiAiSection: unknown): boolean {
+  const id = provider.trim()
+  if (id === '') return false
+  if (providerUsesLocalOAuth(id)) return true
+  if (commandCodeSourceFor(id, llmPiAiSection) !== null) return true
+  const source = openCodeSourceFor(id, llmPiAiSection)
+  return source !== null && source.flavor === 'go'
 }
