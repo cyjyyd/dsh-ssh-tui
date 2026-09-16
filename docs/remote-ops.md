@@ -123,13 +123,15 @@ DSH_TUI_LINE_MODE=1 ssh host 'dsh --profile tui --resume' | tee session.log
 **`--use-env-proxy`**（启动包装脚本里加，别用 `NODE_OPTIONS`——那会把模型跑测试、跑工具的
 每个 Node 子进程也一起塞进代理）。
 
-按域名分流用 `NO_PROXY`（后缀匹配，`deepseek.com` 覆盖整域）。国内直连更快的域名放这里，
+按域名分流用 `NO_PROXY`（后缀匹配，`deepseek.com` 覆盖整域）。国内直连更快、或直连比代理更稳的域名放这里，
 例如：
 
 ```bash
-export NO_PROXY="${NO_PROXY:+$NO_PROXY,}deepseek.com,api.deepseek.com"
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}deepseek.com,api.deepseek.com,commandcode.ai,api.commandcode.ai"
 exec /path/to/node --use-env-proxy /path/to/@deepseek-ai/dsh/lib/bin.js "$@"
 ```
+
+`cli-chat-proxy.grok.com` / `api.x.ai` / `auth.x.ai` **不要**放进 `NO_PROXY`：这台机器上 Grok 直连会被 RST，必须走代理。
 
 容器/沙箱里如果只有代理出口，直连会成片超时——那种"直连失败"是出口的噪音，不能当成
 "某家必须走代理"的证据；判断标准应该是**该域名直连是否稳定**，而不是一次超时。

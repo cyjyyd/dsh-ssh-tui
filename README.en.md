@@ -66,6 +66,16 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 `docs/screenshots/slow-link.json`. This capture is 14 paints, about
 **18.0 KB**, **8.8 s** at 2 kB/s. Byte ledger for this event sequence.
 
+0.7 highlights: drag-select any part of a model reply to copy it (OSC 52 into your local
+clipboard; a tool card still expands on click) · the footer is one priority-ordered chip
+strip, and `⚠` opens `/doctor` · the quota bar is on screen from the first frame and names
+its window (`5Hr`/`1Wk`/`1Mo`, smallest window by default, `?%` with a 15-second retry until
+a reading arrives) · `/mode` groups presets and filters with `/` · the compact view names
+every changed file · tool diffs are line-level, emphasise only what changed, and go
+side-by-side at 100 columns or more · `DSH_TUI_LINE_MODE=1` appends plain lines for screen
+readers and `tee` · `ssh-tui.keys` rebinds keys, refusing conflicts · `DSH_TUI_COLOR_DEPTH`
+pins the palette (truecolor / 256 / 8 / none).
+
 ## Requirements
 
 - Node.js >= 22.19
@@ -286,68 +296,28 @@ You can reopen the wizard at any time with:
 
 ## Cross-platform support
 
-The plugin runs on Linux, macOS, and Windows (Node ≥ 22.19):
-
-- Linux/macOS: same command as above; the wizard persists credentials in
-  `~/.dsh/.credentials.yaml`, or `~/.dsh/env.sh` when a system-injected
-  environment variable must be overridden.
-- Windows (PowerShell or Windows Terminal): install with the same npm/dsh
-  commands — `dsh` is on PATH via npm's global bin. The wizard stores the key
-  through the dsh credential store, or runs `setx` (plus `env.cmd`) when an
-  environment variable shadows the store. Agent shell tools automatically use
-  PowerShell on Windows (the harness disables bash there).
-- Windows display channel: the Host/Display link is a named pipe
-  (`\\.\pipe\dsh-tui-<8-hex DSH_HOME>-<session name>-<8-hex session id>`), not a
-  `.sock` file — a named pipe is the only local socket Windows can listen on,
-  and it is reclaimed when the Host exits. Both digests are part of the name so
-  two homes or two sessions can never share one machine-wide pipe. Because `fs.access()` cannot see the pipe namespace, readiness is
-  probed with a real connect, and a Host that exits early is reported at once
-  with its stderr (kept in `%USERPROFILE%\.dsh\tui-socks\<session>.err`).
-- Windows session locks: with no `/proc`, a live pid is checked with
-  `Get-Process` (image name plus creation time), so a pid recycled by an
-  unrelated process is recognised as stale and the session resumes instead of
-  reporting a phantom zombie Host.
-- Footer speed (`135 tok/s`): measured from the first token the model emits
-  (reasoning or tool-call fragments included) to the settled step, and rebuilt
-  when a session is replayed on `--resume` — from the durable `assistant/chunk`
-  events on 0.1.2 hosts, or from the packed stream inside `assistant/message`
-  on 0.1.5. Steps with no usable timing fall back to `首字 1.2s`.
-- Emoji width: BMP symbols carrying the Unicode `Emoji` property are budgeted two cells. When the monospace font lacks the glyph, the terminal falls back to a colour emoji about 1.6 cells wide that still advances one cell — it covers its neighbours, and the second budgeted cell goes unspent so the row comes up short. `pinEmojiCells()` does both halves at paint time: VS15 asks for the narrow text form, and a reserving space spends the second cell (emitted unconditionally, so "two cells plus every space in the text" equals "one cell of glyph advance, one reserving space, and those same spaces" for every shape). Symbols that already default to emoji presentation (`✅` `⚡` …) and astral emoji (`😀` …) advance two cells and are left alone.
-- Reconnect: channel readiness is a real connect, so a `.sock` file left behind by a killed Host is no longer listed as attachable (it used to fail the first attach with `write EPIPE`); a Host still cancelling/flushing keeps itself alive when a relay HELLOs mid-hangup; a launcher that hits a vanished peer retries once automatically — silently, with the TTY kept in raw mode and queued bytes dropped so a stale cursor reply is never echoed as `^[[17;1R`; and a probe that misses its window is retried while the Host keeps the last measurement, so the footer chip does not fall back to four hollow circles.
-- Reporting a problem: `/diag` prints a local, read-only snapshot — plugin/dsh/node
-  versions, platform, session id, whether this process is the launcher or the detached
-  Host, `DSH_HOME`, the display channel address and whether it answers (including the
-  leftover-socket-file verdict), the Host pid/identity/lock state, the lock file path, link
-  RTT and paint interval, the session log format and size, other locks on the machine, and
-  a **verdict chain** ("attaches to the leftover Host (pid N), do not open a second
-  window", "the pid was recycled", "a leftover socket file that does not answer — the
-  source of the first-attach EPIPE"). Nothing leaves the machine; paste it into an issue.
-- When `/mode` reports a missing service or the preset tools vanish after an upgrade
-  (the 0.6.3 class of configuration regression), run `/doctor`. It judges the
-  **deployment composition** item by item: whether the profile patch parses, whether the
-  agent-presets roster and code-runtime are composed (naming the missing row), whether the
-  subagent model-selection settings row is mounted, whether any row is mounted twice (with
-  its line), whether the profile layer and the bundle layer both mount a row, whether the
-  host version is in the plugin's declared compatibility table, whether two
-  `@deepseek-ai/dsh-scope` installs exist (the nested-install copy trap), and whether the
-  default route and the subagent model are self-consistent. Every item carries its evidence
-  and the command that acts on it. `/doctor --fix` mounts the missing rows and merges
-  duplicates into `cordis.patch.yml`, keeping a `.bak-<timestamp>` beside it and never
-  touching an override or disable you wrote; `/fix code-runtime` repairs one row. A restart
-  picks it up, and like `/diag` nothing leaves the machine.
-- Leftover Host lifetime: the write lock a dropped-but-still-running Host holds is what makes the Web UI refuse the same session (`resume failed for session … is already owned by an active write handle`), and a drop that raced a reattach used to leave the honored-reattach flag set, so the *next* drop was ignored and the session lock kept its stale state. The flag is cleared once a turn runs again, and once the turn the Host stayed for settles it exits within `DSH_TUI_IDLE_EXIT_MS` (default 60s, `0` disables) instead of holding the session for six hours.
-- Subagent route: the identity row always carries `sub:<model>` — the route
-  every child inherits — suffixed with the effort when `/subeffort` set one,
-  and prefixed with the provider when `settings.yaml` pinned one
-  (`ssh-tui-subagent.provider`), e.g. `sub:xai/grok-4.5(xhigh)`.
-- Resize: the launcher picker unregisters its own `resize` listener when it
-  settles and refuses to paint afterwards, so resizing the window can no longer
-  redraw the finished picker over the running TUI (the launcher process keeps
-  owning the TTY as the display relay for the whole session).
-- Legacy Windows consoles without VT support: set `DSH_TUI_NO_ALT_SCREEN=1`
-  (and `--no-color` if needed) to skip the alternate-screen escape sequences.
-- Keyboard input accepts both `\x7f` and `\x08` backspace, and both `\r` /
-  `\r\n` line endings.
+- **Windows**: the display channel is a named pipe
+  (`\\.\pipe\dsh-tui-<8-hex DSH_HOME>-<session name>-<8-hex session id>`) — the only
+  local socket Windows can listen on — and it is reclaimed when the Host exits. Readiness
+  is probed with a real connect, and a Host that exits early is reported at once with its
+  stderr (`%USERPROFILE%\.dsh\tui-socks\<session>.err`). Session locks check a live pid
+  with `Get-Process` (image name plus creation time), so a recycled pid is recognised as
+  stale instead of reported as a phantom zombie Host.
+- **Legacy Windows consoles without VT support**: set `DSH_TUI_NO_ALT_SCREEN=1` (and
+  `--no-color` if needed) to skip the alternate-screen escape sequences.
+- **Footer speed** (`135 tok/s`) is measured from the first token the model emits to the
+  settled step, and is rebuilt when a session is replayed with `--resume`. A step with no
+  usable timing shows `首字 1.2s` instead.
+- **Emoji / CJK width**: BMP symbols carrying the Unicode `Emoji` property are budgeted two
+  cells, and the painter asks for the narrow text form (VS15) plus a reserving space. A
+  monospace font that lacks the glyph still makes the terminal fall back to a wider colour
+  emoji, so pick a font that covers what you use (Noto Sans Mono CJK, for instance).
+- **Keyboard input** accepts both `\x7f` and `\x08` backspace, and both `\r` / `\r\n`
+  line endings.
+- **Subagent route**: the identity row always carries `sub:<model>` — the route every child
+  inherits — with the effort in parentheses when `/subeffort` set one, e.g.
+  `sub:grok-4.5(xhigh)`. Only the model name is shown; the provider and the full route are
+  in `/status`.
 
 ## Usage
 
@@ -507,8 +477,8 @@ completion (`DSH_TUI_NO_BELL=1` disables it).
 
 Tool calls render as compact cards instead of raw argument JSON. The title
 stays the default foreground; the status dot is yellow / green / red for
-running / ok / error. Success no longer repeats `[ok]` next to the green
-dot; failures still show `[error]`, and in-flight calls still show
+running / ok / error. A successful call shows the dot alone — no `[ok]`
+suffix — while a failure still carries `[error]` and an in-flight call
 `[running…]` (plus `[退出码 N]` / `[信号 X]` when a shell exits). Consecutive
 reads or edits of the same path fold into one card (`×N`, cumulative
 chars/lines, appended diffs, a brief flip animation).
@@ -597,6 +567,105 @@ does not write into the transcript.
 
 Idle hangup exits the Host. A busy turn keeps it; `--resume` attaches to that
 process. Do not start a second Host.
+
+## Troubleshooting (Q&A)
+
+Find your symptom; each answer is what to do, not a change log.
+
+### Start-up and install
+
+- **`dsh-ssh-tui: both stdin and stdout must be TTYs`** — start it from a real terminal or
+  SSH session; a pipe, CI, or `&` background job will not do.
+- **Windows: `host display socket did not appear`** — upgrade
+  (`dsh plugin --profile tui add dsh-ssh-tui@latest`); older builds waited 15 seconds and
+  timed out on the named pipe. If it still fails, attach `/diag` to an issue.
+- **pnpm refuses to run the build script of a git dependency** — add the key pnpm prints to
+  `allowBuilds` in the profile's `pnpm-workspace.yaml`, then reinstall.
+- **After an upgrade `/mode` reports a missing service, or the preset tools vanish** — run
+  `/doctor`: it judges the deployment composition item by item (patch parses, roster and
+  code-runtime composed, no row mounted twice, host version inside the compatibility table,
+  two `@deepseek-ai/dsh-scope` installs) and gives a verdict, its evidence and the command
+  that acts on it. `/doctor --fix` writes the missing rows into `cordis.patch.yml`, keeping
+  a `.bak-<timestamp>`; a restart picks it up.
+- **"session is already running on pid N / attachable"** — that Host is alive: attach with
+  `dsh --profile tui --resume`. Do not open a second window; clear `$DSH_HOME/tui-locks/`
+  only once the pid is really gone.
+
+### Sessions and locks
+
+- **The Web UI refuses a session (`already owned by an active write handle`)** — the Host
+  left over from an SSH drop still holds the write lock; it exits within a minute of the
+  turn settling (`DSH_TUI_IDLE_EXIT_MS` / `ssh-tui.idleExit`). You can also attach to it
+  with `--resume` and keep working.
+- **The first `--resume` fails with `write EPIPE`, the second works** — the launcher waits
+  and retries once by itself. If it keeps failing, `/diag` prints the channel and lock
+  verdict chain, including the leftover-socket-file case.
+- **Too many history sessions to tell apart** — filter the `--resume` picker by title,
+  session id or working directory (`/` or `Ctrl+F`); older history is read on demand when
+  you filter or page to the end, and the counter shows how many are still unloaded.
+
+### Display and terminal
+
+- **Colours look wrong, or a diff is one solid block you cannot read** — pin the palette
+  with `DSH_TUI_COLOR_DEPTH=truecolor|256|8|none`. At `256` a diff is dark grey with green
+  or red text; at `none` there is no colour at all, but `+`/`-`, `●`, `⚠` and `✖` remain —
+  status is never carried by colour alone.
+- **CJK or emoji crowd the characters next to them** — use a monospace font that covers
+  them (Noto Sans Mono CJK, for instance). Those symbols are budgeted two cells and the
+  painter asks for the narrow text form; a font without the glyph still makes the terminal
+  fall back to a wider colour emoji.
+- **The screen cannot keep up on a slow link** — `DSH_TUI_PAINT_MS` sets the paint interval
+  (40–1000 ms: smaller is snappier and sends more); unset, it follows the round-trip
+  measured at start-up (80 / 160 / 250 / 400 ms).
+- **Screen reader, or you want a log** — start with `DSH_TUI_LINE_MODE=1`: plain appended
+  lines, no cursor control, safe to `tee`.
+- **Title bar or bell does nothing** — the terminal needs OSC 0 and BEL; `DSH_TUI_NO_BELL=1`
+  turns the bell off.
+- **Whole-row backgrounds are too loud on a dark terminal** — `DSH_TUI_COLOR_DEPTH=none`
+  drops them; diffs still read through `+`/`-`.
+
+### Status line and quota
+
+- **The quota widget shows `░░░░░░░░ ?%`** — no reading has arrived yet (the API is slow or
+  unreachable). It is not `0%`. The TUI asks again every 15 seconds and replaces it with the
+  real number and window; if it never does, `/quota` reports the error.
+- **There is no quota widget** — only SuperGrok, OpenCode Go and Command Code report quota;
+  DeepSeek shows a balance line and a metered Zen route shows none.
+- **What do `5Hr` / `1Wk` / `1Mo` mean?** — the window the number belongs to. The smallest
+  window is shown by default (5-hour → weekly → monthly); `/quota` lists every window with
+  its remaining share and reset time. Threshold alerts still fire on the tightest window.
+- **The model name has no provider prefix** — the status line shows the model alone
+  (`provider/model` is truncated to the model); the full route is in the header and
+  `/status`, and a `sub:` chip shows the child's model the same way.
+- **The subagent model is not what you want** — `/submodel` picks the model, `/subeffort`
+  the reasoning effort, `/status` shows the current pair.
+- **No `tok/s`** — that turn had no measurable model tokens; a step with only a first-token
+  time shows `首字 1.2s`.
+- **The plan strip asked for leftover todos only once** — that is deliberate: one reminder
+  per open list, so a turn end never spawns another turn forever. To see it again, complete
+  the list and start a new one.
+
+### Drops and proxies
+
+- **What happens when SSH drops** — idle: flush and exit. Busy (thinking, replying, a tool,
+  a subagent): the turn is cancelled by default and the Host stays, so
+  `dsh --profile tui --resume` attaches to it; `/disconnect continue` lets it run to
+  completion instead. Do not start a second Host.
+- **After reconnecting there is an extra notice line, `^[[17;1R` flashes, and the link chip
+  goes hollow** — upgrade; the automatic retry stays in raw mode and drops queued bytes, so
+  those replies are no longer echoed.
+- **Model requests must go through a proxy** — start dsh with `--use-env-proxy` (not via
+  `NODE_OPTIONS`) and split by domain with `NO_PROXY`, keeping domestic hosts that are faster
+  direct and every local/intranet address in the list. The recipe and its revert are in
+  [docs/remote-ops.md §4.7](docs/remote-ops.md).
+
+### Asking for help
+
+- **You need a readable report for a supporter** — type **`/diag`** in the session (local and
+  read-only): versions, platform, session id, `DSH_HOME`, the display channel and whether it
+  answers, the Host pid and lock state, link RTT, log format and size, and a verdict chain
+  ("attaches to the leftover Host (pid N), do not open a second window"). Deployment
+  questions go to **`/doctor`**. Paste both into an issue.
 
 ## Development
 
