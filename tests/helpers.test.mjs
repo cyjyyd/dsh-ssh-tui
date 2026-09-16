@@ -1110,13 +1110,17 @@ test('footer keeps the subagent route visible when it repeats the parent model',
     parentModel: 'deepseek-v4-flash', subModel: 'grok-4.5', subProvider: 'xai', subEffort: 'xhigh',
     foldedInput: false, multiLineInput: false, queued: 0,
   })
-  assert.equal(explicit.includes('sub:xai/grok-4.5(xhigh)'), true, explicit.join(' · '))
+  // The child's chip shows the model name too: `/submodel` and `/status` report
+  // the route, and a second `provider/` prefix only spent status-line cells.
+  assert.equal(explicit.includes('sub:grok-4.5(xhigh)'), true, explicit.join(' · '))
   // An inherited provider stays implicit; only `/submodel` routes are prefixed.
   assert.equal(subagentRouteLabel('grok-4.5'), 'sub:grok-4.5')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai'), 'sub:xai/grok-4.5')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai', 'xhigh'), 'sub:xai/grok-4.5(xhigh)')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai'), 'sub:grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', 'xhigh'), 'sub:grok-4.5(xhigh)')
   assert.equal(subagentRouteLabel('grok-4.5', undefined, 'high'), 'sub:grok-4.5(high)')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:xai/grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:grok-4.5')
+  // A `provider/model` id in the child's own field is truncated the same way.
+  assert.equal(subagentRouteLabel('xai/grok-4.5'), 'sub:grok-4.5')
   assert.equal(subagentRouteLabel(''), '')
 })
 
@@ -1145,9 +1149,10 @@ test('the status line shows the model name, not the provider route', () => {
   const routed = footerIdentityParts({ ...base, model: 'xai/grok-4.6', effort: 'xhigh', subModel: 'grok-4.5' })
   assert.ok(routed.includes('grok-4.6 xhigh'), routed.join(' · '))
   assert.equal(routed.some(part => part.includes('xai/grok-4.6')), false, routed.join(' · '))
-  // The child's route is a different route: it keeps its provider.
+  // The child's chip is truncated too; the provider stays in `/submodel`.
   const explicit = footerIdentityParts({ ...base, model: 'xai/grok-4.6', subModel: 'grok-4.5', subProvider: 'xai' })
-  assert.ok(explicit.includes('sub:xai/grok-4.5'), explicit.join(' · '))
+  assert.ok(explicit.includes('sub:grok-4.5'), explicit.join(' · '))
+  assert.equal(explicit.some(part => part.includes('xai/')), false, explicit.join(' · '))
   // An effort that is only whitespace must not leave a trailing space.
   const plain = footerIdentityParts({ ...base, model: 'xai/grok-4.6', effort: '  ' })
   assert.ok(plain.includes('grok-4.6'), plain.join(' · '))

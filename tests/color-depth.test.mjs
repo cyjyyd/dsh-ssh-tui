@@ -35,6 +35,42 @@ test('the diff pair keeps its hue at 8 colours instead of collapsing to grey', (
   assert.equal(eight.includes('38;'), false, 'and nothing truecolor survives')
 })
 
+/**
+ * The 256-colour diff pair is the one case where two mapped colours share a row.
+ * Mapping both through the hue family gave `38;5;2;48;5;2`: pure green on pure
+ * green, so an expanded `write` preview was one solid green bar with nothing in
+ * it. A background must be a different, darker colour than its foreground.
+ */
+test('a 256-colour diff row never paints green on green', () => {
+  const pairs = [
+    { code: '38;2;122;168;116;48;2;18;42;24', hue: 'green' },
+    { code: '38;2;196;122;122;48;2;48;20;20', hue: 'red' },
+  ]
+  const luminance = index => {
+    const [r, g, b] = rgbFrom256(index)
+    const channel = value => {
+      const v = value / 255
+      return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+    }
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+  }
+  for (const { code, hue } of pairs) {
+    const downgraded = downgradeSgr(code, '256')
+    const numbers = [...downgraded.matchAll(/(?:38|48);5;(\d+)/gu)].map(match => Number(match[1]))
+    assert.equal(numbers.length, 2, `both colours survive: ${downgraded}`)
+    const [fg, bg] = numbers
+    assert.notEqual(fg, bg, `the text must not be invisible: ${downgraded}`)
+    // 4.5:1 is the WCAG AA ratio for body text; a diff row carries code.
+    const ratio = (Math.max(luminance(fg), luminance(bg)) + 0.05) / (Math.min(luminance(fg), luminance(bg)) + 0.05)
+    assert.ok(ratio >= 4.5, `contrast ${ratio.toFixed(2)}:1 for ${downgraded} (fg ${fg} on bg ${bg})`)
+    // The hue still has to be recognisable in the text itself, since the row
+    // background went neutral to buy that contrast.
+    const [fr, fg2, fb] = rgbFrom256(fg)
+    if (hue === 'green') assert.ok(fg2 > fr && fg2 >= fb, `green stays green: ${downgraded}`)
+    else assert.ok(fr > fg2 && fr >= fb, `red stays red: ${downgraded}`)
+  }
+})
+
 test('a 256-colour index maps into the 16 when the terminal is 8-colour', () => {
   assert.equal(downgradeSgr('38;5;180', '256'), '38;5;180', 'untouched where the cube exists')
   const eight = downgradeSgr('38;5;180', '8')

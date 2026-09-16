@@ -96,6 +96,36 @@ export function basicSgrFor(r: number, g: number, b: number): number {
   return bright ? 97 : 90
 }
 
+/** Cube axis step nearest to one channel value (the cube's 0/95/135/175/215/255). */
+function cubeAxis(value: number): number {
+  const steps = [0, 95, 135, 175, 215, 255]
+  let best = 0
+  for (let at = 1; at < steps.length; at += 1) {
+    if (Math.abs((steps[at] ?? 0) - value) < Math.abs((steps[best] ?? 0) - value)) best = at
+  }
+  return best
+}
+
+/**
+ * The nearest 256-cube colour. Unlike the 16-colour mapping this keeps
+ * brightness, which is what the text of a diff row needs to stay readable.
+ */
+function nearestCubeIndex(r: number, g: number, b: number): number {
+  return 16 + cubeAxis(r) * 36 + cubeAxis(g) * 6 + cubeAxis(b)
+}
+
+/**
+ * The row background at 256 colours: the ramp's dark grey (`#1c1c1c`).
+ *
+ * The cube's darkest step is `#005f00` / `#5f0000`, and the muted diff text on
+ * that measures 3.2:1 — below the 4.5:1 a row of code needs. A tinted row is not
+ * worth unreadable text, so the row goes neutral and the *hue* stays in the
+ * foreground, which is also what the 8-colour path does (black background, green
+ * or red text). Two consequences worth stating: a background can never equal its
+ * own foreground, and the tint is the one thing a 256-colour terminal loses.
+ */
+const DIFF_BACKGROUND_INDEX = 234
+
 /**
  * Rewrite one SGR parameter list for the palette in use.
  *
@@ -122,6 +152,15 @@ export function downgradeSgr(code: string, depth: ColorDepth): string {
         ]
         index += 4
         if (depth === 'none' || rgb.some(channel => !Number.isFinite(channel))) continue
+        if (depth === '256') {
+          // Truecolor keeps its brightness here, and a background is never the
+          // colour of its own foreground (green on green hid a `write` preview).
+          out.push(
+            String(background ? 48 : 38), '5',
+            String(background ? DIFF_BACKGROUND_INDEX : nearestCubeIndex(rgb[0], rgb[1], rgb[2])),
+          )
+          continue
+        }
         out.push(...paintColour(basicSgrFor(rgb[0], rgb[1], rgb[2]), background, depth))
         continue
       }

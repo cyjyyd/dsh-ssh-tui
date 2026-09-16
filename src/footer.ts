@@ -386,17 +386,19 @@ export function formatQuotaBar(remainingPercent: number, width = 8): string {
 }
 
 /**
- * `sub:<model>` chip for the identity row, mirroring the pre-0.3.6 footer:
- * an explicit `/submodel` provider is prefixed (`sub:xai/grok-4.5`) and an
- * explicit `/subeffort` is appended in parentheses (`sub:grok-4.5(xhigh)`).
- * An inherited provider stays implicit — it is the parent's route.
+ * `sub:<model>` chip for the identity row: `sub:grok-4.5`, or
+ * `sub:grok-4.5(xhigh)` when an explicit `/subeffort` is set.
+ *
+ * It shows the model name only, like the parent's own chip: a `provider/model`
+ * prefix on both chips doubled the same route and pushed the quota badge towards
+ * the drop edge. The provider is not lost — `/submodel` and `/status` report it,
+ * and the child's model name is the part that differs from the parent's.
  */
 export function subagentRouteLabel(model: string, provider?: string, effort?: string): string {
-  const id = model.trim()
+  const id = shortModelName(model)
   if (id === '') return ''
   const suffix = effort === undefined || effort.trim() === '' ? '' : `(${effort.trim()})`
-  const route = provider === undefined || provider.trim() === '' ? id : `${provider.trim()}/${id}`
-  return `sub:${route}${suffix}`
+  return `sub:${id}${suffix}`
 }
 
 /**

@@ -64,12 +64,12 @@ function makeTui({ roster = true, quota = true, windows, provider = 'xai', model
   tui.rows.splice(0, tui.rows.length)
   seedStats(tui)
   if (quota) {
+    // Shapes below are the real ones: SuperGrok reports a weekly window only,
+    // OpenCode Go reports 5-hour/weekly/monthly, Command Code reports
+    // 5-hour/weekly plus a monthly credit pool (measured 2026-09-16).
     tui.quotaSnapshot = windows ?? {
       provider: 'xai', plan: 'SuperGrok', source: 'supergrok',
-      windows: [
-        { label: '本周', period: 'weekly', remainingPercent: 12 },
-        { label: '滚动 5 小时', period: 'hourly', remainingPercent: 91 },
-      ],
+      windows: [{ label: '本周', period: 'weekly', remainingPercent: 82 }],
     }
   }
   tui.contextPressure = { usedTokens: 120_000, contextWindow: 200_000, percent: 60, level: 'ok' }
@@ -136,7 +136,7 @@ const CASES = [
   { name: 'footer-roster-missing', cols: fullWidth + 4, rows: 26, options: { roster: false, quota: 'plan' } },
   { name: 'footer-strip-tight', cols: stripWidth + 1, rows: 26, options: { identity: false, quota: 'plan', completeStrip: true } },
   {
-    name: 'footer-quota-supergrok', cols: 130, rows: 26, options: { badge: 'SuperGrok 5Hr' },
+    name: 'footer-quota-supergrok', cols: 130, rows: 26, options: { badge: 'SuperGrok 1Wk' },
   },
   // Just too narrow for the badge: the window tag must survive it, because the
   // number means nothing without the window it belongs to.
@@ -154,11 +154,17 @@ const CASES = [
     name: 'footer-quota-ocgo', cols: 130, rows: 26,
     options: {
       provider: 'opencode',
+      // OpenCode Go's three windows, with the monthly one tightest: the footer
+      // must still show the 5-hour window.
       windows: {
         provider: 'opencode', plan: 'OpenCode Go', source: 'opencode-go',
-        windows: [{ label: '本周', period: 'weekly', remainingPercent: 62 }],
+        windows: [
+          { label: '本月', period: 'monthly', remainingPercent: 12 },
+          { label: '本周', period: 'weekly', remainingPercent: 47 },
+          { label: '滚动 5 小时', period: 'hourly', remainingPercent: 91 },
+        ],
       },
-      badge: 'OC·GO 1Wk',
+      badge: 'OC·GO 5Hr',
     },
   },
   {
@@ -167,10 +173,12 @@ const CASES = [
       provider: 'command-code',
       windows: {
         provider: 'command-code', plan: 'GOAT', source: 'command-code',
+        // Measured from the live billing reply: 5h 94.2%, weekly 76.3%,
+        // monthly credit pool 88.1% ($61.69).
         windows: [
-          { label: '本月', period: 'monthly', remainingPercent: 74 },
-          { label: '本周', period: 'weekly', remainingPercent: 58 },
-          { label: '滚动 5 小时', period: 'hourly', remainingPercent: 43 },
+          { label: '额度余额', period: 'monthly', remainingPercent: 88.1, detail: '$61.69' },
+          { label: '本周', period: 'weekly', remainingPercent: 76.3 },
+          { label: '滚动 5 小时', period: 'hourly', remainingPercent: 94.2 },
         ],
       },
       badge: 'CC·GOAT 5Hr',
