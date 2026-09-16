@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { fitFooterChips, footerHealthChip, footerStatsGroups } from '../lib/footer.js'
+import { formatLinkQualityChip } from '../lib/paint.js'
 import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
 
@@ -162,8 +163,13 @@ test('a styled chip is measured and cut by its cells, not by its escapes', () =>
 
 const RING_RE = /[⣀⠉⠋⠛⠞⠟⠿⡿⣿]/u
 const BAR_RE = /[█░]{8} \d+%/u
-/** The strip row: the one that opens with the link chip. */
-const stripRowOf = frame => frame.find(line => /(?:SSH|本地|local) [●○]/u.test(line)) ?? ''
+/**
+ * The strip row, found by *position*: the identity line is always the last
+ * painted row and the strip the one above it. Looking for the link chip's text
+ * instead made the test pass in an SSH session and fail on CI, where there is no
+ * SSH environment and the same chip reads `本机`/`Local`.
+ */
+const stripRowOf = frame => frame.at(-2) ?? ''
 
 /**
  * B-1 moved the quota bar and the context ring one row up into the strip; a user
@@ -237,8 +243,16 @@ test('the strip is muted like the identity line, accents excepted', async () => 
   // row legitimately drops the last group before it can be styled.
   const frame = tui.captureFrame(120, 24)
   // Anchored: the header line also contains `SSH TUI`.
-  const strip = frame.find(line => /^(?:SSH|本地|local)\b/u.test(stripAnsi(line))) ?? ''
+  const strip = frame.at(-2) ?? ''
   const identity = frame.at(-1) ?? ''
+  // The link chip leads and keeps the default foreground: the row starts with
+  // the chip itself, not with the mute the counters wear. The chip text comes
+  // from the same function the painter uses, so the wording (`SSH` / `本机` /
+  // `Local`) never enters the assertion.
+  const chip = formatLinkQualityChip(tui.paintLink, tui.paintIntervalMs, tui.paintRttMs, tui.paintProbed, true)
+  assert.ok(strip.startsWith(chip), `the link chip leads, unmuted: ${JSON.stringify(strip)}`)
+  assert.equal(/^\x1b\[90m/u.test(strip), false, `the row does not open muted: ${JSON.stringify(strip)}`)
+
   // Each group, not just the row: a muted separator alone would satisfy a
   // row-wide check while the counters themselves stayed at the default colour.
   const groups = footerStatsGroups(statsRowOf(tui.statsTracker.snapshot()))

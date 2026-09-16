@@ -59,6 +59,13 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 ③ 额度条/上下文环放回状态区（即 B-1 原样）→ 红；
 ④ 状态区失去暗色（`mutedSgr()` 返回空）→ 红。
 
+**CI 复现与修复（同批）**：rc.2 推上去后 CI 四条腿全红，而本机（Node 22/24、含/不含 SSH 环境变量）全绿。
+从 GitHub Actions 原始日志定位到唯一失败用例：`quota and the context ring live on the identity line,
+never the strip` —— 它**靠链路芯片文案**找状态行（`SSH|本地|local`），而 CI runner **没有 SSH 环境**，
+同一个芯片显示`本机`（en 为 `Local`），于是找不到该行。修复：状态行改为**按位置定位**
+（身份行恒为最后一行、状态区为倒数第二行），期望文案由 `formatLinkQualityChip()` 现场生成；
+`scripts/capture-footer-frames.mjs` 同样改为按位置定位。两处在"有/无 SSH 环境"下均验证通过。
+
 **B 批 mutation 记录**：B-1 共 7 组（芯片优先级/裁剪/点击行/事实采集等）· B-2 共 10 组（分组顺序、`order`、broken 原因优先、过滤忽略查询、大小写、移动越界、光标回夹、`/` 不进入、Enter 直接提交、Esc 取消提问）· B-3 共 4 组（不降级、色深恒真彩、none 仍留色、8 色放行真彩对）。每条变异都确认过**真的生效**（编译产物锚点不符时会静默不改，已按真实形状重做）。
 
 ## C 批 · 极简视图、diff、纯行模式、键位（逐项落地，每项一个检查点）

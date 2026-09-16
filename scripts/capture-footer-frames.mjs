@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 import { SshTui, padAnsiToWidth } from '../lib/tui.js'
+import { formatLinkQualityChip } from '../lib/paint.js'
 import { stripAnsi, visibleWidth } from '../lib/term-text.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -128,15 +129,21 @@ const CASES = [
   { name: 'footer-strip-tight', cols: stripWidth + 1, rows: 26, options: { identity: false, quota: 'plan', completeStrip: true } },
 ]
 
+/**
+ * The two chrome rows, found by position: the identity line is always the last
+ * painted row and the strip the one above it. Finding them by the link chip's
+ * text made the check pass in an SSH session and fail on a machine without one,
+ * where the same chip reads `本机`/`Local`.
+ */
 function footerRows(tui, cols, rows) {
   const frame = tui.captureFrame(cols, rows).map(line => padAnsiToWidth(line ?? '', cols))
   const plain = frame.map(line => stripAnsi(line))
-  const stripIndex = plain.findIndex(line => line.includes('SSH ●') || line.includes('本地 ●'))
-  const identityIndex = plain.findIndex(line => line.includes('grok-4.6 xhigh'))
+  const identityIndex = plain.length - 1
+  const stripIndex = plain.length - 2
   return { frame, plain, stripIndex, identityIndex }
 }
 
-function check(name, cols, { frame, plain, stripIndex, identityIndex }, options) {
+function check(tui, name, cols, { frame, plain, stripIndex, identityIndex }, options) {
   const identityExpected = options.identity !== false
   const problems = []
   for (const [index, line] of frame.entries()) {
@@ -156,8 +163,10 @@ function check(name, cols, { frame, plain, stripIndex, identityIndex }, options)
   // The strip keeps the muted style; losing it turned the whole footer white.
   if (stripIndex >= 0 && !frame[stripIndex].includes('\x1b[90m')) problems.push('the strip lost its muted style')
   // The link chip keeps the default foreground and leads, unless the roster
-  // warning outranks it.
-  if (stripIndex >= 0 && options.roster !== false && !/^(?:SSH|本地|local)\b/u.test(strip)) {
+  // warning outranks it. The chip's own text comes from the painter's function,
+  // so this holds on a machine with no SSH environment too.
+  const chip = stripAnsi(formatLinkQualityChip(tui.paintLink, tui.paintIntervalMs, tui.paintRttMs, tui.paintProbed, false))
+  if (stripIndex >= 0 && options.roster !== false && !strip.startsWith(chip)) {
     problems.push(`the link chip no longer leads the strip: ${JSON.stringify(strip)}`)
   }
   // The ring belongs to the identity line, one row down, together with the
@@ -206,7 +215,7 @@ let failed = 0
 for (const testCase of CASES) {
   const tui = makeTui(testCase.options)
   const shot = footerRows(tui, testCase.cols, testCase.rows)
-  const problems = check(testCase.name, testCase.cols, shot, testCase.options)
+  const problems = check(tui, testCase.name, testCase.cols, shot, testCase.options)
   if (!CHECK_ONLY) {
     await writeFile(join(OUT_DIR, `${testCase.name}.ansi.txt`), `${shot.frame.join('\n')}\n`)
     renderPng(testCase.name, '')
