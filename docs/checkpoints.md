@@ -80,6 +80,31 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 
 **mutation（2 组，均 unit+帧双红）**：① 状态行退回直接用 `input.model`；② 取第一个 `/` 之前而不是之后。
 
+## 修复 · Windows 应用内更新 `spawn dsh ENOENT`（用户实测发现，2026-09-16，只提交不发版）
+
+**现象**：Windows 上点应用内更新 → `spawn dsh ENOENT`。
+
+**根因**：`installPluginLatest()` 直接 `spawn('dsh', ['plugin', '--profile', …])`。Windows 上没有可执行的 `dsh`：
+全局安装给的是 `dsh.cmd` 垫片，而 `CreateProcess` **不会**按 `PATHEXT` 解析裸名字（Node 文档明说 `.cmd`/`.bat`
+必须经 shell 或显式 `cmd.exe /c`）。同一份代码在 POSIX 上一直正常，所以只在 Windows 暴露——与宿主进程的启动方式对比更清楚：
+`spawnDetachedHost()` 用的是 `process.execPath` + `process.argv.slice(1)`（所以 Windows 上启动 TUI 没问题）。
+
+**修复**：新增 `resolveDshInvocation()` —— **重跑我们自己所在的这个 CLI**：同样的 node 可执行文件 + 同样的入口脚本
+（`process.argv[1]`），不需要 PATH 查找、更不需要 shell；只有在看不到自身入口（打包成单体可执行文件之类）时才退回
+`dsh` + `shell: process.platform === 'win32'`（这种形态下 Windows **必须**经 shell 才能解析 `.cmd`）。
+另外带上 `windowsHide: true`，避免更新时在 TUI 上闪一个控制台窗口。`installPluginLatest()` 增加可注入的
+`invocation` / `spawnFn`，便于测试而不触发真实安装。
+
+**人工核对**（Windows）：升级到含本修复的版本后，点应用内更新应正常完成（写入 `update.installed` 行）；
+若仍失败，用命令行 `dsh plugin --profile tui add dsh-ssh-tui@latest` 兜底（README QA 已写）。
+
+**自动证据**：`tests/update-check.test.mjs` 新增 2 条：`resolveDshInvocation` 在「有入口 / 无入口」×「linux / win32」
+四种组合下的结论（有入口时一律 `execPath + [entry]`、`shell: false`；无入口时 win32 才 `shell: true`）；
+`installPluginLatest` 用注入的 spawn 断言命令、参数、`shell`、`windowsHide`，以及 spawn 直接报错（正是用户看到的
+ENOENT 形态）时返回 `ok: false` 且把错误文本交给界面。
+
+**mutation（3 组，全部验红）**：① 退回裸 `dsh`；② Windows 兜底去掉 shell；③ 丢掉 spawn 的 `shell`/`windowsHide`。
+
 ## 额度条常驻 + 未获取到时的 ?% 占位与定期重试（用户要求，2026-09-16）
 
 **要求**：进 TUI 时额度条就要在（此前要等首次请求成功才出现）；请求失败或还没拿到时，用**0% 状态的空条**占位，

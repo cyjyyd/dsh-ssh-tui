@@ -522,6 +522,8 @@ npm run build
 - **`dsh-ssh-tui: both stdin and stdout must be TTYs`**：必须在真实终端 / SSH 会话里启动；管道、CI、`&` 后台都不行。
 - **Windows 报 `host display socket did not appear`**：升级到最新版：
   `dsh plugin --profile tui add dsh-ssh-tui@latest`。仍失败请附 `/diag` 输出提 issue。
+- **Windows 上应用内更新报 `spawn dsh ENOENT`**：旧的更新器直接 `spawn dsh`，而 Windows 上装的是 `dsh.cmd` 垫片；
+  在命令行跑一次同样的升级即可（`dsh plugin --profile tui add dsh-ssh-tui@latest`），之后应用内更新正常。
 - **pnpm 拒绝 git 依赖的构建脚本**：把 pnpm 打印的 key 加进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`，再重装。
 - **升级后 `/mode` 报「服务不可用」、preset 工具消失**：敲 `/doctor`。它逐项判定部署组合（补丁能否解析、
   名单与 code-runtime 是否组合、有没有行被挂载两次、dsh 版本是否在兼容表内、是否装着两份 `@deepseek-ai/dsh-scope`），

@@ -4,6 +4,7 @@
  * keeps the lockfile pin (e.g. 0.3.7) when the spec is a bare package name.
  */
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { t } from './i18n/index.js'
 
 const NPM_REGISTRY = 'https://registry.npmjs.org/dsh-ssh-tui/latest'
@@ -81,15 +82,62 @@ export async function checkForPluginUpdate(current: string): Promise<PluginUpdat
   }
 }
 
-export async function installPluginLatest(profile = resolvePluginProfileName()): Promise<{
+/**
+ * How to re-run the dsh CLI that hosts this process.
+ *
+ * `spawn('dsh', …)` works on POSIX and fails on Windows with
+ * `spawn dsh ENOENT`: a global install there is a `dsh.cmd` shim, and
+ * CreateProcess does not apply `PATHEXT` to a bare name. Re-running the CLI we
+ * are already inside — the same node binary and the same entry script — needs no
+ * PATH lookup and no shell at all. The shell fallback is for the case where our
+ * own entry is not visible (a bundled CLI), where Windows *does* need a shell for
+ * the `.cmd` shim to resolve.
+ */
+export interface DshInvocation {
+  command: string
+  /** Arguments that must precede the subcommand (node needs its entry script). */
+  prefix: string[]
+  shell: boolean
+}
+
+export function resolveDshInvocation(options: {
+  execPath?: string
+  argv?: readonly string[]
+  platform?: NodeJS.Platform
+  exists?: (path: string) => boolean
+} = {}): DshInvocation {
+  const execPath = options.execPath ?? process.execPath
+  const argv = options.argv ?? process.argv
+  const platform = options.platform ?? process.platform
+  const exists = options.exists ?? existsSync
+  const entry = argv[1]
+  if (typeof entry === 'string' && entry !== '' && exists(entry)) {
+    return { command: execPath, prefix: [entry], shell: false }
+  }
+  return { command: 'dsh', prefix: [], shell: platform === 'win32' }
+}
+
+export async function installPluginLatest(
+  profile = resolvePluginProfileName(),
+  deps: { invocation?: DshInvocation; spawnFn?: typeof spawn } = {},
+): Promise<{
   ok: boolean
   output: string
 }> {
+  const invocation = deps.invocation ?? resolveDshInvocation()
+  const spawnFn = deps.spawnFn ?? spawn
   return await new Promise(resolve => {
-    const child = spawn('dsh', ['plugin', '--profile', profile, 'add', `${PLUGIN_PACKAGE}@latest`], {
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const child = spawnFn(
+      invocation.command,
+      [...invocation.prefix, 'plugin', '--profile', profile, 'add', `${PLUGIN_PACKAGE}@latest`],
+      {
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: invocation.shell,
+        // No console window flashing over the TUI on Windows.
+        windowsHide: true,
+      },
+    )
     const chunks: Buffer[] = []
     child.stdout?.on('data', chunk => chunks.push(Buffer.from(chunk)))
     child.stderr?.on('data', chunk => chunks.push(Buffer.from(chunk)))

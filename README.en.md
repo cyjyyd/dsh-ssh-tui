@@ -579,6 +579,10 @@ Find your symptom; each answer is what to do, not a change log.
 - **Windows: `host display socket did not appear`** — upgrade
   (`dsh plugin --profile tui add dsh-ssh-tui@latest`); older builds waited 15 seconds and
   timed out on the named pipe. If it still fails, attach `/diag` to an issue.
+- **Windows: the in-app update reports `spawn dsh ENOENT`** — an older updater spawned a
+  bare `dsh`, which on Windows is a `dsh.cmd` shim. Run the same upgrade once from the
+  command line (`dsh plugin --profile tui add dsh-ssh-tui@latest`); the in-app update works
+  from then on.
 - **pnpm refuses to run the build script of a git dependency** — add the key pnpm prints to
   `allowBuilds` in the profile's `pnpm-workspace.yaml`, then reinstall.
 - **After an upgrade `/mode` reports a missing service, or the preset tools vanish** — run
