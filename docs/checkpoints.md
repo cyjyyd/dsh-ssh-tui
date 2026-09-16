@@ -66,6 +66,12 @@ never the strip` —— 它**靠链路芯片文案**找状态行（`SSH|本地|l
 （身份行恒为最后一行、状态区为倒数第二行），期望文案由 `formatLinkQualityChip()` 现场生成；
 `scripts/capture-footer-frames.mjs` 同样改为按位置定位。两处在"有/无 SSH 环境"下均验证通过。
 
+**回归对照图**：`docs/screenshots/footer-regression.png`（上=rc.1 坏、下=修复后；同一渲染器、同一状态）。
+生成方式：`21f60c5^`（B-1 之前）与 `cfb9079`（rc.1）各建 worktree，跑同一个 `capture-footer-frames.mjs`。
+
+**CI 与状态（截至本轮结束）**：`385689d` 四条腿全绿；npm **未动**（`dist-tags = { latest: '0.6.4', next: '0.7.0-rc.1' }`）；
+GitHub 无 `v0.7.0-rc.2` tag（误建后已删除，等用户指令再发）。C 批仍待用户逐项验收。
+
 **B 批 mutation 记录**：B-1 共 7 组（芯片优先级/裁剪/点击行/事实采集等）· B-2 共 10 组（分组顺序、`order`、broken 原因优先、过滤忽略查询、大小写、移动越界、光标回夹、`/` 不进入、Enter 直接提交、Esc 取消提问）· B-3 共 4 组（不降级、色深恒真彩、none 仍留色、8 色放行真彩对）。每条变异都确认过**真的生效**（编译产物锚点不符时会静默不改，已按真实形状重做）。
 
 ## C 批 · 极简视图、diff、纯行模式、键位（逐项落地，每项一个检查点）
