@@ -116,6 +116,25 @@ DSH_TUI_LINE_MODE=1 ssh host 'dsh --profile tui --resume' | tee session.log
 状态符号（● ⚠ ✖、diff 的 `+`/`-`）仍然保留，语义不依赖颜色。全屏交互（鼠标拖选、卡片展开、
 `/find` 高亮）在行模式下不可用——那是画帧的代价，需要时用普通模式。
 
+## 4.7 让 dsh 自己走网络代理
+
+插件跑在 dsh 进程里，所以"TUI 的网络"就是"dsh 的网络"。Node **不会**自动读 `HTTP_PROXY` /
+`HTTPS_PROXY`：`NODE_USE_ENV_PROXY=1` 单独在 v24.19 上不生效，必须给 Node 传
+**`--use-env-proxy`**（启动包装脚本里加，别用 `NODE_OPTIONS`——那会把模型跑测试、跑工具的
+每个 Node 子进程也一起塞进代理）。
+
+按域名分流用 `NO_PROXY`（后缀匹配，`deepseek.com` 覆盖整域）。国内直连更快的域名放这里，
+例如：
+
+```bash
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}deepseek.com,api.deepseek.com"
+exec /path/to/node --use-env-proxy /path/to/@deepseek-ai/dsh/lib/bin.js "$@"
+```
+
+容器/沙箱里如果只有代理出口，直连会成片超时——那种"直连失败"是出口的噪音，不能当成
+"某家必须走代理"的证据；判断标准应该是**该域名直连是否稳定**，而不是一次超时。
+`127.0.0.1` / 本机网段务必留在 `NO_PROXY` 里：显示通道虽然走 AF_UNIX，但别把本地流量也绕出去。
+
 ## 5. 明确不做（以及为什么）
 
 - **内置 `--daemon` 常驻模式**：Host 不是服务。它是"某个会话的写者"，靠 idle-exit 把写锁交还；把它变成常驻服务会让 Web UI 与其它窗口长期打不开同一会话。
