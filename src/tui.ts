@@ -239,15 +239,12 @@ import {
   formatContextPressureRing,
   describeProviderRoute,
   fitFooterChips,
-  fitFooterStatsLine,
   fitFooterStatusLine,
   footerActivity,
   footerHealthChip,
   footerIdentityParts,
   footerStatsGroups,
   formatContextPressureChip,
-  formatFooterQuota,
-  formatQuotaBar,
   formatStatusReport,
   formatTokens,
   parseContextPressure,
@@ -3904,8 +3901,16 @@ export class SshTui {
       subModel: sub.model,
       ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
       ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
-      // Quota and context pressure moved to the status strip, which owns the
-      // loss order for a narrow terminal.
+      // Quota and context pressure stay on the identity line, where they have
+      // always been: B-1 moved them one row up into the strip, and a user
+      // looking at a wide terminal read that as "额度条没了". The strip keeps
+      // the loss order for the groups it does own.
+      ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
+        ? {}
+        : { quotaCode: this.quotaSnapshot.plan, quotaPercent: quotaWindow.remainingPercent }),
+      ...(this.contextPressure === undefined
+        ? {}
+        : { contextChip: formatContextPressureChip(this.contextPressure, false) }),
 
       ...(balanceText === undefined ? {} : { balanceText }),
       ...(this.searchHits.length > 0 && this.searchIndex >= 0
@@ -3925,6 +3930,8 @@ export class SshTui {
         : activity.text
     const identity = footerIdentityParts(footer)
     const statusText = fitFooterStatusLine(activityText, identity, Math.max(1, width))
+    // The context ring is the one accent on an otherwise muted line; the mute
+    // has to be resumed after its reset, exactly as the pre-strip footer did.
     const statusLine = this.contextPressure === undefined || !this.color
       ? this.styleLine('system', statusText)
       : this.styleLine('system', statusText).replace(
@@ -3932,39 +3939,30 @@ export class SshTui {
         `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${formatContextPressureRing(this.contextPressure.percent)}\x1b[0m\x1b[90m`,
       )
 
-    // The strip: one loss order for everything a narrow terminal can do without.
+    // The strip: one loss order for the groups a narrow terminal can do without.
     // Health leads because it is the only group that reports a broken install;
-    // the session counters go before the operational signals.
+    // the session counters go before the operational signals. Quota and context
+    // pressure are deliberately not here — they are on the identity line.
     const strip: FooterChip[] = []
     const health = footerHealthChip(this.rosterMissing, this.color)
-    if (health !== undefined) strip.push(health)
+    // Muted like the identity line, accent excepted: the pre-strip footer
+    // painted the counters dim and only the ⚠'s own glyph yellow.
+    if (health !== undefined) strip.push({ ...health, long: this.muteFooterLine(health.long) })
     strip.push({
       id: 'link',
+      // Keeps the default foreground, exactly as it looked before the strip.
       long: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color),
       short: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false)
         .replace(/\s*\d+ms$/u, ''),
       priority: 1,
     })
     statsGroups.forEach((text, index) => {
-      strip.push({ id: `stat${index}`, long: text, short: '', priority: 4 + index })
+      strip.push({ id: `stat${index}`, long: this.muteFooterLine(text), short: '', priority: 4 + index })
     })
-    if (this.contextPressure !== undefined) {
-      strip.push({
-        id: 'context',
-        long: formatContextPressureChip(this.contextPressure, this.color),
-        short: formatContextPressureRing(this.contextPressure.percent),
-        priority: 2,
-      })
-    }
-    if (quotaWindow !== undefined && this.quotaSnapshot !== undefined && this.quotaSnapshot.provider === provider) {
-      strip.push({
-        id: 'quota',
-        long: formatFooterQuota(quotaWindow.remainingPercent, this.quotaSnapshot.plan),
-        short: formatQuotaBar(quotaWindow.remainingPercent),
-        priority: 3,
-      })
-    }
-    const statsLine = clipAnsiToWidth(fitFooterChips(strip, Math.max(1, width)), Math.max(1, width))
+    const statsLine = clipAnsiToWidth(
+      fitFooterChips(strip, Math.max(1, width), this.mutedSeparator()),
+      Math.max(1, width),
+    )
     this.healthChipRow = undefined
 
     const paintRows: string[] = [
@@ -4567,6 +4565,31 @@ export class SshTui {
       }, refusal.error),
     })
     this.markDirty()
+  }
+
+  /**
+   * Apply the footer's muted style around a strip that carries its own accents
+   * (the link pips, the ⚠). {@link styleLine} cannot do this: it sanitises its
+   * input, which strips an accent's `ESC` and leaves the `[32m` body on the grid
+   * as four literal characters — the garbled footer B-1 shipped. Every inner
+   * reset re-opens the muted style, so the text between two accents stays muted.
+   */
+  private muteFooterLine(text: string): string {
+    if (text === '') return ''
+    const code = this.mutedSgr()
+    if (code === '') return text
+    const open = `\x1b[${code}m`
+    return `${open}${text.replaceAll('\x1b[0m', `\x1b[0m${open}`)}\x1b[0m`
+  }
+
+  /** The muted strip separator, so the groups between the accents stay dim. */
+  private mutedSeparator(): string {
+    const code = this.mutedSgr()
+    return code === '' ? ' │ ' : `\x1b[${code}m │ `
+  }
+
+  private mutedSgr(): string {
+    return this.color ? downgradeSgr('90', this.colorDepth) : ''
   }
 
   private styleLine(kind: DisplayKind, text: string): string {

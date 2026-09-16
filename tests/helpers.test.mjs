@@ -2631,9 +2631,13 @@ test('tool card colors follow state: green ok, red error, dim shell command', ()
     const readFrame = build('ok', 'read', 'src/tui.ts', '读取', 'export const x = 1')
     assert.match(readFrame, /\x1b\[32m●/)
     assert.match(readFrame, /\x1b\[90m\s+src\/tui\.ts/)
-    // Title and body stay default; only the status dot/word are green.
-    assert.equal(/\x1b\[32m读取/.test(readFrame), false)
-    assert.equal(readFrame.includes('\x1b[33m'), false)
+    // Title and body stay default; only the status dot/word are green. The
+    // assertions are per card row: a frame-wide `\x1b[33m` check used to pass
+    // only because the footer's strip stripped every accent's ESC and leaked its
+    // `[33m` body instead — the card itself is what must stay unpainted.
+    const readRow = readFrame.split('\n').find(line => line.includes('读取')) ?? ''
+    assert.equal(/\x1b\[32m读取/.test(readRow), false)
+    assert.equal(readRow.includes('\x1b[33m'), false)
     const editFrame = build('ok', 'edit', 'src/tui.ts', '编辑', '')
     assert.match(editFrame, /\x1b\[32m●/)
     assert.match(editFrame, /\x1b\[90m\s+src\/tui\.ts/)

@@ -29,6 +29,9 @@ const STEPS = [
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'busy', label: 'pty busy-drop probe', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy'], timeoutMs: 300_000 },
   { id: 'linemode', label: 'pty line-mode probe', command: 'node', args: ['scripts/tui-probe.mjs', '--line-mode'], timeoutMs: 300_000 },
+  // Rendered footer frames: the escape-body leak of B-1 passed every unit test
+  // (they fed the fitter unstyled chips) and was only visible on a frame.
+  { id: 'footer', label: 'footer frame check', command: 'node', args: ['scripts/capture-footer-frames.mjs', '--check-only'], timeoutMs: 300_000 },
 ]
 
 function runStep(step) {
@@ -71,6 +74,8 @@ function summarize(step, result) {
   if (skip !== undefined) return skip
   const ok = /^OK:.*$/mu.exec(text)?.[0]
   if (ok !== undefined) return ok
+  const verdict = /^RESULT: (?:PASS|FAIL).*$/mu.exec(text)?.[0]
+  if (verdict !== undefined) return verdict
   return text.trim().split('\n').at(-1)?.slice(0, 120) ?? ''
 }
 
@@ -95,7 +100,7 @@ function parseArgs(argv) {
     if (arg === '--batch') parsed.batch = argv[++index]
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,busy,linemode]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,busy,linemode,footer]')
       process.exit(0)
     } else {
       console.error(`unknown argument: ${arg}`)

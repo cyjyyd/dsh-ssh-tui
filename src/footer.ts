@@ -3,7 +3,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { displayWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
+import { pinEmojiCells, truncateAnsiToWidth, visibleWidth } from './term-text.js'
 import { describeSubagentFit } from './subagent-model.js'
 import { formatQuotaStatusLine, type QuotaSnapshot } from './quota.js'
 import type { DisconnectPolicyName } from './transcript-types.js'
@@ -240,8 +240,13 @@ export interface FooterChip {
  * while keeping long numeric groups. Two passes now: every chip trades its text
  * for its glyph in reverse priority order, and only then do whole groups go,
  * again lowest priority first. The result never exceeds the width.
+ *
+ * Chips may carry SGR accents (the link pips, the ⚠) and the caller may pass a
+ * styled separator, so both the measurement and the final cut are ANSI-aware:
+ * feeding styled text to a plain-text truncator strips the accent's `ESC` and
+ * leaves its `[32m` body on the grid.
  */
-export function fitFooterChips(chips: readonly FooterChip[], width: number): string {
+export function fitFooterChips(chips: readonly FooterChip[], width: number, separator = ' │ '): string {
   const limit = Math.max(1, width)
   const state = chips
     .filter(chip => chip.long !== '' || chip.short !== '')
@@ -250,12 +255,12 @@ export function fitFooterChips(chips: readonly FooterChip[], width: number): str
     .filter(entry => entry.present)
     .map(entry => (entry.full ? entry.chip.long : entry.chip.short))
     .filter(text => text !== '')
-    .join(' │ ')
+    .join(separator)
   // Budget the way it will be painted: the frame pins a symbol like ⚠ with a
   // variation selector and a reserving space, so the raw string measures one or
   // two cells narrower than the row it becomes. Fitting the unpinned text left
   // a row that overflowed the terminal by exactly that much.
-  const used = (): number => displayWidth(pinEmojiCells(render()))
+  const used = (): number => visibleWidth(pinEmojiCells(render()))
   const byLeastImportant = [...state].sort((a, b) => b.chip.priority - a.chip.priority)
   for (const entry of byLeastImportant) {
     if (used() <= limit) break
@@ -275,7 +280,7 @@ export function fitFooterChips(chips: readonly FooterChip[], width: number): str
       best.full = false
     }
   }
-  return truncateToWidth(render(), limit)
+  return truncateAnsiToWidth(render(), limit)
 }
 
 /**
@@ -297,8 +302,8 @@ export function footerHealthChip(missing: boolean, color = false): FooterChip | 
 export function fitFooterStatsLine(chip: string, groups: readonly string[], width: number): string {
   const kept = [...groups]
   const render = (): string => kept.length === 0 ? chip : `${chip} │ ${kept.join(' │ ')}`
-  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
-  return truncateToWidth(render(), Math.max(1, width))
+  while (kept.length > 0 && visibleWidth(render()) > width) kept.pop()
+  return truncateAnsiToWidth(render(), Math.max(1, width))
 }
 
 export type FooterActivityKind =
@@ -444,9 +449,9 @@ export function dropFooterQuotaPlanName(parts: string[]): boolean {
 export function fitFooterStatusLine(activity: string, identity: readonly string[], width: number): string {
   const kept = [...identity]
   const render = (): string => kept.length === 0 ? activity : `${activity}  ${kept.join(' · ')}`
-  if (displayWidth(render()) > width) dropFooterQuotaPlanName(kept)
-  while (kept.length > 0 && displayWidth(render()) > width) kept.pop()
-  return truncateToWidth(render(), Math.max(1, width))
+  if (visibleWidth(render()) > width) dropFooterQuotaPlanName(kept)
+  while (kept.length > 0 && visibleWidth(render()) > width) kept.pop()
+  return truncateAnsiToWidth(render(), Math.max(1, width))
 }
 
 export interface StatusReportInput {

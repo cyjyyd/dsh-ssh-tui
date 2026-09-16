@@ -1040,6 +1040,44 @@ export function clipAnsiToWidth(text: string, width: number): string {
   return out
 }
 
+/**
+ * Cut a line that may already carry SGR accents to fit `width` cells, keeping
+ * the escapes of the part that survives and closing what stays open.
+ *
+ * The plain-text {@link truncateToWidth} cannot be used on a styled line: it
+ * sanitises its input, which strips the `ESC` of a colour sequence and leaves
+ * its `[32m` body on the grid as four literal characters. The footer's chips
+ * carry their own colour (the link pips, the ⚠), so that leak showed up as
+ * `[33m⚠[0m` in the status strip.
+ */
+export function truncateAnsiToWidth(text: string, width: number): string {
+  if (width <= 0) return ''
+  if (visibleWidth(text) <= width) return text
+  if (width === 1) return '…'
+  const limit = width - 1
+  let out = ''
+  let used = 0
+  let index = 0
+  while (index < text.length) {
+    if (text.charCodeAt(index) === 0x1b) {
+      const seqEnd = skipAnsiSequence(text, index)
+      out += text.slice(index, seqEnd)
+      index = seqEnd
+      continue
+    }
+    const cp = text.codePointAt(index)
+    if (cp === undefined) break
+    const char = String.fromCodePoint(cp)
+    const charWidth = displayWidth(char)
+    if (used + charWidth > limit) break
+    out += char
+    used += charWidth
+    index += char.length
+  }
+  // The tail that was dropped may have carried the reset, so close explicitly.
+  return `${out}…\x1b[0m`
+}
+
 /** One renderable view of the input line: text plus the cursor's visual offset. */
 export interface InputView {
   text: string

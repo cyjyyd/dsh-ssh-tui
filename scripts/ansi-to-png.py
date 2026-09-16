@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Render a captured ANSI TUI frame to PNG with ImageMagick -draw."""
+"""Render a captured ANSI TUI frame to PNG with ImageMagick -draw.
+
+Every cell is drawn at its own x, and each glyph comes from the first font that
+actually has it (fontconfig's answer, which is what a terminal falls back to).
+Drawing whole runs from one font was silently wrong twice over: the CJK mono
+font has no Braille block, so the context ring and the todo bar came out blank,
+and an ornament it does have (●, ░) could be a double-width glyph that ran into
+the cells after it. A substituted `o`/`#` for `○`/`░` hid the real footer.
+"""
 
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 import sys
@@ -11,11 +20,16 @@ from pathlib import Path
 SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 ESC_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b].*?(?:\x07|\x1b\\)")
 
+# The TUI's cell model: a two-cell glyph (CJK, a pinned emoji symbol) is drawn
+# from the CJK face, a one-cell glyph from the Latin mono face a terminal would
+# use for it. Drawing ● (one cell, but 15px wide in the CJK face) from the CJK
+# font ran the link pips into each other and into the delay after them.
 FONT = "Noto-Sans-Mono-CJK-SC"
+NARROW_FONT = "DejaVu-Sans-Mono"
+NARROW_FONT_FAMILY = "DejaVu Sans Mono"
 POINT = 15
 BG = "#1a1b26"
 FG = "#c0caf5"
-CELL_W = 9
 CELL_H = 20
 PAD_X = 16
 PAD_Y = 28
@@ -87,20 +101,8 @@ def apply_sgr(codes: list[int], state: dict) -> None:
         i += 1
 
 
-# Noto Sans Mono CJK SC is missing several TUI ornaments; keep cell width.
-GLYPH_FALLBACK = {
-    "❯": ">",
-    "›": ">",
-    "▸": ">",
-    "▾": "v",
-    "▶": ">",
-    "◀": "<",
-    "◆": "*",
-    "●": "●",
-    "○": "o",
-    "◐": "o",
-    "░": "#",
-}
+# Glyphs the primary font lacks are resolved through fontconfig, per character,
+# exactly as a terminal resolves them; nothing is substituted by hand.
 
 
 def display_width(char: str) -> int:
@@ -139,12 +141,63 @@ def parse_line(line: str) -> list[tuple[str, dict, int]]:
             if other:
                 i = other.end()
                 continue
-        char = GLYPH_FALLBACK.get(line[i], line[i])
+        char = line[i]
         width = display_width(char)
         if width > 0:
             cells.append((char, dict(state), width))
         i += 1
     return cells
+
+
+def font_advance(font: str, point: int) -> int:
+    """The cell pitch: one Latin advance of the font the TUI is drawn in."""
+    def width(text: str) -> int:
+        out = subprocess.run(
+            ["convert", "-font", font, "-pointsize", str(point), f"label:{text}", "-format", "%w", "info:"],
+            capture_output=True, text=True, check=True,
+        )
+        return int(out.stdout)
+    return width("AA") - width("A")
+
+
+CELL_W = font_advance(NARROW_FONT, POINT)
+
+
+def _family_key(name: str) -> str:
+    return name.replace(" ", "").replace("-", "").lower()
+
+
+def _font_has(family: str, char: str) -> bool:
+    if ord(char) < 128:
+        return True
+    out = subprocess.run(["fc-list", f":charset={ord(char):X}", "family"], capture_output=True, text=True)
+    wanted = _family_key(family)
+    return any(_family_key(part.strip()) == wanted for line in out.stdout.splitlines() for part in line.split(","))
+
+
+@functools.lru_cache(maxsize=None)
+def _fallback_file(char: str) -> str:
+    out = subprocess.run(
+        ["fc-match", f":charset={ord(char):X}", "-f", "%{file}"],
+        capture_output=True, text=True,
+    )
+    path = out.stdout.strip()
+    return path if path else FONT
+
+
+@functools.lru_cache(maxsize=None)
+def font_for(char: str, cells: int) -> str:
+    """The font a terminal would use for this character in this many cells.
+
+    Missing glyphs fall back to a font *file*: ImageMagick resolves a family name
+    like `DejaVu Sans` to nothing and then draws no glyph at all, which is the
+    very failure this is fixing.
+    """
+    if cells >= 2:
+        return FONT if _font_has("Noto Sans Mono CJK SC", char) else _fallback_file(char)
+    if _font_has(NARROW_FONT_FAMILY, char):
+        return NARROW_FONT
+    return _fallback_file(char)
 
 
 def escape_draw(text: str) -> str:
@@ -184,41 +237,47 @@ def main() -> None:
         col = 0
         y0 = PAD_Y + (row_index + extra) * CELL_H
         y1 = y0 + CELL_H
-        run_text = ""
-        run_key: tuple | None = None
-        run_x = PAD_X
-        run_width = 0
-
-        def flush() -> None:
-            nonlocal run_text, run_key, run_x, run_width
-            if not run_text or run_key is None:
-                run_text = ""
-                run_width = 0
-                return
-            fg, bg, bold, italic = run_key
-            if bg:
-                args.extend(["-fill", bg, "-draw", f"rectangle {run_x},{y0} {run_x + run_width},{y1}"])
-            args.extend(["-font", FONT, "-pointsize", str(POINT)])
-            args.extend(["-fill", fg])
-            if bold:
-                args.extend(["-weight", "Bold"])
-            else:
-                args.extend(["-weight", "Normal"])
-            baseline = y0 + CELL_H - 5
-            args.extend(["-draw", f"text {run_x + 1},{baseline} '{escape_draw(run_text)}'"])
-            run_text = ""
-            run_width = 0
-
+        baseline = y0 + CELL_H - 5
+        # Backgrounds first, as rectangles spanning the cells they cover: a diff
+        # row's fill has to reach the whole row even where the glyph is thin.
+        run_x: int | None = None
+        run_right = 0
+        run_bg = None
         for char, state, cell_width in row:
-            key = style_key(state)
-            if run_key != key:
-                flush()
-                run_key = key
-                run_x = PAD_X + col * CELL_W
-            run_text += char
-            run_width += cell_width * CELL_W
+            _, bg, _, _ = style_key(state)
+            if bg != run_bg:
+                if run_bg and run_x is not None:
+                    args.extend(["-fill", run_bg, "-draw", f"rectangle {run_x},{y0} {run_right},{y1}"])
+                run_bg = bg
+                run_x = PAD_X + col * CELL_W if bg else None
+            right = PAD_X + (col + cell_width) * CELL_W
+            if run_bg and run_x is not None:
+                run_right = right
             col += cell_width
-        flush()
+        if run_bg and run_x is not None:
+            args.extend(["-fill", run_bg, "-draw", f"rectangle {run_x},{y0} {run_right},{y1}"])
+
+        # Then one draw per cell, at that cell's own x: the grid comes from the
+        # TUI's cell model, never from the font's advance.
+        col = 0
+        last_font = None
+        last_fill = None
+        last_weight = None
+        for char, state, cell_width in row:
+            fg, _, bold, italic = style_key(state)
+            font = font_for(char, cell_width)
+            if font != last_font:
+                args.extend(["-font", font, "-pointsize", str(POINT)])
+                last_font = font
+            if fg != last_fill:
+                args.extend(["-fill", fg])
+                last_fill = fg
+            weight = "Bold" if bold or italic else "Normal"
+            if weight != last_weight:
+                args.extend(["-weight", weight])
+                last_weight = weight
+            args.extend(["-draw", f"text {PAD_X + col * CELL_W + 1},{baseline} '{escape_draw(char)}'"])
+            col += cell_width
 
     args.append(f"PNG24:{dest}")
     subprocess.run(["convert", *args], check=True)
