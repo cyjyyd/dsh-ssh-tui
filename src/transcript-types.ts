@@ -85,6 +85,14 @@ export type Row =
        * Does not rewrite the session log.
        */
       turnLeftOpen?: boolean
+      /**
+       * Display-only: the one leftover-todo reminder for this open list has
+       * been sent. The model's answer is itself a `todo_write`, so this must
+       * survive that patch — otherwise every turn end asks again, and each ask
+       * is another model turn. Reset when the list closes, so a list that opens
+       * again gets its own single reminder.
+       */
+      nudged?: boolean
     }
   | {
       kind: 'question'

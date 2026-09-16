@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { setLocale } from '../lib/i18n/index.js'
+import { setLocale, t } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
 import { pinEmojiCells } from '../lib/term-text.js'
@@ -2856,6 +2856,90 @@ test('turn/end marks leftover todos as display-stale and asks once to close them
     ] },
   })
   assert.equal(tui.rows.find(row => row.kind === 'plan').turnLeftOpen, false)
+})
+
+/**
+ * The nudge asks the model to close the leftover todos. It is one reminder per
+ * open list: the model's answer is itself a `todo_write`, and if that answer
+ * leaves an item open the old code re-armed the reminder (any todo patch cleared
+ * the pending flag), so every turn end produced another model turn — a loop that
+ * only stops when the list is completed or the session is cleared.
+ */
+test('a todo_write that leaves the list open does not buy a second nudge', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const followups = []
+  const agent = {
+    id: 'main-session', options: {}, status: 'running',
+    session: { id: 'main-session', events: [] }, cancel() {},
+    followup(message) { followups.push(message) },
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const write = todos => tui.handleSessionEvent(agent.session, { type: 'todo/write', data: { todos } })
+  /** A turn that ends with the driver going idle, which is when the nudge runs. */
+  const endTurn = async () => {
+    tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    agent.status = 'idle'
+    await new Promise(resolve => queueMicrotask(resolve))
+    agent.status = 'running'
+  }
+
+  write([{ content: 'a', status: 'in_progress' }, { content: 'b', status: 'pending' }])
+  await endTurn()
+  assert.equal(followups.length, 1, 'the first turn end asks once')
+
+  // The model answered (this is its own follow-up turn) but left the list open.
+  write([{ content: 'a', status: 'completed' }, { content: 'b', status: 'pending' }])
+  await endTurn()
+  assert.equal(followups.length, 1, 'one reminder per open list, not one per turn end')
+
+  write([{ content: 'a', status: 'completed' }, { content: 'b', status: 'pending' }])
+  await endTurn()
+  assert.equal(followups.length, 1, 'and it stays quiet while the list stays open')
+
+  // Closing the list ends the episode ...
+  write([{ content: 'a', status: 'completed' }, { content: 'b', status: 'completed' }])
+  await endTurn()
+  assert.equal(followups.length, 1, 'a finished list needs no reminder')
+
+  // ... and a list that opens again gets its own single reminder.
+  write([{ content: 'c', status: 'pending' }])
+  await endTurn()
+  assert.equal(followups.length, 2, 'a reopened list is a new episode')
+  write([{ content: 'c', status: 'pending' }])
+  await endTurn()
+  assert.equal(followups.length, 2, 'and that episode is one reminder too')
+})
+
+/**
+ * The reminder is in the session log, so a TUI that resumes the session (a
+ * restarted Host, or `--resume`) must not send it a second time: the model
+ * already has it in context, and sending it again is another model turn.
+ */
+test('a transcript that already carries the reminder does not send another', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const followups = []
+  const agent = {
+    id: 'main-session', options: {}, status: 'running',
+    session: { id: 'main-session', events: [] }, cancel() {},
+    followup(message) { followups.push(message) },
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'todo/write',
+    data: { todos: [{ content: 'a', status: 'pending' }] },
+  })
+  // What a resumed transcript replays: the plugin notice the reminder arrived as.
+  tui.handleSessionEvent(agent.session, {
+    type: 'user/message',
+    data: {
+      content: [{ type: 'text', text: `${t('plan.nudge')}\n- [pending] a` }],
+      source: { kind: 'plugin', plugin: 'dsh-ssh-tui', form: 'notice', summary: t('plan.nudgeQueued') },
+    },
+  })
+  tui.handleSessionEvent(agent.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  agent.status = 'idle'
+  await new Promise(resolve => queueMicrotask(resolve))
+  assert.equal(followups.length, 0, 'the log already carries this list\'s one reminder')
 })
 
 test('planCloseNudgeText lists leftover items only', () => {

@@ -307,6 +307,7 @@ import {
   planDockNote,
   planIsLive,
   planTitleFromMarkdown,
+  planTurnLeftOpen,
   promptInjectionSources,
   promptInjectionTitle,
   subagentHeaderText,
@@ -2719,7 +2720,12 @@ export class SshTui {
       existing.archived = false
       if (patch.todos !== undefined || patch.active !== undefined || patch.pending !== undefined) {
         existing.turnLeftOpen = false
-        this.planNudgePending = false
+        // A patch that leaves items open keeps this episode's reminder spent;
+        // only a list that is fully closed lets a later one ask again.
+        if (!planTurnLeftOpen(existing)) {
+          existing.nudged = false
+          this.planNudgePending = false
+        }
       }
       if (!planIsLive(existing)) {
         existing.archived = true
@@ -2764,6 +2770,11 @@ export class SshTui {
     if (this.agent.status === 'running') return
     const plan = this.findLivePlanRow()
     if (plan === undefined || plan.turnLeftOpen !== true) return
+    // One reminder per open list. The answer to a reminder is a `todo_write`,
+    // and a patch that leaves an item open used to re-arm this — so every turn
+    // end produced another reminder and another model turn, forever.
+    if (plan.nudged === true) return
+    plan.nudged = true
     this.planNudgePending = true
     const text = planCloseNudgeText(plan)
     const queued = t('plan.nudgeQueued')
@@ -2778,7 +2789,13 @@ export class SshTui {
     try {
       this.agent.followup(message)
     } catch (error: unknown) {
+      // The reminder never reached the model: drop the queued notice that
+      // announced it (it would otherwise read as "already asked", here and in a
+      // resumed transcript) and let a later turn end try again.
       this.planNudgePending = false
+      plan.nudged = false
+      const queuedAt = this.rows.findLastIndex(row => row.kind === 'system' && row.text === queued)
+      if (queuedAt >= 0) this.rows.splice(queuedAt, 1)
       this.pushRow({ kind: 'error', text: t('plan.nudgeFailed', { error: errorChain(error) }) })
     }
   }
@@ -4765,6 +4782,12 @@ export class SshTui {
             const last = this.rows.at(-1)
             const alreadyShown = last?.kind === 'system' && last.text === summary
             if (summary !== '' && !alreadyShown) this.pushRow({ kind: 'system', text: summary })
+            // Replaying a resumed session: the reminder in the log belongs to
+            // the open list that is being rebuilt, so mark it as spent.
+            if (summary === t('plan.nudgeQueued')) {
+              const resumed = this.findLivePlanRow()
+              if (resumed !== undefined) resumed.nudged = true
+            }
             if (!this.replaying) this.beginWait()
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
