@@ -6,6 +6,7 @@
  */
 
 import { t } from './i18n/index.js'
+import { downgradeSgr, type ColorDepth } from './color-depth.js'
 
 /**
  * Codex-style compact elapsed: `0s`, `1m 05s`, `1h 01m 01s`.
@@ -495,6 +496,7 @@ export function paintSegmentedLine(
   start: number,
   end: number,
   segments: readonly TextSegment[],
+  depth: ColorDepth = 'truecolor',
 ): string {
   if (segments.length === 0) return line
   let out = ''
@@ -507,7 +509,9 @@ export function paintSegmentedLine(
     if (to <= from) continue
     // Gaps (the tool title) stay default foreground — do not drop them.
     if (from > cursor) out += line.slice(cursor - start, from - start)
-    out += `\x1b[${seg.sgr}m${line.slice(from - start, to - start)}\x1b[0m`
+    const code = downgradeSgr(seg.sgr, depth)
+    const slice = line.slice(from - start, to - start)
+    out += code === '' ? slice : `\x1b[${code}m${slice}\x1b[0m`
     cursor = to
   }
   if (cursor < end) out += line.slice(cursor - start, end - start)
@@ -519,9 +523,10 @@ export function wrapSegmented(
   text: string,
   width: number,
   segments: readonly TextSegment[],
+  depth: ColorDepth = 'truecolor',
 ): string[] {
   return wrapTracked(text, width).map(({ line, start, end }) =>
-    paintSegmentedLine(line, start, end, segments))
+    paintSegmentedLine(line, start, end, segments, depth))
 }
 
 export function truncate(text: string, maxLines: number): string {

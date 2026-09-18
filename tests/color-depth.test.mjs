@@ -18,6 +18,9 @@ test('the environment decides the depth, override first', () => {
   assert.equal(colorDepth(env()), '256')
   assert.equal(colorDepth(env({ TERM: 'xterm' })), '8')
   assert.equal(colorDepth({ TERM: 'dumb' }), 'none')
+  assert.equal(colorDepth({ TERM: 'linux' }), '8', 'a Linux virtual console still paints 8 colours')
+  assert.equal(colorDepth({ TERM: 'vt100' }), '8')
+  assert.equal(colorDepth({ TERM: 'vt220' }), '8')
   assert.equal(colorDepth({ TERM: 'xterm', NO_COLOR: '1' }), 'none')
   assert.equal(colorDepth({ TERM: 'screen' }), '256', 'tmux/screen default to the 256 palette')
   assert.equal(colorDepth({ TERM: 'tmux-256color' }), '256')
@@ -156,6 +159,20 @@ async function frameAt(depth, t) {
   tui.rows.push({ kind: 'brand', text: 'brand' })
   tui.rows.push({ kind: 'diff-add', text: '+ added' })
   tui.rows.push({ kind: 'diff-del', text: '- removed' })
+  tui.rows.push({
+    kind: 'subagent',
+    sessionId: 'child-a',
+    runId: 'run-a',
+    provider: 'spawn',
+    local: true,
+    label: '子代理 spawn',
+    task: 'scan repo',
+    status: 'running',
+    startedAt: Date.now(),
+    lastActivity: 'scan repo',
+    logs: [],
+    expanded: false,
+  })
   return { tui, frame: tui.captureFrame(80, 24).join('\n') }
 }
 
@@ -165,6 +182,24 @@ test('an 8-colour terminal never receives a truecolor or cube sequence', async t
   assert.equal(/38;5|48;5/u.test(frame), false, 'no cube index')
   assert.ok(frame.includes('brand'), 'the rows are still painted')
   assert.ok(/3[0-7]|9[0-7]/u.test(frame), 'with standard colours')
+})
+
+/**
+ * The status line tells the user which route the children take, so its accent
+ * has to mean "a different provider from the parent's". A child that follows
+ * the parent used to be painted violet on that row anyway, which read as a
+ * `/submodel` pin.
+ */
+test('the status line accents only a child on a different provider', async t => {
+  const { tui } = await frameAt('truecolor', t)
+  const identityLine = () =>
+    tui.captureFrame(90, 24).find(line => line.includes('sub:')) ?? ''
+  const following = identityLine()
+  assert.ok(following.includes('sub:'), following)
+  assert.equal(/\x1b\[38;5;(?:141|80)m/u.test(following), false, following)
+  tui.subagentSelection = { current: { provider: 'xai', model: 'grok-4.5' } }
+  const pinned = identityLine()
+  assert.ok(pinned.includes('\x1b[38;5;80msub:xai/grok-4.5\x1b[0m'), pinned)
 })
 
 test('a monochrome terminal receives no colour at all, and keeps the marks', async t => {

@@ -11,6 +11,8 @@ export type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' 
 export interface SubagentLogEntry {
   kind: SubagentLogKind
   text: string
+  /** Parent tool-call id, so a later result can settle on the same log line. */
+  callId?: string
 }
 
 /** One todo-list item as the plan card renders it. */
@@ -59,14 +61,20 @@ export type Row =
   | {
       kind: 'subagent'
       sessionId: string
+      /** Live child id when this chip was first built from the parent spawn tool. */
+      childSessionId?: string
       runId: string
       provider: string
       local: boolean
       label: string
+      /** Parent `subagent` tool description, when the spawn call named the job. */
+      task?: string
       status: 'running' | 'ok' | 'error' | 'aborted'
       startedAt: number
       endedAt?: number
       stopReason?: string
+      /** One-line failure explanation shown on the collapsed chip. */
+      failHint?: string
       lastActivity: string
       logs: SubagentLogEntry[]
       expanded: boolean
@@ -141,7 +149,20 @@ export type CollapsibleBlock =
   | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
-export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'todo-failed' | 'todo-skipped' | 'plan-dock'
+export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'todo-failed' | 'todo-skipped' | 'plan-dock' | 'subagent-header'
+
+/** One rendered diff/inspect body line with its display role. */
+export interface DiffDisplayLine {
+  kind: DisplayKind
+  text: string
+  /**
+   * Ranges of `text` to emphasise, in UTF-16 offsets. They travel with the line
+   * rather than being baked in as escapes because the painter sanitises the text
+   * it styles — an escape inserted down here would be stripped, leaving a
+   * literal `[7m` on screen.
+   */
+  spans?: readonly { start: number; end: number }[]
+}
 
 /** One file's change, matching the web diff-card contract (`card: 'diff'`). */
 export interface ToolDiffHunk {

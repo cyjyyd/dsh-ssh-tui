@@ -13,7 +13,7 @@ import {
   type DiffLine,
 } from './line-diff.js'
 import { t } from './i18n/index.js'
-import { jobAlias } from './job-label.js'
+import { displayToolName, jobAlias, looksLikeOpaqueId } from './job-label.js'
 import { padToWidth, sliceCodePoints, truncate, type TextSegment, wrap } from './term-text.js'
 import { firstString, parseJsonArgs, scalarText } from './json-args.js'
 import {
@@ -27,7 +27,7 @@ import {
   todoItemKind,
   planMarkdownFromArgs,
 } from './plan.js'
-import type { DisplayKind, Row, ToolDiffHunk } from './transcript-types.js'
+import type { DiffDisplayLine, DisplayKind, Row, ToolDiffHunk } from './transcript-types.js'
 
 export const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 export const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
@@ -274,7 +274,7 @@ const TOOL_TITLE_KEYS = [
 ] as const
 
 export function toolTitle(name: string): string {
-  if (name === '' || name.startsWith('call-')) return t('card.tool')
+  if (name === '' || looksLikeOpaqueId(name)) return t('card.tool')
   return t(`toolTitle.${name}`, undefined, name === 'tool' ? t('card.tool') : name)
 }
 export function planReviewOf(question: AskUserQuestionItem): boolean {
@@ -447,18 +447,7 @@ export function diffContentLines(text: string): string[] {
   return body.split('\n')
 }
 
-/** One rendered diff body line with its display role. */
-export interface DiffDisplayLine {
-  kind: DisplayKind
-  text: string
-  /**
-   * Ranges of `text` to emphasise, in UTF-16 offsets. They travel with the line
-   * rather than being baked in as escapes because the painter sanitises the text
-   * it styles — an escape inserted down here would be stripped, leaving a
-   * literal `[7m` on screen.
-   */
-  spans?: readonly { start: number; end: number }[]
-}
+export type { DiffDisplayLine } from './transcript-types.js'
 
 /** Cap one flat diff/body row list to `maxLines` while preserving the final line. */
 export function capDisplayLines(lines: readonly DiffDisplayLine[], maxLines: number): DiffDisplayLine[] {

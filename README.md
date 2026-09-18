@@ -13,7 +13,7 @@ English: [README.en.md](README.en.md)
 如果你主要在 SSH 里写代码——公司跳板、测试机、只有键盘的会话——可以从这里开始。
 本机桌面终端若更在意主题和布局，也可以继续用你已经习惯的界面。
 
-SuperGrok / X Premium 订阅走配套插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)，复用本机 grok-bridge token，不需要 xAI API Key。
+已经在付 SuperGrok / X Premium 的话，用独立插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth) 把订阅接进 dsh（headless / web / 本 TUI 都能用），复用本机 grok-bridge token，不需要 xAI API Key。
 
 本插件已被 [dshfind 插件目录](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui) 收录：
 
@@ -68,7 +68,8 @@ dsh --profile tui
 - 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
   第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧（含 `目录:srv`；点击打印完整工作目录）；
   身份里始终带 `sub:<子代理模型>`（如 `sub:grok-4.5(xhigh)`）：`/submodel` 选模型、`/subeffort` 选档位（带括号后缀）；
-  只显示模型名——提供商与完整路由在顶栏与 `/status`；
+  子代理跟随主模型时它就是身份行的暗色；只有 `/submodel` 钉到**别的提供商**才变色并补上 `提供商/` 前缀
+  （如 `sub:xai/grok-4.5`）——完整路由在顶栏与 `/status`；
 - 恢复旧会话会切到该会话记录的工作目录；新建会话用启动时的当前目录；
 - 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
 - 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
@@ -110,11 +111,11 @@ dsh --profile tui
 
 推荐安装就是文首那条 `dsh plugin --profile tui add dsh-ssh-tui@latest`。CLI 会从 npm 拉包、写入 profile 依赖，并把本插件加入 `dsh.profile.bundles`（因为包内声明了 `dsh.bundle`）。
 
-可选：本机已有 SuperGrok / grok-bridge token 时再装配套 OAuth：
+可选：把 SuperGrok 订阅接进 dsh（独立插件，不依赖本 TUI）：
 
 ```bash
-dsh plugin --profile tui add dsh-llm-xai-oauth
-dsh plugin --profile headless add dsh-llm-xai-oauth
+dsh plugin --profile tui add dsh-llm-xai-oauth@latest
+dsh plugin --profile headless add dsh-llm-xai-oauth@latest
 ```
 
 SuperGrok 的 access token 大约 1 小时过期。TUI 打开时会刷新即将过期的 token，`/usage` 遇到 401 也会再刷一次。机器长时间不开 dsh 时，请另开刷新进程，否则一打开就是 401：
@@ -566,7 +567,7 @@ npm run build
 - **`5Hr` / `1Wk` / `1Mo` 是什么**：该数值所属的额度窗口。默认显示**最小窗口**（5 小时 → 周 → 月），
   `/quota` 列出全部窗口、剩余比例与重置时间。告警仍按"最紧的那个窗口"触发。
 - **状态栏模型名没有提供商前缀**：状态行只显示模型名（`provider/model` 会截断成模型名），完整路由在顶栏与 `/status`；
-  `sub:` 子代理同理，只显示模型名。
+  `sub:` 子代理同样只显示模型名；只有钉到别的提供商时才补 `提供商/` 前缀并变色。
 - **看不到子代理模型 / 想换子代理**：`/submodel` 选模型、`/subeffort` 选思考档位，`/status` 查看当前值。
 - **没有 `tok/s`**：该轮没有可统计的模型 token；只有首字耗时时显示 `首字 1.2s`。
 - **计划条只提醒一次"补待办"**：有意如此——一条待办列表只问一次，避免每轮结束都开一个新回合。

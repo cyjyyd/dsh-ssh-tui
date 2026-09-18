@@ -20,10 +20,10 @@ export type ColorDepth = 'truecolor' | '256' | '8' | 'none'
  * Decide the palette from the environment.
  *
  * `DSH_TUI_COLOR_DEPTH` wins outright so a user can correct a wrong guess.
- * Otherwise: no colour at all when `NO_COLOR` is set or `TERM` names a
- * monochrome terminal; truecolor when `COLORTERM` says so; 256 for a
+ * Otherwise: no colour at all when `NO_COLOR` is set or `TERM` is `dumb`
+ * (or empty on POSIX); truecolor when `COLORTERM` says so; 256 for a
  * `*256color` terminal and for tmux/screen (their default palette is 256 and
- * they translate truecolor poorly); 8 for everything else.
+ * they translate truecolor poorly); 8 for Linux/VT consoles and everything else.
  * @param env - the environment to read (tests pass their own).
  * @returns the palette to paint with.
  */
@@ -47,8 +47,13 @@ export function colorDepth(
   // white. The explicit markers below still decide the palette there.
   if (term === '') {
     if (platform !== 'win32') return 'none'
-  } else if (term === 'dumb' || term === 'linux' || term === 'vt100' || term === 'vt220') {
+  } else if (term === 'dumb') {
     return 'none'
+  } else if (term === 'linux' || term === 'vt100' || term === 'vt220') {
+    // Linux virtual consoles (tty1 on a headless box) and classic VT
+    // emulators advertise these names and still paint the 8/16-colour
+    // palette. OSC 8 hyperlinks stay off (see osc8Enabled); colour does not.
+    return '8'
   }
   const colorTerm = (env.COLORTERM ?? '').trim().toLowerCase()
   if (colorTerm === 'truecolor' || colorTerm === '24bit') return 'truecolor'

@@ -144,12 +144,14 @@ import {
   SUBAGENT_SETTINGS_NAMESPACE,
   defaultSubagentModelForProvider,
   subagentModelMatchesProvider,
+  subagentProviderDiffers,
   subagentSettingsValue,
   type SubagentSelection,
   type SubagentSelectionRef,
 } from './subagent-model.js'
 import { resolveFreshSuperGrokToken } from './supergrok-token.js'
 import { copyTextFromRow, copyTextFromTranscript } from './copy-text.js'
+import { displayToolName, subagentCourtesyName } from './job-label.js'
 
 import {
   UserQuestionError,
@@ -243,6 +245,8 @@ import {
   footerActivity,
   footerHealthChip,
   footerIdentityParts,
+  footerSubagentForeign,
+  paintFooterSubagentChip,
   footerStatsGroups,
   formatContextPressureChip,
   providerHasQuotaSurface,
@@ -296,9 +300,12 @@ import {
 } from './quota.js'
 import {
   appendSubagentLog,
+  foldSubagentUserLog,
   applyTurnEndToPlan,
+  buildSubagentHeader,
   cardCategoryLabel,
   cardCategoryOf,
+  clipSubagentActivity,
   compactionHeaderText,
   formatCompactCommandError,
   isPromptInjectionMessage,
@@ -313,7 +320,12 @@ import {
   planTurnLeftOpen,
   promptInjectionSources,
   promptInjectionTitle,
+  describeSubagentFailure,
+  subagentChipSummary,
+  subagentDisplayName,
   subagentHeaderText,
+  subagentInspectLines,
+  subagentRowFromSpawnTool,
   todoItemKind,
   todoProgressLabel,
   TODO_STATUS_MARK,
@@ -339,6 +351,7 @@ import {
   type DiffDisplayLine,
   READ_TOOL_NAMES,
   SHELL_TOOL_NAMES,
+  SUBAGENT_TOOL_NAMES,
   toolBodyFitsWorkspace,
   toolBodyLines,
   toolTitle,
@@ -415,6 +428,8 @@ export {
   footerActivity,
   footerIdentityParts,
   footerStatsGroups,
+  footerSubagentForeign,
+  paintFooterSubagentChip,
   formatContextPressureChip,
   formatContextPressureRing,
   formatContextPressureStatusLine,
@@ -505,7 +520,15 @@ export {
   planTurnLeftOpen,
   promptInjectionSources,
   promptInjectionTitle,
+  buildSubagentHeader,
+  clipSubagentActivity,
+  describeSubagentFailure,
+  subagentChipSummary,
+  subagentDisplayName,
   subagentHeaderText,
+  subagentInspectLines,
+  subagentRowFromSpawnTool,
+  foldSubagentUserLog,
   todoProgressLabel,
   todoSummary,
   type CardCategory,
@@ -1207,6 +1230,8 @@ export class SshTui {
   private readonly seenCommandDoneIds = new Set<string>()
   private activeSubagents = new Map<string, { id: string; provider: string; startedAt: number }>()
   private subagentSessions = new Set<string>()
+  /** Parent `subagent` tool descriptions waiting for the matching child card. */
+  private pendingSubagentTasks: string[] = []
   private openToolCalls = new Map<string, string>()
   /** Survives result settlement so a card-less result can still be labelled. */
   private toolCallNames = new Map<string, string>()
@@ -1418,7 +1443,11 @@ export class SshTui {
     })
     if (this.headlessDisplay) {
       this.displayDetached = true
-      this.startRenderTimer()
+      // Line mode has no frames and no window title. The Host still listens on
+      // the display socket; typing arrives as FRAME_STDIN, not process.stdin.
+      // Starting the paint timer here is what leaked OSC titles into the log
+      // (`\x1b]0;dsh …\x07`) the moment a turn began.
+      if (!this.lineMode) this.startRenderTimer()
       this.bootBackgroundTasks()
       return
     }
@@ -1434,10 +1463,8 @@ export class SshTui {
     process.stdin.on('error', this.handleIoError)
 
     if (this.lineMode) {
-      // Typing still works — commands are how the user drives the session — but
-      // there is no screen to paint and no animation to run.
-      process.stdin.setRawMode(true)
-      process.stdin.resume()
+      // Direct (non-Host) line mode: typing still works, but there is no
+      // screen to paint and no animation to run.
       process.stdin.on('data', this.handleData)
       this.bootBackgroundTasks()
       return
@@ -1733,7 +1760,7 @@ export class SshTui {
       const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
       const styled = headerSegments.length === 0
         ? this.styleLine('tool', collapsed)
-        : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
+        : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
       addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
       // A collapsed burst is all the reader sees, so the two things that decide
       // whether to expand belong on it: which files moved, and what failed.
@@ -1755,7 +1782,7 @@ export class SshTui {
     }
     const expandedHeaderLines = headerSegments.length === 0
       ? wrap(header.plain, width).map(line => this.styleLine('tool', line))
-      : wrapSegmented(header.plain, Math.max(1, width), headerSegments)
+      : wrapSegmented(header.plain, Math.max(1, width), headerSegments, this.colorDepth)
     for (const wrapped of expandedHeaderLines) {
       addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${wrapped}\x1b[27m` : wrapped, anchor)
     }
@@ -1847,6 +1874,10 @@ export class SshTui {
     } finally {
       this.replaying = false
       this.replayQueue = undefined
+      // Replay synthesizes chips from parent spawn tools; it never sees
+      // `subagent/start`, so those descriptions must not sit in the live queue
+      // and become the next child's courtesy name after --resume.
+      this.pendingSubagentTasks = []
     }
     for (const item of parked) {
       if (this.disposed) return
@@ -1995,16 +2026,22 @@ export class SshTui {
     } catch {
       // ignore
     }
-    try {
-      process.stdout.write('\x1b]0;\x07')
-      process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-      process.stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
-    } catch (error) {
-      if (!isHangupErrno(error)) {
-        try {
-          process.stderr.write(`dsh-ssh-tui: failed to restore terminal: ${errorChain(error)}\n`)
-        } catch {
-          // both pipes gone
+    // Line mode never entered the alternate screen or hid the cursor; writing
+    // the restore sequence here would dump CSI into a `tee` the moment SSH
+    // dropped. The Host's stdout is usually a discarded pipe, but the same
+    // path is shared with a direct (non-Host) line-mode process.
+    if (!this.lineMode) {
+      try {
+        process.stdout.write('\x1b]0;\x07')
+        process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
+        process.stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+      } catch (error) {
+        if (!isHangupErrno(error)) {
+          try {
+            process.stderr.write(`dsh-ssh-tui: failed to restore terminal: ${errorChain(error)}\n`)
+          } catch {
+            // both pipes gone
+          }
         }
       }
     }
@@ -2569,7 +2606,7 @@ export class SshTui {
     this.paintRttMs = rttMs
     if (!(Number.isFinite(envOverride) && envOverride > 0)) {
       this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs })
-      this.startRenderTimer()
+      if (!this.lineMode) this.startRenderTimer()
     }
     this.markDirty()
   }
@@ -2724,14 +2761,27 @@ export class SshTui {
       ...(liveTool === undefined ? {} : { toolTitle: liveTool.title, toolSummary: liveTool.summary }),
       ...(liveTool !== undefined || liveSub === undefined
         ? {}
-        : { toolTitle: liveSub.label, toolSummary: liveSub.lastActivity }),
+        : { toolTitle: subagentDisplayName(liveSub), toolSummary: subagentChipSummary(liveSub) }),
       ...(this.streaming?.reasoning ? { reasoning: this.streaming.reasoning } : {}),
     }
   }
 
   private findSubagentRow(sessionId: string): Extract<Row, { kind: 'subagent' }> | undefined {
     return this.rows.findLast((row): row is Extract<Row, { kind: 'subagent' }> =>
-      row.kind === 'subagent' && row.sessionId === sessionId)
+      row.kind === 'subagent' && (row.sessionId === sessionId || row.childSessionId === sessionId))
+  }
+
+  private subagentInspectId(row: Extract<Row, { kind: 'subagent' }>): string {
+    return row.childSessionId ?? row.sessionId
+  }
+
+  /** Courtesy name for a child session; never the raw session hash. */
+  private subagentNameFor(sessionId: string | undefined): string {
+    const id = sessionId === undefined ? '' : String(sessionId)
+    if (id === '' || id === String(this.agent.id)) return t('approval.thisSession')
+    const row = this.findSubagentRow(id)
+    if (row !== undefined) return subagentDisplayName(row)
+    return subagentCourtesyName({ sessionId: id, fallback: t('card.subagent') })
   }
 
   private findLivePlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
@@ -2976,7 +3026,7 @@ export class SshTui {
   private paintInspectOverlay(width: number, height: number): void {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'inspect') return
-    const header = this.styleLine('system', truncateToWidth(t('tool.inspectTitle', { title: dialog.title }), width))
+    const header = this.styleLine('system', truncateToWidth(dialog.title, width))
     const hint = this.styleLine('system', truncateToWidth(t('tool.inspectHint'), width))
     const divider = this.styleLine('system', repeatToWidth('─', width))
     const bodyBudget = Math.max(1, height - 4)
@@ -2987,18 +3037,7 @@ export class SshTui {
       for (const wrapped of wrap(line.text, inner)) {
         const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
         const kind = line.kind
-        rendered.push(
-          kind === 'diff-add' || kind === 'diff-del' || kind === 'diff-path'
-            ? this.styleLine(kind, body)
-            : kind === 'todo-done' || kind === 'todo-active' || kind === 'todo-pending'
-              || kind === 'todo-failed' || kind === 'todo-skipped'
-              ? this.styleLine(kind, body)
-              : kind === 'error'
-                ? this.styleLine('error', body)
-                : kind === 'assistant'
-                  ? this.styleLine('assistant', body)
-                  : this.styleLine('tool-result', body),
-        )
+        rendered.push(this.styleLine(kind === 'subagent' ? 'subagent-header' : kind, body))
       }
     }
     const maxOffset = Math.max(0, rendered.length - bodyBudget)
@@ -3037,9 +3076,26 @@ export class SshTui {
     const lines = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
     this.openDialog({
       kind: 'inspect',
-      title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}`,
+      title: t('tool.inspectTitle', { title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}` }),
       lines,
       offset: 0,
+    })
+  }
+
+  private openSubagentInspect(row: Extract<Row, { kind: 'subagent' }>): void {
+    const dialog = this.dialog
+    if (dialog?.kind === 'inspect' && dialog.subagentSessionId === this.subagentInspectId(row)) {
+      dialog.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
+      dialog.lines = subagentInspectLines(row)
+      this.markDirty()
+      return
+    }
+    this.openDialog({
+      kind: 'inspect',
+      title: t('sub.inspectTitle', { title: subagentDisplayName(row) }),
+      lines: subagentInspectLines(row),
+      offset: 0,
+      subagentSessionId: this.subagentInspectId(row),
     })
   }
 
@@ -3104,6 +3160,11 @@ export class SshTui {
   }
 
   toggleCard(target: CollapsibleBlock): void {
+    if (target.kind === 'subagent') {
+      this.focusedRow = target
+      this.openSubagentInspect(target)
+      return
+    }
     if (target.kind === 'tool' && !target.expanded) {
       const width = Math.max(10, this.screenColumns())
       const height = Math.max(6, this.screenRows())
@@ -3134,6 +3195,7 @@ export class SshTui {
       const height = Math.max(6, this.screenRows())
       const workspace = this.workspaceRowsFor(width, height)
       for (const row of rows) {
+        if (row.kind === 'subagent') continue
         if (row.kind === 'tool') {
           const bodyRows = wrappedToolBodyLineCount(toolBodyLines(row, Number.MAX_SAFE_INTEGER), width)
           if (!toolBodyFitsWorkspace(bodyRows, workspace)) continue
@@ -3185,6 +3247,11 @@ export class SshTui {
 
   private revealRow(row: Row | CollapsibleBlock | undefined): void {
     if (row === undefined) return
+    if (row.kind === 'subagent') {
+      this.focusedRow = row
+      this.openSubagentInspect(row)
+      return
+    }
     if (row.kind === 'tool') {
       const width = Math.max(10, this.screenColumns())
       const height = Math.max(6, this.screenRows())
@@ -3398,13 +3465,13 @@ export class SshTui {
           const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
           const styled = headerSegments.length === 0
             ? collapsed
-            : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments)
+            : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
           addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
           continue
         }
         const expandedHeaderLines = headerSegments.length === 0
           ? wrap(header.plain, width)
-          : wrapSegmented(header.plain, Math.max(1, width), headerSegments)
+          : wrapSegmented(header.plain, Math.max(1, width), headerSegments, this.colorDepth)
         for (const wrapped of expandedHeaderLines) {
           addDisplay(wrapped, row)
         }
@@ -3426,43 +3493,24 @@ export class SshTui {
       }
       if (row.kind === 'subagent') {
         const running = row.status === 'running'
-        const ok = row.status === 'ok'
-        const aborted = row.status === 'aborted'
-        const dotColor = !this.color ? undefined : running ? '33' : ok ? '32' : aborted ? '33' : '31'
-        const styleHeader = (line: string): string => {
-          const safe = sanitizeTerminalText(line)
-          if (!this.color) return safe
-          const dotIndex = safe.indexOf('●')
-          if (dotColor === undefined || dotIndex === -1) return safe
-          return `${safe.slice(0, dotIndex)}\x1b[${dotColor}m●\x1b[0m${safe.slice(dotIndex + 1)}`
-        }
-        const spinner = running ? ` ${this.spinnerFrame()}` : ''
-        const header = `● ${subagentHeaderText(row)}${spinner}${row.expanded ? '' : t('card.expand')}`
-        this.paintCollapsibleHeader(addDisplay, row, 'system', header, width, styleHeader)
-        if (row.expanded) {
-          addDisplay(this.styleLine('system', t('sub.cardSession', {
-            id: row.sessionId,
-            provider: row.provider,
-            external: row.local ? '' : t('sub.external'),
-          })), row)
-          if (row.stopReason !== undefined) {
-            addDisplay(this.styleLine('system', t('sub.stopReason', { reason: row.stopReason })), row)
-          }
-          if (row.logs.length === 0) {
-            addDisplay(this.styleLine('system', running ? t('sub.cardWait') : t('sub.cardEmpty')), row)
-          } else {
-            for (const entry of row.logs) {
-              const kind: DisplayKind = entry.kind === 'assistant'
-                ? 'assistant'
-                : entry.kind === 'result' && row.status === 'error'
-                  ? 'error'
-                  : 'system'
-              for (const wrapped of wrap(entry.text, Math.max(1, width - 2))) {
-                addDisplay(this.styleLine(kind, `  ${wrapped}`), row)
-              }
-            }
-          }
-        }
+        const elapsed = Math.max(0, Math.floor(((row.endedAt ?? Date.now()) - row.startedAt) / 1000))
+        const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`
+        const header = buildSubagentHeader({
+          focused: this.focusedRow === row,
+          title: subagentDisplayName(row),
+          status: row.status,
+          elapsedLabel,
+          summary: subagentChipSummary(row),
+          spinner: running ? ` ${this.spinnerFrame()}` : '',
+          inspectHint: t('card.inspect'),
+          foreign: subagentProviderDiffers(this.currentProviderId(), this.subagentSelection.current.provider),
+        })
+        const headerSegments = this.color ? header.segments : []
+        const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
+        const styled = headerSegments.length === 0
+          ? this.styleLine('subagent-header', collapsed)
+          : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
+        addDisplay(this.focusedRow === row && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
         continue
       }
       if (row.kind === 'plan') {
@@ -3989,14 +4037,27 @@ export class SshTui {
         : activity.text
     const identity = footerIdentityParts(footer)
     const statusText = fitFooterStatusLine(activityText, identity, Math.max(1, width))
-    // The context ring is the one accent on an otherwise muted line; the mute
-    // has to be resumed after its reset, exactly as the pre-strip footer did.
-    const statusLine = this.contextPressure === undefined || !this.color
-      ? this.styleLine('system', statusText)
-      : this.styleLine('system', statusText).replace(
-        formatContextPressureRing(this.contextPressure.percent),
-        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${formatContextPressureRing(this.contextPressure.percent)}\x1b[0m\x1b[90m`,
+    // Accents on an otherwise muted line: the context ring, then the `sub:`
+    // chip. Each reset reopens mute (`90`), the same way the pre-strip footer
+    // did. `styleLine` sanitises first, so the accents are spliced in after.
+    let statusLine = this.styleLine('system', statusText)
+    if (this.color && this.contextPressure !== undefined) {
+      const ring = formatContextPressureRing(this.contextPressure.percent)
+      statusLine = statusLine.replace(
+        ring,
+        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${ring}\x1b[0m\x1b[90m`,
       )
+    }
+    if (this.color) {
+      const chip = identity.find(part => part.startsWith('sub:')) ?? ''
+      statusLine = paintFooterSubagentChip(
+        statusLine,
+        chip,
+        footerSubagentForeign(footer),
+        this.mutedSgr() || '90',
+        this.colorDepth,
+      )
+    }
 
     // The strip: one loss order for the groups a narrow terminal can do without.
     // Health leads because it is the only group that reports a broken install;
@@ -4170,7 +4231,7 @@ export class SshTui {
 
   /** Refresh the terminal window title (throttled while running). */
   private updateTerminalTitle(): void {
-    if (this.exiting) return
+    if (this.exiting || this.lineMode) return
     const now = Date.now()
     // Completion wins over a still-running agent status: the turn/end event
     // lands before agent/status flips to idle, and the title must not stay
@@ -4208,6 +4269,7 @@ export class SshTui {
 
   /** Terminal bell on completion (opt out with DSH_TUI_NO_BELL=1). */
   private playCompletionSignal(): void {
+    if (this.lineMode) return
     const disabled = process.env.DSH_TUI_NO_BELL === '1' || process.env.DSH_TUI_NO_BELL === 'true'
     if (disabled) return
     this.write('\x07')
@@ -4670,6 +4732,7 @@ export class SshTui {
       kind === 'todo-skipped' ? '2;33' :
       kind === 'todo-pending' ? '90' :
       kind === 'plan-dock' ? '38;5;180' :
+      kind === 'subagent-header' ? '38;5;141' :
       kind === 'diag' ? '2;36' :
       kind === 'error' ? '31' :
       '90'
@@ -4754,6 +4817,12 @@ export class SshTui {
    * The parent request is left untouched (its own `/model` waterfall already
    * owns the route); direct children created by tool-subagent inherit the
    * parent provider unless `/submodel` stored an explicit subagent provider.
+   *
+   * Effort is not inherited from the parent. `next()` copies the live parent
+   * config, so a grok-4.6 `xhigh` parent would otherwise send `xhigh` with
+   * the light grok-4.5 child and fail with UNSUPPORTED_REASONING_EFFORT
+   * before the child writes a closing message. An explicit `/subeffort`
+   * still wins; otherwise the child's own adapter default is used.
    */
   readonly handleAgentRequest = async (
     { agent }: { agent: Agent },
@@ -4764,14 +4833,23 @@ export class SshTui {
     const selection = this.subagentSelection.current
     const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
     const provider = selection.provider ?? parentProvider
-    const model = subagentModelMatchesProvider(provider, selection.model)
+    // A pinned provider keeps the stored model even when it is a different
+    // family from the parent. Only an inherited (follow-parent) route is
+    // rewritten onto a same-family default.
+    const model = selection.provider !== undefined || subagentModelMatchesProvider(provider, selection.model)
       ? selection.model
       : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
+    const { reasoningEffort: parentEffort, ...withoutParentEffort } = resolved
+    // `/subeffort` wins. Otherwise keep the parent effort only when the child
+    // is still on that same model — grok-4.6 xhigh is legal on grok-4.6 and
+    // rejected on grok-4.5.
+    const effort = selection.reasoningEffort
+      ?? (model === resolved.model ? parentEffort : undefined)
     return {
-      ...resolved,
+      ...withoutParentEffort,
       provider,
       model,
-      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
     }
   }
 
@@ -4890,6 +4968,30 @@ export class SshTui {
         this.statsTracker.noteToolStart(String(event.data.callId), event.time)
         if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
           const present = presentToolCall(event.data.name, event.data.arguments)
+          if (SUBAGENT_TOOL_NAMES.has(event.data.name)) {
+            const task = present.summary.trim()
+            // Replay never gets `subagent/start` to drain this queue. Only a
+            // live parent spawn should wait for the matching child card.
+            if (task !== '' && !this.replaying) this.pendingSubagentTasks.push(task)
+            const live = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+              candidate.kind === 'subagent' && candidate.status === 'running')
+            if (live !== undefined) {
+              if (task !== '' && (live.task === undefined || live.task === '')) live.task = task
+              live.runId = String(event.data.callId)
+            } else if (this.replaying) {
+              // Live `subagent/start` is not in the parent log. Resume still
+              // needs a courtesy chip; a live Host already has the real card.
+              this.pushRow(subagentRowFromSpawnTool({
+                callId: String(event.data.callId),
+                task,
+                status: 'running',
+                startedAt: typeof event.time === 'number' ? event.time : Date.now(),
+              }))
+            }
+            this.streaming = undefined
+            this.markDirty()
+            break
+          }
           const previous = this.findMergeableToolRow({ name: event.data.name, args: event.data.arguments })
           if (previous !== undefined) {
             this.mergeIntoToolCard(previous, {
@@ -4930,8 +5032,27 @@ export class SshTui {
         this.openToolCalls.delete(String(event.data.message.source.callId))
         this.statsTracker.noteToolEnd(String(event.data.message.source.callId), event.time)
         const callId = String(event.data.message.source.callId)
-        const row = this.findToolRowByCallId(callId)
+        const spawnCard = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+          candidate.kind === 'subagent' && candidate.runId === callId)
         const output = collectText(event.data.message.content)
+        if (spawnCard !== undefined) {
+          // A live child already owns this spawn: the parent tool/result is
+          // just the wrapper settling. Do not stamp a 0s twin chip complete.
+          if (spawnCard.childSessionId !== undefined) {
+            this.markDirty()
+            break
+          }
+          const failed = event.data.error !== undefined || event.data.message.content[0]?.isError === true
+          spawnCard.status = failed ? 'error' : 'ok'
+          spawnCard.endedAt = typeof event.time === 'number' ? event.time : Date.now()
+          if (output !== '') {
+            spawnCard.lastActivity = clipSubagentActivity(output, 80)
+            appendSubagentLog(spawnCard, { kind: failed ? 'result' : 'assistant', text: clipSubagentActivity(output, 80) })
+          }
+          this.markDirty()
+          break
+        }
+        const row = this.findToolRowByCallId(callId)
         if (row !== undefined) {
           const metaDiffs = diffMetaDiffs(event.data.meta)
           if (metaDiffs !== null) {
@@ -4963,9 +5084,7 @@ export class SshTui {
           if (recordedName !== '' && HIDDEN_TOOL_NAMES.has(recordedName)) break
           // Never title a card with the call id (`call-<uuid>`). Prefer the
           // recorded tool name; fall back to a generic tool card.
-          const toolName = recordedName === '' || recordedName.startsWith('call-')
-            ? 'tool'
-            : recordedName
+          const toolName = displayToolName(recordedName)
           const present = presentToolCall(toolName, '')
           this.pushRow({
             kind: 'tool',
@@ -5563,32 +5682,63 @@ export class SshTui {
     switch (event.type) {
       case 'user/message': {
         const text = collectText(event.data.content)
-        if (text !== '') appendSubagentLog(row, { kind: 'user', text: `❯ ${truncate(text, 4)}` })
+        const source = (event.data as { source?: { kind?: unknown; plugin?: unknown } }).source
+        const sourceKind = typeof source?.kind === 'string' ? source.kind : 'user'
+        const plugin = typeof source?.plugin === 'string' ? source.plugin : undefined
+        foldSubagentUserLog(row, text, sourceKind, plugin)
         break
       }
       case 'assistant/message': {
         const text = collectText(event.data.message.content)
-        if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: truncate(text, 8) })
+        if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: clipSubagentActivity(text, 80) })
         break
       }
       case 'tool/call': {
         if (HIDDEN_TOOL_NAMES.has(event.data.name)) break
+        this.toolCallNames.set(String(event.data.callId), event.data.name)
         const present = presentToolCall(event.data.name, event.data.arguments)
-        appendSubagentLog(row, { kind: 'tool', text: `▶ ${present.title} ${present.summary}` })
-        break
-      }
-      case 'tool/result': {
-        const output = truncate(collectText(event.data.message.content), 3)
-        const ok = event.data.error === undefined && event.data.message.content[0]?.isError !== true
         appendSubagentLog(row, {
-          kind: 'result',
-          text: `${ok ? '✓' : '✗'} ${event.data.message.source.callId}${output === '' ? '' : ` · ${output}`}`,
+          kind: 'tool',
+          text: `▶ ${present.title} ${clipSubagentActivity(present.summary, 48)}`.trimEnd(),
+          callId: String(event.data.callId),
         })
         break
       }
-      case 'turn/end':
-        appendSubagentLog(row, { kind: 'turn', text: t('sub.turnEnd', { reason: event.data.reason.kind }) })
+      case 'tool/result': {
+        const ok = event.data.error === undefined && event.data.message.content[0]?.isError !== true
+        const callId = String(event.data.message.source.callId)
+        const sourceName = (event.data.message.source as { name?: unknown }).name
+        const recorded = this.toolCallNames.get(callId)
+          ?? (typeof sourceName === 'string' ? sourceName : '')
+        const title = toolTitle(displayToolName(recorded))
+        appendSubagentLog(row, {
+          kind: 'result',
+          text: `${ok ? '✓' : '✗'} ${title}`,
+          callId,
+        })
         break
+      }
+      case 'turn/end': {
+        const reason = event.data.reason
+        const error = reason.kind === 'error'
+          ? String((reason as { error?: { message?: unknown } }).error?.message ?? '')
+          : ''
+        const explained = describeSubagentFailure({
+          stopReason: reason.kind,
+          message: error,
+          provider: this.subagentSelection.current.provider ?? row.provider,
+        })
+        if (explained !== undefined) row.failHint = explained.hint
+        appendSubagentLog(row, {
+          kind: error === '' ? 'turn' : 'result',
+          text: explained === undefined
+            ? (error === ''
+              ? t('sub.turnEnd', { reason: reason.kind })
+              : t('sub.turnEndError', { reason: reason.kind, error }))
+            : explained.hint,
+        })
+        break
+      }
       case 'approval/asked':
         appendSubagentLog(row, { kind: 'approval', text: t('sub.approval', { tool: event.data.toolName }) })
         break
@@ -5597,6 +5747,7 @@ export class SshTui {
         break
     }
     this.lastActivity = Date.now()
+    this.refreshOpenSubagentInspect(row)
     this.markDirty()
   }
 
@@ -5609,8 +5760,15 @@ export class SshTui {
     })
     this.subagentSessions.add(sessionId)
     this.lastActivity = Date.now()
+    const task = this.pendingSubagentTasks.shift()
     const existing = this.findSubagentRow(sessionId)
+      ?? (task === undefined ? undefined : this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+        candidate.kind === 'subagent'
+        && candidate.status === 'running'
+        && candidate.childSessionId === undefined
+        && candidate.task === task))
     if (existing !== undefined) {
+      existing.childSessionId = sessionId
       existing.runId = String(info.runId)
       existing.provider = info.provider
       existing.local = info.local
@@ -5620,15 +5778,19 @@ export class SshTui {
       existing.stopReason = undefined
       existing.lastActivity = t('sub.started')
       existing.expanded = false
+      if (task !== undefined) existing.task = task
       appendSubagentLog(existing, { kind: 'system', text: t('sub.startedDetail', { provider: info.provider, external: info.local ? '' : t('sub.external') }) })
+      this.refreshOpenSubagentInspect(existing)
     } else {
       this.pushRow({
         kind: 'subagent',
         sessionId,
+        childSessionId: sessionId,
         runId: String(info.runId),
         provider: info.provider,
         local: info.local,
         label: t('sub.label', { provider: info.provider }),
+        ...(task === undefined ? {} : { task }),
         status: 'running',
         startedAt: Date.now(),
         lastActivity: t('sub.started'),
@@ -5645,18 +5807,31 @@ export class SshTui {
     this.lastActivity = Date.now()
     const output = info.lastAssistantMessage === undefined
       ? ''
-      : truncate(collectText(info.lastAssistantMessage), 6)
+      : clipSubagentActivity(collectText(info.lastAssistantMessage), 80)
     const row = this.findSubagentRow(String(info.id)) ?? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
       candidate.kind === 'subagent' && candidate.runId === String(info.runId))
     const failed = info.stopReason !== 'completed'
+    const explained = failed
+      ? describeSubagentFailure({
+        stopReason: info.stopReason,
+        message: output,
+        provider: this.subagentSelection.current.provider ?? info.provider,
+      })
+      : undefined
+    const hint = explained?.hint ?? row?.failHint
+    const endText = hint === undefined
+      ? t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`)
+      : hint
     if (row !== undefined) {
       row.status = info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok'
       row.endedAt = Date.now()
       row.stopReason = info.stopReason
+      if (hint !== undefined) row.failHint = hint
       appendSubagentLog(row, {
         kind: failed ? 'result' : 'assistant',
-        text: t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`),
+        text: endText,
       })
+      this.refreshOpenSubagentInspect(row)
     } else {
       this.pushRow({
         kind: 'subagent',
@@ -5669,12 +5844,22 @@ export class SshTui {
         startedAt: Date.now(),
         endedAt: Date.now(),
         stopReason: info.stopReason,
-        lastActivity: t('sub.ended', { reason: info.stopReason }),
-        logs: [{ kind: 'system', text: t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`) }],
+        ...(explained === undefined ? {} : { failHint: explained.hint }),
+        lastActivity: endText,
+        logs: [{ kind: failed ? 'result' : 'system', text: endText }],
         expanded: false,
       })
     }
     this.markDirty()
+  }
+
+  /** Keep an open inspect overlay in sync with the live child log. */
+  private refreshOpenSubagentInspect(row: Extract<Row, { kind: 'subagent' }>): void {
+    const dialog = this.dialog
+    if (dialog === undefined || dialog.kind !== 'inspect') return
+    if (dialog.subagentSessionId !== this.subagentInspectId(row)) return
+    dialog.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
+    dialog.lines = subagentInspectLines(row)
   }
 
   // ── approval and questions ──────────────────────────────────────────────
@@ -5759,7 +5944,7 @@ export class SshTui {
     const selection = this.subagentSelection.current
     const parentProvider = this.selectionRef?.current?.provider ?? this.agent.options.provider ?? this.providerName
     const provider = selection.provider ?? parentProvider
-    const model = subagentModelMatchesProvider(provider, selection.model)
+    const model = selection.provider !== undefined || subagentModelMatchesProvider(provider, selection.model)
       ? selection.model
       : defaultSubagentModelForProvider(provider, [], this.selectionRef?.current?.model)
     return { provider, model }
@@ -6014,9 +6199,7 @@ export class SshTui {
         return 'cancelled'
       }
     }
-    const agentLabel = request.agent.id === this.agent.id
-      ? t('approval.thisSession')
-      : t('sub.agentLabel', { id: request.agent.id })
+    const agentLabel = t('sub.agentLabel', { name: this.subagentNameFor(String(request.agent.id)) })
     return new Promise<ApprovalOutcome>((resolve) => {
       if (request.signal?.aborted === true) {
         resolve('cancelled')
@@ -6057,7 +6240,7 @@ export class SshTui {
     const answers: AskUserQuestionAnswer['answers'] = []
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined
-      : t('sub.agentLabel', { id: request.agent.id })
+      : t('sub.agentLabel', { name: this.subagentNameFor(String(request.agent.id)) })
     const cards: Extract<Row, { kind: 'question' }>[] = []
     for (const question of request.questions) {
       const card: Extract<Row, { kind: 'question' }> = {
@@ -6133,6 +6316,7 @@ export class SshTui {
   private openDialog(dialog: Dialog): void {
     if (this.dialog === undefined) {
       this.dialog = dialog
+      this.echoLineModeDialog(dialog)
     } else {
       this.dialogQueue.push(dialog)
     }
@@ -6144,7 +6328,50 @@ export class SshTui {
     const next = this.dialogQueue.shift()
     if (next !== undefined) {
       this.dialog = next
+      this.echoLineModeDialog(next)
       this.markDirty()
+    }
+  }
+
+  /**
+   * Line mode has no framed dialog. Write the prompt (and its keys) into the
+   * log once when it becomes active, so a `tee` or a screen reader can answer
+   * it. Options stay on the framed path; the log only needs the question.
+   */
+  private echoLineModeDialog(dialog: Dialog): void {
+    if (!this.lineMode) return
+    if (dialog.kind === 'confirm') {
+      this.pushRow({ kind: 'system', text: dialog.prompt })
+      this.pushRow({ kind: 'system', text: dialog.hint })
+      return
+    }
+    if (dialog.kind === 'questions') {
+      const header = t('dialog.ask', {
+        index: dialog.index + 1,
+        total: dialog.total,
+        question: dialog.question.question,
+      })
+      this.pushRow({ kind: 'system', text: header })
+      if (dialog.question.header !== undefined && dialog.question.header !== '') {
+        this.pushRow({ kind: 'system', text: dialog.question.header })
+      }
+      const options = dialog.question.options ?? []
+      for (const [index, option] of options.entries()) {
+        if (option === undefined) continue
+        const key = QUESTION_OPTION_KEYS[index] ?? String(index + 1)
+        const extra = option.description === undefined ? '' : ` — ${option.description}`
+        this.pushRow({ kind: 'system', text: `  ${key} ${option.label}${extra}` })
+      }
+      this.pushRow({
+        kind: 'system',
+        text: options.length === 0
+          ? t('dialog.freeform')
+          : dialog.question.multiSelect === true ? t('dialog.multiHint') : t('dialog.singleHint'),
+      })
+      return
+    }
+    if (dialog.kind === 'onboarding') {
+      this.pushRow({ kind: 'system', text: t('onboard.title') })
     }
   }
 
@@ -6757,7 +6984,6 @@ export class SshTui {
 
   /** /submodel: pick (or set) the model subagent children use. */
   private async runSubmodelCommand(arg: string): Promise<void> {
-    const provider = this.effectiveSubagentProvider()
     const current = this.subagentSelection.current
     const direct = arg.trim()
     if (direct.toLowerCase() === 'reset' || direct === '跟随' || direct === '默认') {
@@ -6778,9 +7004,39 @@ export class SshTui {
       this.markDirty()
       return
     }
+
+    const slash = direct.indexOf('/')
+    if (slash > 0) {
+      const providerId = direct.slice(0, slash).trim()
+      const modelId = direct.slice(slash + 1).trim()
+      if (providerId !== '' && modelId !== '') {
+        await this.commitSubagentRoute(providerId, modelId, { pinProvider: true })
+        return
+      }
+    }
+
+    let provider = this.effectiveSubagentProvider()
     let selectedId = direct
 
     if (selectedId === '') {
+      const parentProvider = this.currentProviderId()
+      const providers = this.listSelectableProviders()
+      const currentIndex = Math.max(0, providers.findIndex(option => option.id === provider))
+      const pickedAnswer = await this.askQuestion({
+        id: 'submodel-provider-pick',
+        question: t('sub.pickProvider'),
+        options: providers.map(option => ({
+          label: option.label,
+          description: option.id === parentProvider
+            ? t('sub.providerFollowsParent')
+            : option.id === current.provider
+              ? t('sub.providerPinned')
+              : describeProviderRoute(option.id).kind,
+        })),
+      }, 0, 1, currentIndex)
+      const pickedProvider = providers.find(option => option.label === pickedAnswer.selected[0])?.id
+      if (pickedProvider === undefined) return
+      provider = pickedProvider
       const { options, source } = await this.subagentModelOptions(provider)
       if (options.length === 0) {
         options.push({ id: current.model, label: current.model })
@@ -6789,14 +7045,30 @@ export class SshTui {
       if (selected === undefined) return
       selectedId = selected.id
     }
-    if (!(await this.ensureProviderModelConfigured(provider, selectedId))) return
+    await this.commitSubagentRoute(provider, selectedId, {
+      pinProvider: provider !== this.currentProviderId() || current.provider !== undefined,
+    })
+  }
 
-    const persisted = await this.saveSubagentSelection({ ...current, model: selectedId })
+  /** Persist one subagent provider/model pair and say whether it follows or is pinned. */
+  private async commitSubagentRoute(
+    provider: string,
+    modelId: string,
+    options: { pinProvider: boolean },
+  ): Promise<void> {
+    if (!(await this.ensureProviderModelConfigured(provider, modelId))) return
+    const effort = this.subagentSelection.current.reasoningEffort
+    const next: SubagentSelection = {
+      ...(options.pinProvider ? { provider } : {}),
+      model: modelId,
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+    }
+    const persisted = await this.saveSubagentSelection(next)
     this.pushRow({
       kind: 'system',
-      text: (current.provider === undefined
-        ? t('sub.modelFollow', { model: selectedId, provider })
-        : t('sub.modelPinned', { model: selectedId, provider }))
+      text: (options.pinProvider
+        ? t('sub.modelPinned', { model: modelId, provider })
+        : t('sub.modelFollow', { model: modelId, provider }))
         + (persisted ? '' : t('sub.sessionOnly')),
     })
     this.markDirty()
@@ -8862,6 +9134,9 @@ export class SshTui {
     }
     const text = this.input.trim()
     if (text === '') return
+    // Framed mode paints the composer; line mode has to put the typed line
+    // into the log itself, or a `tee` never sees what the user sent.
+    if (this.lineMode) this.pushRow({ kind: 'user', text: t('line.prompt', { text }) })
     if (text.startsWith('/')) {
       this.historyIndex = this.history.length
       this.historyDraft = ''
@@ -9129,16 +9404,17 @@ export class SshTui {
         if (this.activeSubagents.size === 0) {
           this.pushRow({ kind: 'system', text: t('sub.none') })
         } else {
-          const lines = [...this.activeSubagents.entries()].map(([runId, sub]) => {
+          const lines = [...this.activeSubagents.entries()].map(([, sub]) => {
             const card = this.findSubagentRow(sub.id)
-            const label = card?.label ?? sub.id
-            const activity = card?.lastActivity ? ` · ${card.lastActivity}` : ''
+            const label = card === undefined ? this.subagentNameFor(sub.id) : subagentDisplayName(card)
+            const activity = card === undefined ? '' : (() => {
+              const summary = subagentChipSummary(card)
+              return summary === '' ? '' : ` · ${summary}`
+            })()
             return t('sub.listLine', {
               label,
-              id: sub.id,
               provider: sub.provider,
               seconds: Math.floor((Date.now() - sub.startedAt) / 1000),
-              run: runId.slice(0, 8),
               activity,
             })
           })

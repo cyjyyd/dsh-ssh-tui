@@ -113,6 +113,48 @@ export function defaultSubagentModelForProvider(
 }
 
 /**
+ * Canonical id of the supplier behind a route.
+ *
+ * The settings file can name the same supplier two ways — `xai` against
+ * `grok`, `deepseek-official` against `deepseek` — and a `/submodel` pin that
+ * spells the parent's own provider differently is still the parent's provider.
+ * Only the known families collapse; two unknown ids stay two ids, because the
+ * TUI cannot know that two custom routes share a bill.
+ */
+export function canonicalProviderId(provider: string | undefined): string {
+  const id = provider?.trim().toLowerCase() ?? ''
+  if (id === '') return ''
+  const family = providerFamily(id)
+  return family === 'other' ? id : family
+}
+
+/**
+ * True when `child` is a different supplier from `parent`.
+ *
+ * This is the one condition that earns a subagent an accent colour: a child
+ * that follows the parent — or that was pinned back onto the parent's own
+ * provider — is on the parent's route and must read as such.
+ */
+export function subagentProviderDiffers(parent: string | undefined, child: string | undefined): boolean {
+  const a = canonicalProviderId(parent)
+  const b = canonicalProviderId(child)
+  if (a === '' || b === '') return false
+  return a !== b
+}
+
+/**
+ * Identity SGR for a subagent chip title. Same provider as the parent stays
+ * the violet used since the courtesy-name work; a different provider uses
+ * cyan so the foreign route is visible without a second color layer.
+ */
+export const SUBAGENT_IDENTITY_SGR = '38;5;141'
+export const SUBAGENT_FOREIGN_SGR = '38;5;80'
+
+export function subagentIdentitySgr(foreign: boolean): typeof SUBAGENT_IDENTITY_SGR | typeof SUBAGENT_FOREIGN_SGR {
+  return foreign ? SUBAGENT_FOREIGN_SGR : SUBAGENT_IDENTITY_SGR
+}
+
+/**
  * True when the stored subagent model still belongs to the parent provider
  * family. An explicit leftover DeepSeek flash id after switching to xAI is
  * treated as stale so the TUI can pick a same-family default.

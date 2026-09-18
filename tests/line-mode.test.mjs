@@ -81,7 +81,11 @@ async function lineModeTui({ attach = true } = {}) {
     tui.attachRelayDisplay()
   }
   if (attach) attachDisplay()
-  return { tui, written: () => written.join(''), attachDisplay }
+  const since = () => {
+    const mark = written.length
+    return () => written.slice(mark).join('')
+  }
+  return { tui, written: () => written.join(''), attachDisplay, since }
 }
 
 test('events produced before a display attaches are held, not lost', async () => {
@@ -130,4 +134,71 @@ test('painting stays off in line mode even when the screen is dirtied', async ()
   tui.pushRow({ kind: 'assistant', text: 'x' })
   const frame = tui.captureFrame(80, 24)
   assert.deepEqual(frame, [], 'a frame is never composed in line mode')
+})
+
+/**
+ * The Host process is what users actually run (`headlessDisplay: true` in
+ * `index.ts`). Typing arrives as FRAME_STDIN → `handleData`, not process.stdin.
+ * These tests drive that path: a title/bell leak, a confirm prompt, a typed
+ * command. They do not call `start()` — that would steal SIGTERM and scan the
+ * credential store.
+ */
+test('a Host-side turn does not leak OSC titles or a bell into the log', async () => {
+  const { tui, since } = await lineModeTui()
+  const added = since()
+  tui.handleStatus({ agent: tui.agent, status: 'running' })
+  tui.handleStatus({ agent: tui.agent, status: 'idle' })
+  const out = added()
+  assert.equal(out.includes('\x1b]0;'), false, `no OSC title: ${JSON.stringify(out)}`)
+  assert.equal(out.includes('\x07'), false, `no bell: ${JSON.stringify(out)}`)
+})
+
+test('a confirm prompt is written into the log, and y answers it', async () => {
+  const { tui, since } = await lineModeTui()
+  const added = since()
+  const pending = tui.handleApproval({
+    toolName: 'bash',
+    callId: 'c-line',
+    agent: tui.agent,
+  }, async () => { throw new Error('waterfall next() must not run') })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const shown = added()
+  assert.match(shown, /bash/u, `the prompt names the tool: ${JSON.stringify(shown)}`)
+  assert.match(shown, /y = /u, `the keys are in the log: ${JSON.stringify(shown)}`)
+  assert.equal(/\x1b/u.test(shown), false, `the prompt itself is not an escape: ${JSON.stringify(shown)}`)
+  tui.handleData(Buffer.from('y'))
+  assert.equal(await pending, 'allowed-once')
+})
+
+test('a typed command is echoed once, then handled', async () => {
+  const { tui, since } = await lineModeTui()
+  const added = since()
+  tui.handleData(Buffer.from('/help\r'))
+  const out = added()
+  assert.match(out, /> \/help/u, `the typed line is in the log: ${JSON.stringify(out)}`)
+  assert.equal(out.split('> /help').length - 1, 1, 'the typed line appears once')
+  assert.equal(out.includes('\x1b]0;'), false, `no OSC in the command echo: ${JSON.stringify(out)}`)
+})
+
+test('a question dialog lists its options in the log', async () => {
+  const { tui, since } = await lineModeTui()
+  const added = since()
+  const pending = tui.handleUserQuestions({
+    questions: [{
+      id: 'q1',
+      question: 'Which colour?',
+      options: [
+        { label: 'red', description: 'stop' },
+        { label: 'green', description: 'go' },
+      ],
+    }],
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const shown = added()
+  assert.match(shown, /Which colour/u, `the question is in the log: ${JSON.stringify(shown)}`)
+  assert.match(shown, /red/u)
+  assert.match(shown, /green/u)
+  tui.handleData(Buffer.from('\r'))
+  const answer = await pending
+  assert.equal(answer.answers[0]?.selected[0], 'red')
 })

@@ -52,6 +52,8 @@ export interface InspectDialog {
   title: string
   lines: DiffDisplayLine[]
   offset: number
+  /** Child session whose live log should refresh this overlay in place. */
+  subagentSessionId?: string
 }
 
 export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog

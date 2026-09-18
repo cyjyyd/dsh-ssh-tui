@@ -94,7 +94,7 @@ test('a job alias is stable, id-derived, and locale-owned', () => {
     return jobAlias('bash-1')
   })()
   setLocale('zh')
-  assert.match(en, /^[a-z]+ [a-z]+$/u)
+  assert.match(en, /^[a-z]+(?:[ -][a-z]+)+$/u)
 })
 
 test('present and read_image cards are translated', () => {

@@ -4,7 +4,8 @@
 
 import { t } from './i18n/index.js'
 import { pinEmojiCells, truncateAnsiToWidth, visibleWidth } from './term-text.js'
-import { describeSubagentFit } from './subagent-model.js'
+import { describeSubagentFit, subagentIdentitySgr, subagentProviderDiffers } from './subagent-model.js'
+import { downgradeSgr, type ColorDepth } from './color-depth.js'
 import {
   commandCodeSourceFor, formatQuotaStatusLine, openCodeSourceFor,
   type QuotaPeriod, type QuotaSnapshot, type QuotaSource,
@@ -394,16 +395,46 @@ export function formatQuotaBar(remainingPercent: number, width = 8): string {
  * `sub:<model>` chip for the identity row: `sub:grok-4.5`, or
  * `sub:grok-4.5(xhigh)` when an explicit `/subeffort` is set.
  *
- * It shows the model name only, like the parent's own chip: a `provider/model`
- * prefix on both chips doubled the same route and pushed the quota badge towards
- * the drop edge. The provider is not lost — `/submodel` and `/status` report it,
- * and the child's model name is the part that differs from the parent's.
+ * It shows the model name only, like the parent's own chip, unless `/submodel`
+ * pinned a different provider — then `sub:xai/grok-4.5` so the foreign route
+ * is visible on the identity row as well as the recolored chip.
  */
 export function subagentRouteLabel(model: string, provider?: string, effort?: string): string {
   const id = shortModelName(model)
   if (id === '') return ''
   const suffix = effort === undefined || effort.trim() === '' ? '' : `(${effort.trim()})`
-  return `sub:${id}${suffix}`
+  const host = provider === undefined || provider.trim() === '' ? '' : `${provider.trim()}/`
+  return `sub:${host}${id}${suffix}`
+}
+
+/**
+ * Paint the `sub:` chip on an otherwise muted status line.
+ *
+ * Only a *foreign* route is accented: cyan when `/submodel` pinned a supplier
+ * the parent is not on. A child that follows the parent (or that was pinned
+ * back onto the parent's own provider) keeps the identity row's mute — the
+ * accent means "this route is not your parent's", and spending it on every
+ * child made the following case look pinned.
+ *
+ * The mute (`90`) is reopened after the chip so the rest of the identity row
+ * stays dim.
+ */
+export function paintFooterSubagentChip(
+  line: string,
+  chip: string,
+  foreign: boolean,
+  muteSgr = '90',
+  depth: ColorDepth = 'truecolor',
+): string {
+  if (!foreign || chip === '' || !line.includes(chip)) return line
+  const code = downgradeSgr(subagentIdentitySgr(true), depth)
+  if (code === '') return line
+  const mute = muteSgr === '' ? '0' : muteSgr
+  return line.replace(chip, `\x1b[${code}m${chip}\x1b[0m\x1b[${mute}m`)
+}
+
+export function footerSubagentForeign(input: Pick<FooterStatusInput, 'provider' | 'subProvider'>): boolean {
+  return subagentProviderDiffers(input.provider, input.subProvider)
 }
 
 /**

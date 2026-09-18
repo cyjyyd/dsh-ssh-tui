@@ -14,6 +14,9 @@ If you mostly work over SSH — a jump host, a test box, a keyboard-only
 session — start here. A local desktop terminal with themes and layout
 you already like can stay as it is.
 
+A SuperGrok / X Premium subscription goes through the standalone plugin
+[dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth) (headless, web, or this TUI). It reuses a local grok-bridge token; no xAI API key.
+
 Listed on the [dshfind plugin directory](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui):
 
 [![dshfind](https://dshfind.com/api/card/cyjyyd/dsh-ssh-tui?lang=en)](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
@@ -89,11 +92,11 @@ The recommended install is the command at the top of this README:
 profile dependency, and appends this package to `dsh.profile.bundles`
 because the manifest declares `dsh.bundle`.
 
-Optional: reuse a SuperGrok / grok-bridge token already on the machine:
+Optional: put a SuperGrok subscription on dsh (standalone plugin, this TUI is not required):
 
 ```sh
-dsh plugin --profile tui add dsh-llm-xai-oauth
-dsh plugin --profile headless add dsh-llm-xai-oauth
+dsh plugin --profile tui add dsh-llm-xai-oauth@latest
+dsh plugin --profile headless add dsh-llm-xai-oauth@latest
 ```
 
 SuperGrok access tokens last about an hour. The TUI refreshes a due token on open, and `/usage` force-refreshes once after HTTP 401. If dsh is not running overnight, install the companion refresher or the next session starts with 401:
@@ -316,8 +319,9 @@ You can reopen the wizard at any time with:
   line endings.
 - **Subagent route**: the identity row always carries `sub:<model>` — the route every child
   inherits — with the effort in parentheses when `/subeffort` set one, e.g.
-  `sub:grok-4.5(xhigh)`. Only the model name is shown; the provider and the full route are
-  in `/status`.
+  `sub:grok-4.5(xhigh)`. While the child is on the parent's own provider the chip keeps the
+  row's mute; only a `/submodel` pin onto a *different* provider colours it and prefixes the
+  provider (`sub:xai/grok-4.5`). The full route is in the header and `/status`.
 
 ## Usage
 
@@ -644,7 +648,8 @@ Find your symptom; each answer is what to do, not a change log.
   its remaining share and reset time. Threshold alerts still fire on the tightest window.
 - **The model name has no provider prefix** — the status line shows the model alone
   (`provider/model` is truncated to the model); the full route is in the header and
-  `/status`, and a `sub:` chip shows the child's model the same way.
+  `/status`, and a `sub:` chip shows the child's model the same way — unless `/submodel`
+  pinned another provider, which adds a `provider/` prefix and an accent.
 - **The subagent model is not what you want** — `/submodel` picks the model, `/subeffort`
   the reasoning effort, `/status` shows the current pair.
 - **No `tok/s`** — that turn had no measurable model tokens; a step with only a first-token

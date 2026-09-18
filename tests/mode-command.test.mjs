@@ -190,7 +190,7 @@ test('child-agent requests carry the TUI subagent model, not the parent route', 
   // host subagent rows, so this waterfall is the only thing that keeps a child
   // on the light model; guard it against a silent removal.
   const { tui } = fixture()
-  const parent = { provider: 'deepseek-official', model: 'deepseek-flash', maxTokens: 100 }
+  const parent = { provider: 'deepseek-official', model: 'deepseek-flash', maxTokens: 100, reasoningEffort: 'high' }
   const child = { id: 'child-session', options: {} }
 
   tui.subagentSelection.current = { model: 'deepseek-v4-flash' }
@@ -198,12 +198,20 @@ test('child-agent requests carry the TUI subagent model, not the parent route', 
   assert.equal(inherited.provider, 'deepseek-official')
   assert.equal(inherited.model, 'deepseek-v4-flash')
   assert.equal(inherited.maxTokens, 100, 'other request fields survive')
+  assert.equal(inherited.reasoningEffort, undefined, 'a different child model does not inherit parent effort')
 
-  // A stored model from another provider family is replaced, not sent.
-  tui.subagentSelection.current = { provider: 'xai', model: 'deepseek-v4-flash' }
+  // A leftover model on an inherited (unpinned) route is replaced, not sent.
+  tui.subagentSelection.current = { model: 'grok-4.5' }
+  const stale = await tui.handleAgentRequest({ agent: child }, async () => ({ ...parent }))
+  assert.equal(stale.provider, 'deepseek-official')
+  assert.equal(stale.model, 'deepseek-v4-flash')
+
+  // A pinned provider keeps its model even when it is a different family.
+  tui.subagentSelection.current = { provider: 'xai', model: 'grok-4.5' }
   const switched = await tui.handleAgentRequest({ agent: child }, async () => ({ ...parent }))
   assert.equal(switched.provider, 'xai')
   assert.equal(switched.model, 'grok-4.5')
+  assert.equal(switched.reasoningEffort, undefined)
 
   // The main agent keeps its own /model waterfall untouched.
   const main = await tui.handleAgentRequest({ agent: tui.agent }, async () => ({ ...parent }))

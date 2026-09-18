@@ -62,6 +62,8 @@ import {
   footerActivity,
   footerIdentityParts,
   footerStatsGroups,
+  footerSubagentForeign,
+  paintFooterSubagentChip,
   formatTokensPerSecond,
   fitFooterStatsLine,
   fitFooterStatusLine,
@@ -125,6 +127,13 @@ import {
   diffStatToken,
   compactionHeaderText,
   subagentHeaderText,
+  buildSubagentHeader,
+  clipSubagentActivity,
+  subagentChipSummary,
+  describeSubagentFailure,
+  subagentDisplayName,
+  subagentInspectLines,
+  subagentRowFromSpawnTool,
   todoProgressLabel,
   todoSummary,
   toolBodyLines,
@@ -132,11 +141,21 @@ import {
   visibleWidth,
 } from '../lib/tui.js'
 import {
+  canonicalProviderId,
   defaultSubagentModelForProvider,
   describeSubagentFit,
   subagentCostClass,
+  subagentIdentitySgr,
   subagentModelMatchesProvider,
+  subagentProviderDiffers,
 } from '../lib/subagent-model.js'
+import {
+  displayToolName,
+  looksLikeOpaqueId,
+  subagentBeastId,
+  subagentCourtesyName,
+  subagentRoleId,
+} from '../lib/job-label.js'
 
 /** Minimal DisplayHost stand-in for hangup tests. */
 function fakeDisplayHost() {
@@ -1112,16 +1131,46 @@ test('footer keeps the subagent route visible when it repeats the parent model',
   })
   // The child's chip shows the model name too: `/submodel` and `/status` report
   // the route, and a second `provider/` prefix only spent status-line cells.
-  assert.equal(explicit.includes('sub:grok-4.5(xhigh)'), true, explicit.join(' · '))
-  // An inherited provider stays implicit; only `/submodel` routes are prefixed.
+  assert.equal(explicit.includes('sub:xai/grok-4.5(xhigh)'), true, explicit.join(' · '))
+  // An inherited provider stays implicit; a pinned `/submodel` route is prefixed.
   assert.equal(subagentRouteLabel('grok-4.5'), 'sub:grok-4.5')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai'), 'sub:grok-4.5')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai', 'xhigh'), 'sub:grok-4.5(xhigh)')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai'), 'sub:xai/grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', 'xhigh'), 'sub:xai/grok-4.5(xhigh)')
   assert.equal(subagentRouteLabel('grok-4.5', undefined, 'high'), 'sub:grok-4.5(high)')
-  assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:grok-4.5')
+  assert.equal(subagentRouteLabel('grok-4.5', 'xai', '  '), 'sub:xai/grok-4.5')
   // A `provider/model` id in the child's own field is truncated the same way.
   assert.equal(subagentRouteLabel('xai/grok-4.5'), 'sub:grok-4.5')
   assert.equal(subagentRouteLabel(''), '')
+  const muted = '空闲  grok-4.6 · sub:grok-4.5'
+  // A child on the parent's own route keeps the identity row's mute: the
+  // accent is reserved for a supplier the parent is not on.
+  const following = paintFooterSubagentChip(muted, 'sub:grok-4.5', false, '90', 'truecolor')
+  assert.equal(following, muted)
+  assert.equal(following.includes('38;5'), false, following)
+  const foreignLine = '空闲  deepseek-v4-flash · sub:xai/grok-4.5'
+  assert.equal(
+    paintFooterSubagentChip(foreignLine, 'sub:xai/grok-4.5', true, '90', 'truecolor').includes('\x1b[38;5;80msub:xai/grok-4.5\x1b[0m\x1b[90m'),
+    true,
+  )
+  assert.equal(/38;5|48;5/u.test(paintFooterSubagentChip(foreignLine, 'sub:xai/grok-4.5', true, '90', '8')), false)
+  assert.match(paintFooterSubagentChip(foreignLine, 'sub:xai/grok-4.5', true, '90', '8'), /\x1b\[96m/)
+  assert.equal(footerSubagentForeign({ provider: 'deepseek-official', subProvider: 'xai' }), true)
+  assert.equal(footerSubagentForeign({ provider: 'xai' }), false)
+  // Spelling the parent's supplier differently is still the parent's supplier,
+  // so a pin that names it again must not repaint the chip.
+  assert.equal(footerSubagentForeign({ provider: 'xai', subProvider: 'grok' }), false)
+  assert.equal(footerSubagentForeign({ provider: 'deepseek-official', subProvider: 'deepseek' }), false)
+  assert.equal(footerSubagentForeign({ provider: 'xai-api', subProvider: 'grok' }), false)
+  // Two routes the TUI cannot prove share a bill stay two providers.
+  assert.equal(footerSubagentForeign({ provider: 'opencode', subProvider: 'opencode-go' }), true)
+  assert.equal(footerSubagentForeign({ provider: 'xai', subProvider: 'my-relay' }), true)
+  assert.equal(subagentProviderDiffers(undefined, 'xai'), false)
+  assert.equal(subagentProviderDiffers('xai', undefined), false)
+  assert.equal(subagentProviderDiffers('', ''), false)
+  assert.equal(canonicalProviderId('  XAI-API '), 'xai')
+  assert.equal(canonicalProviderId('deepseek-official'), 'deepseek')
+  assert.equal(canonicalProviderId('my-relay'), 'my-relay')
+  assert.equal(canonicalProviderId(undefined), '')
 })
 
 /**
@@ -1151,8 +1200,7 @@ test('the status line shows the model name, not the provider route', () => {
   assert.equal(routed.some(part => part.includes('xai/grok-4.6')), false, routed.join(' · '))
   // The child's chip is truncated too; the provider stays in `/submodel`.
   const explicit = footerIdentityParts({ ...base, model: 'xai/grok-4.6', subModel: 'grok-4.5', subProvider: 'xai' })
-  assert.ok(explicit.includes('sub:grok-4.5'), explicit.join(' · '))
-  assert.equal(explicit.some(part => part.includes('xai/')), false, explicit.join(' · '))
+  assert.ok(explicit.includes('sub:xai/grok-4.5'), explicit.join(' · '))
   // An effort that is only whitespace must not leave a trailing space.
   const plain = footerIdentityParts({ ...base, model: 'xai/grok-4.6', effort: '  ' })
   assert.ok(plain.includes('grok-4.6'), plain.join(' · '))
@@ -2062,6 +2110,7 @@ test('osc52Clipboard encodes UTF-8 as base64', () => {
   assert.equal(osc8Enabled({ DSH_TUI_OSC8: '0', TERM: 'xterm-256color' }), false)
   assert.equal(osc8Enabled({ DSH_TUI_OSC8: '1', TERM: 'dumb' }), true)
   assert.equal(osc8Enabled({ TERM: 'dumb' }), false)
+  assert.equal(osc8Enabled({ TERM: 'linux' }), false, 'a Linux console has colour but not OSC 8')
 })
 
 test('friendlyJsonLines bounds recursion and entry count', () => {
@@ -2245,6 +2294,63 @@ test('subagent waterfall follows the parent xAI route instead of leftover DeepSe
   assert.equal(child.model, 'grok-4.5')
 })
 
+test('a pinned subagent provider keeps a foreign model instead of rewriting it', async () => {
+  const ctx = { get: () => undefined }
+  const agent = { id: 'main-session', options: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'deepseek-official',
+    selectionRef: { current: { provider: 'deepseek-official', model: 'deepseek-v4-pro' } },
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
+  })
+  const child = await tui.handleAgentRequest(
+    { agent: { id: 'child-session' } },
+    async () => ({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' }),
+  )
+  assert.equal(child.provider, 'xai')
+  assert.equal(child.model, 'grok-4.5')
+  assert.equal(child.reasoningEffort, undefined)
+})
+
+test('subagent waterfall drops a parent xhigh when the child is grok-4.5', async () => {
+  // Live failure: parent grok-4.6 xhigh; TUI picks grok-4.5; host next() copies
+  // the parent effort; xAI then rejects UNSUPPORTED_REASONING_EFFORT and the
+  // child dies with no closing message.
+  const ctx = { get: () => undefined }
+  const agent = { id: 'main-session', options: { provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' } }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'xai',
+    selectionRef: { current: { provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' } },
+    subagentSelection: { current: { model: 'grok-4.5' } },
+  })
+  const child = await tui.handleAgentRequest(
+    { agent: { id: 'child-session' } },
+    async () => ({ provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh', maxTokens: 64000 }),
+  )
+  assert.equal(child.provider, 'xai')
+  assert.equal(child.model, 'grok-4.5')
+  assert.equal(child.maxTokens, 64000)
+  assert.equal(child.reasoningEffort, undefined)
+
+  tui.subagentSelection.current = { model: 'grok-4.6' }
+  const sameModel = await tui.handleAgentRequest(
+    { agent: { id: 'child-session' } },
+    async () => ({ provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' }),
+  )
+  assert.equal(sameModel.model, 'grok-4.6')
+  assert.equal(sameModel.reasoningEffort, 'xhigh', 'same-model children still inherit the parent effort')
+
+  tui.subagentSelection.current = { model: 'grok-4.5', reasoningEffort: 'high' }
+  const pinned = await tui.handleAgentRequest(
+    { agent: { id: 'child-session' } },
+    async () => ({ provider: 'xai', model: 'grok-4.6', reasoningEffort: 'xhigh' }),
+  )
+  assert.equal(pinned.reasoningEffort, 'high')
+})
+
 test('parsePlanTodos and todoSummary keep parallel in-progress counts', () => {
   const todos = parsePlanTodos({
     todos: [
@@ -2394,12 +2500,406 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   assert.ok(cards[0].logs.some(entry => entry.text.includes('alpha working')))
   assert.ok(cards[1].logs.some(entry => entry.text.includes('终端')))
   assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('运行中'), true)
+  assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('child-a'), false)
   tui.handleSubagentEnd({
     runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',
     lastAssistantMessage: [{ type: 'text', text: 'alpha done' }],
   })
   assert.equal(cards[0].status, 'ok')
   assert.equal(cards[0].expanded, false)
+})
+
+test('subagent chip omits log dumps and Enter opens the inspect overlay', () => {
+  const long = `${'x'.repeat(200)}\nsecond line of child output`
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    data: { callId: 'spawn-1', name: 'subagent', arguments: JSON.stringify({ description: 'scan repo', prompt: 'go' }) },
+  })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: long }] } },
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  assert.equal(card.task, 'scan repo')
+  assert.equal(subagentChipSummary(card), 'repo')
+  const header = subagentHeaderText(card, card.startedAt)
+  assert.equal(header.includes('repo'), true)
+  assert.equal(header.includes('second line'), false)
+  assert.ok(header.length < 80)
+  assert.equal(clipSubagentActivity(long).includes('\n'), false)
+  assert.ok(clipSubagentActivity(long).length < 60)
+
+  process.stdout.columns = 48
+  process.stdout.rows = 16
+  const collapsed = tui.captureFrame(48, 16)
+  assert.equal(collapsed.some(line => line.includes('second line of child output')), false)
+  assert.ok(collapsed.some(line => line.includes('Enter 看全文') || line.includes('探路') || line.includes('repo')))
+
+  tui.toggleCard(card)
+  assert.equal(card.expanded, false)
+  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.dialog.subagentSessionId, 'child-a')
+  const overlay = tui.captureFrame(48, 16)
+  assert.ok(overlay.some(line => line.includes('子代理全文')))
+  assert.ok(overlay.some(line => line.includes(subagentDisplayName(card))))
+  assert.ok(overlay.some(line => line.includes('scan repo') || line.includes('任务')))
+  tui.closeInspect()
+  assert.equal(tui.dialog, undefined)
+})
+
+test('subagent header paints identity and status as separate colors', () => {
+  const header = buildSubagentHeader({
+    focused: false,
+    title: '探路·青龙',
+    status: 'running',
+    elapsedLabel: '12s',
+    summary: 'scan repo',
+    inspectHint: ' · Enter 看全文',
+  })
+  assert.match(header.plain, /● 探路·青龙 {2}运行中 · 12s {2}scan repo/)
+  const title = header.segments.find(segment => header.plain.slice(segment.start, segment.end) === '探路·青龙')
+  const summary = header.segments.find(segment => header.plain.slice(segment.start, segment.end).includes('scan repo'))
+  assert.equal(title?.sgr, '38;5;141')
+  assert.equal(summary?.sgr, '90')
+  const foreign = buildSubagentHeader({
+    focused: false,
+    title: '探路·青龙',
+    status: 'running',
+    elapsedLabel: '12s',
+    summary: 'scan repo',
+    foreign: true,
+  })
+  const foreignTitle = foreign.segments.find(segment => foreign.plain.slice(segment.start, segment.end) === '探路·青龙')
+  assert.equal(foreignTitle?.sgr, '38;5;80')
+  const inspect = subagentInspectLines({
+    kind: 'subagent',
+    sessionId: 'child-a',
+    runId: 'run-a',
+    provider: 'spawn',
+    local: true,
+    label: '子代理 spawn',
+    task: 'scan repo',
+    status: 'ok',
+    startedAt: 0,
+    lastActivity: 'done',
+    logs: [
+      { kind: 'tool', text: '▶ 读取 tui.ts' },
+      { kind: 'assistant', text: 'done' },
+    ],
+    expanded: false,
+  })
+  assert.equal(inspect.some(line => line.kind === 'subagent-header'), true)
+  assert.equal(inspect.some(line => line.kind === 'tool' && line.text.includes('读取')), true)
+  assert.equal(inspect.some(line => line.kind === 'assistant' && line.text === 'done'), true)
+})
+
+test('a live spawn tool call does not leave a 0s twin beside the real child card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 10,
+    data: {
+      callId: 'spawn-1',
+      name: 'subagent',
+      arguments: JSON.stringify({ description: 'scan ~/genshin/srv', prompt: 'go' }),
+    },
+  })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 11,
+    data: {
+      message: { source: { kind: 'tool', callId: 'spawn-1' }, content: [{ type: 'text', text: 'started' }] },
+    },
+  })
+  tui.handleSubagentEnd({
+    runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'hk4e private server' }],
+  })
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(cards.length, 1)
+  assert.equal(cards[0].childSessionId, 'child-a')
+  assert.equal(cards[0].status, 'ok')
+  const elapsed = (cards[0].endedAt ?? 0) - cards[0].startedAt
+  assert.ok(elapsed >= 0)
+})
+
+test('replaying a parent subagent tool call rebuilds the courtesy chip, not a probe tool card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true })
+  tui.replaying = true
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 10,
+    data: {
+      callId: 'spawn-www',
+      name: 'subagent',
+      arguments: JSON.stringify({ description: 'probe /www site deploy', prompt: 'go' }),
+    },
+  })
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 20,
+    data: {
+      message: { source: { kind: 'tool', callId: 'spawn-www' }, content: [{ type: 'text', text: '宝塔多站点' }] },
+    },
+  })
+  const tools = tui.rows.filter(row => row.kind === 'tool')
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(tools.length, 0)
+  assert.equal(cards.length, 1)
+  assert.equal(cards[0].task, 'probe /www site deploy')
+  assert.equal(cards[0].status, 'ok')
+  const name = subagentDisplayName(cards[0])
+  assert.match(name, /探路·(青龙|白虎|朱雀|玄武)/u)
+  assert.equal(name.toLowerCase().includes('probe'), false)
+  const frame = tui.captureFrame(72, 16)
+  const joined = frame.join('\n')
+  assert.ok(joined.includes('探路'), joined)
+  assert.equal(/\bprobe\b/iu.test(joined.split('\n').find(line => line.includes('探路') || line.includes('●')) ?? ''), false)
+})
+
+test('replaying a parent subagent spawn does not name the next live child', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const events = [
+    {
+      type: 'tool/call',
+      time: 10,
+      data: {
+        callId: 'spawn-old',
+        name: 'subagent',
+        arguments: JSON.stringify({ description: 'probe /www site deploy', prompt: 'go' }),
+      },
+    },
+    {
+      type: 'tool/result',
+      time: 20,
+      data: {
+        message: { source: { kind: 'tool', callId: 'spawn-old' }, content: [{ type: 'text', text: 'done' }] },
+      },
+    },
+  ]
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: {
+      id: 'main-session',
+      seq: events.length,
+      eventAt: (seq) => events[seq],
+    },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.replayHistory()
+  assert.deepEqual(tui.pendingSubagentTasks, [])
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    data: {
+      callId: 'spawn-new',
+      name: 'subagent',
+      arguments: JSON.stringify({ description: 'edit src/tui.ts', prompt: 'go' }),
+    },
+  })
+  tui.handleSubagentStart({ runId: 'run-new', id: 'child-new', provider: 'spawn', local: true })
+  const live = tui.rows.filter(row => row.kind === 'subagent' && row.childSessionId === 'child-new')
+  assert.equal(live.length, 1)
+  assert.equal(live[0].task, 'edit src/tui.ts')
+  assert.equal(live[0].task.includes('probe'), false)
+  assert.equal(subagentRoleId(live[0].task), 'artisan')
+})
+
+test('subagent overlay never shows session or call hashes', () => {
+  assert.equal(looksLikeOpaqueId('call-346d8e09-43aa-4aa5-a0e5-cd34359ccc9b-428'), true)
+  assert.equal(looksLikeOpaqueId('cd20665b-63f5-44f8-a733-b2abd07e469b'), true)
+  assert.equal(looksLikeOpaqueId('bash-1'), false)
+  assert.equal(displayToolName('call-346d8e09-43aa-4aa5-a0e5-cd34359ccc9b-428'), 'tool')
+  assert.equal(displayToolName('read'), 'read')
+
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const childId = 'cd20665b-63f5-44f8-a733-b2abd07e469b'
+  const callId = 'call-346d8e09-43aa-4aa5-a0e5-cd34359ccc9b-428'
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    data: { callId: 'spawn-1', name: 'subagent', arguments: JSON.stringify({ description: 'scan /www', prompt: 'go' }) },
+  })
+  tui.handleSubagentStart({ runId: 'run-www', id: childId, provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent(childId, {
+    type: 'tool/call',
+    data: { callId, name: 'bash', arguments: '{"command":"ls /www"}' },
+  })
+  tui.handleSubagentSessionEvent(childId, {
+    type: 'tool/result',
+    data: { message: { source: { callId }, content: [{ type: 'text', text: 'ok' }] } },
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  const name = subagentDisplayName(card)
+  assert.match(name, /探路·(青龙|白虎|朱雀|玄武)/u)
+  assert.equal(name.includes(childId), false)
+  assert.ok(card.logs.some(entry => entry.kind === 'tool' && entry.text.includes('终端') && entry.text.includes('✓')))
+  assert.equal(card.logs.filter(entry => entry.kind === 'result').length, 0)
+  assert.equal(card.logs.some(entry => entry.text.includes(callId) || entry.text.includes('call-')), false)
+  const inspect = subagentInspectLines(card)
+  const blob = inspect.map(line => line.text).join('\n')
+  assert.equal(blob.includes(childId), false)
+  assert.equal(blob.includes(callId), false)
+  assert.ok(blob.includes(name))
+})
+
+test('subagent overlay folds reminders and pairs tool results on the call line', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'user/message',
+    data: {
+      source: { kind: 'plugin', plugin: 'system-prompt' },
+      content: [{ type: 'text', text: '<system-reminder>\nAdditional instructions from: AGENTS.md\nDo the work.\n</system-reminder>' }],
+    },
+  })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'user/message',
+    data: {
+      source: { kind: 'plugin', plugin: 'system-prompt' },
+      content: [{ type: 'text', text: '<system-reminder>\nAdditional instructions from: AGENTS.md\nAgain.\n</system-reminder>' }],
+    },
+  })
+  for (const [index, command] of ['ls /www', 'ls /root'].entries()) {
+    const callId = `call-${index}`
+    tui.handleSubagentSessionEvent('child-a', {
+      type: 'tool/call',
+      data: { callId, name: 'bash', arguments: JSON.stringify({ command }) },
+    })
+    tui.handleSubagentSessionEvent('child-a', {
+      type: 'tool/result',
+      data: { message: { source: { callId }, content: [{ type: 'text', text: 'ok' }] } },
+    })
+  }
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  const reminders = card.logs.filter(entry => entry.text.includes('提示词注入'))
+  assert.equal(reminders.length, 1)
+  assert.equal(card.logs.some(entry => entry.text.includes('<system-reminder')), false)
+  const tools = card.logs.filter(entry => entry.kind === 'tool')
+  assert.equal(tools.length, 2)
+  assert.equal(card.logs.filter(entry => entry.kind === 'result').length, 0)
+  assert.ok(tools.every(entry => entry.text.includes('✓')))
+  const inspect = subagentInspectLines(card).map(line => line.text).join('\n')
+  assert.equal((inspect.match(/提示词注入/gu) ?? []).length, 1)
+  assert.equal((inspect.match(/✓/gu) ?? []).length, 2)
+})
+
+test('subagent overlay pairs read/edit/write results on the same line', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  const calls = [
+    { callId: 'r1', name: 'read', arguments: JSON.stringify({ path: 'src/tui.ts' }) },
+    { callId: 'e1', name: 'edit', arguments: JSON.stringify({ file_path: 'src/plan.ts', old_string: 'a', new_string: 'b' }) },
+    { callId: 'w1', name: 'write', arguments: JSON.stringify({ file_path: 'src/job-label.ts', content: 'x' }) },
+  ]
+  for (const call of calls) {
+    tui.handleSubagentSessionEvent('child-a', { type: 'tool/call', data: call })
+    tui.handleSubagentSessionEvent('child-a', {
+      type: 'tool/result',
+      data: { message: { source: { callId: call.callId }, content: [{ type: 'text', text: 'ok' }] } },
+    })
+  }
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  const tools = card.logs.filter(entry => entry.kind === 'tool')
+  assert.equal(tools.length, 3)
+  assert.equal(card.logs.filter(entry => entry.kind === 'result').length, 0)
+  assert.ok(tools.some(entry => entry.text.includes('读取') && entry.text.includes('tui.ts') && entry.text.includes('✓')))
+  assert.ok(tools.some(entry => entry.text.includes('编辑') && entry.text.includes('plan.ts') && entry.text.includes('✓')))
+  assert.ok(tools.some(entry => entry.text.includes('写入') && entry.text.includes('job-label.ts') && entry.text.includes('✓')))
+})
+
+test('subagent courtesy names distill the parent task onto a directional beast', () => {
+  assert.equal(subagentRoleId('scan repo for leftover Host keys'), 'scout')
+  assert.equal(subagentRoleId('调研 dsh 上游的版本分布情况'), 'scout')
+  assert.equal(subagentRoleId('research the upstream version spread'), 'scout')
+  assert.equal(subagentRoleId('阅读 src/tui.ts 并总结卡片渲染'), 'scribe')
+  assert.equal(subagentRoleId('edit the subagent card and write tests'), 'artisan')
+  assert.equal(subagentRoleId('fetch https://example.com/docs'), 'envoy')
+  assert.equal(subagentRoleId('ask the user which provider to keep'), 'inquirer')
+  assert.equal(subagentRoleId('run the unit tests and lint'), 'sentinel')
+  assert.equal(subagentRoleId('plan the oauth discovery work'), 'steward')
+  assert.equal(subagentRoleId(''), 'courier')
+  // The beast comes from the session id: stable for one child, and spread over
+  // the four symbols rather than pinned to a single one.
+  assert.equal(subagentBeastId('child-a'), subagentBeastId('child-a'))
+  const beasts = new Set(Array.from({ length: 40 }, (_unused, at) => subagentBeastId(`child-${at}`)))
+  assert.equal(beasts.size, 4, [...beasts].join(','))
+  const named = subagentCourtesyName({ sessionId: 'child-a', task: 'scan repo', fallback: '子代理 spawn' })
+  assert.match(named, /探路·(青龙|白虎|朱雀|玄武)/u)
+  const unnamed = subagentCourtesyName({ sessionId: 'child-a', fallback: '子代理 spawn' })
+  assert.match(unnamed, /承命·(青龙|白虎|朱雀|玄武)/u)
+  assert.equal(subagentRoleId('run the install in the terminal'), 'courier')
+})
+
+test('a child turn/end error lands on the subagent card instead of a blank close', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'turn/end',
+    data: {
+      turn: 1,
+      reason: {
+        kind: 'error',
+        error: { message: 'provider "xai" model "grok-4.5" does not support reasoning effort "xhigh"', code: 'UNSUPPORTED_REASONING_EFFORT' },
+      },
+    },
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  assert.equal(card.failHint?.includes('/subeffort'), true, card.failHint)
+  assert.ok(
+    card.logs.some(entry => entry.text.includes('/subeffort') || entry.text.includes('思考强度')),
+    JSON.stringify(card.logs),
+  )
+  assert.match(subagentChipSummary(card), /思考强度|subeffort/u)
+})
+
+test('subagent failure hints name quota, auth, and effort with a command', () => {
+  assert.equal(describeSubagentFailure({ stopReason: 'error', message: 'HTTP 429 quota exceeded', provider: 'xai' })?.kind, 'quota')
+  assert.match(describeSubagentFailure({ stopReason: 'error', message: 'HTTP 429 quota exceeded', provider: 'xai' })?.hint ?? '', /\/usage/)
+  assert.equal(describeSubagentFailure({ stopReason: 'error', message: '401 unauthorized token expired', provider: 'xai' })?.kind, 'auth')
+  assert.match(describeSubagentFailure({ stopReason: 'error', message: '401 unauthorized', provider: 'xai' })?.hint ?? '', /\/setup/)
+  assert.equal(describeSubagentFailure({ stopReason: 'error', message: 'does not support reasoning effort "xhigh"' })?.kind, 'effort')
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
+  })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentEnd({
+    runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'error',
+    lastAssistantMessage: [{ type: 'text', text: 'insufficient_quota: billing' }],
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.status, 'error')
+  assert.match(card.failHint ?? '', /\/usage/)
+  assert.match(subagentChipSummary(card), /额度|quota|\/usage/iu)
+  const inspect = subagentInspectLines(card).map(line => line.text).join('\n')
+  assert.match(inspect, /失败|failed/u)
 })
 
 test('parseWorkspaceView accepts compact aliases', () => {
@@ -3450,6 +3950,11 @@ test('default subagent model follows the parent provider family', () => {
   )
   assert.equal(subagentModelMatchesProvider('xai', 'deepseek-v4-flash'), false)
   assert.equal(subagentModelMatchesProvider('deepseek-official', 'deepseek-v4-flash'), true)
+  assert.equal(subagentProviderDiffers('deepseek-official', 'xai'), true)
+  assert.equal(subagentProviderDiffers('xai', 'xai'), false)
+  assert.equal(subagentProviderDiffers('xai', undefined), false)
+  assert.equal(subagentIdentitySgr(false), '38;5;141')
+  assert.equal(subagentIdentitySgr(true), '38;5;80')
   // A dirty catalog that still lists the leftover DeepSeek id must not keep it on xAI.
   assert.equal(
     subagentModelMatchesProvider('xai', 'deepseek-v4-flash', ['grok-4.6', 'deepseek-v4-flash']),

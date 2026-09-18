@@ -5,7 +5,10 @@
 import { t } from './i18n/index.js'
 import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens } from './footer.js'
 import { parseJsonArgs } from './json-args.js'
-import type { DisplayKind, PlanTodoItem, Row, SubagentLogEntry } from './transcript-types.js'
+import { subagentCourtesyName } from './job-label.js'
+import { subagentIdentitySgr } from './subagent-model.js'
+import { sliceCodePoints, type TextSegment } from './term-text.js'
+import type { DiffDisplayLine, DisplayKind, PlanTodoItem, Row, SubagentLogEntry } from './transcript-types.js'
 
 export const MAX_SUBAGENT_LOGS = 80
 
@@ -384,24 +387,288 @@ export function askSummary(value: unknown): string {
   return questions.length > 1 ? t('ask.multi', { text, count: questions.length }) : text
 }
 
-/** One-line subagent card header used while collapsed. */
+/** First non-empty line, collapsed to a single scan line. */
+export function firstDisplayLine(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
+}
+
+/** Collapse a child-session blob to one short chip/wait-card line. */
+export function clipSubagentActivity(text: string, maxChars = 48): string {
+  const line = firstDisplayLine(text)
+  if (line === '') return ''
+  const clipped = sliceCodePoints(line, maxChars)
+  return clipped === line ? line : `${clipped}…`
+}
+
+function subagentStatusLabel(status: Extract<Row, { kind: 'subagent' }>['status']): string {
+  if (status === 'running') return t('sub.running')
+  if (status === 'ok') return t('sub.ok')
+  if (status === 'aborted') return t('sub.aborted')
+  return t('sub.failed')
+}
+
+/** Running / ok / aborted / error → ANSI for the status dot and status word. */
+export function subagentStateColor(
+  status: Extract<Row, { kind: 'subagent' }>['status'],
+): '33' | '32' | '31' | '90' {
+  if (status === 'ok') return '32'
+  if (status === 'error') return '31'
+  if (status === 'aborted') return '90'
+  return '33'
+}
+
+/**
+ * Rebuild a subagent chip from the parent spawn tool call that survives in the
+ * session log. Live `subagent/start` is not replayed, so resume would otherwise
+ * show a generic tool card titled from the English description ("probe").
+ */
+export function subagentRowFromSpawnTool(input: {
+  callId: string
+  task: string
+  provider?: string
+  local?: boolean
+  status?: Extract<Row, { kind: 'subagent' }>['status']
+  startedAt?: number
+  endedAt?: number
+  output?: string
+}): Extract<Row, { kind: 'subagent' }> {
+  const task = input.task.trim()
+  const provider = input.provider?.trim() || 'spawn'
+  const status = input.status ?? 'ok'
+  const startedAt = input.startedAt ?? 0
+  const output = clipSubagentActivity(input.output ?? '')
+  return {
+    kind: 'subagent',
+    sessionId: input.callId,
+    runId: input.callId,
+    provider,
+    local: input.local ?? true,
+    label: t('sub.label', { provider }),
+    ...(task === '' ? {} : { task }),
+    status,
+    startedAt,
+    ...(input.endedAt === undefined ? {} : { endedAt: input.endedAt }),
+    lastActivity: output === '' ? t('sub.started') : output,
+    logs: output === ''
+      ? [{ kind: 'system', text: t('sub.startedDetail', { provider, external: '' }) }]
+      : [{ kind: 'assistant', text: output }],
+    expanded: false,
+  }
+}
+
+/** Courtesy title: distilled role plus a directional beast. */
+export function subagentDisplayName(row: Extract<Row, { kind: 'subagent' }>): string {
+  return subagentCourtesyName({
+    sessionId: row.sessionId,
+    ...(row.task === undefined ? {} : { task: row.task }),
+    fallback: row.label,
+  })
+}
+
+/**
+ * Short activity for the collapsed chip and wait card: prefer the parent
+ * task name, else a clipped last log line. Never the full child transcript.
+ */
+export function subagentChipSummary(row: Extract<Row, { kind: 'subagent' }>): string {
+  const fail = row.failHint?.trim() ?? ''
+  if (fail !== '' && (row.status === 'error' || row.status === 'aborted')) {
+    return clipSubagentActivity(fail, 48)
+  }
+  const task = row.task?.trim() ?? ''
+  if (task !== '') {
+    // The courtesy title already carries the distilled role, so strip a leading
+    // English verb (`probe /www` → `/www`) instead of repeating it on resume.
+    const stripped = task.replace(/^(probe|scan|search|read|fetch|run|plan|edit|write|inspect|explore|look)\b[\s:/]*/iu, '')
+    return clipSubagentActivity(stripped === '' ? task : stripped, 40)
+  }
+  return clipSubagentActivity(row.lastActivity, 40)
+}
+
+/** One-line subagent chip used in the parent transcript (never dumps logs). */
 export function subagentHeaderText(row: Extract<Row, { kind: 'subagent' }>, now = Date.now()): string {
   const elapsed = Math.max(0, Math.floor(((row.endedAt ?? now) - row.startedAt) / 1000))
   const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`
-  const state = row.status === 'running'
-    ? t('sub.running')
-    : row.status === 'ok'
-      ? t('sub.ok')
-      : row.status === 'aborted'
-        ? t('sub.aborted')
-        : t('sub.failed')
-  const activity = row.lastActivity === '' ? '' : ` · ${row.lastActivity}`
-  const id = row.sessionId.slice(0, 8)
-  return `${row.label}  [${id}]  ${state} · ${elapsedLabel}${activity}`
+  const summary = subagentChipSummary(row)
+  const activity = summary === '' ? '' : ` · ${summary}`
+  return `${subagentDisplayName(row)}  ${subagentStatusLabel(row.status)} · ${elapsedLabel}${activity}`
+}
+
+/** Header + SGR spans: identity color, status dot/word, muted summary. */
+export function buildSubagentHeader(input: {
+  focused: boolean
+  title: string
+  status: Extract<Row, { kind: 'subagent' }>['status']
+  elapsedLabel: string
+  summary: string
+  spinner?: string
+  inspectHint?: string
+  /** Different provider from the parent: paint the title cyan, not violet. */
+  foreign?: boolean
+}): { plain: string; segments: TextSegment[] } {
+  const prefix = input.focused ? '▶ ' : '  '
+  const marker = '▸'
+  const lead = `${prefix}${marker} ● ${input.title}`
+  const state = subagentStatusLabel(input.status)
+  const stateText = `  ${state} · ${input.elapsedLabel}`
+  const summaryText = input.summary === '' ? '' : `  ${input.summary}`
+  const spinner = input.spinner ?? ''
+  const hint = input.inspectHint ?? ''
+  const plain = `${lead}${stateText}${summaryText}${spinner}${hint}`
+  const dotIndex = lead.indexOf('●')
+  const titleIndex = lead.indexOf(input.title)
+  const stateCode = subagentStateColor(input.status)
+  const segments: TextSegment[] = []
+  if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
+  if (titleIndex >= 0 && input.title !== '') {
+    segments.push({
+      start: titleIndex,
+      end: titleIndex + input.title.length,
+      sgr: subagentIdentitySgr(input.foreign === true),
+    })
+  }
+  segments.push({ start: lead.length, end: lead.length + stateText.length, sgr: stateCode })
+  if (summaryText.length > 0) {
+    segments.push({
+      start: lead.length + stateText.length,
+      end: lead.length + stateText.length + summaryText.length,
+      sgr: '90',
+    })
+  }
+  const tailStart = lead.length + stateText.length + summaryText.length
+  if (spinner !== '' || hint !== '') {
+    segments.push({ start: tailStart, end: plain.length, sgr: '90' })
+  }
+  return { plain, segments: segments.filter(segment => segment.end > segment.start) }
+}
+
+/** Map a folded child-session event onto an existing display role. */
+export function subagentLogDisplayKind(
+  entry: SubagentLogEntry,
+  status: Extract<Row, { kind: 'subagent' }>['status'],
+): DisplayKind {
+  if (entry.kind === 'user') return 'user'
+  if (entry.kind === 'assistant') return 'assistant'
+  if (entry.kind === 'tool') return entry.text.includes('✗') ? 'error' : 'tool'
+  if (entry.kind === 'approval') return 'todo-active'
+  if (entry.kind === 'result') {
+    const failed = status === 'error' || /^\s*✗/u.test(entry.text)
+    return failed ? 'error' : 'tool-result'
+  }
+  return 'system'
+}
+
+/** Overlay body: session line, stop reason, then the clipped child log. */
+export function subagentInspectLines(row: Extract<Row, { kind: 'subagent' }>): DiffDisplayLine[] {
+  const lines: DiffDisplayLine[] = [{
+    kind: 'subagent-header',
+    text: t('sub.cardSession', {
+      name: subagentDisplayName(row),
+      provider: row.provider,
+      external: row.local ? '' : t('sub.external'),
+    }).trim(),
+  }]
+  if (row.task !== undefined && row.task.trim() !== '') {
+    lines.push({ kind: 'tool-result', text: t('sub.cardTask', { task: row.task.trim() }) })
+  }
+  if (row.failHint !== undefined && row.failHint.trim() !== '') {
+    lines.push({ kind: 'error', text: t('sub.failHint', { hint: row.failHint.trim() }).trim() })
+  } else if (row.stopReason !== undefined) {
+    lines.push({ kind: 'system', text: t('sub.stopReason', { reason: row.stopReason }).trim() })
+  }
+  if (row.logs.length === 0) {
+    lines.push({
+      kind: 'system',
+      text: (row.status === 'running' ? t('sub.cardWait') : t('sub.cardEmpty')).trim(),
+    })
+    return lines
+  }
+  for (const entry of row.logs) {
+    const kind = subagentLogDisplayKind(entry, row.status)
+    for (const text of entry.text.split('\n')) {
+      lines.push({ kind, text })
+    }
+  }
+  return lines
+}
+
+/**
+ * Classify a child-session error so the chip can say *why* it died, not just
+ * that it ended. Quota and expired auth get a command that actually helps;
+ * everything else keeps a clipped diagnostic.
+ */
+export function describeSubagentFailure(input: {
+  stopReason?: string
+  message?: string
+  provider?: string
+}): { hint: string; kind: 'quota' | 'auth' | 'effort' | 'error' } | undefined {
+  const reason = input.stopReason?.trim() ?? ''
+  const message = (input.message ?? '').replace(/\s+/gu, ' ').trim()
+  if (reason === '' && message === '') return undefined
+  if (reason === 'aborted' && message === '') {
+    return { hint: t('sub.failAborted'), kind: 'error' }
+  }
+  const blob = `${reason} ${message}`.toLowerCase()
+  const rawProvider = input.provider?.trim() ?? ''
+  const provider = rawProvider === '' || rawProvider === 'spawn' ? t('card.subagent') : rawProvider
+  if (
+    /\b(401|403|unauthori[sz]ed|invalid[_ ]?(api[_ ]?key|token)|token expired|expired token|authentication|not authenticated)\b/u.test(blob)
+    || /未授权|无效.*key|token 过期|登录过期|鉴权/.test(message)
+  ) {
+    return { hint: t('sub.failAuth', { provider }), kind: 'auth' }
+  }
+  if (
+    /\b(429|quota|rate[_ ]?limit|insufficient[_ ]?(quota|credit)|billing|payment required)\b/u.test(blob)
+    || /额度|配额|余额不足|限流/.test(message)
+  ) {
+    return { hint: t('sub.failQuota', { provider }), kind: 'quota' }
+  }
+  if (/\bunsupported_reasoning_effort|does not support reasoning effort\b/u.test(blob)) {
+    return { hint: t('sub.failEffort'), kind: 'effort' }
+  }
+  const detail = message === '' ? reason : message
+  if (detail === '') return undefined
+  return { hint: clipSubagentActivity(detail, 72), kind: 'error' }
+}
+
+function settleSubagentToolLine(
+  row: Extract<Row, { kind: 'subagent' }>,
+  entry: SubagentLogEntry,
+): boolean {
+  const open = entry.callId !== undefined
+    ? row.logs.findLast(item => item.kind === 'tool' && item.callId === entry.callId)
+    : row.logs.findLast(item => item.kind === 'tool' && !/[✓✗]/u.test(item.text))
+  if (open === undefined) return false
+  const mark = /^\s*✗/u.test(entry.text) ? '✗' : '✓'
+  if (!/[✓✗]/u.test(open.text)) open.text = `${open.text}  ${mark}`
+  row.lastActivity = clipSubagentActivity(open.text)
+  return true
 }
 
 export function appendSubagentLog(row: Extract<Row, { kind: 'subagent' }>, entry: SubagentLogEntry): void {
+  if (entry.kind === 'result' && settleSubagentToolLine(row, entry)) return
   row.logs.push(entry)
   if (row.logs.length > MAX_SUBAGENT_LOGS) row.logs.splice(0, row.logs.length - MAX_SUBAGENT_LOGS)
-  row.lastActivity = entry.text
+  row.lastActivity = clipSubagentActivity(entry.text)
+}
+
+/** Fold a child user/plugin blob: reminders become one inject chip, not raw XML. */
+export function foldSubagentUserLog(
+  row: Extract<Row, { kind: 'subagent' }>,
+  text: string,
+  sourceKind = 'user',
+  plugin?: string,
+): void {
+  const body = text.trim()
+  if (body === '') return
+  if (isPromptInjectionMessage(sourceKind, body, plugin)) {
+    const title = promptInjectionTitle(promptInjectionSources(body, plugin))
+    const last = row.logs.at(-1)
+    if (last?.kind === 'system' && last.text === title) {
+      row.lastActivity = title
+      return
+    }
+    appendSubagentLog(row, { kind: 'system', text: title })
+    return
+  }
+  appendSubagentLog(row, { kind: 'user', text: `❯ ${clipSubagentActivity(body, 80)}` })
 }
