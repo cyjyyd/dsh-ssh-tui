@@ -434,6 +434,8 @@ export const zh: Record<string, string> = {
   'mode.preset.cordis': '创造模式',
   'boot.help': '输入 /help 查看快捷键 · /find 搜索思考/计划/子代理/回复 · 空输入时 ↑/↓ 选卡片',
   'cwd.entered': '已进入会话工作目录 {cwd}',
+  'session.routeRestored': '已按本会话记录恢复路由：{route}{sub}',
+  'session.routeSubagent': ' · 子代理 {route}',
   'cwd.notAbsolute': '会话工作目录不是绝对路径：{path}',
   'cwd.missing': '会话工作目录不存在：{path}',
   'cwd.notDirectory': '会话工作目录不是目录：{path}',

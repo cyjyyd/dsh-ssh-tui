@@ -67,6 +67,7 @@ import {
 import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
+import { resolveLaunchRoute, restoreSessionRoute, sameSessionRoute, saveSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import { installUiLocale, t } from './i18n/index.js'
 
 
@@ -260,32 +261,32 @@ export function apply(ctx: Context, config: Config): void {
           ))
         : undefined
 
+      // A resumed session carries its own route: the supplier it was actually
+      // spending on, and the subagent route it was running its children on. A
+      // new session has no record, and another session's record is never used.
+      const sessionRoute = await restoreSessionRoute({
+        sessionId: String(sessionId),
+        resume,
+        subagentSelection,
+      })
+
       // An explicit in-process change (/setup or /model) wins over launch-time
       // CLI overrides for every session created or resumed later in this process.
-      const provider = liveSelection?.provider
-        ?? config.provider
-        ?? savedSelection?.provider
-        ?? rememberedFallback?.provider
-        ?? 'deepseek-official'
-      const model = liveSelection?.model
-        ?? config.model
-        ?? savedSelection?.model
-        ?? rememberedFallback?.model
-        ?? 'deepseek-v4-flash'
-
-      // Reasoning effort is only meaningful for the exact provider/model it
-      // belongs to. CLI overrides that change either route must not inherit the
-      // saved effort of a different model.
-      let reasoningEffort = liveSelection?.reasoningEffort
-      if (reasoningEffort === undefined && liveSelection === undefined) {
-        const sameSavedRoute = (savedSelection ?? rememberedFallback) !== undefined
-          && (config.provider === undefined || config.provider === (savedSelection ?? rememberedFallback)?.provider)
-          && (config.model === undefined || config.model === (savedSelection ?? rememberedFallback)?.model)
-        if (sameSavedRoute) {
-          const rawEffort = (savedSelection ?? rememberedFallback)?.reasoningEffort
-          reasoningEffort = rawEffort === undefined ? undefined : ReasoningEffortId(String(rawEffort))
-        }
-      }
+      const launch = resolveLaunchRoute({
+        ...(liveSelection === undefined ? {} : { live: liveSelection }),
+        cli: {
+          ...(config.provider === undefined ? {} : { provider: config.provider }),
+          ...(config.model === undefined ? {} : { model: config.model }),
+        },
+        ...(sessionRoute === undefined ? {} : { session: sessionRoute }),
+        ...(savedSelection === undefined ? {} : { saved: savedSelection }),
+        ...(rememberedFallback === undefined ? {} : { remembered: rememberedFallback }),
+      })
+      const provider = launch.provider
+      const model = launch.model
+      let reasoningEffort = launch.reasoningEffort === undefined
+        ? undefined
+        : ReasoningEffortId(launch.reasoningEffort)
       // OpenCode / third-party (llm-pi-ai) routes carry no adapter-level
       // reasoning default, so default a supported effort ourselves when none is
       // selected. Without it the model streams thinking as plain text and the
@@ -301,6 +302,17 @@ export function apply(ctx: Context, config: Config): void {
         provider,
         model,
         ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      }
+      // The per-session record: this conversation's supplier and its subagent
+      // route. Written when a route settles, and once below so a conversation is
+      // recorded from its first turn; a resume that changed nothing rewrites
+      // nothing. Best-effort — a missing file only costs the next resume its
+      // memory of the route.
+      let notedRoute = sessionRoute
+      const noteRoute = (route: Omit<SessionRoute, 'updatedAt'>): void => {
+        if (sameSessionRoute(notedRoute, route)) return
+        notedRoute = { ...route, updatedAt: Date.now() }
+        void saveSessionRoute(String(sessionId), route).catch(() => {})
       }
       const selectionRef: ModelSelectionRef = {
         current: effectiveSelection,
@@ -374,12 +386,23 @@ export function apply(ctx: Context, config: Config): void {
           // Fall back to the id's own label.
         }
       }
+      // Record the route this conversation starts on, before the first turn can
+      // spend on it: a resumed session that has no record yet (an older session,
+      // or a first run) is remembered from here on.
+      const initialRoute = sessionRouteInput({
+        provider,
+        model,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort: String(reasoningEffort) }),
+        subagent: subagentSelection.current,
+      })
+      if (initialRoute !== undefined) noteRoute(initialRoute)
       controller = mountTui(ctx, {
         ...config,
         headlessDisplay: true,
         sessionId: String(sessionId),
         resume,
         ...(resumeCwdNotice === undefined ? {} : { cwdNotice: resumeCwdNotice }),
+        ...(sessionRoute === undefined ? {} : { restoredRoute: sessionRoute }),
         provider,
         model,
         selectionRef,
@@ -388,6 +411,10 @@ export function apply(ctx: Context, config: Config): void {
         presetName,
         presetTrust,
         goodbye: goodbyeFor(String(sessionId)),
+        // The record of which supplier this conversation ran on lives in
+        // `$DSH_HOME`, written here rather than in the TUI: the launcher is the
+        // only place that knows the session is real.
+        onRouteSettled: (settled) => { noteRoute(settled) },
         onSelectionChanged: (next) => {
           liveSelection = next
         },

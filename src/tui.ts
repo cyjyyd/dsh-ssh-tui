@@ -119,6 +119,7 @@ import {
   windowTranscript,
 } from './rows.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
+import { sameSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import {
   applySavedLocale,
   getLocale,
@@ -660,6 +661,16 @@ export interface TuiConfig {
   resume?: boolean
   /** One-line notice after entering a resumed session's working directory. */
   cwdNotice?: string
+  /**
+   * The route this resumed session ran on, when it has a record. Applied before
+   * the TUI mounts; this is only for saying so on screen.
+   */
+  restoredRoute?: SessionRoute
+  /**
+   * Report a settled route to the launcher, which owns the per-session record.
+   * Absent in tests and in line mode: nothing here touches the disk.
+   */
+  onRouteSettled?: (route: Omit<SessionRoute, 'updatedAt'>) => void
   /** Provider route selected at launch (defaults to deepseek-official). */
   provider?: string
   /** Model selected at launch (defaults to the saved/fallback model). */
@@ -1155,6 +1166,23 @@ export function parseWorkspaceView(raw: string): WorkspaceView | undefined {
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
+/** One line naming the route a resumed session came back on. */
+function sessionRouteNotice(route: SessionRoute): string {
+  const effort = route.reasoningEffort === undefined || route.reasoningEffort === ''
+    ? ''
+    : ` (${route.reasoningEffort})`
+  const subagent = route.subagent
+  const sub = subagent === undefined
+    ? ''
+    : t('session.routeSubagent', {
+        route: `${subagent.provider === undefined ? '' : `${subagent.provider}/`}${subagent.model}`
+          + (subagent.reasoningEffort === undefined || subagent.reasoningEffort === ''
+            ? ''
+            : `(${subagent.reasoningEffort})`),
+      })
+  return t('session.routeRestored', { route: `${route.provider}/${route.model}${effort}`, sub })
+}
+
 /** Owns one interactive terminal channel and its agent event wiring. */
 export class SshTui {
   private readonly rows: Row[] = []
@@ -1220,10 +1248,13 @@ export class SshTui {
   private readonly selectionRef: ModelSelectionRef | undefined
   private readonly subagentSelection: SubagentSelectionRef
   private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
+  private readonly onRouteSettled: ((route: Omit<SessionRoute, 'updatedAt'>) => void) | undefined
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
   private presetId = 'standard'
   private presetName = t('mode.preset.standard')
+  /** Last route reported to the launcher; a repaint must not report it again. */
+  private lastSessionRoute: SessionRoute | undefined
   private readonly useAlternateScreen: boolean
   private agentGone = false
   private onboarding: OnboardingState | undefined
@@ -1391,6 +1422,7 @@ export class SshTui {
     // 8-colour terminal is not a cosmetic loss, it is the wrong colour.
     this.colorDepth = config.color === false ? 'none' : colorDepth(process.env)
     this.color = this.colorDepth !== 'none'
+    this.lastSessionRoute = config.restoredRoute
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
     this.showReasoning = config.showReasoning !== false
     this.workspaceView = this.readWorkspaceView()
@@ -1403,6 +1435,7 @@ export class SshTui {
     this.selectionRef = config.selectionRef
     this.subagentSelection = config.subagentSelection ?? { current: { model: DEFAULT_SUBAGENT_MODEL } }
     this.onSelectionChanged = config.onSelectionChanged
+    this.onRouteSettled = config.onRouteSettled
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
     this.headlessDisplay = config.headlessDisplay === true
@@ -1437,6 +1470,9 @@ export class SshTui {
     }
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
       this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
+    }
+    if (config.restoredRoute !== undefined) {
+      this.pushRow({ kind: 'system', text: sessionRouteNotice(config.restoredRoute) })
     }
   }
 
@@ -5318,6 +5354,9 @@ export class SshTui {
         this.stalledWarningShown = false
         this.llmRetry = undefined
         this.status = `turn ${event.data.turn} running`
+        // A turn is about to spend on this route: make sure the session's record
+        // names it, whatever changed it (a preset, a settings edit, a resume).
+        this.noteSessionRoute()
         this.markDirty()
         break
       case 'turn/end': {
@@ -6949,7 +6988,46 @@ export class SshTui {
     return rememberedRouteFor(memory, provider)
   }
 
+  /** The route this session is running right now, record-shaped. */
+  private sessionRouteRecord(): Omit<SessionRoute, 'updatedAt'> | undefined {
+    const current = this.selectionRef?.current
+    const subagent = this.subagentSelection.current
+    // Shaped by the launcher's own builder, so what the TUI reports and what the
+    // launcher writes cannot drift apart.
+    return sessionRouteInput({
+      provider: current?.provider ?? this.currentProviderId(),
+      model: current?.model ?? this.agent.options.model ?? '',
+      ...(current?.reasoningEffort === undefined ? {} : { reasoningEffort: String(current.reasoningEffort) }),
+      subagent: {
+        ...(subagent.provider === undefined ? {} : { provider: subagent.provider }),
+        model: subagent.model,
+        ...(subagent.reasoningEffort === undefined ? {} : { reasoningEffort: String(subagent.reasoningEffort) }),
+      },
+    })
+  }
+
+  /**
+   * Tell the launcher which route this session has settled on, so resuming it
+   * comes back on the same supplier — the subagent route included, which is what
+   * makes a resumed cross-provider conversation reproducible.
+   *
+   * Reported when a route settles (`/model`, `/submodel`, `/setup`) and at the
+   * start of every turn, which catches a preset or a settings edit moving the
+   * route behind the TUI's back. The launcher owns the file; the TUI only says
+   * what changed, and says nothing when nothing did.
+   */
+  private noteSessionRoute(): void {
+    const route = this.sessionRouteRecord()
+    if (route === undefined) return
+    if (sameSessionRoute(this.lastSessionRoute, route)) return
+    this.lastSessionRoute = { ...route, updatedAt: Date.now() }
+    this.onRouteSettled?.(route)
+  }
+
   private async rememberRoute(selection: ModelSelection): Promise<void> {
+    // The session's record is kept even when the settings service is missing:
+    // coming back to this conversation on the same supplier is the point of it.
+    this.noteSessionRoute()
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
     const section = settings.get(ROUTE_MEMORY_NS)
@@ -7182,6 +7260,9 @@ export class SshTui {
   /** Persist one subagent selection and publish it to the live request waterfall. */
   private async saveSubagentSelection(next: SubagentSelection): Promise<boolean> {
     this.subagentSelection.current = next
+    // The session record keeps the subagent route too, so a resumed
+    // cross-provider conversation comes back on the same children.
+    this.noteSessionRoute()
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
       this.pushRow({ kind: 'error', text: t('sub.settingsMissing') })

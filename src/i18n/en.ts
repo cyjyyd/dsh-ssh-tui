@@ -434,6 +434,8 @@ export const en: Record<string, string> = {
   'mode.preset.cordis': 'Cordis',
   'boot.help': 'Type /help for keys · /find searches thinking/plan/subagent/reply · empty ↑/↓ selects cards',
   'cwd.entered': 'Entered session working directory {cwd}',
+  'session.routeRestored': 'Resumed on this session\'s recorded route: {route}{sub}',
+  'session.routeSubagent': ' · subagent {route}',
   'cwd.notAbsolute': 'Session working directory is not absolute: {path}',
   'cwd.missing': 'Session working directory does not exist: {path}',
   'cwd.notDirectory': 'Session working directory is not a directory: {path}',

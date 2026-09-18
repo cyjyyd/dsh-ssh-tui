@@ -3134,6 +3134,63 @@ test('the courtesy beast survives a resume of the same child', () => {
   assert.match(subagentDisplayName(live), /探路/u)
 })
 
+test('the launcher hears the route this session settled on', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const seen = []
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'deepseek-official',
+    subagentSelection: { current: { model: 'deepseek-v4-flash' } },
+    onRouteSettled: route => seen.push(route),
+  })
+  // A turn is about to spend on this route, so the session records it.
+  tui.handleSessionEvent(agent.session, { type: 'turn/start', data: { turn: 1 } })
+  assert.equal(seen.length, 1)
+  assert.deepEqual(seen[0], {
+    provider: 'deepseek-official',
+    model: 'deepseek-v4-pro',
+    subagent: { model: 'deepseek-v4-flash' },
+  })
+  // Nothing moved: the next turn reports nothing.
+  tui.handleSessionEvent(agent.session, { type: 'turn/start', data: { turn: 2 } })
+  assert.equal(seen.length, 1)
+  // A pinned foreign child is part of what a resume has to restore.
+  tui.subagentSelection.current = { provider: 'xai', model: 'grok-4.5', reasoningEffort: 'high' }
+  tui.handleSessionEvent(agent.session, { type: 'turn/start', data: { turn: 3 } })
+  assert.equal(seen.length, 2)
+  assert.deepEqual(seen[1].subagent, { provider: 'xai', model: 'grok-4.5', reasoningEffort: 'high' })
+})
+
+test('a resumed session says which route it came back on', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'xai',
+    subagentSelection: { current: { model: 'grok-4.5' } },
+    restoredRoute: {
+      provider: 'xai',
+      model: 'grok-4.6',
+      reasoningEffort: 'xhigh',
+      subagent: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      updatedAt: 1,
+    },
+  })
+  const notice = tui.rows.find(row => row.kind === 'system' && String(row.text).includes('恢复'))
+  assert.ok(notice !== undefined, JSON.stringify(tui.rows.slice(0, 6)))
+  assert.match(notice.text, /xai\/grok-4\.6 \(xhigh\)/u)
+  assert.match(notice.text, /deepseek-official\/deepseek-v4-flash/u)
+})
+
 test('the overlay keeps a child tool result and the model route', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }

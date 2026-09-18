@@ -399,6 +399,34 @@ default. Both commands are remembered under `ssh-tui-subagent` in
 releases selected continuable children using the harness 0.1.1
 `drainContinuableChildren` capability.
 
+### Each session keeps its own route (`$DSH_HOME/tui-session-routes.json`)
+
+The settings above are the **software-level default**: a new session starts
+there. What a session actually ran on — the parent provider/model/effort plus
+the subagent route, including a child pinned to another supplier — is recorded
+separately, and `--resume` applies it automatically with one line saying so:
+
+```
+Resumed on this session's recorded route: xai/grok-4.6 (xhigh) · subagent deepseek-official/deepseek-v4-flash
+```
+
+This is what cross-provider children made necessary: under one global default,
+session A can run its children on DeepSeek while session B runs them on xAI, and
+a resume that only knew the software default would mix the two up. The rules:
+
+- a **new session** is unaffected — it still starts from `settings.yaml`;
+- on **resume** the record beats the default, but an explicit `--provider` /
+  `--model` flag still wins: that is what this launch asked for;
+- a restored subagent route applies to **that session only** and is not written
+  back to `ssh-tui-subagent`, so one resume cannot change the default for every
+  later session;
+- the record is written when a route settles (`/model`, `/provider`,
+  `/submodel`, `/subeffort`, `/setup`) and at the start of every turn, which
+  catches a preset or a hand-edited `settings.yaml`; nothing is written when
+  nothing changed;
+- the newest 200 sessions are kept and older ones fall out; an unreadable file
+  reads as "no record" and the default applies.
+
 Each subagent is its own collapsible card. One or many children start collapsed,
 so the parent transcript stays readable; `Enter`, click, empty-input `↑`/`↓`,
 and `Ctrl+R` expand or collapse them independently. Running cards show a spinner,
