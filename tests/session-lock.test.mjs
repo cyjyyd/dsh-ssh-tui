@@ -14,15 +14,22 @@ import {
   formatLockHeldMessage,
   hostImageName,
   inspectLiveHost,
+  legacySessionLockPath,
   parseWindowsProcessIdentity,
   listAttachableHosts,
   parseSessionLock,
   processIsAlive,
+  readSessionLock,
   releaseSessionLock,
+  sessionLockLookupPaths,
   sessionLockPath,
   windowsProcessMatchesLock,
 } from '../lib/session-lock.js'
-import { sessionSockPath } from '../lib/display-sock.js'
+import { legacySessionSockPath, sessionLabel, sessionSockLookupPaths, sessionSockPath } from '../lib/display-sock.js'
+
+function lockFile(home, sessionId) {
+  return join(home, 'tui-locks', `${sessionLabel(sessionId, 80)}.json`)
+}
 
 function readBootId() {
   try {
@@ -54,7 +61,17 @@ test('parseSessionLock rejects junk and keeps pid/session', () => {
 
 test('sessionLockPath sanitizes session ids', () => {
   const path = sessionLockPath('main-session/../evil id', '/tmp/dsh-home')
-  assert.equal(path, join('/tmp/dsh-home', 'tui-locks', 'main-session_.._evil_id.json'))
+  assert.equal(path, join('/tmp/dsh-home', 'tui-locks', `${sessionLabel('main-session/../evil id', 80)}.json`))
+  assert.match(path, /main-session___evil_id-[0-9a-f]{8}\.json$/u)
+})
+
+test('sessionLockPath keeps sanitized-but-distinct ids apart', () => {
+  const home = '/tmp/dsh-home'
+  assert.notEqual(sessionLockPath('foo/bar', home), sessionLockPath('foo_bar', home))
+  assert.equal(sessionLockPath('foo/bar', home), sessionLockPath('foo/bar', home))
+  assert.equal(legacySessionLockPath('foo/bar', home), legacySessionLockPath('foo_bar', home))
+  assert.deepEqual(sessionLockLookupPaths('plain-id', home)[0], sessionLockPath('plain-id', home))
+  assert.equal(sessionLockLookupPaths('plain-id', home).includes(legacySessionLockPath('plain-id', home)), true)
 })
 
 test('formatLockHeldMessage tells the user to attach the live pid', () => {
@@ -93,6 +110,38 @@ async function listenOn(path) {
   return server
 }
 
+test('inspectLiveHost still attaches a 0.7.1 lock and socket name', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
+  const sessionId = 'main-session-legacy'
+  const sock = legacySessionSockPath(sessionId, home)
+  assert.ok(sock, 'POSIX still has a 0.7.1 socket name')
+  const { mkdir } = await import('node:fs/promises')
+  await mkdir(join(home, 'tui-locks'), { recursive: true })
+  await mkdir(join(home, 'tui-socks'), { recursive: true })
+  const legacyLock = legacySessionLockPath(sessionId, home)
+  await writeFile(legacyLock, `${JSON.stringify({
+    pid: process.pid,
+    sessionId,
+    startedAt: new Date().toISOString(),
+    bootId,
+    pidStart: procStarttimeOf(process.pid),
+    sock,
+    state: 'paused',
+  }, null, 2)}\n`)
+  const server = await listenOn(sock)
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const live = await inspectLiveHost(sessionId, home)
+  assert.equal(live?.kind, 'attachable')
+  assert.equal(live?.path, legacyLock)
+  assert.equal(live?.sock, sock)
+  const held = await readSessionLock(sessionId, home)
+  assert.equal(held?.path, legacyLock)
+  await assert.rejects(
+    () => acquireSessionLock(sessionId, { pid: process.pid + 1_000_000, dshHome: home }),
+    error => error instanceof SessionLockHeldError && error.lock.pid === process.pid,
+  )
+})
+
 test('inspectLiveHost is attachable only while the host pid is alive', async t => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session-attach'
@@ -100,7 +149,7 @@ test('inspectLiveHost is attachable only while the host pid is alive', async t =
   const { mkdir } = await import('node:fs/promises')
   await mkdir(join(home, 'tui-locks'), { recursive: true })
   await mkdir(join(home, 'tui-socks'), { recursive: true })
-  await writeFile(join(home, 'tui-locks', `${sessionId}.json`), `${JSON.stringify({
+  await writeFile(lockFile(home, sessionId), `${JSON.stringify({
     pid: process.pid,
     sessionId,
     startedAt: new Date().toISOString(),
@@ -119,12 +168,11 @@ test('inspectLiveHost is attachable only while the host pid is alive', async t =
 test('a dead pid with a leftover sock is not attachable and the lock is stolen', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session/dead host'
-  const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
-  const sock = join(home, 'tui-socks', `${safe}.sock`)
+  const sock = sessionSockPath(sessionId, home)
   const { mkdir, access } = await import('node:fs/promises')
   await mkdir(join(home, 'tui-locks'), { recursive: true })
   await mkdir(join(home, 'tui-socks'), { recursive: true })
-  await writeFile(join(home, 'tui-locks', `${safe}.json`), `${JSON.stringify({
+  await writeFile(lockFile(home, sessionId), `${JSON.stringify({
     pid: 1_000_000_000,
     sessionId,
     startedAt: new Date().toISOString(),
@@ -134,7 +182,7 @@ test('a dead pid with a leftover sock is not attachable and the lock is stolen',
   await writeFile(sock, '')
   assert.equal(await inspectLiveHost(sessionId, home), undefined)
   assert.deepEqual(await listAttachableHosts(home), [])
-  await assert.rejects(() => access(join(home, 'tui-locks', `${safe}.json`)))
+  await assert.rejects(() => access(lockFile(home, sessionId)))
   const stolen = await acquireSessionLock(sessionId, { pid: process.pid, dshHome: home })
   assert.equal(stolen.info.pid, process.pid)
   await releaseSessionLock(stolen.path)
@@ -177,8 +225,8 @@ test('old-format lock: alive pid that is not the Host is stolen, a genuine Host 
 
   // pid is alive but unrelated (no --resume=<sid> in its cmdline) → stale.
   const sid = 'main-session-recycled-pid'
-  const sock = join(home, 'tui-socks', `${sid}.sock`)
-  const lockPath = join(home, 'tui-locks', `${sid}.json`)
+  const sock = sessionSockPath(sid, home)
+  const lockPath = lockFile(home, sid)
   await writeFile(lockPath, lockJson(sid, decoy.pid, sock))
   assert.equal(await inspectLiveHost(sid, home), undefined, 'unrelated alive pid must be stolen')
   assert.equal(existsSync(lockPath), false)
@@ -188,10 +236,10 @@ test('old-format lock: alive pid that is not the Host is stolen, a genuine Host 
   const host = spawnHost(hostSid)
   t.after(() => host.kill('SIGKILL'))
   await new Promise(resolve => setTimeout(resolve, 300))
-  const hostSock = join(home, 'tui-socks', `${hostSid}.sock`)
+  const hostSock = sessionSockPath(hostSid, home)
   const hostServer = await listenOn(hostSock)
   t.after(() => new Promise(resolve => hostServer.close(resolve)))
-  await writeFile(join(home, 'tui-locks', `${hostSid}.json`), lockJson(hostSid, host.pid, hostSock))
+  await writeFile(lockFile(home, hostSid), lockJson(hostSid, host.pid, hostSock))
   assert.equal((await inspectLiveHost(hostSid, home))?.kind, 'attachable')
   const { rm } = await import('node:fs/promises')
   await rm(hostSock)
@@ -204,8 +252,8 @@ test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posi
   const host = spawnHost(sid)
   t.after(() => host.kill('SIGKILL'))
   await new Promise(resolve => setTimeout(resolve, 300))
-  const sock = join(home, 'tui-socks', `${sid}.sock`)
-  const lockPath = join(home, 'tui-locks', `${sid}.json`)
+  const sock = sessionSockPath(sid, home)
+  const lockPath = lockFile(home, sid)
 
   const server = await listenOn(sock)
   t.after(() => new Promise(resolve => server.close(resolve)))
@@ -244,14 +292,14 @@ test('new-format lock: bootId+pidStart decide staleness, not kill(pid, 0)', posi
 test('acquire does not steal a lock whose display still answers', posixOnly, async t => {
   const home = await makeHome(t)
   const sid = 'main-session-answering'
-  const sock = join(home, 'tui-socks', `${sid}.sock`)
+  const sock = sessionSockPath(sid, home)
   const host = spawnHost(sid)
   t.after(() => host.kill('SIGKILL'))
   await new Promise(resolve => setTimeout(resolve, 300))
   const server = await listenOn(sock)
   t.after(() => new Promise(resolve => server.close(resolve)))
   // The recorded identity cannot be verified, but the channel answers.
-  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, host.pid, sock, {
+  await writeFile(lockFile(home, sid), lockJson(sid, host.pid, sock, {
     bootId: '00000000-0000-0000-0000-000000000000', pidStart: '1',
   }))
   await assert.rejects(
@@ -268,8 +316,8 @@ test('acquire steals a stale old-format lock and records identity on the new loc
   const decoy = spawnDecoy()
   t.after(() => { host.kill('SIGKILL'); decoy.kill('SIGKILL') })
   await new Promise(resolve => setTimeout(resolve, 300))
-  const sock = join(home, 'tui-socks', `${sid}.sock`)
-  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, decoy.pid, sock))
+  const sock = sessionSockPath(sid, home)
+  await writeFile(lockFile(home, sid), lockJson(sid, decoy.pid, sock))
 
   const { path, info } = await acquireSessionLock(sid, { pid: host.pid, dshHome: home })
   assert.equal(info.pid, host.pid)
@@ -291,8 +339,8 @@ test('real-world pid-5 leftovers are classified stale', posixOnly, async t => {
     'main-session-79b3cc75-1ca3-40e2-87b5-3c5cc6d8dafc',
     'main-session-916ce9a2-3d6e-4e73-97e4-9e23bbddcdb7',
   ]) {
-    await writeFile(join(home, 'tui-locks', `${sid}.json`),
-      lockJson(sid, 5, join(home, 'tui-socks', `${sid}.sock`)))
+    await writeFile(lockFile(home, sid),
+      lockJson(sid, 5, sessionSockPath(sid, home)))
     assert.equal(await inspectLiveHost(sid, home), undefined, `${sid} must be stolen`)
   }
 })
@@ -309,7 +357,7 @@ test('win32: a live host pipe is attachable, a closed one is a zombie',
       onStdin: () => {}, onResize: () => {}, onDetach: () => {}, onAttach: () => {},
     })
     await host.listen()
-    await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, process.pid, sock))
+    await writeFile(lockFile(home, sid), lockJson(sid, process.pid, sock))
     assert.equal((await inspectLiveHost(sid, home))?.kind, 'attachable')
     await host.close()
     assert.equal((await inspectLiveHost(sid, home))?.kind, 'zombie')
@@ -323,8 +371,8 @@ test('win32: a recycled pid does not keep a dead lock alive',
     // before the process started — exactly what pid reuse looks like. Without
     // the identity probe that reads as a live-but-silent Host ("zombie") and
     // blocks --resume until the lock is deleted by hand.
-    await writeFile(join(home, 'tui-locks', `${sid}.json`),
-      lockJson(sid, process.pid, join(home, 'tui-socks', `${sid}.sock`),
+    await writeFile(lockFile(home, sid),
+      lockJson(sid, process.pid, sessionSockPath(sid, home),
         { startedAt: new Date(Date.now() - 60_000).toISOString() }))
     assert.equal(await inspectLiveHost(sid, home), undefined)
   })
@@ -373,8 +421,8 @@ test('a dead channel makes the lock stale even when a socket file remains',
   const sid = 'main-session-stale-channel'
   const sock = sessionSockPath(sid, home)
   await writeFile(sock, '')
-  await writeFile(join(home, 'tui-locks', `${sid}.json`), lockJson(sid, process.pid, sock))
+  await writeFile(lockFile(home, sid), lockJson(sid, process.pid, sock))
   assert.equal(await inspectLiveHost(sid, home), undefined, 'a dead peer must not be attachable')
   assert.equal(existsSync(sock), false, 'the leftover socket file is cleaned up')
-  assert.equal(existsSync(join(home, 'tui-locks', `${sid}.json`)), false, 'and so is the lock')
+  assert.equal(existsSync(lockFile(home, sid)), false, 'and so is the lock')
 })

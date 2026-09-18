@@ -21,11 +21,13 @@ import { t } from './i18n/index.js'
 import {
   displaySockExists,
   isPipePath,
+  legacySessionErrPath,
   resolveDshHome,
   sessionErrPath,
+  sessionSockLookupPaths,
   sessionSockPath,
 } from './display-sock.js'
-import { inspectLiveHost, sessionLockDisabled, sessionLockPath } from './session-lock.js'
+import { inspectLiveHost, sessionLockDisabled, sessionLockLookupPaths, sessionLockPath } from './session-lock.js'
 import { sessionIndexPath } from './session-index.js'
 
 /** How much of a Host stderr log the report carries. */
@@ -99,14 +101,19 @@ export async function readErrTail(
   sessionId: string,
   dshHome = resolveDshHome(),
 ): Promise<string | undefined> {
-  try {
-    const raw = await readFile(sessionErrPath(sessionId, dshHome), 'utf8')
-    const trimmed = raw.trim()
-    if (trimmed === '') return undefined
-    return trimmed.length <= DIAG_ERR_TAIL_BYTES ? trimmed : `…${trimmed.slice(-DIAG_ERR_TAIL_BYTES)}`
-  } catch {
-    return undefined
+  const paths = [sessionErrPath(sessionId, dshHome), legacySessionErrPath(sessionId, dshHome)]
+    .filter((path): path is string => path !== undefined)
+  for (const path of paths) {
+    try {
+      const raw = await readFile(path, 'utf8')
+      const trimmed = raw.trim()
+      if (trimmed === '') continue
+      return trimmed.length <= DIAG_ERR_TAIL_BYTES ? trimmed : `…${trimmed.slice(-DIAG_ERR_TAIL_BYTES)}`
+    } catch {
+      // Missing at this name; try the 0.7.1 leftover next.
+    }
   }
+  return undefined
 }
 
 /**
@@ -260,11 +267,27 @@ export async function collectDiag(options: {
   const dshHome = options.dshHome ?? resolveDshHome()
   const sockPath = sessionSockPath(options.sessionId, dshHome)
   const lockPath = sessionLockPath(options.sessionId, dshHome)
+  const sockLookup = sessionSockLookupPaths(options.sessionId, dshHome)
+  const lockLookup = sessionLockLookupPaths(options.sessionId, dshHome)
 
-  const reachable = await displaySockExists(sockPath)
+  let reachable = false
+  let reachableSock = sockPath
+  for (const candidate of sockLookup) {
+    if (await displaySockExists(candidate)) {
+      reachable = true
+      reachableSock = candidate
+      break
+    }
+  }
   let sockFilePresent: boolean | undefined
   if (!isPipePath(sockPath)) {
-    sockFilePresent = await stat(sockPath).then(() => true).catch(() => false)
+    sockFilePresent = false
+    for (const candidate of sockLookup) {
+      if (await stat(candidate).then(() => true).catch(() => false)) {
+        sockFilePresent = true
+        break
+      }
+    }
   }
 
   const live = await inspectLiveHost(options.sessionId, dshHome).catch(() => undefined)
@@ -284,15 +307,17 @@ export async function collectDiag(options: {
   // `inspectLiveHost` steals a dead lock, so a lock file that exists while the
   // inspection found nothing is the stale case.
   if (host.kind === 'none') {
-    const raw = await readFile(lockPath, 'utf8').then(text => text, () => undefined)
-    if (raw !== undefined) {
+    for (const candidate of lockLookup) {
+      const raw = await readFile(candidate, 'utf8').then(text => text, () => undefined)
+      if (raw === undefined) continue
       try {
         const parsed = JSON.parse(raw) as { pid?: number; state?: string; agentStatus?: string }
         host.kind = 'stale'
         if (typeof parsed.pid === 'number') host.pid = parsed.pid
         if (typeof parsed.state === 'string') host.state = parsed.state
         if (typeof parsed.agentStatus === 'string') host.agentStatus = parsed.agentStatus
-        host.lockPath = lockPath
+        host.lockPath = candidate
+        break
       } catch {
         // An unreadable lock is reported as no lock.
       }
@@ -319,7 +344,7 @@ export async function collectDiag(options: {
     hostProcess: options.hostProcess,
     locksDisabled: sessionLockDisabled(),
     dshHome,
-    sockPath,
+    sockPath: reachable ? reachableSock : sockPath,
     sockReachable: reachable,
     ...(sockFilePresent === undefined ? {} : { sockFilePresent }),
     host,

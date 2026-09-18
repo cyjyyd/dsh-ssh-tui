@@ -26,6 +26,10 @@ import {
   isPipePath,
   probeDisplaySock,
   sessionErrPath,
+  sessionLabel,
+  legacySessionErrPath,
+  legacySessionSockPath,
+  sessionSockLookupPaths,
   sessionSockPath,
   waitForDisplaySock,
 } from '../lib/display-sock.js'
@@ -95,10 +99,38 @@ test('hostArgvForSession pins --resume=id and drops picker flags', () => {
 })
 
 test('sessionSockPath sanitizes ids next to the lock dir', () => {
-  assert.equal(
-    sessionSockPath('main-session/../evil id', '/tmp/dsh-home', 'linux'),
-    join('/tmp/dsh-home', 'tui-socks', 'main-session_.._evil_id.sock'),
-  )
+  const path = sessionSockPath('main-session/../evil id', '/tmp/dsh-home', 'linux')
+  assert.equal(path.startsWith(join('/tmp/dsh-home', 'tui-socks')), true, path)
+  assert.match(path, /main-session___evil_id-[0-9a-f]{8}\.sock$/u)
+  assert.equal(path, join('/tmp/dsh-home', 'tui-socks', `${sessionLabel('main-session/../evil id', 80)}.sock`))
+})
+
+test('sessionSockLookupPaths still names the 0.7.1 socket', () => {
+  const home = '/tmp/dsh-home'
+  const id = 'main-session-legacy'
+  const current = sessionSockPath(id, home, 'linux')
+  const legacy = legacySessionSockPath(id, home, 'linux')
+  assert.equal(legacy, join(home, 'tui-socks', `${id}.sock`))
+  assert.notEqual(current, legacy)
+  assert.deepEqual(sessionSockLookupPaths(id, home, 'linux'), [current, legacy])
+  assert.equal(legacySessionSockPath(id, home, 'win32'), undefined)
+  assert.deepEqual(sessionSockLookupPaths(id, home, 'win32'), [sessionSockPath(id, home, 'win32')])
+  assert.equal(legacySessionErrPath(id, home, 'linux'), `${legacy}.err`)
+})
+
+test('sessionSockPath keeps sanitized-but-distinct ids apart on POSIX', () => {
+  const home = '/tmp/dsh-home'
+  const a = sessionSockPath('foo/bar', home, 'linux')
+  const b = sessionSockPath('foo_bar', home, 'linux')
+  const c = sessionSockPath('foo.bar', home, 'linux')
+  assert.notEqual(a, b, 'slash and underscore must not share a socket')
+  assert.notEqual(a, c)
+  assert.notEqual(b, c)
+  assert.equal(a, sessionSockPath('foo/bar', home, 'linux'), 'the name is deterministic')
+  const longA = sessionSockPath(`${'x'.repeat(400)}-a`, home, 'linux')
+  const longB = sessionSockPath(`${'x'.repeat(400)}-b`, home, 'linux')
+  assert.notEqual(longA, longB, 'truncation must not collapse distinct sessions')
+  assert.ok(longA.length < 200, `socket name too long: ${longA.length}`)
 })
 
 test('sessionSockPath uses a named pipe on win32', () => {

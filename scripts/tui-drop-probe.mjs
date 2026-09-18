@@ -32,12 +32,14 @@
 import { lstatSync } from 'node:fs'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+const { sessionLockLookupPaths } = await import(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js'))
 
 const USAGE = `usage: node scripts/tui-drop-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -72,10 +74,22 @@ async function loadPty() {
 }
 
 /** Kill the detached Host this probe spawned, by the pid in its tui-lock. */
+async function readLock(sessionId, home) {
+  for (const path of sessionLockLookupPaths(sessionId, home)) {
+    try {
+      return { path, lock: JSON.parse(await readFile(path, 'utf8')) }
+    } catch {
+      // Missing at this name; try the 0.7.1 leftover next.
+    }
+  }
+  return undefined
+}
+
 async function killHostByLock(sessionId, home) {
   try {
-    const lock = JSON.parse(await readFile(join(home, 'tui-locks', `${sessionId}.json`), 'utf8'))
-    if (Number.isInteger(lock.pid) && lock.pid > 0) process.kill(lock.pid, 'SIGKILL')
+    const held = await readLock(sessionId, home)
+    const pid = held?.lock?.pid
+    if (Number.isInteger(pid) && pid > 0) process.kill(pid, 'SIGKILL')
   } catch {
     // No lock or already gone: nothing to clean.
   }
@@ -195,8 +209,7 @@ async function runProbe({ sessionId, keep, home }) {
     // policy keeps a Host only while a turn is running. Either way the session
     // must come back — from the surviving Host, or by replaying its log — so
     // this is recorded, not asserted.
-    const lockPath = join(home, 'tui-locks', `${createdSessionId}.json`)
-    const hostSurvived = await readFile(lockPath, 'utf8').then(() => true, () => false)
+    const hostSurvived = (await readLock(createdSessionId, home)) !== undefined
     console.log(`host after the drop: ${hostSurvived ? 'still running (lock held)' : 'exited (idle, no display)'}`)
 
     // 3. Window B resumes the same session: the transcript comes back.

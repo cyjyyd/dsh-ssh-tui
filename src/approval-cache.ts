@@ -26,6 +26,7 @@
  * @module dsh-ssh-tui/approval-cache
  */
 
+import { createHash } from 'node:crypto'
 import { isOpaqueInterpreterCommand } from './auto-approval.js'
 import type { ReviewVerdict } from './approval-reviewer.js'
 
@@ -59,14 +60,16 @@ export interface VerdictKeyInput {
   authorization: string
 }
 
-/** FNV-1a: dependency-free, stable across restarts, and fine for a cache key. */
-function fnv1a(text: string): string {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash.toString(16).padStart(8, '0')
+/**
+ * Identity digest for a reviewed request.
+ *
+ * A 32-bit FNV-1a used to be enough to *look* unique in a 32-slot map, but a
+ * collision here reuses someone else's verdict — `npm publish --tag next`
+ * answering as yesterday's `npm publish`. SHA-1 truncated to 16 hex is still
+ * short in the map and not a birthday problem at this capacity.
+ */
+function identityDigest(text: string): string {
+  return createHash('sha1').update(text).digest('hex').slice(0, 16)
 }
 
 /** Whitespace-insensitive form of a command, so spacing alone cannot miss. */
@@ -95,7 +98,7 @@ export function cacheableShape(input: VerdictKeyInput): boolean {
  * @returns a stable, collision-resistant digest.
  */
 export function verdictKey(input: VerdictKeyInput): string {
-  return fnv1a([
+  return identityDigest([
     input.toolName,
     canonicalCommand(input.command),
     input.args ?? '',

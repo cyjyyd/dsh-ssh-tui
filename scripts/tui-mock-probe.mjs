@@ -27,13 +27,15 @@
 import { lstatSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const ROOT = process.cwd()
+const { sessionLockLookupPaths } = await import(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js'))
 
 const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy] [--keep] [--cols N] [--rows N]
 
@@ -131,10 +133,22 @@ function isAlive(pid) {
   }
 }
 
+async function readLock(sessionId, home) {
+  for (const path of sessionLockLookupPaths(sessionId, home)) {
+    try {
+      return { path, lock: JSON.parse(await readFile(path, 'utf8')) }
+    } catch {
+      // Missing at this name; try the 0.7.1 leftover next.
+    }
+  }
+  return undefined
+}
+
 async function killHostByLock(sessionId, home) {
   try {
-    const lock = JSON.parse(await readFile(join(home, 'tui-locks', `${sessionId}.json`), 'utf8'))
-    if (Number.isInteger(lock.pid) && lock.pid > 0) process.kill(lock.pid, 'SIGKILL')
+    const held = await readLock(sessionId, home)
+    const pid = held?.lock?.pid
+    if (Number.isInteger(pid) && pid > 0) process.kill(pid, 'SIGKILL')
   } catch {
     // No lock or already gone.
   }
@@ -178,11 +192,10 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, check,
   // The drop: SIGKILL, so the launcher never gets to hand the terminal back.
   firstWindow.kill('SIGKILL')
   await delay(2_000)
-  const lockPath = join(home, 'tui-locks', `${sessionId}.json`)
   // The lock file alone is not proof: a Host that died leaves one behind. Ask
-  // the pid whether it is still there.
-  const lockPid = await readFile(lockPath, 'utf8')
-    .then(text => JSON.parse(text).pid ?? 0, () => 0)
+  // the pid whether it is still there. The 0.7.1 name and the digested name
+  // both count.
+  const lockPid = (await readLock(sessionId, home))?.lock?.pid ?? 0
   const survived = Number.isInteger(lockPid) && lockPid > 0 && isAlive(lockPid)
   check(survived, `a busy drop must leave the Host running (pid ${lockPid} is gone)`)
   console.log(`host after the busy drop: ${survived ? 'still running (lock held)' : 'exited — the keep-alive policy failed'}`)

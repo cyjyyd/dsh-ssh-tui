@@ -20,12 +20,14 @@
 import { lstatSync } from 'node:fs'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+const { sessionLockLookupPaths } = await import(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js'))
 
 const USAGE = `usage: node scripts/tui-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -65,10 +67,21 @@ async function loadPty() {
  * Kill the detached Host this probe spawned, using the pid from its tui-lock.
  * The Host installs SIGTERM/SIGHUP ignores at startup, so only SIGKILL works.
  */
+async function readLock(sessionId, home) {
+  for (const path of sessionLockLookupPaths(sessionId, home)) {
+    try {
+      return JSON.parse(await readFile(path, 'utf8'))
+    } catch {
+      // Missing at this name; try the 0.7.1 leftover next.
+    }
+  }
+  return undefined
+}
+
 async function killHostByLock(sessionId, home) {
   try {
-    const lock = JSON.parse(await readFile(join(home, 'tui-locks', `${sessionId}.json`), 'utf8'))
-    if (Number.isInteger(lock.pid) && lock.pid > 0) process.kill(lock.pid, 'SIGKILL')
+    const lock = await readLock(sessionId, home)
+    if (Number.isInteger(lock?.pid) && lock.pid > 0) process.kill(lock.pid, 'SIGKILL')
   } catch {
     // No lock or already gone: nothing to clean.
   }

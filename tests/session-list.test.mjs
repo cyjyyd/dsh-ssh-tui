@@ -496,6 +496,15 @@ test('enterSessionCwd switches into an absolute existing directory', () => {
   })
   assert.equal(relative.changed, false)
   assert.match(relative.error ?? '', /不是绝对路径/)
+  const file = enterSessionCwd('/tmp/not-a-dir', {
+    current: '/tmp',
+    exists: () => true,
+    isDirectory: () => false,
+    chdir: () => { throw new Error('should not chdir') },
+  })
+  assert.equal(file.changed, false)
+  assert.equal(file.cwd, '/tmp')
+  assert.match(file.error ?? '', /不是目录/)
 })
 
 // The picker's first frame is a header sketch; entries it cannot name yet are

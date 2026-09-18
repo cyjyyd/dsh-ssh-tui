@@ -444,6 +444,7 @@ export const zh: Record<string, string> = {
   'cwd.entered': '已进入会话工作目录 {cwd}',
   'cwd.notAbsolute': '会话工作目录不是绝对路径：{path}',
   'cwd.missing': '会话工作目录不存在：{path}',
+  'cwd.notDirectory': '会话工作目录不是目录：{path}',
   'cwd.failed': '无法进入会话工作目录 {path}：{error}',
   'cwd.full': '工作目录 {cwd}',
 

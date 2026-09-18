@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
-import { displaySockExists, isPipePath, resolveDshHome, sessionSockPath } from './display-sock.js'
+import { displaySockExists, isPipePath, resolveDshHome, sessionLabel, sessionSockLookupPaths, sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
 export type DisconnectPolicy = 'pause' | 'continue'
@@ -43,8 +43,25 @@ export class SessionLockHeldError extends Error {
 }
 
 export function sessionLockPath(sessionId: string, dshHome = resolveDshHome()): string {
+  return join(dshHome, 'tui-locks', `${sessionLabel(sessionId, 80)}.json`)
+}
+
+/**
+ * Pre-digest lock path (`tui-locks/<safeId>.json`).
+ *
+ * 0.7.1 Hosts still write here. Lookup must find that file; a new Host must
+ * not bind a second lock beside a live one just because the filename changed.
+ */
+export function legacySessionLockPath(sessionId: string, dshHome = resolveDshHome()): string {
   const safe = sessionId.replaceAll(/[^A-Za-z0-9._-]/g, '_')
-  return join(dshHome, 'tui-locks', `${safe}.json`)
+  return join(dshHome, 'tui-locks', `${safe === '' ? 'session' : safe}.json`)
+}
+
+/** Digested lock first, then the 0.7.1 name when it is different. */
+export function sessionLockLookupPaths(sessionId: string, dshHome = resolveDshHome()): string[] {
+  const current = sessionLockPath(sessionId, dshHome)
+  const legacy = legacySessionLockPath(sessionId, dshHome)
+  return legacy === current ? [current] : [current, legacy]
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -334,14 +351,16 @@ export async function readSessionLock(
   sessionId: string,
   dshHome = resolveDshHome(),
 ): Promise<{ path: string; info: SessionLockInfo } | undefined> {
-  const path = sessionLockPath(sessionId, dshHome)
-  try {
-    const info = parseSessionLock(await readFile(path, 'utf8'))
-    if (info === undefined) return undefined
-    return { path, info }
-  } catch {
-    return undefined
+  for (const path of sessionLockLookupPaths(sessionId, dshHome)) {
+    try {
+      const info = parseSessionLock(await readFile(path, 'utf8'))
+      if (info === undefined) continue
+      return { path, info }
+    } catch {
+      // Missing or unreadable at this name; try the next.
+    }
   }
+  return undefined
 }
 
 export async function writeSessionLock(path: string, info: SessionLockInfo): Promise<void> {
@@ -380,7 +399,38 @@ export async function acquireSessionLock(
     agentStatus: options.agentStatus ?? 'idle',
   }
   const payload = `${JSON.stringify(info, null, 2)}\n`
+  const stealIfStale = async (existing: SessionLockInfo, existingPath: string): Promise<void> => {
+    const ours = options.pid ?? process.pid
+    if (existing.pid === ours && existingPath === path) return
+    if (existing.pid !== ours) {
+      // An answering display is a live owner even when the recorded pid
+      // identity cannot be verified (a lock written inside another pid
+      // namespace, or a recycled pid): stealing it starts a second Host that
+      // dies on the session write handle.
+      const sock = await resolveLockSock(existing, dshHome)
+      const answered = await displaySockExists(sock)
+      if (answered || await lockOwnerIsAlive(existing)) {
+        throw new SessionLockHeldError(existing, existingPath)
+      }
+    }
+    try {
+      await unlink(existingPath)
+    } catch {
+      // Raced with another unlock; retry exclusive create.
+    }
+  }
   for (let attempt = 0; attempt < 4; attempt++) {
+    const held = await readSessionLock(sessionId, dshHome)
+    if (held !== undefined) {
+      await stealIfStale(held.info, held.path)
+      if (held.path !== path) {
+        try {
+          await unlink(held.path)
+        } catch {
+          // Already gone.
+        }
+      }
+    }
     try {
       await writeFile(path, payload, { flag: 'wx', mode: 0o600 })
       return { path, info }
@@ -392,17 +442,8 @@ export async function acquireSessionLock(
       } catch {
         existing = undefined
       }
-      const ours = options.pid ?? process.pid
-      if (existing !== undefined && existing.pid !== ours) {
-        // An answering display is a live owner even when the recorded pid
-        // identity cannot be verified (a lock written inside another pid
-        // namespace, or a recycled pid): stealing it starts a second Host that
-        // dies on the session write handle.
-        const sock = existing.sock ?? sessionSockPath(existing.sessionId, dshHome)
-        const answered = await displaySockExists(sock)
-        if (answered || await lockOwnerIsAlive(existing)) {
-          throw new SessionLockHeldError(existing, path)
-        }
+      if (existing !== undefined) {
+        await stealIfStale(existing, path)
       }
       try {
         await unlink(path)
@@ -435,12 +476,21 @@ export async function inspectLiveHost(
   return inspectHeldLock(held.path, held.info, dshHome)
 }
 
+/** Prefer the path recorded on the lock; otherwise probe digested then 0.7.1 names. */
+async function resolveLockSock(info: SessionLockInfo, dshHome: string): Promise<string> {
+  if (info.sock !== undefined && info.sock !== '') return info.sock
+  for (const candidate of sessionSockLookupPaths(info.sessionId, dshHome)) {
+    if (await displaySockExists(candidate)) return candidate
+  }
+  return sessionSockPath(info.sessionId, dshHome)
+}
+
 async function inspectHeldLock(
   path: string,
   info: SessionLockInfo,
   dshHome: string,
 ): Promise<{ kind: LiveHostKind; lock: SessionLockInfo; path: string; sock: string } | undefined> {
-  const sock = info.sock ?? sessionSockPath(info.sessionId, dshHome)
+  const sock = await resolveLockSock(info, dshHome)
   // `displaySockExists` is a real connect probe on every platform (a leftover
   // file never answers), so an answering channel proves that a Host owns this
   // session right now — stronger evidence than the recorded pid identity,

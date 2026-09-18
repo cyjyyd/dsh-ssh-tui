@@ -4,7 +4,7 @@
  * labels, and ordering, so both surfaces offer the same sessions.
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
 import {
@@ -41,20 +41,35 @@ export function formatFooterCwd(cwd: string): string {
   return label === '' ? '' : t('footer.cwdChip', { name: label })
 }
 
+/** True when `path` exists and is a directory. Broken links and files are not. */
+function pathIsDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 /**
  * Switch the process into a persisted session working directory. Returns the
  * directory actually used; missing/invalid paths stay put and are reported.
+ *
+ * The target must be an absolute directory. A regular file that happens to
+ * exist at the recorded path used to pass `existsSync` and then fail inside
+ * `chdir` with a platform errno; resume now refuses it before moving.
  */
 export function enterSessionCwd(
   cwd: string | undefined,
   options: {
     current?: string
     exists?: (path: string) => boolean
+    isDirectory?: (path: string) => boolean
     chdir?: (path: string) => void
   } = {},
 ): { cwd: string; changed: boolean; error?: string } {
   const current = options.current ?? process.cwd()
   const exists = options.exists ?? existsSync
+  const isDirectory = options.isDirectory ?? pathIsDirectory
   const chdir = options.chdir ?? ((path: string) => process.chdir(path))
   if (cwd === undefined || cwd.trim() === '') return { cwd: current, changed: false }
   const target = cwd.trim()
@@ -63,6 +78,9 @@ export function enterSessionCwd(
   }
   if (!exists(target)) {
     return { cwd: current, changed: false, error: t('cwd.missing', { path: target }) }
+  }
+  if (!isDirectory(target)) {
+    return { cwd: current, changed: false, error: t('cwd.notDirectory', { path: target }) }
   }
   if (target === current) return { cwd: current, changed: false }
   try {

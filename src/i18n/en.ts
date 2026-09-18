@@ -444,6 +444,7 @@ export const en: Record<string, string> = {
   'cwd.entered': 'Entered session working directory {cwd}',
   'cwd.notAbsolute': 'Session working directory is not absolute: {path}',
   'cwd.missing': 'Session working directory does not exist: {path}',
+  'cwd.notDirectory': 'Session working directory is not a directory: {path}',
   'cwd.failed': 'Could not enter session working directory {path}: {error}',
   'cwd.full': 'working directory {cwd}',
 

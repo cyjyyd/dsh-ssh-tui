@@ -48,6 +48,7 @@ test('the key covers every input the verdict depends on', () => {
   const base = verdictKey(identity())
   assert.equal(verdictKey(identity()), base, 'stable')
   assert.equal(verdictKey(identity({ command: 'python  deploy.py' })), base, 'spacing alone is the same request')
+  assert.match(base, /^[0-9a-f]{16}$/u, 'a cryptographic digest, not a 32-bit FNV')
 
   const changes = {
     toolName: 'pwsh',
@@ -64,6 +65,18 @@ test('the key covers every input the verdict depends on', () => {
   for (const [field, value] of Object.entries(changes)) {
     assert.notEqual(verdictKey(identity({ [field]: value })), base, `${field} must change the key`)
   }
+})
+
+test('near-miss commands never share a key', () => {
+  // The failure mode a 32-bit FNV invited: a later, different publish
+  // answering as the one the user authorized. Capacity is 32; the digest
+  // still has to separate these without hoping the birthday bound holds.
+  const authorized = verdictKey(identity({ command: 'npm publish' }))
+  const tagged = verdictKey(identity({ command: 'npm publish --tag next' }))
+  const otherDir = verdictKey(identity({ workspaceCwd: '/srv/other' }))
+  assert.notEqual(authorized, tagged)
+  assert.notEqual(authorized, otherDir)
+  assert.notEqual(tagged, otherDir)
 })
 
 test('a remembered verdict is served inside its TTL and dropped after it', () => {

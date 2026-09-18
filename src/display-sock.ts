@@ -2,7 +2,7 @@
  * Length-prefixed local-socket frames between a leftover Host and a new
  * Display relay. Binary on purpose: paint bytes are raw ANSI, not JSON.
  *
- * Transport: an AF_UNIX socket at `$DSH_HOME/tui-socks/<id>.sock` on POSIX,
+ * Transport: an AF_UNIX socket at `$DSH_HOME/tui-socks/<label>-<digest>.sock` on POSIX,
  * and a named pipe at `\\.\pipe\dsh-tui-<home>-<id>` on Windows. Node requires
  * the `\\.\pipe\` form there — a plain file path cannot be listened on — and
  * `fs.access()` cannot see pipes, so channel liveness always goes through
@@ -129,11 +129,12 @@ export function safeSessionId(sessionId: string): string {
 /**
  * Readable, collision-free short label for one session: a sanitized head plus a
  * digest of the raw id. The digest is always appended because sanitizing alone
- * collapses distinct ids (`abc`, `abc.`, `_abc`, `abc..`) into one name, and on
- * Windows the pipe namespace is machine-wide — the collapsed forms would share
- * a channel and a relay could attach to the wrong session.
+ * collapses distinct ids (`foo/bar` and `foo_bar`, `abc` and `abc.`) into one
+ * name. On Windows the pipe namespace is machine-wide; on POSIX the same
+ * collapse would share a socket file and a lock, so a relay could attach to
+ * the wrong session.
  */
-function sessionLabel(sessionId: string, maxLength: number): string {
+export function sessionLabel(sessionId: string, maxLength: number): string {
   const digest = createHash('sha1').update(sessionId).digest('hex').slice(0, 8)
   const head = safeSessionId(sessionId)
     .replaceAll(/\.{2,}/gu, '_')
@@ -165,7 +166,41 @@ export function sessionSockPath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (platform === 'win32') return windowsPipePath(sessionId, dshHome)
+  // UNIX_PATH_MAX is 108 on Linux; leave headroom for the directory prefix.
+  return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 80)}.sock`)
+}
+
+/**
+ * Pre-digest POSIX socket path (`tui-socks/<safeId>.sock`).
+ *
+ * 0.7.1 Hosts still listen here. A newer build's attach must find that channel
+ * instead of spawning a second Host that dies on the session write handle.
+ * Distinct ids that collapsed under sanitizing (`foo/bar` vs `foo_bar`)
+ * share this name — that is why the digest form exists — so a leftover
+ * file is only an attach target, never the path a new Host binds.
+ */
+export function legacySessionSockPath(
+  sessionId: string,
+  dshHome: string = defaultDshHome(),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform === 'win32') return undefined
   return join(sessionSockDir(dshHome), `${safeSessionId(sessionId)}.sock`)
+}
+
+/**
+ * Channel a leftover Host may still be listening on: the digested path first,
+ * then the 0.7.1 name when it is different.
+ */
+export function sessionSockLookupPaths(
+  sessionId: string,
+  dshHome: string = defaultDshHome(),
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const current = sessionSockPath(sessionId, dshHome, platform)
+  const legacy = legacySessionSockPath(sessionId, dshHome, platform)
+  if (legacy === undefined || legacy === current) return [current]
+  return [current, legacy]
 }
 
 /**
@@ -183,6 +218,19 @@ export function sessionErrPath(
   const sock = sessionSockPath(sessionId, dshHome, platform)
   if (isPipePath(sock)) return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 64)}.err`)
   return `${sock}.err`
+}
+
+/** Pre-digest Host stderr log next to the 0.7.1 socket, when that name differs. */
+export function legacySessionErrPath(
+  sessionId: string,
+  dshHome: string = defaultDshHome(),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const legacy = legacySessionSockPath(sessionId, dshHome, platform)
+  if (legacy === undefined) return undefined
+  const current = sessionErrPath(sessionId, dshHome, platform)
+  const candidate = `${legacy}.err`
+  return candidate === current ? undefined : candidate
 }
 
 export function encodeFrame(type: number, payload: Buffer = Buffer.alloc(0)): Buffer {
