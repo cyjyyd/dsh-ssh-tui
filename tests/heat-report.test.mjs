@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import {
   apiDay,
@@ -242,7 +242,6 @@ test('the token is found in the environment, a token file, or a credential store
   writeFileSync(file, 'github_pat_fromfile\n')
   assert.deepEqual(discoverToken({ tokenFile: file }), { token: 'github_pat_fromfile', source: file })
   assert.deepEqual(discoverToken({ env: { GITHUB_TOKEN: ' github_pat_env ' }, home: dir }), { token: 'github_pat_env', source: 'the environment' })
-  writeFileSync(join(dir, '.config'), '')
   const home = mkdtempSync(join(tmpdir(), 'dsh-heat-home-'))
   assert.equal(discoverToken({ env: {}, home }).token, undefined)
   const parsed = tokenFromGitCredentials('https://cyjyyd:github_pat_abc123@github.com\n')
@@ -258,9 +257,10 @@ test('a token never survives into a message or a store', () => {
 })
 
 test('the store defaults to $DSH_HOME, and a blank one is unset', () => {
-  assert.equal(defaultStorePath({ DSH_HOME: '/srv/dsh' }, '/home/u'), '/srv/dsh/heat/samples.jsonl')
-  assert.equal(defaultStorePath({ DSH_HOME: '   ' }, '/home/u'), '/home/u/.dsh/heat/samples.jsonl')
-  assert.equal(defaultStorePath({}, '/home/u'), '/home/u/.dsh/heat/samples.jsonl')
+  // `resolve` in the expectation: on Windows both the drive and the separator differ.
+  assert.equal(defaultStorePath({ DSH_HOME: '/srv/dsh' }, '/home/u'), join(resolve('/srv/dsh'), 'heat', 'samples.jsonl'))
+  assert.equal(defaultStorePath({ DSH_HOME: '   ' }, '/home/u'), join(resolve('/home/u'), '.dsh', 'heat', 'samples.jsonl'))
+  assert.equal(defaultStorePath({}, '/home/u'), join(resolve('/home/u'), '.dsh', 'heat', 'samples.jsonl'))
 })
 
 test('day helpers stay in UTC across month ends', () => {
