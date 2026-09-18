@@ -192,6 +192,27 @@ test('a wide card paints two columns that fit, a narrow one stacks', async () =>
   )
   assert.ok((paired.spans ?? []).length >= 1, 'and the changed characters are still emphasised')
 
+  // A paired row is a removal and an addition at once, so it carries one role
+  // per column: colourizing the whole row would mislabel half of it, and a
+  // single neutral kind (what shipped in 0.7.0/0.7.1) dropped the diff colour
+  // from the default wide view entirely.
+  const columns = paired.columns ?? []
+  assert.equal(columns.length, 2, JSON.stringify(paired))
+  assert.equal(columns[0].kind, 'diff-del')
+  assert.equal(columns[1].kind, 'diff-add')
+  assert.equal(columns[0].start, 0)
+  assert.equal(columns[0].end, paired.text.indexOf('│') - 1, 'the left column ends at the gutter')
+  assert.equal(paired.text.slice(columns[1].start - 3, columns[1].start), ' │ ')
+  // A context row reads the same on both sides: it stays neutral.
+  const context = wide.find(line => line.text.includes('keep') && line.text.includes('│'))
+  assert.equal((context.columns ?? []).length, 0, JSON.stringify(context))
+  // The blank side of a one-sided change gets no colour either.
+  const oneSided = renderToolDiff([{ path: 'a.ts', oldText: 'keep\n', newText: 'keep\nadded\n' }], 20, 120)
+    .find(line => line.text.includes('+ added'))
+  assert.equal(oneSided.columns.length, 1, JSON.stringify(oneSided))
+  assert.equal(oneSided.columns[0].kind, 'diff-add')
+  assert.equal(oneSided.text.slice(0, oneSided.text.indexOf('│') - 1).trim(), '', 'the empty side is unpainted')
+
   const narrow = renderToolDiff(diffs, 20, 80)
   assert.equal(narrow.some(line => line.text.includes('│')), false, 'a narrow diff stacks instead')
 

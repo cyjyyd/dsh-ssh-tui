@@ -221,6 +221,56 @@ test('a running child keeps the accent of the route it actually runs on', async 
   assert.ok(foreign.includes('\x1b[38;5;80m'), foreign)
 })
 
+/**
+ * The wide-terminal diff holds two roles in one row, so the colour has to land
+ * on the column that owns it. Painting the row as a single kind mislabels half
+ * of it — and the neutral rows shipped in 0.7.0 dropped the diff colour from
+ * the default view altogether, which is what this guards.
+ */
+test('a side-by-side diff colours each column, and only where there is a line', async () => {
+  const { SshTui } = await import('../lib/tui.js')
+  const { stripAnsi, visibleWidth } = await import('../lib/term-text.js')
+  const build = depth => {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 's', options: {}, status: 'idle', session: { id: 's', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 's', color: true, headlessDisplay: true })
+    // The palette is pinned on the instance: the terminal the suite runs on has
+    // no say in what this test is about.
+    tui.colorDepth = depth
+    tui.color = depth !== 'none'
+    tui.rows.push({
+      kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts',
+      args: '{}', output: '', status: 'ok', expanded: true,
+      diff: [{ path: 'a.ts', oldText: 'keep\nold line\n', newText: 'keep\nnew line\nadded\n' }],
+    })
+    return tui.captureFrame(120, 20)
+  }
+  const DEL = '48;2;48;20;20'
+  const ADD = '48;2;18;42;24'
+  const rows = build('truecolor')
+  // Match on the plain text: the word emphasis puts escapes inside the phrase.
+  const find = needle => rows.find(line => stripAnsi(line).includes(needle))
+  const paired = find('- old line')
+  assert.ok(paired !== undefined && paired.includes(DEL) && paired.includes(ADD), paired)
+  assert.equal(visibleWidth(paired), 120, 'the row fills the width, so both bars are flush')
+  const context = find('keep')
+  assert.ok(context !== undefined && context.includes('│'), context)
+  assert.equal(context.includes(DEL) || context.includes(ADD), false, context)
+  const added = find('+ added')
+  assert.ok(added !== undefined, 'the one-sided addition is rendered')
+  assert.equal(added.includes(DEL), false, 'the blank side carries no removal colour')
+  assert.ok(added.includes(ADD), added)
+  // An 8-colour terminal keeps the red/green foreground and loses the fills;
+  // one without colour keeps only the markers and the emphasis.
+  assert.equal(/38;2|48;2|38;5|48;5/u.test(build('8').join('\n')), false)
+  const mono = build('none').join('\n')
+  for (const sgr of mono.match(/\x1b\[[0-9;]*m/gu) ?? []) {
+    for (const param of sgr.slice(2, -1).split(';')) {
+      assert.equal(/^(3[0-9]|4[0-9]|9[0-7]|10[0-7])$/u.test(param), false, `no colour survives: ${sgr}`)
+    }
+  }
+})
+
 test('a monochrome terminal receives no colour at all, and keeps the marks', async t => {
   const { tui, frame } = await frameAt('none', t)
   tui.rows.push({ kind: 'error', text: '✖ something failed' })

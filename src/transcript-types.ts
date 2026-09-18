@@ -168,6 +168,21 @@ export interface DiffDisplayLine {
    * literal `[7m` on screen.
    */
   spans?: readonly { start: number; end: number }[]
+  /**
+   * Parts of `text` that carry their own role, for a line that holds two at
+   * once: the columns of a side-by-side diff are a removal on the left and an
+   * addition on the right, and painting the row as either one would mislabel
+   * half of it. Offsets are UTF-16 into `text`; anything not covered keeps the
+   * line's own `kind`.
+   */
+  columns?: readonly DiffDisplayColumn[]
+}
+
+/** One part of a line, painted with its own display role. */
+export interface DiffDisplayColumn {
+  start: number
+  end: number
+  kind: DisplayKind
 }
 
 /** One file's change, matching the web diff-card contract (`card: 'diff'`). */

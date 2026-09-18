@@ -3016,6 +3016,49 @@ export class SshTui {
     return rows.length === 0 ? [this.styleLine(line.kind, '')] : rows
   }
 
+  /**
+   * A body row whose parts carry different roles: the two columns of a
+   * side-by-side diff.
+   *
+   * No single kind fits such a row — the left column is a removal, the right an
+   * addition — so each part is painted with its own style, the gutter keeps the
+   * row's own (neutral) one, and a word emphasis rides inside whichever column
+   * it belongs to. The first column takes the leading indent and the last one
+   * runs to the end of the row, so both bars are flush.
+   */
+  private styleColumnedLine(line: DiffDisplayLine, width: number): string[] {
+    const indent = 2
+    const padded = padToWidth(`  ${line.text}`, Math.max(1, width))
+    const cut = (at: number): number => Math.max(0, Math.min(padded.length, at + indent))
+    const columns = (line.columns ?? []).map((column, index, all) => ({
+      start: index === 0 ? 0 : cut(column.start),
+      end: index === all.length - 1 ? padded.length : cut(column.end),
+      kind: column.kind,
+    }))
+    const cuts = new Set<number>([0, padded.length])
+    for (const span of line.spans ?? []) {
+      cuts.add(cut(span.start))
+      cuts.add(cut(span.end))
+    }
+    for (const column of line.columns ?? []) {
+      cuts.add(cut(column.start))
+      cuts.add(cut(column.end))
+    }
+    const ordered = [...cuts].sort((left, right) => left - right)
+    const pieces: string[] = []
+    for (let at = 0; at + 1 < ordered.length; at += 1) {
+      const from = ordered[at] ?? 0
+      const to = ordered[at + 1] ?? from
+      if (to <= from) continue
+      const column = columns.find(item => item.start <= from && item.end >= to)
+      const emphasis = (line.spans ?? []).some(span => cut(span.start) <= from && cut(span.end) >= to)
+      const text = padded.slice(from, to)
+      const styled = this.styleLine(column?.kind ?? line.kind, text)
+      pieces.push(emphasis ? `\x1b[7m${styled}\x1b[27m` : styled)
+    }
+    return pieces.length === 0 ? [this.styleLine(line.kind, '')] : [pieces.join('')]
+  }
+
   private paintToolBodyLine(
     addDisplay: (line: string, ref?: Row | CollapsibleBlock) => void,
     row: Row | CollapsibleBlock | undefined,
@@ -3024,6 +3067,12 @@ export class SshTui {
   ): void {
     const inner = Math.max(1, width - 2)
     const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
+    // A line that holds two roles (the columns of a side-by-side diff) is
+    // painted part by part; its emphasis rides inside whichever part it is in.
+    if (line.columns !== undefined && line.columns.length > 0) {
+      for (const painted of this.styleColumnedLine(line, width)) addDisplay(painted, row)
+      return
+    }
     // An emphasised line is styled in parts: the escapes wrap *styled* pieces,
     // because the painter's sanitiser strips any escape that reaches it inside
     // the text — which is how a literal `[7m` once appeared on screen.

@@ -625,10 +625,12 @@ export function renderToolDiff(diffs: ToolDiffHunk[], maxLines: number, width?: 
 /**
  * The diff rows with the two columns of a wide terminal.
  *
- * A paired row is neutral rather than styled as an addition or a removal: it is
- * both, and styling it as one would mislabel half of it. The `-`/`+` markers
- * inside each column carry the meaning, and the emphasis still marks the
- * characters that differ.
+ * A paired row is a removal on the left and an addition on the right at the
+ * same time, so it carries one role *per column* (`columns`) instead of one kind
+ * for the row — the painter colours each side on its own and leaves the gutter
+ * alone. A row with a single side is wholly that change, and a context row,
+ * which reads the same on both sides, stays neutral. The `-`/`+` markers inside
+ * each column still carry the meaning on a terminal without colour.
  */
 function paintHunksSideBySide(
   perHunk: readonly { hunk: ToolDiffHunk; lines: DiffLine[] }[],
@@ -654,10 +656,21 @@ function paintHunksSideBySide(
           ...row.leftSpans,
           ...row.rightSpans.map(span => ({ start: span.start + column + SIDE_BY_SIDE_GUTTER.length, end: span.end + column + SIDE_BY_SIDE_GUTTER.length })),
         ]
+        // A side with no line of its own gets no colour: a removal is red where
+        // the removal is, an addition green where the addition is, and the
+        // blank half of a one-sided change stays neutral instead of turning the
+        // whole row into a bar with nothing in it.
+        const columns = [
+          ...(row.context || row.left === '' ? [] : [{ start: 0, end: column, kind: 'diff-del' as const }]),
+          ...(row.context || row.right === ''
+            ? []
+            : [{ start: column + SIDE_BY_SIDE_GUTTER.length, end: text.length, kind: 'diff-add' as const }]),
+        ]
         rows.push({
-          kind: row.context ? 'tool-result' : 'tool-result',
+          kind: 'tool-result',
           text,
           ...(spans.length === 0 ? {} : { spans }),
+          ...(columns.length === 0 ? {} : { columns }),
         })
       }
     }
