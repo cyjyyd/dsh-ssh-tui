@@ -2752,7 +2752,9 @@ test('subagent overlay never shows session or call hashes', () => {
   assert.equal(card.logs.some(entry => entry.text.includes(callId) || entry.text.includes('call-')), false)
   const inspect = subagentInspectLines(card)
   const blob = inspect.map(line => line.text).join('\n')
-  assert.equal(blob.includes(childId), false)
+  // The overlay is the detail surface: the child's own session id belongs there
+  // (`/subagents kill` takes it), while the parent's call id never does.
+  assert.equal(blob.includes(childId), true)
   assert.equal(blob.includes(callId), false)
   assert.ok(blob.includes(name))
 })
@@ -2849,6 +2851,18 @@ test('subagent courtesy names distill the parent task onto a directional beast',
   const unnamed = subagentCourtesyName({ sessionId: 'child-a', fallback: '子代理 spawn' })
   assert.match(unnamed, /承命·(青龙|白虎|朱雀|玄武)/u)
   assert.equal(subagentRoleId('run the install in the terminal'), 'courier')
+  // Stems match their inflections. A trailing `\b` after `summar` never matched
+  // `summarize`, so every such description silently fell back to 承命.
+  assert.equal(subagentRoleId('summarize the diff'), 'scribe')
+  assert.equal(subagentRoleId('investigate the crash'), 'scribe')
+  assert.equal(subagentRoleId('analyze the module'), 'scribe')
+  assert.equal(subagentRoleId('diagnose the failure'), 'scribe')
+  assert.equal(subagentRoleId('evaluate the options'), 'scribe')
+  assert.equal(subagentRoleId('clarify the spec'), 'inquirer')
+  assert.equal(subagentRoleId('validate the output'), 'sentinel')
+  assert.equal(subagentRoleId('organize the release notes'), 'steward')
+  assert.equal(subagentRoleId('coordinate the parallel jobs'), 'steward')
+  assert.equal(subagentRoleId('execute the installer'), 'courier')
 })
 
 test('a child turn/end error lands on the subagent card instead of a blank close', () => {
@@ -2900,6 +2914,129 @@ test('subagent failure hints name quota, auth, and effort with a command', () =>
   assert.match(subagentChipSummary(card), /额度|quota|\/usage/iu)
   const inspect = subagentInspectLines(card).map(line => line.text).join('\n')
   assert.match(inspect, /失败|failed/u)
+})
+
+/** Drive one live spawn the way the Host does: call, start, wrapper result. */
+function liveSpawn(tui, agent, { callId, description, childId, runId = `run-${callId}`, result = 'started' }) {
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/call',
+    time: 10,
+    data: { callId, name: 'subagent', arguments: JSON.stringify({ description, prompt: 'go' }) },
+  })
+  if (childId !== undefined) {
+    tui.handleSubagentStart({ runId, id: childId, provider: 'spawn', local: true })
+  }
+  tui.handleSessionEvent(agent.session, {
+    type: 'tool/result',
+    time: 20,
+    data: { message: { source: { kind: 'tool', callId }, content: [{ type: 'text', text: result }] } },
+  })
+}
+
+test('a live spawn leaves one chip and no second subagent tool card', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  liveSpawn(tui, agent, { callId: 'spawn-a', description: 'scan /www', childId: 'child-a' })
+  liveSpawn(tui, agent, { callId: 'spawn-b', description: 'edit src/tui.ts', childId: 'child-b' })
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(cards.length, 2, JSON.stringify(tui.rows.map(row => row.kind)))
+  // The wrapper result must not be drawn as a `subagent` tool card beside the
+  // chip: that duplicate is the whole point of the guard.
+  assert.equal(tui.rows.filter(row => row.kind === 'tool').length, 0)
+  assert.equal(cards[0].task, 'scan /www')
+  assert.equal(cards[1].task, 'edit src/tui.ts')
+  assert.equal(cards[0].childSessionId, 'child-a')
+  assert.equal(cards[1].childSessionId, 'child-b')
+  assert.equal(cards[0].status, 'running', 'only the child settles its own chip')
+  assert.equal(tui.pendingSubagentTasks.length, 0)
+})
+
+test('a spawn that never starts does not name the next child', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // Denied: the wrapper errors out and no `subagent/start` ever arrives.
+  liveSpawn(tui, agent, { callId: 'spawn-denied', description: 'scan /www', childId: undefined, result: 'denied' })
+  liveSpawn(tui, agent, { callId: 'spawn-ok', description: 'edit src/tui.ts', childId: 'child-ok' })
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(cards.length, 1)
+  assert.equal(cards[0].task, 'edit src/tui.ts')
+  assert.equal(subagentRoleId(cards[0].task), 'artisan')
+  assert.equal(subagentDisplayName(cards[0]).includes('探路'), false, subagentDisplayName(cards[0]))
+})
+
+test('a healthy end clears the failure hint an earlier attempt left behind', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'turn/end',
+    data: { turn: 1, reason: { kind: 'error', error: { message: '401 unauthorized token expired' } } },
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.match(card.failHint ?? '', /\/setup/)
+  tui.handleSubagentEnd({
+    runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'all done' }],
+  })
+  assert.equal(card.status, 'ok')
+  assert.equal(card.failHint, undefined)
+  assert.equal(subagentChipSummary(card).includes('/setup'), false, subagentChipSummary(card))
+  // History may still carry the failed attempt's log line; the card's own
+  // surfaces (chip summary, header, fail-hint row) must not claim a failure.
+  const lines = subagentInspectLines(card)
+  assert.equal(lines[0].text.includes('/setup'), false, lines[0].text)
+})
+
+test('a fail hint names the model route, never the subagent backend', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // `fork` is a subagent backend, not a provider a user can re-authenticate.
+  tui.handleSubagentStart({ runId: 'run-f', id: 'child-f', provider: 'fork', local: false })
+  tui.handleSubagentEnd({
+    runId: 'run-f', id: 'child-f', provider: 'fork', local: false, stopReason: 'error',
+    lastAssistantMessage: [{ type: 'text', text: '401 unauthorized' }],
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card.failHint.includes('fork'), false, card.failHint)
+  assert.match(card.failHint, /\/setup/)
+  const inspect = subagentInspectLines(card).map(line => line.text).join('\n')
+  assert.equal(inspect.includes('fork'), false, inspect)
+  assert.equal(inspect.includes('spawn'), false, inspect)
+})
+
+test('the courtesy beast survives a resume of the same child', () => {
+  const base = {
+    kind: 'subagent', runId: 'run-a', provider: 'spawn', local: true, label: '子代理 spawn',
+    task: 'scan repo', status: 'ok', startedAt: 0, lastActivity: '', logs: [], expanded: false,
+  }
+  const live = { ...base, sessionId: 'child-9f', childSessionId: 'child-9f' }
+  const resumed = { ...base, sessionId: 'call-abc', childSessionId: 'child-9f' }
+  assert.equal(subagentDisplayName(live), subagentDisplayName(resumed))
+  assert.match(subagentDisplayName(live), /探路/u)
+})
+
+test('the overlay keeps a child tool result and the model route', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'tool/call',
+    data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls /www"}' },
+  })
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'tool/result',
+    data: { message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'site-a\nsite-b' }] } },
+  })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  const inspect = subagentInspectLines(card).map(line => line.text).join('\n')
+  assert.match(inspect, /site-b/u, 'the tool output is readable in the only detail surface')
+  assert.equal(inspect.includes('spawn'), false, inspect)
+  assert.match(inspect, /child-a/u)
 })
 
 test('parseWorkspaceView accepts compact aliases', () => {

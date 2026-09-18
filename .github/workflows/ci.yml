@@ -57,7 +57,12 @@ jobs:
         if: matrix.dsh == '0.1.5-rc.1'
         run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: npx tsc -p tsconfig.json --noEmit
-      - run: node --test "tests/*.test.mjs"
+      # The TAP stream is kept on disk so a red run can annotate *which* test
+      # failed: the checks UI otherwise shows only "exit code 1".
+      - run: node --test --test-reporter=tap --test-reporter-destination=test-output.txt --test-reporter=spec --test-reporter-destination=stdout "tests/*.test.mjs"
+      - name: Annotate the failing tests
+        if: failure()
+        run: node scripts/ci-annotate-failures.mjs test-output.txt
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
   # path only gets real coverage on a Windows runner.
@@ -72,4 +77,7 @@ jobs:
       - run: npx tsc -p tsconfig.json --noEmit
       # Node expands the quoted glob itself: PowerShell does not glob for
       # native commands, and this keeps the step identical on both shells.
-      - run: node --test "tests/*.test.mjs"
+      - run: node --test --test-reporter=tap --test-reporter-destination=test-output.txt --test-reporter=spec --test-reporter-destination=stdout "tests/*.test.mjs"
+      - name: Annotate the failing tests
+        if: failure()
+        run: node scripts/ci-annotate-failures.mjs test-output.txt

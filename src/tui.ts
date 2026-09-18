@@ -1231,7 +1231,7 @@ export class SshTui {
   private activeSubagents = new Map<string, { id: string; provider: string; startedAt: number }>()
   private subagentSessions = new Set<string>()
   /** Parent `subagent` tool descriptions waiting for the matching child card. */
-  private pendingSubagentTasks: string[] = []
+  private pendingSubagentTasks: { task: string; callId: string }[] = []
   private openToolCalls = new Map<string, string>()
   /** Survives result settlement so a card-less result can still be labelled. */
   private toolCallNames = new Map<string, string>()
@@ -3503,7 +3503,7 @@ export class SshTui {
           summary: subagentChipSummary(row),
           spinner: running ? ` ${this.spinnerFrame()}` : '',
           inspectHint: t('card.inspect'),
-          foreign: subagentProviderDiffers(this.currentProviderId(), this.subagentSelection.current.provider),
+          foreign: subagentProviderDiffers(this.currentProviderId(), row.modelProvider),
         })
         const headerSegments = this.color ? header.segments : []
         const collapsed = truncateToWidth(header.plain, Math.max(1, width - 2))
@@ -4970,20 +4970,20 @@ export class SshTui {
           const present = presentToolCall(event.data.name, event.data.arguments)
           if (SUBAGENT_TOOL_NAMES.has(event.data.name)) {
             const task = present.summary.trim()
-            // Replay never gets `subagent/start` to drain this queue. Only a
-            // live parent spawn should wait for the matching child card.
-            if (task !== '' && !this.replaying) this.pendingSubagentTasks.push(task)
-            const live = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-              candidate.kind === 'subagent' && candidate.status === 'running')
-            if (live !== undefined) {
-              if (task !== '' && (live.task === undefined || live.task === '')) live.task = task
-              live.runId = String(event.data.callId)
-            } else if (this.replaying) {
+            const callId = String(event.data.callId)
+            // Replay never gets `subagent/start` to drain this queue, so only a
+            // live spawn waits for its child card. The pair is dropped again at
+            // `tool/result` when the spawn never started a child (denied,
+            // cancelled): a description left behind would name the next child.
+            if (task !== '' && !this.replaying) this.pendingSubagentTasks.push({ task, callId })
+            if (this.replaying && !this.rows.some(candidate =>
+              candidate.kind === 'subagent' && candidate.runId === callId)) {
               // Live `subagent/start` is not in the parent log. Resume still
               // needs a courtesy chip; a live Host already has the real card.
               this.pushRow(subagentRowFromSpawnTool({
-                callId: String(event.data.callId),
+                callId,
                 task,
+                modelProvider: this.currentProviderId(),
                 status: 'running',
                 startedAt: typeof event.time === 'number' ? event.time : Date.now(),
               }))
@@ -5032,8 +5032,12 @@ export class SshTui {
         this.openToolCalls.delete(String(event.data.message.source.callId))
         this.statsTracker.noteToolEnd(String(event.data.message.source.callId), event.time)
         const callId = String(event.data.message.source.callId)
+        // A spawn whose wrapper came back without starting a child (approval
+        // denied, provider refused, turn cancelled) must not leave its
+        // description queued: the next child would inherit that name.
+        this.pendingSubagentTasks = this.pendingSubagentTasks.filter(entry => entry.callId !== callId)
         const spawnCard = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-          candidate.kind === 'subagent' && candidate.runId === callId)
+          candidate.kind === 'subagent' && (candidate.runId === callId || candidate.spawnCallId === callId))
         const output = collectText(event.data.message.content)
         if (spawnCard !== undefined) {
           // A live child already owns this spawn: the parent tool/result is
@@ -5082,6 +5086,10 @@ export class SshTui {
           const recordedName = this.toolCallNames.get(callId)
             ?? (typeof sourceName === 'string' ? sourceName : '')
           if (recordedName !== '' && HIDDEN_TOOL_NAMES.has(recordedName)) break
+          // A spawn is drawn as the child's chip, never as a `subagent` tool
+          // card: without a start there is still no card to settle, and a
+          // second card beside the chip is exactly the duplicate to avoid.
+          if (SUBAGENT_TOOL_NAMES.has(recordedName)) break
           // Never title a card with the call id (`call-<uuid>`). Prefer the
           // recorded tool name; fall back to a generic tool card.
           const toolName = displayToolName(recordedName)
@@ -5690,7 +5698,9 @@ export class SshTui {
       }
       case 'assistant/message': {
         const text = collectText(event.data.message.content)
-        if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: clipSubagentActivity(text, 80) })
+        // Long enough to be worth opening the overlay for; the collapsed chip
+        // reads `lastActivity`, not this entry.
+        if (text !== '') appendSubagentLog(row, { kind: 'assistant', text: clipSubagentActivity(text, 200) })
         break
       }
       case 'tool/call': {
@@ -5711,9 +5721,13 @@ export class SshTui {
         const recorded = this.toolCallNames.get(callId)
           ?? (typeof sourceName === 'string' ? sourceName : '')
         const title = toolTitle(displayToolName(recorded))
+        // The overlay is the only place a child's tool output can be read, so
+        // keep a few lines of it — the call line itself carries the title.
+        const output = truncate(collectText(event.data.message.content), 3).trim()
         appendSubagentLog(row, {
           kind: 'result',
           text: `${ok ? '✓' : '✗'} ${title}`,
+          ...(output === '' ? {} : { detail: output }),
           callId,
         })
         break
@@ -5726,7 +5740,7 @@ export class SshTui {
         const explained = describeSubagentFailure({
           stopReason: reason.kind,
           message: error,
-          provider: this.subagentSelection.current.provider ?? row.provider,
+          provider: row.modelProvider ?? this.currentProviderId(),
         })
         if (explained !== undefined) row.failHint = explained.hint
         appendSubagentLog(row, {
@@ -5760,41 +5774,50 @@ export class SshTui {
     })
     this.subagentSessions.add(sessionId)
     this.lastActivity = Date.now()
-    const task = this.pendingSubagentTasks.shift()
+    // The spawn description is a FIFO pair (task + parent call id). A card that
+    // is already linked to a spawn keeps it: only a fresh child may take the
+    // oldest waiting description, or two parallel spawns swap names.
     const existing = this.findSubagentRow(sessionId)
-      ?? (task === undefined ? undefined : this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-        candidate.kind === 'subagent'
-        && candidate.status === 'running'
-        && candidate.childSessionId === undefined
-        && candidate.task === task))
+    const pending = existing?.spawnCallId === undefined ? this.pendingSubagentTasks.shift() : undefined
+    const task = pending?.task
+    const modelProvider = this.subagentSelection.current.provider ?? this.currentProviderId()
+    const startedText = t('sub.startedDetail', {
+      provider: modelProvider,
+      external: info.local ? '' : t('sub.external'),
+    })
     if (existing !== undefined) {
       existing.childSessionId = sessionId
       existing.runId = String(info.runId)
       existing.provider = info.provider
+      existing.modelProvider = modelProvider
       existing.local = info.local
       existing.status = 'running'
       existing.startedAt = Date.now()
       existing.endedAt = undefined
       existing.stopReason = undefined
+      delete existing.failHint
       existing.lastActivity = t('sub.started')
       existing.expanded = false
+      if (pending !== undefined) existing.spawnCallId = pending.callId
       if (task !== undefined) existing.task = task
-      appendSubagentLog(existing, { kind: 'system', text: t('sub.startedDetail', { provider: info.provider, external: info.local ? '' : t('sub.external') }) })
+      appendSubagentLog(existing, { kind: 'system', text: startedText })
       this.refreshOpenSubagentInspect(existing)
     } else {
       this.pushRow({
         kind: 'subagent',
         sessionId,
         childSessionId: sessionId,
+        ...(pending === undefined ? {} : { spawnCallId: pending.callId }),
         runId: String(info.runId),
         provider: info.provider,
+        modelProvider,
         local: info.local,
         label: t('sub.label', { provider: info.provider }),
         ...(task === undefined ? {} : { task }),
         status: 'running',
         startedAt: Date.now(),
         lastActivity: t('sub.started'),
-        logs: [{ kind: 'system', text: t('sub.startedDetail', { provider: info.provider, external: info.local ? '' : t('sub.external') }) }],
+        logs: [{ kind: 'system', text: startedText }],
         expanded: false,
       })
     }
@@ -5808,17 +5831,26 @@ export class SshTui {
     const output = info.lastAssistantMessage === undefined
       ? ''
       : clipSubagentActivity(collectText(info.lastAssistantMessage), 80)
-    const row = this.findSubagentRow(String(info.id)) ?? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-      candidate.kind === 'subagent' && candidate.runId === String(info.runId))
+    const row = this.findSubagentRow(String(info.id))
+      ?? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+        candidate.kind === 'subagent' && candidate.runId === String(info.runId))
+      // A chip rebuilt from the parent spawn tool has no child id yet: adopt the
+      // oldest one so an end event settles it instead of adding a twin.
+      ?? this.rows.find((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+        candidate.kind === 'subagent' && candidate.status === 'running' && candidate.childSessionId === undefined)
     const failed = info.stopReason !== 'completed'
+    const modelProvider = row?.modelProvider
+      ?? this.subagentSelection.current.provider
+      ?? this.currentProviderId()
     const explained = failed
       ? describeSubagentFailure({
         stopReason: info.stopReason,
         message: output,
-        provider: this.subagentSelection.current.provider ?? info.provider,
+        provider: modelProvider,
       })
       : undefined
-    const hint = explained?.hint ?? row?.failHint
+    // A healthy end clears any hint an earlier failed attempt left on the row.
+    const hint = explained?.hint
     const endText = hint === undefined
       ? t('sub.ended', { reason: info.stopReason }) + (output === '' ? '' : ` · ${output}`)
       : hint
@@ -5826,7 +5858,10 @@ export class SshTui {
       row.status = info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok'
       row.endedAt = Date.now()
       row.stopReason = info.stopReason
-      if (hint !== undefined) row.failHint = hint
+      row.childSessionId = String(info.id)
+      row.modelProvider = modelProvider
+      if (hint === undefined) delete row.failHint
+      else row.failHint = hint
       appendSubagentLog(row, {
         kind: failed ? 'result' : 'assistant',
         text: endText,
@@ -5836,8 +5871,10 @@ export class SshTui {
       this.pushRow({
         kind: 'subagent',
         sessionId: String(info.id),
+        childSessionId: String(info.id),
         runId: String(info.runId),
         provider: info.provider,
+        modelProvider,
         local: info.local,
         label: t('sub.label', { provider: info.provider }),
         status: info.stopReason === 'aborted' ? 'aborted' : failed ? 'error' : 'ok',
@@ -9413,6 +9450,9 @@ export class SshTui {
             })()
             return t('sub.listLine', {
               label,
+              // `/subagents kill` takes this id, and the list is where a user
+              // looks it up: the chip itself stays name-only.
+              id: sub.id,
               provider: sub.provider,
               seconds: Math.floor((Date.now() - sub.startedAt) / 1000),
               activity,

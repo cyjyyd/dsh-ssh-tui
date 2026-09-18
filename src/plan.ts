@@ -3,7 +3,7 @@
  */
 
 import { t } from './i18n/index.js'
-import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens } from './footer.js'
+import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens, providerShortCode } from './footer.js'
 import { parseJsonArgs } from './json-args.js'
 import { subagentCourtesyName } from './job-label.js'
 import { subagentIdentitySgr } from './subagent-model.js'
@@ -426,6 +426,8 @@ export function subagentRowFromSpawnTool(input: {
   callId: string
   task: string
   provider?: string
+  /** Model route for the child, when the caller knows it. */
+  modelProvider?: string
   local?: boolean
   status?: Extract<Row, { kind: 'subagent' }>['status']
   startedAt?: number
@@ -434,14 +436,17 @@ export function subagentRowFromSpawnTool(input: {
 }): Extract<Row, { kind: 'subagent' }> {
   const task = input.task.trim()
   const provider = input.provider?.trim() || 'spawn'
+  const modelProvider = input.modelProvider?.trim() ?? ''
   const status = input.status ?? 'ok'
   const startedAt = input.startedAt ?? 0
   const output = clipSubagentActivity(input.output ?? '')
   return {
     kind: 'subagent',
     sessionId: input.callId,
+    spawnCallId: input.callId,
     runId: input.callId,
     provider,
+    ...(modelProvider === '' ? {} : { modelProvider }),
     local: input.local ?? true,
     label: t('sub.label', { provider }),
     ...(task === '' ? {} : { task }),
@@ -450,16 +455,22 @@ export function subagentRowFromSpawnTool(input: {
     ...(input.endedAt === undefined ? {} : { endedAt: input.endedAt }),
     lastActivity: output === '' ? t('sub.started') : output,
     logs: output === ''
-      ? [{ kind: 'system', text: t('sub.startedDetail', { provider, external: '' }) }]
+      ? [{ kind: 'system', text: t('sub.startedDetail', { provider: modelProvider === '' ? provider : modelProvider, external: '' }) }]
       : [{ kind: 'assistant', text: output }],
     expanded: false,
   }
 }
 
-/** Courtesy title: distilled role plus a directional beast. */
+/**
+ * Courtesy title: distilled role plus a directional beast.
+ *
+ * The beast comes from the child's own session id, never the parent call id a
+ * replayed chip was built with: the same child must keep its symbol across a
+ * `--resume`.
+ */
 export function subagentDisplayName(row: Extract<Row, { kind: 'subagent' }>): string {
   return subagentCourtesyName({
-    sessionId: row.sessionId,
+    sessionId: row.childSessionId ?? row.sessionId,
     ...(row.task === undefined ? {} : { task: row.task }),
     fallback: row.label,
   })
@@ -557,13 +568,20 @@ export function subagentLogDisplayKind(
   return 'system'
 }
 
-/** Overlay body: session line, stop reason, then the clipped child log. */
+/**
+ * Overlay body: session line, stop reason, then the clipped child log.
+ *
+ * The child's session id is the one `/subagents kill` takes, so it belongs on
+ * this line — the collapsed chip stays free of opaque ids.
+ */
 export function subagentInspectLines(row: Extract<Row, { kind: 'subagent' }>): DiffDisplayLine[] {
+  const modelProvider = row.modelProvider?.trim() ?? ''
   const lines: DiffDisplayLine[] = [{
     kind: 'subagent-header',
     text: t('sub.cardSession', {
       name: subagentDisplayName(row),
-      provider: row.provider,
+      id: row.childSessionId === undefined ? '' : ` · ${row.childSessionId}`,
+      provider: modelProvider === '' ? t('card.subagent') : modelProvider,
       external: row.local ? '' : t('sub.external'),
     }).trim(),
   }]
@@ -609,7 +627,11 @@ export function describeSubagentFailure(input: {
   }
   const blob = `${reason} ${message}`.toLowerCase()
   const rawProvider = input.provider?.trim() ?? ''
-  const provider = rawProvider === '' || rawProvider === 'spawn' ? t('card.subagent') : rawProvider
+  // The backend name (`spawn` / `fork` / `acp`) is not a provider a user can
+  // act on; the short code is what the footer already calls that route.
+  const provider = rawProvider === '' || rawProvider === 'spawn'
+    ? t('card.subagent')
+    : providerShortCode(rawProvider)
   if (
     /\b(401|403|unauthori[sz]ed|invalid[_ ]?(api[_ ]?key|token)|token expired|expired token|authentication|not authenticated)\b/u.test(blob)
     || /未授权|无效.*key|token 过期|登录过期|鉴权/.test(message)
@@ -640,15 +662,21 @@ function settleSubagentToolLine(
   if (open === undefined) return false
   const mark = /^\s*✗/u.test(entry.text) ? '✗' : '✓'
   if (!/[✓✗]/u.test(open.text)) open.text = `${open.text}  ${mark}`
+  // What the tool returned rides on the call line: the overlay is the only
+  // surface that can show it, and that line is where a reader looks for it.
+  const detail = entry.detail?.trim() ?? ''
+  if (detail !== '') open.text = `${open.text} · ${detail}`
   row.lastActivity = clipSubagentActivity(open.text)
   return true
 }
 
 export function appendSubagentLog(row: Extract<Row, { kind: 'subagent' }>, entry: SubagentLogEntry): void {
   if (entry.kind === 'result' && settleSubagentToolLine(row, entry)) return
-  row.logs.push(entry)
+  const detail = entry.detail?.trim() ?? ''
+  const text = detail === '' ? entry.text : `${entry.text} · ${detail}`
+  row.logs.push({ ...entry, text })
   if (row.logs.length > MAX_SUBAGENT_LOGS) row.logs.splice(0, row.logs.length - MAX_SUBAGENT_LOGS)
-  row.lastActivity = clipSubagentActivity(entry.text)
+  row.lastActivity = clipSubagentActivity(text)
 }
 
 /** Fold a child user/plugin blob: reminders become one inject chip, not raw XML. */

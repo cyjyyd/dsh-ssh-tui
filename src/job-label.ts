@@ -72,13 +72,13 @@ export type SubagentRoleId =
 
 const ROLE_RULES: readonly { id: SubagentRoleId; pattern: RegExp }[] = [
   { id: 'scout', pattern: /\b(scan|search|find|grep|glob|explore|look|locate|discover|inspect|audit|survey|probe|list|enumerate|index|crawl|research|recon)\b|扫描|搜索|查找|检索|探|搜|列目录|枚举|审计|巡|调研|勘查|探查|探路/iu },
-  { id: 'scribe', pattern: /\b(read|summar|review|analy[sz]|explain|understand|study|investigat|diagnos|trace|reason|think|compare|eval)\b|阅读|读取|摘要|总结|分析|解释|理解|研究|调查|诊断|对比|评估|审阅/iu },
+  { id: 'scribe', pattern: /\b(read|summar\w*|review|analy[sz]\w*|explain|understand|study|investigat\w*|diagnos\w*|trace|reason|think|compare|eval\w*)\b|阅读|读取|摘要|总结|分析|解释|理解|研究|调查|诊断|对比|评估|审阅/iu },
   { id: 'artisan', pattern: /\b(edit|write|patch|fix|implement|refactor|code|apply|create|update|change|modify|build|generate|draft)\b|编辑|写入|修改|实现|重构|修补|生成|起草|创建|更新/iu },
   { id: 'envoy', pattern: /\b(web|http|fetch|browse|url|download|request|api|network)\b|网页|抓取|浏览|下载|请求|联网/iu },
-  { id: 'inquirer', pattern: /\b(ask|question|clarif|confirm|choose|pick|option)\b|提问|询问|澄清|确认|选择/iu },
-  { id: 'sentinel', pattern: /\b(test|lint|check|verify|validat|assert|guard|watch|monitor)\b|测试|检查|校验|验证|看守|监视/iu },
-  { id: 'steward', pattern: /\b(plan|todo|goal|organiz|coordinat|orchestr|delegat|schedul)\b|计划|待办|目标|编排|协调|调度/iu },
-  { id: 'courier', pattern: /\b(run|execut|shell|bash|command|install|spawn|launch|job|terminal)\b|运行|执行|终端|安装|启动|命令/iu },
+  { id: 'inquirer', pattern: /\b(ask|question|clarif\w*|confirm|choose|pick|option)\b|提问|询问|澄清|确认|选择/iu },
+  { id: 'sentinel', pattern: /\b(test|lint|check|verify|validat\w*|assert|guard|watch|monitor)\b|测试|检查|校验|验证|看守|监视/iu },
+  { id: 'steward', pattern: /\b(plan|todo|goal|organiz\w*|coordinat\w*|orchestr\w*|delegat\w*|schedul\w*)\b|计划|待办|目标|编排|协调|调度/iu },
+  { id: 'courier', pattern: /\b(run|execut\w*|shell|bash|command|install|spawn|launch|job|terminal)\b|运行|执行|终端|安装|启动|命令/iu },
 ]
 
 /** Distill a parent spawn description into one role id. */

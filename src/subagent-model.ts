@@ -118,14 +118,17 @@ export function defaultSubagentModelForProvider(
  * The settings file can name the same supplier two ways — `xai` against
  * `grok`, `deepseek-official` against `deepseek` — and a `/submodel` pin that
  * spells the parent's own provider differently is still the parent's provider.
- * Only the known families collapse; two unknown ids stay two ids, because the
- * TUI cannot know that two custom routes share a bill.
+ * Only those aliases collapse: an id the TUI cannot vouch for (`deepseek-eu`,
+ * `grok-mirror`, a relay) stays itself, because two routes it cannot prove
+ * share a bill are two providers.
  */
 export function canonicalProviderId(provider: string | undefined): string {
   const id = provider?.trim().toLowerCase() ?? ''
   if (id === '') return ''
-  const family = providerFamily(id)
-  return family === 'other' ? id : family
+  if (id === 'deepseek' || id === 'deepseek-official') return 'deepseek'
+  // The OAuth plugin registers itself as `xai-oauth`: every `xai-*` id is xAI.
+  if (id === 'xai' || id === 'grok' || id.startsWith('xai-')) return 'xai'
+  return id
 }
 
 /**

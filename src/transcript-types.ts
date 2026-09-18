@@ -13,6 +13,8 @@ export interface SubagentLogEntry {
   text: string
   /** Parent tool-call id, so a later result can settle on the same log line. */
   callId?: string
+  /** Result body kept beside the call line, when the caller has one. */
+  detail?: string
 }
 
 /** One todo-list item as the plan card renders it. */
@@ -63,6 +65,10 @@ export type Row =
       sessionId: string
       /** Live child id when this chip was first built from the parent spawn tool. */
       childSessionId?: string
+      /** Parent spawn tool-call id, so the wrapper's result can find this child. */
+      spawnCallId?: string
+      /** Model route the child runs on. Never the subagent backend name (`spawn`). */
+      modelProvider?: string
       runId: string
       provider: string
       local: boolean

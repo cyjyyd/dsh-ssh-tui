@@ -202,6 +202,25 @@ test('the status line accents only a child on a different provider', async t => 
   assert.ok(pinned.includes('\x1b[38;5;80msub:xai/grok-4.5\x1b[0m'), pinned)
 })
 
+/**
+ * The card accent describes the child that is running, not the route the next
+ * child would take: a `/submodel` reset must not repaint a live card, and a pin
+ * must not paint children that are on the parent's own route.
+ */
+test('a running child keeps the accent of the route it actually runs on', async t => {
+  const { tui } = await frameAt('truecolor', t)
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  card.modelProvider = 'deepseek-official'
+  // A pin for the *next* child; this one is already on the parent's route.
+  tui.subagentSelection = { current: { provider: 'xai', model: 'grok-4.5' } }
+  const header = tui.captureFrame(90, 24).find(line => line.includes('●')) ?? ''
+  assert.equal(header.includes('\x1b[38;5;80m'), false, header)
+  assert.ok(header.includes('\x1b[38;5;141m'), header)
+  card.modelProvider = 'xai'
+  const foreign = tui.captureFrame(90, 24).find(line => line.includes('●')) ?? ''
+  assert.ok(foreign.includes('\x1b[38;5;80m'), foreign)
+})
+
 test('a monochrome terminal receives no colour at all, and keeps the marks', async t => {
   const { tui, frame } = await frameAt('none', t)
   tui.rows.push({ kind: 'error', text: '✖ something failed' })
