@@ -425,7 +425,17 @@ a resume that only knew the software default would mix the two up. The rules:
   catches a preset or a hand-edited `settings.yaml`; nothing is written when
   nothing changed;
 - the newest 200 sessions are kept and older ones fall out; an unreadable file
-  reads as "no record" and the default applies.
+  reads as "no record" and the default applies;
+- when the **recorded provider no longer exists** (removed or renamed), the whole
+  record is dropped and the launch falls back to the app-level defaults — model,
+  effort and subagent together — saying which supplier it fell back from. A
+  removed *child* pin is narrower: the parent route stays and the children fall
+  back to the app-level subagent setting. If not even the default can be routed
+  to, an error names it, lists what is available, and points at `/setup` and
+  `/provider`. Availability is judged permissively (the four built-ins, the
+  adapter list, a configured `llm-pi-ai` profile): calling a dead route alive
+  costs the harness's own error, calling a live one dead would silently lose the
+  session's route.
 
 Each subagent is its own collapsible card. One or many children start collapsed,
 so the parent transcript stays readable; `Enter`, click, empty-input `↑`/`↓`,
