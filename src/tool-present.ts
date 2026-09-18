@@ -83,17 +83,34 @@ export function countDiffLines(hunks: readonly ToolDiffHunk[] | undefined): numb
   return total
 }
 
-/** Added / removed line counts for a diff (`oldText: null` means a new file). */
+/**
+ * Added / removed line counts for a diff (`oldText: null` means a new file).
+ *
+ * The counts are the *diff's*, not the operands': a three-line snippet with one
+ * changed line is `+1 -1`, not `+3 -3`. Counting whole operands made the card
+ * header disagree with everything under it — the footer and, since the columns
+ * got their colour back, the coloured rows themselves said one line had changed
+ * while the header claimed the entire snippet had.
+ *
+ * The LCS behind `diffLines` is not free, and a paint asks for this stat on
+ * every edit card it draws, so the answer is memoized on the hunk array — the
+ * same array the row keeps for its whole life.
+ */
+const diffStatCache = new WeakMap<readonly ToolDiffHunk[], { add: number; del: number }>()
+
 export function countDiffAddDel(hunks: readonly ToolDiffHunk[] | undefined): { add: number; del: number } {
+  if (hunks === undefined) return { add: 0, del: 0 }
+  const cached = diffStatCache.get(hunks)
+  if (cached !== undefined) return { ...cached }
   const stat = { add: 0, del: 0 }
-  if (hunks === undefined) return stat
   for (const hunk of hunks) {
-    stat.add += hunk.newText === '' ? 0 : hunk.newText.split('\n').length
-    if (hunk.oldText !== null) {
-      stat.del += hunk.oldText === '' ? 0 : hunk.oldText.split('\n').length
+    for (const line of diffLines(hunk.oldText ?? '', hunk.newText)) {
+      if (line.kind === 'add') stat.add += 1
+      else if (line.kind === 'del') stat.del += 1
     }
   }
-  return stat
+  diffStatCache.set(hunks, stat)
+  return { ...stat }
 }
 
 /**

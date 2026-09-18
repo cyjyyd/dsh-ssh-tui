@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { setLocale, t } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
-import { pinEmojiCells } from '../lib/term-text.js'
+import { pinEmojiCells, stripAnsi } from '../lib/term-text.js'
 setLocale('zh')
 
 import {
@@ -3460,9 +3460,35 @@ test('detailed edit cards stay collapsed and show the -/+ stat in the header', (
   const frame = tui.captureFrame(72, 20)
   const text = frame.join('\n')
   // Collapsed by default: the header carries the git stat, no diff body.
-  assert.ok(frame.some(line => line.includes('▸ ● 编辑') && line.includes('-3 +4')))
+  // The stat is the *diff's*: `line2` is replaced and `added-a`/`added-b` are
+  // new, so -2 +3 — not the operands' 3 and 4 lines.
+  assert.ok(frame.some(line => line.includes('▸ ● 编辑') && line.includes('-2 +3')))
   assert.equal(text.includes('-line2'), false)
   assert.equal(text.includes('+changed'), false)
+})
+
+test('the diff stat and the coloured rows count the same lines', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, headlessDisplay: true })
+  tui.colorDepth = 'truecolor'
+  tui.color = true
+  tui.rows.push({
+    kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'src/tui.ts',
+    args: '{}', output: 'ok', status: 'ok', expanded: true,
+    diff: [{ path: 'src/tui.ts', oldText: 'line1\nline2\nline3', newText: 'line1\nchanged\nadded-a\nadded-b' }],
+  })
+  const frame = tui.captureFrame(120, 20)
+  const header = frame.find(line => line.includes('编辑')) ?? ''
+  assert.ok(stripAnsi(header).includes('-2 +3'), header)
+  const DEL = '48;2;48;20;20'
+  const ADD = '48;2;18;42;24'
+  // One side of a row is one changed line: a paired row carries both colours,
+  // so this is 2 removals and 3 additions, exactly what the header says.
+  const delSides = frame.filter(line => line.includes(DEL)).length
+  const addSides = frame.filter(line => line.includes(ADD)).length
+  assert.equal(delSides, 2, frame.join('\n'))
+  assert.equal(addSides, 3, frame.join('\n'))
 })
 
 test('Ctrl+R without a selection expands the latest card', () => {

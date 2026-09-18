@@ -23,14 +23,16 @@ const edit = (summary, diff, args = '{}') => ({ name: 'edit', args, summary, dif
 test('per-file counts aggregate by path and keep first-seen order', () => {
   const stats = compactFileStats([
     edit('src/tui.ts', [hunk('a\nb', 'a\nb\nc', 'src/tui.ts')]),
-    edit('src/paint.ts', [hunk('x', 'x\ny\nz', 'src/paint.ts')]),
+    edit('src/paint.ts', [hunk('x\ny', 'x\nz', 'src/paint.ts')]),
     // The same file again: the counts add up rather than starting a second row.
-    edit('src/tui.ts', [hunk('c', 'c\nd', 'src/tui.ts')]),
+    edit('src/tui.ts', [hunk('c\nd', 'c\ne\nf', 'src/tui.ts')]),
   ])
-  // The same file's second edit adds to the first: 3+2 added, 2+1 removed.
+  // The counts are the diffs': one added line, then a replacement, then a
+  // replacement plus an addition. Counting the operands instead reported 3+2
+  // added and 2+1 removed for src/tui.ts, which is the whole snippet.
   assert.deepEqual(stats, [
-    { path: 'src/tui.ts', add: 5, del: 3 },
-    { path: 'src/paint.ts', add: 3, del: 1 },
+    { path: 'src/tui.ts', add: 3, del: 1 },
+    { path: 'src/paint.ts', add: 1, del: 1 },
   ])
 })
 
