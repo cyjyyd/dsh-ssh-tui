@@ -862,6 +862,15 @@ const PLUGIN_VERSION = ((): string => {
 const MAX_COMPACT_FILE_STATS = 4
 /** Lines of an inspect body that line mode writes into the log before trimming. */
 const LINE_MODE_INSPECT_LINES = 80
+/**
+ * Emphasis inside a filled diff row: a lighter shade of the row's own fill, so
+ * a changed word is marked without stepping outside the muted palette. The
+ * fills they lighten live in `styleLine` (`diff-add` / `diff-del`).
+ */
+const DIFF_EMPHASIS_SGR: Partial<Record<DisplayKind, string>> = {
+  'diff-add': '38;2;198;232;190;48;2;34;72;44',
+  'diff-del': '38;2;246;206;206;48;2;86;34;34',
+}
 const STALL_WARNING_MS = 60000
 /** Bytes already queued for the terminal before a frame is skipped instead. */
 const STDOUT_BACKLOG_BYTES = 32 * 1024
@@ -2994,7 +3003,7 @@ export class SshTui {
       if (buffer.length === 0) return
       const body = buffer
         .map(piece => (piece.emphasis
-          ? `\x1b[7m${this.styleLine(line.kind, piece.text)}\x1b[27m`
+          ? this.styleEmphasisedPiece(line.kind, piece.text)
           : this.styleLine(line.kind, piece.text)))
         .join('')
       rows.push(`  ${body}`)
@@ -3053,8 +3062,8 @@ export class SshTui {
       const column = columns.find(item => item.start <= from && item.end >= to)
       const emphasis = (line.spans ?? []).some(span => cut(span.start) <= from && cut(span.end) >= to)
       const text = padded.slice(from, to)
-      const styled = this.styleLine(column?.kind ?? line.kind, text)
-      pieces.push(emphasis ? `\x1b[7m${styled}\x1b[27m` : styled)
+      const kind = column?.kind ?? line.kind
+      pieces.push(emphasis ? this.styleEmphasisedPiece(kind, text) : this.styleLine(kind, text))
     }
     return pieces.length === 0 ? [this.styleLine(line.kind, '')] : [pieces.join('')]
   }
@@ -4877,6 +4886,25 @@ export class SshTui {
     // Nothing left to paint: the text stands on its own.
     if (code === '') return safe
     return `\x1b[${code}m${safe}\x1b[0m`
+  }
+
+  /**
+   * One emphasised piece of a body line — the words a diff changed.
+   *
+   * Inside a filled diff row the mark is a lighter shade of that same fill.
+   * Inverse video was there first, and it inverted the *fill*: a line replaced
+   * wholesale is emphasised from end to end, so it came out a bright block
+   * beside rows that kept the muted tone — visibly from another palette. On a
+   * terminal with no colour left to shift, the attribute is what survives, so
+   * the inverse video stays for that case.
+   */
+  private styleEmphasisedPiece(kind: DisplayKind, text: string): string {
+    const requested = DIFF_EMPHASIS_SGR[kind]
+    if (requested !== undefined && this.color) {
+      const code = downgradeSgr(requested, this.colorDepth)
+      if (code !== '') return `\x1b[${code}m${sanitizeTerminalText(text)}\x1b[0m`
+    }
+    return `\x1b[7m${this.styleLine(kind, text)}\x1b[27m`
   }
 
   /**

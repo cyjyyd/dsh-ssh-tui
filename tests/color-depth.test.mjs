@@ -271,6 +271,46 @@ test('a side-by-side diff colours each column, and only where there is a line', 
   }
 })
 
+/**
+ * A line replaced wholesale is emphasised from end to end, and inverse video
+ * over the muted fill inverted the *fill* — that row came out a bright block
+ * beside rows that kept the dark tone. The mark is a lighter shade of the same
+ * colour now; only a terminal with no colour left to shift falls back to the
+ * attribute, which is the one signal monochrome has.
+ */
+test('an emphasised word keeps the diff palette instead of inverting it', async () => {
+  const { SshTui } = await import('../lib/tui.js')
+  const { stripAnsi } = await import('../lib/term-text.js')
+  const build = depth => {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 's', options: {}, status: 'idle', session: { id: 's', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 's', color: true, headlessDisplay: true })
+    tui.colorDepth = depth
+    tui.color = depth !== 'none'
+    tui.rows.push({
+      kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts',
+      args: '{}', output: '', status: 'ok', expanded: true,
+      diff: [{
+        path: 'a.ts',
+        oldText: 'shared = 1\nold line entirely different\nkeep me\n',
+        newText: 'shared = 2\nbrand new text here\nkeep me\n',
+      }],
+    })
+    return tui.captureFrame(120, 24)
+  }
+  const replaced = build('truecolor').filter(line => stripAnsi(line).includes('entirely different')
+    || stripAnsi(line).includes('brand new text'))
+  assert.equal(replaced.length, 1, 'the replacement is one paired row')
+  assert.ok(replaced[0].includes('48;2;86;34;34'), replaced[0])
+  assert.ok(replaced[0].includes('48;2;34;72;44'), replaced[0])
+  assert.equal(replaced[0].includes('\x1b[7m'), false, 'no inverse video over a filled diff row')
+  // The muted fills are still the bars behind the marked words.
+  assert.ok(replaced[0].includes('48;2;48;20;20') && replaced[0].includes('48;2;18;42;24'), replaced[0])
+  const mono = build('none')
+  assert.ok(mono.some(line => line.includes('\x1b[7m')), 'monochrome keeps the attribute')
+  assert.equal(/38;2|48;2|38;5|48;5/u.test(build('8').join('\n')), false)
+})
+
 test('a monochrome terminal receives no colour at all, and keeps the marks', async t => {
   const { tui, frame } = await frameAt('none', t)
   tui.rows.push({ kind: 'error', text: '✖ something failed' })
