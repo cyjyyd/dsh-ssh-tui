@@ -23,15 +23,26 @@ node scripts/heat-report.mjs --no-directory   # 跳过 dshfind 查询
 
 **节奏：每周一次。** 14 天窗口配 7 天间隔，每天至少被两次采样覆盖，永不漏日。
 间隔过长会在报告顶部出现 `warning: no data for …`；超过 14 天的空洞补不回来。
-cron 示例（每周一 09:10）：
+## 定时采样（已部署）
 
-```cron
-# 每周一 09:10 采一次；cron 的 PATH 很干净，node 用绝对路径
-10 9 * * 1 cd /root/dsh-ssh-tui && /usr/bin/node scripts/heat-report.mjs >> /root/.dsh/heat/weekly.log 2>&1
+挂在本机的 openclaw automation 上（用户空间，不写系统 crontab）：
+
+```bash
+openclaw cron add --name dsh-ssh-tui-heat --display-name "dsh-ssh-tui heat baseline" \
+  --description "Weekly popularity sample for cyjyyd/dsh-ssh-tui (see docs/heat-tracking.md)" \
+  --cron '10 9 * * 1' --tz Asia/Shanghai --no-deliver \
+  --command 'cd /root/dsh-ssh-tui && /usr/bin/node scripts/heat-report.mjs >> /root/.dsh/heat/weekly.log 2>&1 && tail -n 12 /root/.dsh/heat/weekly.log' \
+  --timeout-seconds 300
 ```
 
-在本机用面板的「计划任务」加这一行即可（代理会话的沙箱对 `/var/spool/cron` 只读，`crontab -e` 会报 EROFS）。
-脚本不依赖任何环境变量：token 走文件查找，`env -i /bin/sh -c '…'` 下已实测可采集。
+- 任务名 `dsh-ssh-tui heat baseline`，每周一 09:10（Asia/Shanghai），首次执行 2026-09-21；
+- `--no-deliver`：不往 WeCom / Telegram 推送；想每周收一条摘要就换成显式的 `--channel`（本机有多个频道时必须指定）；
+- 查看 / 手动跑 / 历史：`openclaw cron list | grep heat`、`openclaw cron run <id> --wait`、`openclaw cron runs <id>`；
+- 日志 `/root/.dsh/heat/weekly.log`：每次追加一份完整报告；命令末尾的 `tail` 让运行历史里也留下最新一行数据；
+- 替代方案（系统 crontab / 面板计划任务，开机由系统拉起）：
+  `10 9 * * 1 cd /root/dsh-ssh-tui && /usr/bin/node scripts/heat-report.mjs >> /root/.dsh/heat/weekly.log 2>&1`
+
+脚本不依赖任何环境变量：token 走文件查找，`env -i /bin/sh -c '…'` 下已实测可采集；无 token 时仍会采集公开仓库信息与 npm 数据。
 
 ## 存储与合并规则
 
