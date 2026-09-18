@@ -231,6 +231,10 @@ test('renaming writes preset.yml beside a backup and keeps the other fields', as
     assert.match(written, /order: 3/u, 'order survives')
     const backups = (await waitForBackup(directory, tui)).filter(name => name.includes('.bak-'))
     assert.equal(backups.length, 1, 'the previous file is kept')
+    // The rows that report the rename land a microtask after the write resolves;
+    // wait for them instead of reading the transcript first (this exact race
+    // failed the 0.1.5-rc.2 leg).
+    await waitForText(tui, '已更新 mine 的名称')
     assert.match(systemText(tui), /已更新 mine 的名称/u)
     assert.match(systemText(tui), /原文件备份/u)
 
@@ -365,6 +369,9 @@ test('the wizard renames a user preset and refuses a shipped one', async () => {
     tui.handleChar('新')
     tui.handleChar('\r')
     await waitForFileText(join(directory, 'preset.yml'), /name: 新/u, tui)
+    // Same race as above: the file can be readable one microtask before the row
+    // that announces it.
+    await waitForText(tui, '已更新 mine 的名称')
     assert.match(systemText(tui), /已更新 mine 的名称/u)
 
     // A shipped preset offers no rename/delete action at all.
