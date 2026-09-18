@@ -762,6 +762,64 @@ test('/submodel reset follows the parent provider again', async () => {
   assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('仅当前会话')))
 })
 
+test('picking the parent provider in /submodel unpins instead of lying', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'deepseek-official',
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
+  })
+  let asked
+  tui.askQuestion = async question => {
+    asked = question
+    // The row the user reads as "follows parent" is the parent's own provider.
+    const row = question.options.find(option => option.label.includes('deepseek-official'))
+    return { selected: [row.label] }
+  }
+  tui.pickModelOption = async () => ({ id: 'deepseek-v4-flash', label: 'deepseek-v4-flash' })
+  await tui.runSubmodelCommand('')
+  const parentRow = asked.options.find(option => option.label.includes('deepseek-official'))
+  const pinnedRow = asked.options.find(option => option.label.includes('xai'))
+  assert.equal(parentRow.description, t('sub.providerFollowsParent'))
+  assert.equal(pinnedRow.description, t('sub.providerPinned'))
+  // Choosing the row that says "follows parent" must actually unpin.
+  assert.equal(tui.subagentSelection.current.provider, undefined)
+  assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
+})
+
+test('picking a foreign provider in /submodel pins it', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'deepseek-official',
+    subagentSelection: { current: { model: 'deepseek-v4-flash' } },
+  })
+  tui.askQuestion = async question => {
+    const row = question.options.find(option => option.label.includes('xai'))
+    return { selected: [row.label] }
+  }
+  tui.pickModelOption = async () => ({ id: 'grok-4.5', label: 'grok-4.5' })
+  await tui.runSubmodelCommand('')
+  assert.equal(tui.subagentSelection.current.provider, 'xai')
+  assert.equal(tui.subagentSelection.current.model, 'grok-4.5')
+})
+
 test('parseEffortArg accepts default aliases and rejects junk', () => {
   assert.deepEqual(parseEffortArg('default'), { kind: 'default' })
   assert.deepEqual(parseEffortArg('默认'), { kind: 'default' })
@@ -2244,11 +2302,64 @@ test('syncSubagentToProvider force-follows a parent provider switch', async () =
     subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
   })
   tui.quotaSnapshot = { provider: 'xai', plan: 'SuperGrok', windows: [{ label: '本周', period: 'weekly', remainingPercent: 82 }] }
+  // A pinned route now asks first; this picks "follow the new parent".
+  const asked = []
+  tui.askQuestion = async question => {
+    asked.push(question)
+    return { selected: [t('sub.followSwitchLabel', { provider: 'opencode-go' })] }
+  }
   await tui.syncSubagentToProvider('opencode-go', ['deepseek-v4-flash', 'deepseek-v4-pro'], true)
+  assert.equal(asked.length, 1)
+  assert.match(asked[0].question, /opencode-go/u)
   assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
   assert.equal(tui.subagentSelection.current.provider, undefined)
   tui.clearQuotaForProvider('opencode-go')
   assert.equal(tui.quotaSnapshot, undefined)
+})
+
+test('a parent provider switch asks before it moves a pinned subagent route', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    provider: 'xai',
+    subagentSelection: { current: { provider: 'xai', model: 'grok-4.5' } },
+  })
+  const asked = []
+  tui.askQuestion = async question => {
+    asked.push(question)
+    return { selected: [t('sub.followKeepLabel', { provider: 'xai' })] }
+  }
+  await tui.syncSubagentToProvider('deepseek-official', ['deepseek-v4-flash'], true)
+  assert.equal(asked.length, 1)
+  assert.match(asked[0].question, /xai/u)
+  assert.match(asked[0].question, /deepseek-official/u)
+  // Keeping the pin must not touch the provider *or* the model.
+  assert.equal(tui.subagentSelection.current.provider, 'xai')
+  assert.equal(tui.subagentSelection.current.model, 'grok-4.5')
+  assert.ok(tui.rows.some(row => row.kind === 'system' && row.text.includes('仍钉在')), JSON.stringify(tui.rows))
+
+  // Escaping the dialog keeps the pin too: only an explicit answer moves it.
+  tui.askQuestion = async () => ({ selected: [] })
+  await tui.syncSubagentToProvider('deepseek-official', ['deepseek-v4-flash'], true)
+  assert.equal(tui.subagentSelection.current.provider, 'xai')
+  assert.equal(tui.subagentSelection.current.model, 'grok-4.5')
+
+  // A non-forced sync (same provider, model change) never asks.
+  const quiet = []
+  tui.askQuestion = async question => {
+    quiet.push(question)
+    return { selected: [] }
+  }
+  await tui.syncSubagentToProvider('xai', ['grok-4.5'], false)
+  assert.equal(quiet.length, 0)
 })
 
 test('subagent request waterfall applies model/effort but leaves the parent alone', async () => {
@@ -3039,8 +3150,116 @@ test('the overlay keeps a child tool result and the model route', () => {
   assert.match(inspect, /child-a/u)
 })
 
-test('parseWorkspaceView accepts compact aliases', () => {
-  assert.equal(parseWorkspaceView('compact'), 'compact')
+/** A parent log with only the events given, as `replayHistory` reads it. */
+function replayAgent(events) {
+  return {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', seq: events.length, eventAt: seq => events[seq] },
+    cancel() {},
+  }
+}
+
+test('resume closes a spawn whose end never reached the log', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = replayAgent([{
+    type: 'tool/call',
+    time: 10,
+    data: {
+      callId: 'spawn-lost',
+      name: 'subagent',
+      arguments: JSON.stringify({ description: 'scan /www', prompt: 'go' }),
+    },
+  }])
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.replayHistory()
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card?.kind, 'subagent')
+  // A child lives in the Host that wrote this log, and replay runs in the Host
+  // that replaced it: nothing will ever end this one, so it must not count up.
+  assert.equal(card.status, 'aborted')
+  assert.equal(card.stopReason, 'unknown')
+  assert.equal(card.endedAt, card.startedAt)
+  assert.ok(card.logs.some(entry => entry.text.includes('结束事件')), JSON.stringify(card.logs))
+  assert.equal(tui.rows.filter(row => row.kind === 'tool').length, 0)
+  // A late live end adopts that chip instead of adding a twin beside it.
+  tui.handleSubagentEnd({
+    runId: 'run-late', id: 'child-late', provider: 'spawn', local: true, stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'done late' }],
+  })
+  const cards = tui.rows.filter(row => row.kind === 'subagent')
+  assert.equal(cards.length, 1)
+  assert.equal(cards[0].status, 'ok')
+  assert.equal(cards[0].childSessionId, 'child-late')
+})
+
+test('resume still settles a spawn that did reach its result', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = replayAgent([
+    {
+      type: 'tool/call',
+      time: 10,
+      data: {
+        callId: 'spawn-done',
+        name: 'subagent',
+        arguments: JSON.stringify({ description: 'scan /www', prompt: 'go' }),
+      },
+    },
+    {
+      type: 'tool/result',
+      time: 20,
+      data: {
+        message: { source: { kind: 'tool', callId: 'spawn-done' }, content: [{ type: 'text', text: 'all clear' }] },
+      },
+    },
+  ])
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.replayHistory()
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  assert.equal(card.status, 'ok')
+  assert.equal(card.stopReason, undefined)
+  assert.equal(card.logs.some(entry => entry.text.includes('结束事件')), false)
+})
+
+test('a /find hit inside a child log is scrolled to and marked', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, headlessDisplay: true })
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  // Enough child log to push the hit below the overlay's first screen.
+  for (let at = 0; at < 30; at += 1) {
+    tui.handleSubagentSessionEvent('child-a', {
+      type: 'tool/call',
+      data: { callId: `c${at}`, name: 'bash', arguments: JSON.stringify({ command: `echo line ${at}` }) },
+    })
+  }
+  tui.handleSubagentSessionEvent('child-a', {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: 'needle-token: the answer' }] } },
+  })
+  tui.runCommand('/find needle-token')
+  assert.equal(tui.dialog?.kind, 'inspect')
+  const frame = tui.captureFrame(90, 24).join('\n')
+  // The overlay used to open at the top, so the reported hit was off screen.
+  assert.ok(frame.includes('needle-token'), frame)
+  assert.ok(tui.dialog.offset > 0, `scrolled to the hit, not the top: ${tui.dialog.offset}`)
+  // Monochrome marks it with the same `»` the transcript uses; a coloured
+  // terminal paints the hit in reverse video. The suite runs under whatever
+  // palette the environment asks for, so accept either marker here.
+  const marked = frame.includes('»   needle-token') || /\x1b\[7m[^\x1b]*needle-token/u.test(frame)
+  assert.ok(marked, frame)
+  // The coloured path itself, forced so the assertion does not depend on TERM.
+  tui.color = true
+  const colored = tui.captureFrame(90, 24).join('\n')
+  assert.ok(/\x1b\[7m[^\x1b]*needle-token/u.test(colored), colored)
+  // A repaint keeps the reader's own scroll position.
+  tui.dialog.offset = 0
+  tui.captureFrame(90, 24)
+  assert.equal(tui.dialog.offset, 0)
+})
+
+test('parseWorkspaceView accepts compact aliases', () => {  assert.equal(parseWorkspaceView('compact'), 'compact')
   assert.equal(parseWorkspaceView('minimal'), 'compact')
   assert.equal(parseWorkspaceView('极简'), 'compact')
   assert.equal(parseWorkspaceView('detailed'), 'detailed')

@@ -860,6 +860,8 @@ const PLUGIN_VERSION = ((): string => {
 })()
 /** Files named on a collapsed compact burst before the rest are counted. */
 const MAX_COMPACT_FILE_STATS = 4
+/** Lines of an inspect body that line mode writes into the log before trimming. */
+const LINE_MODE_INSPECT_LINES = 80
 const STALL_WARNING_MS = 60000
 /** Bytes already queued for the terminal before a frame is skipped instead. */
 const STDOUT_BACKLOG_BYTES = 32 * 1024
@@ -1878,6 +1880,7 @@ export class SshTui {
       // `subagent/start`, so those descriptions must not sit in the live queue
       // and become the next child's courtesy name after --resume.
       this.pendingSubagentTasks = []
+      this.settleUnfinishedReplayChips()
     }
     for (const item of parked) {
       if (this.disposed) return
@@ -1890,6 +1893,34 @@ export class SshTui {
     this.refreshContextPressure({ compact: false })
     this.paintTailBudget = Math.max(24, this.screenRows() * 3)
     this.dirty = true
+  }
+
+  /**
+   * Close the chips replay could not settle.
+   *
+   * A spawn `tool/call` with no `tool/result` in the log means the wrapper was
+   * still in flight when the log was last written. Replay only runs in a Host
+   * that has just started, and the child lived in the Host running back then,
+   * so that child is gone and no `subagent/end` will ever arrive for it.
+   * Leaving the chip "running" made every resume of an interrupted turn show a
+   * child counting up forever while `/status` reported none.
+   *
+   * `stopReason: 'unknown'` is also what lets a late live end adopt this row
+   * instead of adding a twin beside it.
+   */
+  private settleUnfinishedReplayChips(): void {
+    if (this.disposed) return
+    for (const row of this.rows) {
+      if (row.kind !== 'subagent') continue
+      if (row.status !== 'running' || row.childSessionId !== undefined) continue
+      row.status = 'aborted'
+      row.endedAt = row.startedAt
+      row.stopReason = 'unknown'
+      const text = t('sub.endedMissing')
+      row.lastActivity = text
+      appendSubagentLog(row, { kind: 'system', text })
+      this.refreshOpenSubagentInspect(row)
+    }
   }
 
   /** Show the first-launch provider/API-key onboarding when nothing is configured. */
@@ -3037,8 +3068,17 @@ export class SshTui {
       for (const wrapped of wrap(line.text, inner)) {
         const body = fillRow ? padToWidth(`  ${wrapped}`, width) : `  ${wrapped}`
         const kind = line.kind
-        rendered.push(this.styleLine(kind === 'subagent' ? 'subagent-header' : kind, body))
+        const styled = this.styleLine(kind === 'subagent' ? 'subagent-header' : kind, body)
+        rendered.push(this.markSearchRow(styled, wrapped))
       }
+    }
+    // `/find` reported a hit inside this body, so put it on screen: the overlay
+    // used to open at the top and leave the reader scrolling for it. Done once,
+    // so PgDn afterwards keeps the reader's own position.
+    if (dialog.searchRevealed !== true && this.searchNeedle !== '') {
+      const at = rendered.findIndex(row => searchContains(stripAnsi(row), this.searchNeedle))
+      if (at >= 0) dialog.offset = Math.max(0, at - 1)
+      dialog.searchRevealed = true
     }
     const maxOffset = Math.max(0, rendered.length - bodyBudget)
     if (dialog.offset > maxOffset) dialog.offset = maxOffset
@@ -3072,11 +3112,23 @@ export class SshTui {
     this.lastTranscriptStart = -1
   }
 
+  /**
+   * Reverse-video (or a `»` in monochrome) on the overlay row that holds the
+   * current `/find` needle, matching what the transcript does for the same hit.
+   */
+  private markSearchRow(styled: string, plain: string): string {
+    const needle = this.searchNeedle
+    if (needle === '' || !searchContains(plain, needle)) return styled
+    return this.color ? highlightAnsiNeedle(styled, needle) : `» ${styled}`
+  }
+
   private openToolInspect(row: Extract<Row, { kind: 'tool' }>): void {
     const lines = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
+    const title = t('tool.inspectTitle', { title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}` })
+    if (this.echoInspectToLog(title, lines)) return
     this.openDialog({
       kind: 'inspect',
-      title: t('tool.inspectTitle', { title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}` }),
+      title,
       lines,
       offset: 0,
     })
@@ -3090,13 +3142,35 @@ export class SshTui {
       this.markDirty()
       return
     }
+    const title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
+    const lines = subagentInspectLines(row)
+    if (this.echoInspectToLog(title, lines)) return
     this.openDialog({
       kind: 'inspect',
-      title: t('sub.inspectTitle', { title: subagentDisplayName(row) }),
-      lines: subagentInspectLines(row),
+      title,
+      lines,
       offset: 0,
       subagentSessionId: this.subagentInspectId(row),
     })
+  }
+
+  /**
+   * Line mode has no framed scroller, so an inspect body goes into the log.
+   *
+   * Opening the modal there printed nothing and then swallowed the next Enter:
+   * an invisible dialog. The log is the only detail surface line mode has, and
+   * writing it keeps the input free.
+   */
+  private echoInspectToLog(title: string, lines: readonly DiffDisplayLine[]): boolean {
+    if (!this.lineMode) return false
+    const shown = lines.slice(0, LINE_MODE_INSPECT_LINES)
+    const body = [title, ...shown.map(line => line.text)]
+    if (lines.length > shown.length) {
+      body.push(t('tool.bodyMoreLines', { count: lines.length - shown.length }))
+    }
+    this.pushRow({ kind: 'system', text: body.join('\n') })
+    this.markDirty()
+    return true
   }
 
   closeInspect(): void {
@@ -5835,9 +5909,12 @@ export class SshTui {
       ?? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
         candidate.kind === 'subagent' && candidate.runId === String(info.runId))
       // A chip rebuilt from the parent spawn tool has no child id yet: adopt the
-      // oldest one so an end event settles it instead of adding a twin.
+      // oldest one so an end event settles it instead of adding a twin. A chip
+      // replay already closed as `unknown` is adopted too, and corrected.
       ?? this.rows.find((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-        candidate.kind === 'subagent' && candidate.status === 'running' && candidate.childSessionId === undefined)
+        candidate.kind === 'subagent'
+        && (candidate.status === 'running' || candidate.stopReason === 'unknown')
+        && candidate.childSessionId === undefined)
     const failed = info.stopReason !== 'completed'
     const modelProvider = row?.modelProvider
       ?? this.subagentSelection.current.provider
@@ -6918,6 +6995,11 @@ export class SshTui {
    * When the parent provider changes (OAuth or API key), keep the subagent
    * on a same-family model. An explicit leftover DeepSeek flash id after
    * switching to xAI is treated as stale.
+   *
+   * A `/submodel` pin is the user's explicit route, so a parent switch asks
+   * before moving the children: dropping the pin silently spends on a route
+   * they pinned away from, and keeping it silently leaves the children on the
+   * old provider.
    */
   private async syncSubagentToProvider(
     provider: string,
@@ -6925,7 +7007,10 @@ export class SshTui {
     force = false,
   ): Promise<void> {
     const current = this.subagentSelection.current
-    if (!force && current.provider !== undefined && current.provider !== provider) return
+    if (current.provider !== undefined) {
+      if (!force) return
+      if (await this.confirmKeepSubagentPin(provider, current)) return
+    }
     if (!force && subagentModelMatchesProvider(provider, current.model, listed)) return
     let catalog = [...listed]
     if (catalog.length === 0) {
@@ -6947,6 +7032,34 @@ export class SshTui {
       kind: 'system',
       text: t('sub.followed', { provider, model: nextModel, sessionOnly: persisted ? '' : t('sub.sessionOnly') }),
     })
+  }
+
+  /**
+   * Ask whether a `/submodel` pin survives a parent provider change.
+   *
+   * Returns true when the pin should be kept. Cancelling the dialog keeps it
+   * too: the pin is the user's explicit choice, so only an explicit answer
+   * moves the children onto the new parent route.
+   */
+  private async confirmKeepSubagentPin(
+    provider: string,
+    current: SubagentSelection,
+  ): Promise<boolean> {
+    const pinned = current.provider ?? ''
+    const keepLabel = t('sub.followKeepLabel', { provider: pinned })
+    const followLabel = t('sub.followSwitchLabel', { provider })
+    const answer = await this.askQuestion({
+      id: 'submodel-follow-pick',
+      question: t('sub.followAsk', { pinned, provider, model: current.model }),
+      options: [
+        { label: keepLabel, description: t('sub.followKeepHint') },
+        { label: followLabel, description: t('sub.followSwitchHint', { provider }) },
+      ],
+    }, 0, 1, 0)
+    if (answer.selected[0] === followLabel) return false
+    this.pushRow({ kind: 'system', text: t('sub.pinKept', { pinned, parent: provider }) })
+    this.markDirty()
+    return true
   }
 
   private clearQuotaForProvider(provider: string): void {
@@ -7064,6 +7177,10 @@ export class SshTui {
         question: t('sub.pickProvider'),
         options: providers.map(option => ({
           label: option.label,
+          // The description says what picking the row does. Picking the parent's
+          // provider follows it — that is the one explicit way to unpin without
+          // `/submodel reset` — so the parent row must not read "currently
+          // pinned" just because the pin happens to name it.
           description: option.id === parentProvider
             ? t('sub.providerFollowsParent')
             : option.id === current.provider
@@ -7083,7 +7200,7 @@ export class SshTui {
       selectedId = selected.id
     }
     await this.commitSubagentRoute(provider, selectedId, {
-      pinProvider: provider !== this.currentProviderId() || current.provider !== undefined,
+      pinProvider: provider !== this.currentProviderId(),
     })
   }
 
@@ -8618,6 +8735,10 @@ export class SshTui {
   private async saveOnboarding(): Promise<void> {
     const state = this.onboarding
     if (state === undefined) return
+    // `/setup` can switch the parent route (that is the point of adding a key),
+    // so remember where it pointed before the wizard's answer is applied: the
+    // subagent pin question below needs the old value.
+    const previousParentProvider = this.currentProviderId()
     let saved = true
     try {
       const credentials = this.ctx.get('credentials')
@@ -8634,7 +8755,7 @@ export class SshTui {
         }
         this.onSelectionChanged?.({ provider: 'deepseek-official', model })
         await this.rememberRoute({ provider: 'deepseek-official', model })
-        await this.syncSubagentToProvider('deepseek-official', state.models)
+        await this.syncSubagentToProvider('deepseek-official', state.models, previousParentProvider !== 'deepseek-official')
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
           this.pushRow({ kind: 'system', text: t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }) })
@@ -8740,7 +8861,7 @@ export class SshTui {
           }
           this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
-          await this.syncSubagentToProvider(state.providerId, state.models)
+          await this.syncSubagentToProvider(state.providerId, state.models, previousParentProvider !== state.providerId)
           this.pushRow({
             kind: 'system',
             text: t('onboard.customDone', { id: state.providerId, model }),

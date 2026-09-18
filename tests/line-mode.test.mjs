@@ -184,6 +184,22 @@ test('a confirm prompt is written into the log, and y answers it', async () => {
   assert.equal(await pending, 'allowed-once')
 })
 
+test('line mode writes an inspect body to the log instead of an invisible dialog', async () => {
+  const { tui, since } = await lineModeTui()
+  const added = since()
+  tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
+  const card = tui.rows.find(row => row.kind === 'subagent')
+  tui.focusedRow = card
+  tui.handleData(Buffer.from('\r'))
+  assert.equal(tui.dialog, undefined, 'no modal that prints nothing and eats the next Enter')
+  const shown = added()
+  assert.match(shown, /子代理全文/u, shown)
+  assert.match(shown, /已启动/u, 'the body carries the child log')
+  // The input still works right after: a second Enter is not swallowed.
+  tui.handleData(Buffer.from('/help\r'))
+  assert.match(added(), /> \/help/u)
+})
+
 test('a typed command is echoed once, then handled', async () => {
   const { tui, since } = await lineModeTui()
   const added = since()

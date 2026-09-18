@@ -54,6 +54,8 @@ export interface InspectDialog {
   offset: number
   /** Child session whose live log should refresh this overlay in place. */
   subagentSessionId?: string
+  /** `/find` already scrolled to its hit here; later repaints keep the offset. */
+  searchRevealed?: boolean
 }
 
 export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog
