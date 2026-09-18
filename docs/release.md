@@ -41,3 +41,9 @@ B-1 回归修复完成后，助手在用户给出"先不急着发 npm"的指示*
 - GitHub 侧保留提交与 tag（用户明确允许"只提交 github"）。
 
 教训：把"发版"当成**需要显式授权的动作**，而不是"交付完成的自然收尾"。
+
+## 发版窗口怎么定
+
+选日期看的是热度曲线，不是感觉：GitHub 的 traffic 只留 14 天，发版脉冲 24–48 小时就衰减，
+所以「再等几天」换不到信号。采集与读表方式见 [heat-tracking.md](heat-tracking.md)
+（`node scripts/heat-report.mjs`，每周一次，数据落在 `$DSH_HOME/heat/`，不进仓库）。
