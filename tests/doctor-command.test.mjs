@@ -95,7 +95,11 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   assert.ok(written.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"), written)
   const backups = (await readdir(dir)).filter(name => name.includes('.bak-'))
   assert.equal(backups.length, 1)
-  // The fix notice is a system row; the report above it is a diag row.
+  // The fix notice is a system row; the report above it is a diag row. Wait for
+  // it rather than reading the transcript straight after the file appeared: the
+  // write resolves first, and on a slow runner the rows that report it land a
+  // microtask later — which is exactly how this failed on the 0.1.2 leg.
+  await waitForText(tui, '重启 TUI 后生效')
   assert.ok(allText(tui).includes('重启 TUI 后生效'), allText(tui))
 
   // The services stay missing for this launcher, so the report still fails, but
