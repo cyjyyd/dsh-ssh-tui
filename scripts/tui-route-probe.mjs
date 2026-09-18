@@ -144,9 +144,22 @@ async function runProbe({ keep }) {
     return false
   }
   /** The log without escapes, one line per painted row. */
-  const plain = () => output
+  const strip = text => text
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/gu, '')
     .replace(/\x1b\][^\x07]*\x07/gu, '')
+  const plain = () => strip(output)
+  /**
+   * Output written after this point.
+   *
+   * The buffer keeps every frame ever painted, so a chip that disappeared two
+   * repaints ago is still in it: a check that reads the whole buffer passes
+   * whatever happened afterwards. Claims about the *current* status line read
+   * only what came after the action.
+   */
+  const since = () => {
+    const mark = output.length
+    return () => strip(output.slice(mark))
+  }
 
   let failures = 0
   const check = (ok, what) => {
@@ -176,6 +189,30 @@ async function runProbe({ keep }) {
     const afterTurn = await readRoute()
     check(afterTurn?.model === 'deepseek-v4-pro', 'the record still names the session route after a turn')
     check(afterTurn?.updatedAt === 1, 'a route that did not move is not rewritten')
+
+    // Someone else writing the app-level subagent setting — the web UI, or the
+    // second SSH window the user has open — must not move this conversation's
+    // children. Without the session-owned flag the host's settings watcher puts
+    // the file's value on the ref and the pin quietly disappears.
+    const afterPin = since()
+    await writeFile(join(home, 'settings.yaml'), [
+      'agent-default-model:',
+      '  provider: deepseek-official',
+      '  model: deepseek-v4-flash',
+      'ssh-tui-subagent:',
+      '  provider: deepseek-official',
+      '  model: deepseek-v4-pro',
+      '',
+    ].join('\n'))
+    term.write('/view detailed\r')
+    await new Promise(resolve => setTimeout(resolve, 2_500))
+    check(afterPin().includes('sub:xai/grok-4.5'), 'the session pin survives another writer')
+    check((await readRoute())?.subagent?.provider === 'xai', 'the record keeps the session pin')
+    // And the pin is what a bare `/submodel <model>` acts on, not the file's.
+    const beforeMove = since()
+    term.write('/submodel grok-4.5\r')
+    await new Promise(resolve => setTimeout(resolve, 2_500))
+    check(!beforeMove().includes('sub:deepseek-official/deepseek-v4-pro'), 'the file value never took over')
 
     // Move the subagent route while the window is open: the record must follow,
     // and the bare `/submodel <model>` form must keep the restored pin.

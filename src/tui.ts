@@ -667,6 +667,11 @@ export interface TuiConfig {
    */
   restoredRoute?: SessionRoute
   /**
+   * What the launcher decided about the resumed route: a supplier that is gone,
+   * or one that cannot be routed to at all. Pushed on screen at boot.
+   */
+  launchNotices?: readonly { kind: 'system' | 'error'; text: string }[]
+  /**
    * Report a settled route to the launcher, which owns the per-session record.
    * Absent in tests and in line mode: nothing here touches the disk.
    */
@@ -1473,6 +1478,9 @@ export class SshTui {
     }
     if (config.restoredRoute !== undefined) {
       this.pushRow({ kind: 'system', text: sessionRouteNotice(config.restoredRoute) })
+    }
+    for (const notice of config.launchNotices ?? []) {
+      this.pushRow({ kind: notice.kind, text: notice.text })
     }
   }
 
@@ -7260,6 +7268,10 @@ export class SshTui {
   /** Persist one subagent selection and publish it to the live request waterfall. */
   private async saveSubagentSelection(next: SubagentSelection): Promise<boolean> {
     this.subagentSelection.current = next
+    // An explicit change makes the settings the source again: the next time
+    // this session is resumed, the record — not a stale in-memory override —
+    // decides, and the settings watcher may update the ref again.
+    this.subagentSelection.source = 'settings'
     // The session record keeps the subagent route too, so a resumed
     // cross-provider conversation comes back on the same children.
     this.noteSessionRoute()

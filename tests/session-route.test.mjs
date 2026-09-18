@@ -17,6 +17,7 @@ import {
   sessionRoutePath,
   SESSION_ROUTE_LIMIT,
 } from '../lib/session-route.js'
+import { adoptSessionSubagentSelection, releaseSessionSubagentSelection } from '../lib/subagent-model.js'
 
 /**
  * Per-session route memory: what a conversation was spending on, so resuming it
@@ -235,16 +236,16 @@ test('resuming applies the record, and a new session is left alone', async () =>
   }, path)
   const ref = { current: { model: 'deepseek-v4-flash' } }
   // A new session keeps the global default…
-  assert.equal(await restoreSessionRoute({ sessionId: 's1', resume: false, subagentSelection: ref, path }), undefined)
+  assert.deepEqual(await restoreSessionRoute({ sessionId: 's1', resume: false, subagentSelection: ref, path }), {})
   assert.deepEqual(ref.current, { model: 'deepseek-v4-flash' })
   // …and a resume brings the session's own route back, subagent included.
   const restored = await restoreSessionRoute({ sessionId: 's1', resume: true, subagentSelection: ref, path })
-  assert.equal(restored.provider, 'xai')
-  assert.equal(restored.model, 'grok-4.6')
+  assert.equal(restored.route?.provider, 'xai')
+  assert.equal(restored.route?.model, 'grok-4.6')
   assert.deepEqual(ref.current, { provider: 'xai', model: 'grok-4.5' })
   // A resumed session with no record starts from the default, untouched.
   const fresh = { current: { model: 'deepseek-v4-flash' } }
-  assert.equal(await restoreSessionRoute({ sessionId: 'never-seen', resume: true, subagentSelection: fresh, path }), undefined)
+  assert.deepEqual(await restoreSessionRoute({ sessionId: 'never-seen', resume: true, subagentSelection: fresh, path }), {})
   assert.deepEqual(fresh.current, { model: 'deepseek-v4-flash' })
   // A record that pinned the parent's own provider stays pinned after resume:
   // `/submodel` said so for this conversation.
@@ -252,4 +253,38 @@ test('resuming applies the record, and a new session is left alone', async () =>
   const inherited = { current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }
   await restoreSessionRoute({ sessionId: 's2', resume: true, subagentSelection: inherited, path })
   assert.deepEqual(inherited.current, { model: 'grok-4.5' })
+})
+
+test('a session route outranks the settings watcher, and a user change hands it back', () => {
+  const ref = { current: { model: 'deepseek-v4-flash' }, source: 'settings' }
+  adoptSessionSubagentSelection(ref, { provider: 'xai', model: 'grok-4.5' })
+  assert.equal(ref.source, 'session')
+  assert.deepEqual(ref.current, { provider: 'xai', model: 'grok-4.5' })
+  // A new session in this process re-reads the settings…
+  releaseSessionSubagentSelection(ref, { model: 'deepseek-v4-pro' })
+  assert.equal(ref.source, 'settings')
+  assert.deepEqual(ref.current, { model: 'deepseek-v4-pro' })
+  // …but an unreadable section leaves the value alone rather than swapping in
+  // the built-in default.
+  adoptSessionSubagentSelection(ref, { provider: 'xai', model: 'grok-4.5' })
+  releaseSessionSubagentSelection(ref, undefined)
+  assert.equal(ref.source, 'settings')
+  assert.deepEqual(ref.current, { provider: 'xai', model: 'grok-4.5' })
+  // Releasing a ref the settings already own changes nothing.
+  releaseSessionSubagentSelection(ref, { model: 'deepseek-v4-pro' })
+  assert.deepEqual(ref.current, { provider: 'xai', model: 'grok-4.5' })
+})
+
+test('a resumed session adopts its subagent route as session-owned', async () => {
+  const path = await tempPath()
+  await saveSessionRoute('s3', {
+    provider: 'xai',
+    model: 'grok-4.6',
+    subagent: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+  }, path)
+  const ref = { current: { model: 'deepseek-v4-pro' }, source: 'settings' }
+  const plan = await restoreSessionRoute({ sessionId: 's3', resume: true, subagentSelection: ref, path })
+  assert.equal(plan.route?.model, 'grok-4.6')
+  assert.deepEqual(ref.current, { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+  assert.equal(ref.source, 'session')
 })

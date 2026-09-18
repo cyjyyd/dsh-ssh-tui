@@ -248,6 +248,48 @@ export interface SubagentSelection {
 /** Mutable selection handle shared by the settings watcher and the TUI. */
 export interface SubagentSelectionRef {
   current: SubagentSelection
+  /**
+   * Where `current` came from.
+   *
+   * A route restored from a session's own record (`session`) outranks the
+   * settings watcher: the host fires `onChange` on writes to *any* section, so a
+   * `/model` or a `/doctor --fix` would otherwise put the app-level default back
+   * and silently drop the pin the conversation was resumed with. A user change
+   * through `/submodel` hands ownership back to the settings.
+   */
+  source?: 'settings' | 'session'
+}
+
+/**
+ * Adopt a session's own subagent route, outranking the settings watcher.
+ * @param ref - the shared selection handle.
+ * @param selection - the route the session's record names.
+ */
+export function adoptSessionSubagentSelection(
+  ref: SubagentSelectionRef,
+  selection: SubagentSelection,
+): void {
+  ref.current = selection
+  ref.source = 'session'
+}
+
+/**
+ * Hand the ref back to the settings watcher.
+ *
+ * Called when a user change makes the settings the source again, and before a
+ * new session starts in this process — a session-scoped route must not leak into
+ * the next conversation. Only a readable section may replace the current value:
+ * resetting on a settings service that is not up yet would swap the route for
+ * the built-in default instead.
+ */
+export function releaseSessionSubagentSelection(
+  ref: SubagentSelectionRef,
+  settingsValue: unknown,
+): void {
+  if (ref.source !== 'session') return
+  ref.source = 'settings'
+  if (settingsValue === null || settingsValue === undefined) return
+  ref.current = normalizeSubagentSelection(settingsValue)
 }
 
 /** Settings schema for `$DSH_HOME/settings.yaml`. */
@@ -279,7 +321,7 @@ export function normalizeSubagentSelection(value: unknown): SubagentSelection {
  */
 export function createSubagentSelection(ctx: Context): SubagentSelectionRef {
   let source = (): SubagentSettings => ({ model: DEFAULT_SUBAGENT_MODEL })
-  const ref: SubagentSelectionRef = { current: normalizeSubagentSelection(source()) }
+  const ref: SubagentSelectionRef = { current: normalizeSubagentSelection(source()), source: 'settings' }
   installSettingsSection(ctx, SUBAGENT_SETTINGS_NAMESPACE, SUBAGENT_SETTINGS_SCHEMA, {
     model: DEFAULT_SUBAGENT_MODEL,
   }, {
@@ -287,6 +329,12 @@ export function createSubagentSelection(ctx: Context): SubagentSelectionRef {
       source = () => current() as unknown as SubagentSettings
     },
     onChange: () => {
+      // A session's own route is not the settings' to overwrite; see
+      // `SubagentSelectionRef.source`. The host fires this on writes to the
+      // subagent section from anywhere — the web UI, another SSH window — and
+      // adopting that value here is what silently dropped a resumed session's
+      // pin.
+      if (ref.source === 'session') return
       ref.current = normalizeSubagentSelection(source())
     },
   })

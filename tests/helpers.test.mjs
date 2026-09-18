@@ -3169,6 +3169,31 @@ test('the launcher hears the route this session settled on', () => {
   assert.deepEqual(seen[1].subagent, { provider: 'xai', model: 'grok-4.5', reasoningEffort: 'high' })
 })
 
+test('the launcher can say a recorded provider is gone', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    launchNotices: [
+      { kind: 'system', text: '本会话记录的提供商 gone-relay 已不可用，改用默认路由 xai/grok-4.5' },
+      { kind: 'error', text: '没有可路由的提供商：nope' },
+    ],
+  })
+  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('gone-relay')))
+  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('没有可路由')))
+})
+
+test('a user change hands the subagent route back to the settings', async () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const ref = { current: { provider: 'xai', model: 'grok-4.5' }, source: 'session' }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, subagentSelection: ref })
+  await tui.saveSubagentSelection({ model: 'deepseek-v4-flash' })
+  assert.equal(ref.source, 'settings')
+  assert.deepEqual(ref.current, { model: 'deepseek-v4-flash' })
+})
+
 test('a resumed session says which route it came back on', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }

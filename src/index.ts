@@ -42,7 +42,7 @@ import { lineModeEnabled } from './line-mode.js'
 import { writeBootSplash } from './paint.js'
 import { mountTui, type TuiController } from './tui.js'
 import { defaultReasoningEffort } from './reasoning.js'
-import { createSubagentSelection } from './subagent-model.js'
+import { createSubagentSelection, releaseSessionSubagentSelection, SUBAGENT_SETTINGS_NAMESPACE } from './subagent-model.js'
 import {
   acquireSessionLock,
   inspectLiveHost,
@@ -67,7 +67,17 @@ import {
 import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd } from './session-list.js'
-import { resolveLaunchRoute, restoreSessionRoute, sameSessionRoute, saveSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
+import {
+  BUILTIN_ROUTABLE_PROVIDERS,
+  providerIsRoutable,
+  resolveLaunchRoute,
+  restoreSessionRoute,
+  sameSessionRoute,
+  saveSessionRoute,
+  sessionRouteInput,
+  type SessionRoute,
+} from './session-route.js'
+import { settingsNamespace } from './dsh-compat.js'
 import { installUiLocale, t } from './i18n/index.js'
 
 
@@ -261,14 +271,36 @@ export function apply(ctx: Context, config: Config): void {
           ))
         : undefined
 
+      // Which providers this install can still route to. Permissive on purpose:
+      // see `providerIsRoutable` — wrongly keeping a record costs the error the
+      // harness already reports, wrongly dropping one loses the session's route.
+      const listedProviders = (ctx.get('llm')?.listProviders() ?? []).map(entry => entry.id)
+      const piAiSection = ctx.get('settings')?.get(settingsNamespace('llm-pi-ai')) as { providers?: unknown } | null | undefined
+      const configuredProviders = piAiSection?.providers !== null && typeof piAiSection?.providers === 'object'
+        ? Object.keys(piAiSection.providers as Record<string, unknown>)
+        : []
+      const routable = (id: string): boolean =>
+        providerIsRoutable({ provider: id, listed: listedProviders, configured: configuredProviders })
+
       // A resumed session carries its own route: the supplier it was actually
       // spending on, and the subagent route it was running its children on. A
       // new session has no record, and another session's record is never used.
-      const sessionRoute = await restoreSessionRoute({
+      // A supplier that has since been removed takes its record with it, and the
+      // launch falls back to the app-level defaults.
+      // A route restored for an earlier session in this process must not leak
+      // into this one; only a readable section may replace it.
+      releaseSessionSubagentSelection(
+        subagentSelection,
+        ctx.get('settings')?.get(SUBAGENT_SETTINGS_NAMESPACE),
+      )
+      const sessionPlan = await restoreSessionRoute({
         sessionId: String(sessionId),
         resume,
         subagentSelection,
+        routable,
       })
+      const sessionRoute = sessionPlan.route
+      const launchNotices: { kind: 'system' | 'error'; text: string }[] = []
 
       // An explicit in-process change (/setup or /model) wins over launch-time
       // CLI overrides for every session created or resumed later in this process.
@@ -284,6 +316,34 @@ export function apply(ctx: Context, config: Config): void {
       })
       const provider = launch.provider
       const model = launch.model
+      // Say what the record was worth before anything else can fail: which
+      // supplier it fell back from, and — when not even the fallback can be
+      // routed to — what is available, so the fix is one command away.
+      if (sessionPlan.droppedProvider !== undefined) {
+        launchNotices.push({
+          kind: 'system',
+          text: t('session.routeProviderGone', {
+            provider: sessionPlan.droppedProvider,
+            route: `${provider}/${model}`,
+          }),
+        })
+      }
+      if (sessionPlan.droppedSubagentProvider !== undefined) {
+        launchNotices.push({
+          kind: 'system',
+          text: t('session.subagentProviderGone', { provider: sessionPlan.droppedSubagentProvider }),
+        })
+      }
+      if (!routable(provider)) {
+        const available = [...new Set([...BUILTIN_ROUTABLE_PROVIDERS, ...listedProviders, ...configuredProviders])]
+        launchNotices.push({
+          kind: 'error',
+          text: t('session.routeNoneRoutable', {
+            provider,
+            available: available.join(' · ') || t('session.routeNoProviders'),
+          }),
+        })
+      }
       let reasoningEffort = launch.reasoningEffort === undefined
         ? undefined
         : ReasoningEffortId(launch.reasoningEffort)
@@ -403,6 +463,7 @@ export function apply(ctx: Context, config: Config): void {
         resume,
         ...(resumeCwdNotice === undefined ? {} : { cwdNotice: resumeCwdNotice }),
         ...(sessionRoute === undefined ? {} : { restoredRoute: sessionRoute }),
+        ...(launchNotices.length === 0 ? {} : { launchNotices }),
         provider,
         model,
         selectionRef,

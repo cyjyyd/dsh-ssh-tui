@@ -23,7 +23,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { resolveDshHome } from './display-sock.js'
-import { normalizeSubagentSelection, type SubagentSelection } from './subagent-model.js'
+import { adoptSessionSubagentSelection, normalizeSubagentSelection, type SubagentSelectionRef } from './subagent-model.js'
 
 /** Subagent route as this session ran it; no provider means "follows parent". */
 export interface SessionSubagentRoute {
@@ -249,12 +249,82 @@ export function sessionRouteInput(input: {
 }
 
 /**
+ * Providers the harness ships with. They are routable in any install even when
+ * the adapter list is still warming up, so a record naming one is never treated
+ * as stale on that basis alone.
+ */
+export const BUILTIN_ROUTABLE_PROVIDERS = ['deepseek-official', 'xai', 'opencode-go', 'opencode'] as const
+
+/**
+ * Whether this install can still route to a provider.
+ *
+ * Deliberately permissive: the cost of wrongly *keeping* a record is an error the
+ * harness already reports clearly (an unknown route, the same one a launch flag
+ * would hit), while wrongly *dropping* one silently loses the session's route —
+ * which is the whole feature. So a provider counts as routable when it is a
+ * built-in, appears in the adapter list, has a configured `llm-pi-ai` profile, or
+ * is listed by the adapter's own model catalog.
+ */
+export function providerIsRoutable(input: {
+  provider: string
+  /** Ids from `llm.listProviders()`. */
+  listed?: readonly string[]
+  /** Ids with an `llm-pi-ai.providers.<id>` section. */
+  configured?: readonly string[]
+}): boolean {
+  const id = input.provider.trim()
+  if (id === '') return false
+  if ((BUILTIN_ROUTABLE_PROVIDERS as readonly string[]).includes(id)) return true
+  if ((input.listed ?? []).some(entry => entry.trim() === id)) return true
+  return (input.configured ?? []).some(entry => entry.trim() === id)
+}
+
+/** What a resumed session's record is worth in this install. */
+export interface RouteAvailabilityPlan {
+  /** The parent route, when the provider it names can still be routed to. */
+  route?: SessionRoute
+  /** The subagent route, when its own pin can be routed to as well. */
+  subagent?: SessionSubagentRoute
+  /** Recorded parent provider that is gone; the caller says so on screen. */
+  droppedProvider?: string
+  /** Recorded subagent pin that is gone; the app-level setting takes over. */
+  droppedSubagentProvider?: string
+}
+
+/**
+ * Decide what of a recorded route still applies.
+ *
+ * A provider that no longer exists takes its whole record with it: the session
+ * was configured around that supplier (its model, its effort, and the children
+ * it pinned), so the honest answer is the app-level default for all of it rather
+ * than a half-restored route. A pinned *child* provider that is gone is narrower:
+ * the parent route is kept and the children fall back to the app-level subagent
+ * setting. An inherited child route has no pin to check — it follows the parent,
+ * which was just found routable.
+ */
+export function routeAvailabilityPlan(input: {
+  recorded?: SessionRoute
+  routable: (provider: string) => boolean
+}): RouteAvailabilityPlan {
+  const recorded = input.recorded
+  if (recorded === undefined) return {}
+  if (!input.routable(recorded.provider)) return { droppedProvider: recorded.provider }
+  const subagent = recorded.subagent
+  if (subagent === undefined) return { route: recorded }
+  if (subagent.provider !== undefined && !input.routable(subagent.provider)) {
+    return { route: recorded, droppedSubagentProvider: subagent.provider }
+  }
+  return { route: recorded, subagent }
+}
+
+/**
  * Apply a resumed session's record to the live selection.
  *
- * Returns the record so the launcher can say which route the session came back
- * on. A new session is left alone (nothing to restore), and so is a resumed one
- * that never had a record — it starts from the global `/submodel` default, which
- * is the same behaviour as before this existed.
+ * Returns what the record was worth (see `routeAvailabilityPlan`) so the
+ * launcher can say which route the session came back on — and, when a supplier
+ * has been removed since, which one it fell back from. A new session is left
+ * alone, and so is a resumed one that never had a record: both start from the
+ * app-level defaults, which is the behaviour before any of this existed.
  *
  * The subagent route is applied in memory only: it belongs to the conversation
  * being resumed, and writing it back to the settings would make one session's
@@ -263,15 +333,21 @@ export function sessionRouteInput(input: {
 export async function restoreSessionRoute(input: {
   sessionId: string
   resume: boolean
-  subagentSelection: { current: SubagentSelection }
+  subagentSelection: SubagentSelectionRef
   path?: string
-}): Promise<SessionRoute | undefined> {
-  if (!input.resume) return undefined
-  const route = await loadSessionRoute(input.sessionId, input.path ?? sessionRoutePath())
-  if (route?.subagent !== undefined) {
-    input.subagentSelection.current = normalizeSubagentSelection(route.subagent)
+  /** Availability test; omitted means "everything is routable". */
+  routable?: (provider: string) => boolean
+}): Promise<RouteAvailabilityPlan> {
+  if (!input.resume) return {}
+  const recorded = await loadSessionRoute(input.sessionId, input.path ?? sessionRoutePath())
+  const plan = routeAvailabilityPlan({
+    ...(recorded === undefined ? {} : { recorded }),
+    routable: input.routable ?? (() => true),
+  })
+  if (plan.subagent !== undefined) {
+    adoptSessionSubagentSelection(input.subagentSelection, normalizeSubagentSelection(plan.subagent))
   }
-  return route
+  return plan
 }
 
 /** One remembered route as the launch waterfall sees it. */
