@@ -114,7 +114,8 @@ test('inspectLiveHost still attaches a 0.7.1 lock and socket name', async t => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session-legacy'
   const sock = legacySessionSockPath(sessionId, home)
-  assert.ok(sock, 'POSIX still has a 0.7.1 socket name')
+  // The pre-digest socket name is POSIX-only; Windows has always used a pipe.
+  if (sock === undefined) return t.skip('no 0.7.1 socket name on Windows')
   const { mkdir } = await import('node:fs/promises')
   await mkdir(join(home, 'tui-locks'), { recursive: true })
   await mkdir(join(home, 'tui-socks'), { recursive: true })
@@ -168,7 +169,9 @@ test('inspectLiveHost is attachable only while the host pid is alive', async t =
 test('a dead pid with a leftover sock is not attachable and the lock is stolen', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-lock-'))
   const sessionId = 'main-session/dead host'
-  const sock = sessionSockPath(sessionId, home)
+  // A real file path on both platforms: on Windows `sessionSockPath` is a
+  // `\\.\pipe\` name, which is not a path `writeFile` can leave behind.
+  const sock = join(home, 'tui-socks', `${sessionLabel(sessionId, 80)}.sock`)
   const { mkdir, access } = await import('node:fs/promises')
   await mkdir(join(home, 'tui-locks'), { recursive: true })
   await mkdir(join(home, 'tui-socks'), { recursive: true })

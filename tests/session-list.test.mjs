@@ -474,9 +474,12 @@ test('sessionCwdLabel keeps the last folder name', () => {
 
 test('enterSessionCwd switches into an absolute existing directory', () => {
   const calls = []
+  // `isDirectory` is injected like `exists`: the default stats the real path,
+  // and this test must not depend on which machine it runs on.
   const ok = enterSessionCwd('/root/genshin/srv', {
     current: '/tmp',
     exists: () => true,
+    isDirectory: () => true,
     chdir: (path) => { calls.push(path) },
   })
   assert.deepEqual(ok, { cwd: '/root/genshin/srv', changed: true })

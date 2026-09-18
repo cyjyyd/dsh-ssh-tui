@@ -143,6 +143,20 @@ test('painting stays off in line mode even when the screen is dirtied', async ()
  * command. They do not call `start()` — that would steal SIGTERM and scan the
  * credential store.
  */
+
+/**
+ * Wait for a prompt to reach the log. A fixed sleep is a race on a loaded CI
+ * runner; this polls the writer instead and only fails when nothing arrives.
+ */
+async function waitForText(read, needle, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (read().includes(needle)) return true
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  return read().includes(needle)
+}
+
 test('a Host-side turn does not leak OSC titles or a bell into the log', async () => {
   const { tui, since } = await lineModeTui()
   const added = since()
@@ -161,7 +175,7 @@ test('a confirm prompt is written into the log, and y answers it', async () => {
     callId: 'c-line',
     agent: tui.agent,
   }, async () => { throw new Error('waterfall next() must not run') })
-  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(await waitForText(added, 'y = '), `the keys are in the log: ${JSON.stringify(added())}`)
   const shown = added()
   assert.match(shown, /bash/u, `the prompt names the tool: ${JSON.stringify(shown)}`)
   assert.match(shown, /y = /u, `the keys are in the log: ${JSON.stringify(shown)}`)
@@ -193,7 +207,7 @@ test('a question dialog lists its options in the log', async () => {
       ],
     }],
   })
-  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(await waitForText(added, 'green'), `the question is in the log: ${JSON.stringify(added())}`)
   const shown = added()
   assert.match(shown, /Which colour/u, `the question is in the log: ${JSON.stringify(shown)}`)
   assert.match(shown, /red/u)
