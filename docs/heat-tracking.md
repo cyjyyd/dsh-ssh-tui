@@ -26,8 +26,12 @@ node scripts/heat-report.mjs --no-directory   # 跳过 dshfind 查询
 cron 示例（每周一 09:10）：
 
 ```cron
-10 9 * * 1 cd /root/dsh-ssh-tui && node scripts/heat-report.mjs >> ~/.dsh/heat/weekly.log 2>&1
+# 每周一 09:10 采一次；cron 的 PATH 很干净，node 用绝对路径
+10 9 * * 1 cd /root/dsh-ssh-tui && /usr/bin/node scripts/heat-report.mjs >> /root/.dsh/heat/weekly.log 2>&1
 ```
+
+在本机用面板的「计划任务」加这一行即可（代理会话的沙箱对 `/var/spool/cron` 只读，`crontab -e` 会报 EROFS）。
+脚本不依赖任何环境变量：token 走文件查找，`env -i /bin/sh -c '…'` 下已实测可采集。
 
 ## 存储与合并规则
 
