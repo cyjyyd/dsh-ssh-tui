@@ -3282,18 +3282,34 @@ export class SshTui {
     this.toggleCard(target)
   }
 
+  /**
+   * Whether an inline tool body would be cut short.
+   *
+   * Two things stop a body short: it cannot fit the workspace, or the measured
+   * link is slow enough that the paint budget trims it. Both leave the reader
+   * looking at part of a diff under a header that counts all of it, and both
+   * are what the overlay is for — so both answers are the overlay, and the
+   * card's own `Enter 全览` hint stays true.
+   */
+  private toolBodyTruncated(target: Extract<Row, { kind: 'tool' }>, width: number, height: number): boolean {
+    const body = toolBodyLines(target, Number.MAX_SAFE_INTEGER)
+    if (body.length > toolBodyLineLimit(linkQualityOf(this.paintLink, this.paintRttMs))) return true
+    return !toolBodyFitsWorkspace(
+      wrappedToolBodyLineCount(body, width),
+      this.workspaceRowsFor(width, height),
+    )
+  }
+
   toggleCard(target: CollapsibleBlock): void {
     if (target.kind === 'subagent') {
       this.focusedRow = target
       this.openSubagentInspect(target)
       return
     }
-    if (target.kind === 'tool' && !target.expanded) {
+    if (target.kind === 'tool') {
       const width = Math.max(10, this.screenColumns())
       const height = Math.max(6, this.screenRows())
-      const body = toolBodyLines(target, Number.MAX_SAFE_INTEGER)
-      const bodyRows = wrappedToolBodyLineCount(body, width)
-      if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
+      if (this.toolBodyTruncated(target, width, height)) {
         this.focusedRow = target
         this.openToolInspect(target)
         return
@@ -3378,9 +3394,7 @@ export class SshTui {
     if (row.kind === 'tool') {
       const width = Math.max(10, this.screenColumns())
       const height = Math.max(6, this.screenRows())
-      const body = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
-      const bodyRows = wrappedToolBodyLineCount(body, width)
-      if (!toolBodyFitsWorkspace(bodyRows, this.workspaceRowsFor(width, height))) {
+      if (this.toolBodyTruncated(row, width, height)) {
         this.focusedRow = row
         this.openToolInspect(row)
         return

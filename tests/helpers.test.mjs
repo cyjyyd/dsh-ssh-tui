@@ -3725,6 +3725,53 @@ test('oversized tool bodies open a dedicated inspect overlay', () => {
   assert.ok(inPlace.some(line => line.includes('one line')))
 })
 
+test('a body the slow-link budget would cut opens in the overlay instead', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: { provider: 'xai', model: 'grok-4.6' },
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  // A body that fits the workspace: only the link budget can cut this one.
+  const diff = [{ path: 'a.ts', oldText: 'keep\nold line\n', newText: 'keep\nnew line\nextra\n' }]
+  const fixture = (rttMs, expanded) => {
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+    // The paint path reads the link quality the same way, so the card and this
+    // decision cannot disagree about whether the body was cut.
+    tui.paintLink = 'ssh'
+    tui.paintRttMs = rttMs
+    const row = {
+      kind: 'tool', callId: 'e1', name: 'edit', title: '编辑', summary: 'a.ts',
+      args: '{}', output: '', status: 'ok', expanded, diff,
+    }
+    tui.rows.push(row)
+    tui.captureFrame(120, 24)
+    return { tui, row }
+  }
+  const fast = fixture(40, false)
+  fast.tui.toggleCard(fast.row)
+  assert.equal(fast.row.expanded, true, 'a fast link still expands in place')
+  assert.equal(fast.tui.dialog, undefined)
+
+  // On a measured slow link the inline body is trimmed to a few lines. Opening
+  // it must show the rest, not expand a card that hides most of the diff.
+  const slow = fixture(1200, false)
+  slow.tui.toggleCard(slow.row)
+  assert.equal(slow.tui.dialog?.kind, 'inspect', 'Enter shows the full body')
+  const body = slow.tui.dialog.lines.map(line => line.text).join('\n')
+  assert.match(body, /old line/u)
+  assert.match(body, /new line/u)
+  assert.match(body, /extra/u, 'the added line is in the overlay, not dropped')
+  // And a card already expanded when the link degraded opens it too, instead of
+  // collapsing half a body away.
+  const open = fixture(1200, true)
+  open.tui.toggleCard(open.row)
+  assert.equal(open.tui.dialog?.kind, 'inspect')
+  assert.equal(open.row.expanded, true)
+})
+
 test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
