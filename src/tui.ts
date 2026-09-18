@@ -323,7 +323,6 @@ import {
   describeSubagentFailure,
   subagentChipSummary,
   subagentDisplayName,
-  subagentHeaderText,
   subagentInspectLines,
   subagentRowFromSpawnTool,
   todoItemKind,
@@ -525,7 +524,6 @@ export {
   describeSubagentFailure,
   subagentChipSummary,
   subagentDisplayName,
-  subagentHeaderText,
   subagentInspectLines,
   subagentRowFromSpawnTool,
   foldSubagentUserLog,
@@ -1772,7 +1770,7 @@ export class SshTui {
       const styled = headerSegments.length === 0
         ? this.styleLine('tool', collapsed)
         : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
-      addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, anchor)
+      addDisplay(this.selectLine(styled, this.focusedRow === anchor), anchor)
       // A collapsed burst is all the reader sees, so the two things that decide
       // whether to expand belong on it: which files moved, and what failed.
       if (kind === 'edits') {
@@ -1795,7 +1793,7 @@ export class SshTui {
       ? wrap(header.plain, width).map(line => this.styleLine('tool', line))
       : wrapSegmented(header.plain, Math.max(1, width), headerSegments, this.colorDepth)
     for (const wrapped of expandedHeaderLines) {
-      addDisplay(this.focusedRow === anchor && this.color ? `\x1b[7m${wrapped}\x1b[27m` : wrapped, anchor)
+      addDisplay(this.selectLine(wrapped, this.focusedRow === anchor), anchor)
     }
     for (const item of items) {
       if (kind === 'edits') {
@@ -3255,12 +3253,12 @@ export class SshTui {
     if (!row.expanded) {
       const collapsed = truncateToWidth(plain, Math.max(1, width - 2))
       const styled = paint(collapsed)
-      addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+      addDisplay(this.selectLine(styled, focused), row)
       return
     }
     for (const wrapped of wrap(plain, width)) {
       const styled = paint(wrapped)
-      addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+      addDisplay(this.selectLine(styled, focused), row)
     }
   }
 
@@ -3580,7 +3578,7 @@ export class SshTui {
         const header = t('reason.done', { marker, lines }) + (row.expanded ? '' : t('card.expand'))
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
-        addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+        addDisplay(this.selectLine(styled, focused), row)
         if (row.expanded) {
           for (const wrapped of wrap(row.text, width)) {
             addDisplay(this.styleLine('reasoning', wrapped), row)
@@ -3612,7 +3610,7 @@ export class SshTui {
           const styled = headerSegments.length === 0
             ? collapsed
             : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
-          addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+          addDisplay(this.selectLine(styled, focused), row)
           continue
         }
         const expandedHeaderLines = headerSegments.length === 0
@@ -3656,7 +3654,7 @@ export class SshTui {
         const styled = headerSegments.length === 0
           ? this.styleLine('subagent-header', collapsed)
           : paintSegmentedLine(collapsed, 0, collapsed.length, headerSegments, this.colorDepth)
-        addDisplay(this.focusedRow === row && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, row)
+        addDisplay(this.selectLine(styled, this.focusedRow === row), row)
         continue
       }
       if (row.kind === 'plan') {
@@ -3785,7 +3783,7 @@ export class SshTui {
           + (elapsed > 0 ? t('reason.elapsed', { seconds: elapsed }) : '')
         const line = `${focused ? '▶ ' : '  '}${header}`
         const styled = this.styleLine('reasoning', line)
-        addDisplay(focused && this.color ? `\x1b[7m${styled}\x1b[27m` : styled, block)
+        addDisplay(this.selectLine(styled, focused), block)
         if (block.expanded) {
           for (const wrapped of wrap(this.streaming.reasoning, width)) {
             addDisplay(this.styleLine('reasoning', wrapped), block)
@@ -4007,8 +4005,8 @@ export class SshTui {
       if (command === undefined) continue
       const marker = index === this.suggestionIndex ? '›' : ' '
       const line = `  ${marker} /${command.name.padEnd(14)} ${command.description}${command.local ? '' : '  (dsh)'}`
-      suggestionLines.push(index === this.suggestionIndex && this.color
-        ? `\x1b[7m${fitLine(line)}\x1b[27m`
+      suggestionLines.push(index === this.suggestionIndex
+        ? this.selectLine(fitLine(line), true)
         : this.styleLine('system', fitLine(line)))
     }
     if (suggestionEnd < this.commandSuggestions.length) {
@@ -4905,6 +4903,21 @@ export class SshTui {
       if (code !== '') return `\x1b[${code}m${sanitizeTerminalText(text)}\x1b[0m`
     }
     return `\x1b[7m${this.styleLine(kind, text)}\x1b[27m`
+  }
+
+  /**
+   * Paint a row the reader has selected.
+   *
+   * The obvious `7`…`27` wrap only reaches the part before the line's first
+   * reset, and every painted segment ends with one: a focused card kept its
+   * marker and status dot highlighted while the title, the state word and the
+   * summary stayed plain, so ↑/↓ gave no visible clue which card was picked —
+   * on exactly the rows that carry a segmented header. Re-opening the attribute
+   * after every reset covers the whole row, whatever colours sit on top of it.
+   */
+  private selectLine(styled: string, selected: boolean): string {
+    if (!selected || !this.color) return styled
+    return `\x1b[7m${styled.replaceAll('\x1b[0m', '\x1b[0m\x1b[7m')}\x1b[27m`
   }
 
   /**

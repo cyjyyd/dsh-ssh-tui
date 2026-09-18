@@ -495,15 +495,6 @@ export function subagentChipSummary(row: Extract<Row, { kind: 'subagent' }>): st
   return clipSubagentActivity(row.lastActivity, 40)
 }
 
-/** One-line subagent chip used in the parent transcript (never dumps logs). */
-export function subagentHeaderText(row: Extract<Row, { kind: 'subagent' }>, now = Date.now()): string {
-  const elapsed = Math.max(0, Math.floor(((row.endedAt ?? now) - row.startedAt) / 1000))
-  const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`
-  const summary = subagentChipSummary(row)
-  const activity = summary === '' ? '' : ` · ${summary}`
-  return `${subagentDisplayName(row)}  ${subagentStatusLabel(row.status)} · ${elapsedLabel}${activity}`
-}
-
 /** Header + SGR spans: identity color, status dot/word, muted summary. */
 export function buildSubagentHeader(input: {
   focused: boolean

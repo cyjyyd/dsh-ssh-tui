@@ -126,7 +126,6 @@ import {
   countDiffAddDel,
   diffStatToken,
   compactionHeaderText,
-  subagentHeaderText,
   buildSubagentHeader,
   clipSubagentActivity,
   subagentChipSummary,
@@ -2610,8 +2609,11 @@ test('subagent cards stay collapsed, isolated, and animate while running', () =>
   assert.equal(cards[1].expanded, false)
   assert.ok(cards[0].logs.some(entry => entry.text.includes('alpha working')))
   assert.ok(cards[1].logs.some(entry => entry.text.includes('终端')))
-  assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('运行中'), true)
-  assert.equal(subagentHeaderText(cards[0], cards[0].startedAt).includes('child-a'), false)
+  // Read the chip the reader actually gets: a helper that no longer paints
+  // anything would keep these assertions green while the card drifted.
+  const painted = tui.captureFrame(80, 20).join('\n')
+  assert.ok(painted.includes('运行中'), painted)
+  assert.equal(painted.includes('child-a'), false)
   tui.handleSubagentEnd({
     runId: 'run-a', id: 'child-a', provider: 'spawn', local: true, stopReason: 'completed',
     lastAssistantMessage: [{ type: 'text', text: 'alpha done' }],
@@ -2638,10 +2640,12 @@ test('subagent chip omits log dumps and Enter opens the inspect overlay', () => 
   assert.equal(card?.kind, 'subagent')
   assert.equal(card.task, 'scan repo')
   assert.equal(subagentChipSummary(card), 'repo')
-  const header = subagentHeaderText(card, card.startedAt)
-  assert.equal(header.includes('repo'), true)
-  assert.equal(header.includes('second line'), false)
-  assert.ok(header.length < 80)
+  // Same rule as above: assert on the painted header, not on a function that
+  // computes its own copy of it.
+  const paintedHeader = tui.captureFrame(80, 20).find(line => line.includes('repo')) ?? ''
+  assert.ok(paintedHeader.includes('repo'), paintedHeader)
+  assert.equal(paintedHeader.includes('second line'), false)
+  assert.ok(visibleWidth(paintedHeader) < 80)
   assert.equal(clipSubagentActivity(long).includes('\n'), false)
   assert.ok(clipSubagentActivity(long).length < 60)
 
@@ -3259,7 +3263,64 @@ test('a /find hit inside a child log is scrolled to and marked', () => {
   assert.equal(tui.dialog.offset, 0)
 })
 
-test('parseWorkspaceView accepts compact aliases', () => {  assert.equal(parseWorkspaceView('compact'), 'compact')
+/**
+ * Visible characters a styled line emits while reverse video is *not* active.
+ * Empty means the selection highlight covers the whole row.
+ */
+function visibleOutsideReverse(styled) {
+  let reverse = false
+  let out = ''
+  for (let at = 0; at < styled.length; at += 1) {
+    if (styled[at] === '\x1b') {
+      const end = styled.indexOf('m', at)
+      if (end === -1) break
+      for (const param of styled.slice(at + 2, end).split(';')) {
+        if (param === '7') reverse = true
+        else if (param === '0' || param === '27') reverse = false
+      }
+      at = end
+      continue
+    }
+    if (styled[at] !== ' ' && !reverse) out += styled[at]
+  }
+  return out
+}
+
+test('a focused card highlights its whole header, not just the marker', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, headlessDisplay: true })
+  tui.colorDepth = 'truecolor'
+  tui.color = true
+  tui.rows.push({
+    kind: 'subagent', sessionId: 'child-a', childSessionId: 'child-a', runId: 'run-a', provider: 'spawn',
+    local: true, label: '子代理 spawn', task: 'scan repo for keys', status: 'running',
+    startedAt: Date.now(), lastActivity: 'scan repo', logs: [], expanded: false, modelProvider: 'xai',
+  })
+  tui.rows.push({
+    kind: 'tool', callId: 'c1', name: 'bash', title: '终端', summary: '$ ls', args: '{}',
+    output: 'ok', status: 'ok', expanded: false,
+  })
+  const line = needle => tui.captureFrame(80, 16).find(row => row.includes(needle)) ?? ''
+  const cards = [
+    ['探路', tui.rows.find(row => row.kind === 'subagent')],
+    ['终端', tui.rows.find(row => row.kind === 'tool')],
+  ]
+  for (const [needle, row] of cards) {
+    assert.ok(row !== undefined, `the ${needle} card exists`)
+    tui.focusedRow = row
+    const focused = line(needle)
+    assert.ok(focused !== '', focused)
+    // The old wrap stopped at the first segment's `\x1b[0m`, so the title, the
+    // state word and the summary stayed plain while the marker was highlighted.
+    assert.equal(visibleOutsideReverse(focused), '', focused)
+    tui.focusedRow = null
+    assert.equal(line(needle).includes('\x1b[7m'), false, 'an unfocused card is not highlighted')
+  }
+})
+
+test('parseWorkspaceView accepts compact aliases', () => {
+  assert.equal(parseWorkspaceView('compact'), 'compact')
   assert.equal(parseWorkspaceView('minimal'), 'compact')
   assert.equal(parseWorkspaceView('极简'), 'compact')
   assert.equal(parseWorkspaceView('detailed'), 'detailed')
