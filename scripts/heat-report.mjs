@@ -491,7 +491,10 @@ export function buildReportModel({ snapshots, now = new Date(), days = 28, store
   // six-day window with a seven-day one would read as a change that is not one.
   const lastTrafficDay = series.findLast(row => row.views !== undefined)?.day ?? lastDay
   return {
-    generatedAt: new Date().toISOString(),
+    // Stamped from the injected clock, not the wall clock: the "npm pending"
+    // annotation is derived from this day, and a report built for a fixture
+    // must not change its mind when the real date rolls over.
+    generatedAt: new Date(now).toISOString(),
     repo: REPO,
     package: PACKAGE_NAME,
     store: { path: storePath, samples: ordered.length, skipped, size: series.length },
