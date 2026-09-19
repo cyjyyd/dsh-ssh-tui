@@ -113,25 +113,22 @@ test('/setup catalog API-key step explains the environment-key fallback', () => 
   setLocale('zh')
 })
 
-test('/setup lists both protocols for the gateways whose model routes differ', () => {
-  // Command Code's `/models` reports `supported_endpoints` per id: 55 of 71 on
-  // both routes, 8 on Completions only. Zen's listing has no such field at all,
-  // so a chat-only model there cannot be detected from the gateway either. One
-  // provider entry holds one protocol — without both rows those models are
-  // unreachable from the wizard.
-  const gateways = [
-    { completions: 'onboard.providerCommandCode', responses: 'onboard.providerCommandCodeResponses', host: 'api.commandcode.ai' },
-    { completions: 'onboard.providerGoCompletions', responses: 'onboard.providerGo', host: 'opencode.ai/zen/go' },
-  ]
+test('/setup lists one row per gateway, and the protocol is chosen per model', () => {
+  // A gateway whose catalogue spans protocols used to need one row per
+  // protocol, which asked the user to guess. The wizard now files each model
+  // under the route it speaks (see gateway-protocol), so the row count is the
+  // gateway count and no row names a protocol.
   for (const locale of ['zh', 'en']) {
     setLocale(locale)
     const { text } = dialogFrame('provider')
-    for (const gateway of gateways) {
-      assert.ok(text.includes(t(gateway.completions)), `${locale}: missing the Completions row for ${gateway.host}\n${text}`)
-      assert.ok(text.includes(t(gateway.responses)), `${locale}: missing the Responses row for ${gateway.host}\n${text}`)
-      assert.ok(text.includes(`${gateway.host} · Completions`), `${locale}: ${gateway.host} Completions row must name its protocol\n${text}`)
-      assert.ok(text.includes(`${gateway.host} · Responses`), `${locale}: ${gateway.host} Responses row must name its protocol\n${text}`)
+    for (const key of ['onboard.providerGo', 'onboard.providerCommandCode']) {
+      const label = t(key)
+      const rows = text.split('\n').filter(line => line.includes(label))
+      assert.equal(rows.length, 1, `${locale}: ${key} must appear exactly once\n${text}`)
     }
+    assert.equal(text.includes('· Responses'), false, `${locale}: no per-protocol rows\n${text}`)
+    assert.equal(text.includes('· Completions'), false, `${locale}: no per-protocol rows\n${text}`)
+    assert.ok(text.includes(t('onboard.protocolAuto')), `${locale}: the row must say the protocol is automatic\n${text}`)
   }
   setLocale('zh')
 })

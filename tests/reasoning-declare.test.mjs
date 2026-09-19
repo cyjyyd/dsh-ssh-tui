@@ -161,7 +161,7 @@ test('the wizard lists the fixed Command Code provider', () => {
   const entries = tui.mergedProviderEntries(wizardState({ step: 'provider' }))
   const entry = entries.find(candidate => candidate.key === 'template:command-code')
   assert.ok(entry, `Command Code must be offered: ${JSON.stringify(entries)}`)
-  assert.match(entry.detail, /api\.commandcode\.ai/)
+  assert.match(entry.label, /Command Code/)
 })
 
 test('/setup persists the fixed Command Code route with its verified capacity', async () => {
@@ -180,11 +180,45 @@ test('/setup persists the fixed Command Code route with its verified capacity', 
 
   const write = writes.find(entry => entry.op === 'mutate' && entry.ns === 'llm-pi-ai')
   assert.ok(write, 'the provider profile must be written')
-  assert.equal(write.ops[0].value.api, 'openai-completions')
+  // The gateway's pinned protocol is responses (verified against the live
+  // gateway), and the base id keeps that protocol.
+  assert.equal(write.ops[0].path[1], 'command-code')
+  assert.equal(write.ops[0].value.api, 'openai-responses')
   assert.equal(write.ops[0].value.baseURL, 'https://api.commandcode.ai/provider/v1')
   assert.deepEqual(write.ops[0].value.models, [{
     id: 'deepseek/deepseek-v4.1-flash',
     contextWindow: 1_048_576,
     reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max', xhigh: 'xhigh' },
   }])
+})
+
+test('/setup files each model of one gateway under the protocol it speaks', async () => {
+  const section = { providers: {} }
+  const { tui, writes } = makeTui({ section, credentials: { set: async () => {} } })
+  tui.onboarding = wizardState({
+    step: 'confirm',
+    providerType: 'command-code',
+    providerId: 'command-code',
+    baseUrl: '',
+    models: ['deepseek/deepseek-v4.1-flash', 'z-ai/glm-5.3-flash'],
+    modelCapacity: new Map(),
+    // What `GET /provider/v1/models` publishes for these two ids.
+    modelEndpoints: new Map([
+      ['deepseek/deepseek-v4.1-flash', ['/chat/completions', '/responses']],
+      ['z-ai/glm-5.3-flash', ['/chat/completions']],
+    ]),
+  })
+
+  await tui.saveOnboarding()
+
+  const write = writes.find(entry => entry.op === 'mutate' && entry.ns === 'llm-pi-ai')
+  assert.ok(write, 'the provider profiles must be written')
+  const byId = Object.fromEntries(write.ops.map(op => [op.path[1], op.value]))
+  // One wizard row, two entries: the model that answers both routes takes the
+  // preferred one, the chat-only model gets its own sibling entry.
+  assert.equal(byId['command-code'].api, 'openai-responses')
+  assert.deepEqual(byId['command-code'].models.map(model => model.id), ['deepseek/deepseek-v4.1-flash'])
+  assert.equal(byId['command-code-completions'].api, 'openai-completions')
+  assert.deepEqual(byId['command-code-completions'].models.map(model => model.id), ['z-ai/glm-5.3-flash'])
+  assert.equal(Object.keys(byId).length, 2)
 })

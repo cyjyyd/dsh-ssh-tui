@@ -121,6 +121,15 @@ import {
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
 import { sameSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import {
+  GATEWAY_PROTOCOL_SUFFIX,
+  gatewayModelTable,
+  isSiblingOf,
+  siblingProviderId,
+  siblingProtocolOf,
+  splitModelsByProtocol,
+  type GatewayProtocol,
+} from './gateway-protocol.js'
+import {
   applySavedLocale,
   getLocale,
   localeDisplayName,
@@ -594,6 +603,36 @@ function discoverProviderModels(
   return llm.discoverModels(settingsNamespace('llm-pi-ai'), { ...request, signal }, signal)
 }
 
+/**
+ * Ask a gateway which routes each of its models answers (`supported_endpoints`
+ * in an OpenAI-shaped `GET {baseURL}/models` reply). Command Code publishes
+ * them; most gateways do not, and the split then falls back to the built-in
+ * table. Best-effort by design: no key, no field, a network error or a shape we
+ * do not recognise all mean "no answer", never a failed setup.
+ */
+async function fetchModelEndpoints(baseURL: string, apiKey: string): Promise<Map<string, readonly string[]> | undefined> {
+  if (baseURL === '' || apiKey === '') return undefined
+  try {
+    const response = await fetch(`${baseURL.replace(/\/+$/u, '')}/models`, {
+      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) return undefined
+    const body = (await response.json()) as { data?: { id?: unknown; supported_endpoints?: unknown }[] }
+    const endpoints = new Map<string, readonly string[]>()
+    for (const entry of body.data ?? []) {
+      const id = typeof entry?.id === 'string' ? entry.id : ''
+      const list = Array.isArray(entry?.supported_endpoints)
+        ? entry.supported_endpoints.filter((value): value is string => typeof value === 'string')
+        : []
+      if (id !== '' && list.length > 0) endpoints.set(id, list)
+    }
+    return endpoints.size === 0 ? undefined : endpoints
+  } catch {
+    return undefined
+  }
+}
+
 /** 0.1.1 registers a provider object; 0.1.2 answers through the waterfall. */
 type UserQuestionAnswerer = {
   registerProvider?(provider: { ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer> }): () => void
@@ -719,9 +758,7 @@ export interface TuiConfig {
 type OnboardingProviderType =
   | 'official'
   | 'opencode-go'
-  | 'opencode-go-completions'
   | 'command-code'
-  | 'command-code-responses'
   | 'openai-completions'
   | 'openai-responses'
   | 'anthropic-messages'
@@ -732,6 +769,13 @@ interface ProviderTemplate {
   defaultId: string
   defaultBaseUrl: string
   api?: 'openai-completions' | 'openai-responses' | 'anthropic-messages'
+  /**
+   * A gateway whose catalogue spans protocols: one wizard row, several provider
+   * entries. Saving files each model under the first protocol here that it
+   * supports, so the wizard never asks the user to guess (see
+   * `gateway-protocol.ts`).
+   */
+  protocols?: readonly GatewayProtocol[]
   defaultModels: string[]
   /** Capacities already verified for the template's default models, by id. */
   defaultModelCapacity?: Record<string, { contextWindow?: number; maxTokens?: number }>
@@ -745,48 +789,27 @@ function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>,
     defaultBaseUrl: 'https://api.deepseek.com',
     defaultModels: ['deepseek-v4-pro', 'deepseek-v4-flash'],
   },
+  // One row, both routes: the wizard files each model under the protocol it
+  // speaks (the gateway publishes `supported_endpoints`, and its pinned
+  // defaults are verified on responses), so nobody has to pick a protocol by
+  // hand or discover later that half the catalogue needs the other one.
   'opencode-go': {
     label: t('onboard.providerGo'),
     defaultId: 'opencode-go',
     defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
     api: 'openai-responses',
+    protocols: ['openai-responses', 'openai-completions', 'anthropic-messages'],
     defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   },
-  // The same gateway on its chat route. Zen's own listing (37 ids under
-  // `/zen/go/v1/models`) carries no `supported_endpoints` field, and the
-  // published Go table puts deepseek on `/chat/completions` while this pinned
-  // template was verified against `/responses` — both answer, so the verified
-  // default stays and this row is the way to the models the table lists as
-  // chat-only (GLM, Kimi, LongCat, MiMo, Hy). MiniMax and Qwen need
-  // `/messages`, which is a third protocol and not a second row of this one.
-  'opencode-go-completions': {
-    label: t('onboard.providerGoCompletions'),
-    defaultId: 'opencode-go-completions',
-    defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
-    api: 'openai-completions',
-    defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
-  },
-  // A fixed provider: its chat route is OpenAI-completions, but billing uses
-  // Command Code's own `/alpha/billing/credits` surface on the API root.
+  // Same shape for Command Code: its chat route bills through the API root's
+  // `/alpha/billing/credits`, and its catalogue is split across three
+  // protocols, which the splitter reads off `GET /provider/v1/models`.
   'command-code': {
     label: t('onboard.providerCommandCode'),
     defaultId: 'command-code',
     defaultBaseUrl: 'https://api.commandcode.ai/provider/v1',
-    api: 'openai-completions',
-    defaultModels: ['deepseek/deepseek-v4.1-flash'],
-    defaultModelCapacity: { 'deepseek/deepseek-v4.1-flash': { contextWindow: 1_048_576 } },
-  },
-  // The same gateway and key on its Responses route. `GET /provider/v1/models`
-  // reports `supported_endpoints` per model: 55 of 71 accept `/responses` (all
-  // five deepseek ids except `deepseek-v4-flash-fast`), 8 accept only
-  // `/chat/completions`, and the Claude family only `/messages`. One provider
-  // entry cannot hold two protocols, so the choice stays with the user instead
-  // of a wholesale switch that would break those eight models.
-  'command-code-responses': {
-    label: t('onboard.providerCommandCodeResponses'),
-    defaultId: 'command-code-responses',
-    defaultBaseUrl: 'https://api.commandcode.ai/provider/v1',
     api: 'openai-responses',
+    protocols: ['openai-responses', 'openai-completions', 'anthropic-messages'],
     defaultModels: ['deepseek/deepseek-v4.1-flash'],
     defaultModelCapacity: { 'deepseek/deepseek-v4.1-flash': { contextWindow: 1_048_576 } },
   },
@@ -837,6 +860,13 @@ interface OnboardingState {
   baseUrl: string
   key: string
   models: string[]
+  /**
+   * `supported_endpoints` per model, when the gateway publishes them (Command
+   * Code does). Captured while the key is in hand, because that is the only
+   * moment the wizard can ask; absent means the split falls back to the
+   * built-in table and then to the gateway's primary protocol.
+   */
+  modelEndpoints?: Map<string, readonly string[]>
   /** Capacities the endpoint's model listing disclosed, keyed by model id.
    *  A hand-declared gateway has no pi-ai catalog entry, so this is the only
    *  source for its context window and output cap. */
@@ -8672,10 +8702,8 @@ export class SshTui {
     const templates = providerTemplates()
     const templateEntries: ProviderListEntry[] = [
       { key: 'template:official', label: templates.official.label, detail: 'api.deepseek.com' },
-      { key: 'template:opencode-go', label: templates['opencode-go'].label, detail: 'opencode.ai/zen/go · Responses' },
-      { key: 'template:opencode-go-completions', label: templates['opencode-go-completions'].label, detail: 'opencode.ai/zen/go · Completions' },
-      { key: 'template:command-code', label: templates['command-code'].label, detail: 'api.commandcode.ai · Completions' },
-      { key: 'template:command-code-responses', label: templates['command-code-responses'].label, detail: 'api.commandcode.ai · Responses' },
+      { key: 'template:opencode-go', label: templates['opencode-go'].label, detail: t('onboard.protocolAuto') },
+      { key: 'template:command-code', label: templates['command-code'].label, detail: t('onboard.protocolAuto') },
       { key: 'template:openai-completions', label: templates['openai-completions'].label, detail: 'openai-completions' },
       { key: 'template:openai-responses', label: templates['openai-responses'].label, detail: 'openai-responses' },
       { key: 'template:anthropic-messages', label: templates['anthropic-messages'].label, detail: 'anthropic-messages' },
@@ -8941,6 +8969,11 @@ export class SshTui {
       if (ids.length === 0) {
         this.pushRow({ kind: 'error', text: t('onboard.noModels') })
       } else {
+        // Read the gateway's own route list while the key is still in hand: the
+        // confirm step has no way to ask for it again.
+        if (template.protocols !== undefined) {
+          state.modelEndpoints = await fetchModelEndpoints(baseURL, key)
+        }
         state.models = ids
         state.modelCapacity = new Map(discovered.flatMap(model => {
           const capacity: { contextWindow?: number; maxTokens?: number } = {
@@ -9016,7 +9049,25 @@ export class SshTui {
           defaultEffort === undefined ? undefined : String(defaultEffort),
         )
         const existing = this.piAiProviderProfile(state.providerId)
-        const existingModels = Array.isArray(existing?.models) ? existing.models : []
+        // One gateway can already be spread over sibling entries (an earlier
+        // setup, or a hand-written profile): the pool is every model the gateway
+        // has, so re-running setup re-homes them instead of duplicating or
+        // dropping any.
+        const declaredProtocol = (value: unknown): GatewayProtocol | undefined =>
+          value === 'openai-responses' || value === 'openai-completions' || value === 'anthropic-messages' ? value : undefined
+        const baseProtocol = declaredProtocol(existing?.api) ?? template.api ?? 'openai-completions'
+        const siblingEntries = template.protocols === undefined
+          ? []
+          : template.protocols
+              .filter(protocol => protocol !== baseProtocol)
+              .map(protocol => ({
+                protocol,
+                profile: this.piAiProviderProfile(siblingProviderId(state.providerId, protocol)),
+              }))
+        const existingModels = [
+          ...(Array.isArray(existing?.models) ? existing.models : []),
+          ...siblingEntries.flatMap(entry => (Array.isArray(entry.profile?.models) ? entry.profile.models : [])),
+        ]
         // The confirm step can be reached without walking the models step (and
         // a saved catalog answer may have landed after it), so size the picks
         // here too: the call is idempotent and fills only missing windows.
@@ -9045,42 +9096,79 @@ export class SshTui {
         // and an absent key defers to the provider's own environment auth.
         const catalogRoute = state.providerType === 'catalog' && state.catalog !== undefined
         const keyless = catalogRoute && state.key === ''
-        const profile = {
+        const baseURL = state.baseUrl === ''
+          ? (typeof existing?.baseURL === 'string' && existing.baseURL !== '' ? existing.baseURL : template.defaultBaseUrl)
+          : state.baseUrl
+        // A gateway with `protocols` keeps one wizard row and lands in several
+        // provider entries, one per protocol its models actually speak. The base
+        // id keeps the protocol it already declares (so routes naming it never
+        // change meaning); a fresh gateway takes the template's pinned one.
+        const split = template.protocols === undefined
+          ? new Map<GatewayProtocol, string[]>([[baseProtocol, mergedIds]])
+          : splitModelsByProtocol({
+              models: mergedIds,
+              ...(state.modelEndpoints === undefined ? {} : { advertised: state.modelEndpoints }),
+              ...(gatewayModelTable(baseURL) === undefined ? {} : { table: gatewayModelTable(baseURL) }),
+              fallback: baseProtocol,
+              preference: template.protocols,
+            })
+        const profileFor = (protocol: GatewayProtocol, models: string[]): Record<string, unknown> => ({
           displayName: typeof existing?.displayName === 'string' && existing.displayName.trim() !== ''
             ? existing.displayName
             : template.label,
           ...(keyless ? {} : { apiKeyEnv: envRef }),
-          api: template.api ?? existing?.api,
-          ...(catalogRoute && state.baseUrl === ''
-            ? {}
-            : {
-                baseURL: state.baseUrl === ''
-                  ? (typeof existing?.baseURL === 'string' && existing.baseURL !== '' ? existing.baseURL : template.defaultBaseUrl)
-                  : state.baseUrl,
-              }),
-          models: mergedIds.map(id => ({
+          // A catalog route leaves the protocol to the installed catalog: it
+          // used to write no `api` at all, and pinning one here would override
+          // whatever that catalog serves.
+          api: template.protocols === undefined ? (template.api ?? existing?.api) : protocol,
+          ...(catalogRoute && state.baseUrl === '' ? {} : { baseURL }),
+          models: models.map(id => ({
             id,
             ...(state.modelCapacity?.get(id) ?? template.defaultModelCapacity?.[id] ?? {}),
             ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
           })),
           ...(state.routeContextWindow === undefined ? {} : { defaultContextWindow: state.routeContextWindow }),
           ...(defaultEffort === undefined ? {} : { reasoning: defaultEffort }),
+        })
+        // Write every protocol that ends up holding models, plus any sibling
+        // that exists but is now empty because its models moved elsewhere.
+        const writes = [...split]
+          .filter(([, models]) => models.length > 0)
+          .map(([protocol, models]) => ({ protocol, models }))
+        for (const sibling of siblingEntries) {
+          // Only an entry that exists can be emptied: never create a sibling
+          // just to say it holds nothing.
+          if (sibling.profile === undefined) continue
+          if (!writes.some(entry => entry.protocol === sibling.protocol)) {
+            writes.push({ protocol: sibling.protocol, models: [] })
+          }
         }
+        const entryId = (protocol: GatewayProtocol): string =>
+          protocol === baseProtocol ? state.providerId : siblingProviderId(state.providerId, protocol)
+        // The route the wizard hands over must be the entry that actually lists
+        // the chosen model — with a split they are no longer the same id.
+        const ownerId = entryId(writes.find(entry => entry.models.includes(model))?.protocol ?? baseProtocol)
         if (settings === undefined) {
           this.pushRow({ kind: 'error', text: t('onboard.settingsMissing') })
           saved = false
         } else {
-          await settings.mutate(settingsNamespace('llm-pi-ai'), [
-            { op: 'set', path: ['providers', state.providerId], value: profile },
-          ])
+          await settings.mutate(settingsNamespace('llm-pi-ai'), writes.map(entry => ({
+            op: 'set' as const,
+            path: ['providers', entryId(entry.protocol)],
+            value: profileFor(entry.protocol, entry.models),
+          })))
           this.pushRow({ kind: 'system', text: t('onboard.providerSaved', { id: state.providerId, path: displayDshPath('settings.yaml') }) })
+          if (template.protocols !== undefined) {
+            const summary = writes.map(entry => `${GATEWAY_PROTOCOL_SUFFIX[entry.protocol]} ${entry.models.length}`).join(' · ')
+            this.pushRow({ kind: 'system', text: t('onboard.providerSplit', { id: state.providerId, summary }) })
+          }
         }
         // Only store the key when its provider profile actually made it to
         // settings; otherwise the saved key points at an unusable route.
         if (saved && !keyless) await this.saveCredential(credentials, envRef, state.key)
         if (saved) {
           const selection: ModelSelection = {
-            provider: state.providerId,
+            provider: ownerId,
             model,
             ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
           }
@@ -9090,10 +9178,10 @@ export class SshTui {
           }
           this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
-          await this.syncSubagentToProvider(state.providerId, state.models, previousParentProvider !== state.providerId)
+          await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
           this.pushRow({
             kind: 'system',
-            text: t('onboard.customDone', { id: state.providerId, model }),
+            text: t('onboard.customDone', { id: ownerId, model }),
           })
         }
       }
