@@ -112,3 +112,26 @@ test('/setup catalog API-key step explains the environment-key fallback', () => 
   }
   setLocale('zh')
 })
+
+test('/setup lists both protocols for the gateways whose model routes differ', () => {
+  // Command Code's `/models` reports `supported_endpoints` per id: 55 of 71 on
+  // both routes, 8 on Completions only. Zen's listing has no such field at all,
+  // so a chat-only model there cannot be detected from the gateway either. One
+  // provider entry holds one protocol — without both rows those models are
+  // unreachable from the wizard.
+  const gateways = [
+    { completions: 'onboard.providerCommandCode', responses: 'onboard.providerCommandCodeResponses', host: 'api.commandcode.ai' },
+    { completions: 'onboard.providerGoCompletions', responses: 'onboard.providerGo', host: 'opencode.ai/zen/go' },
+  ]
+  for (const locale of ['zh', 'en']) {
+    setLocale(locale)
+    const { text } = dialogFrame('provider')
+    for (const gateway of gateways) {
+      assert.ok(text.includes(t(gateway.completions)), `${locale}: missing the Completions row for ${gateway.host}\n${text}`)
+      assert.ok(text.includes(t(gateway.responses)), `${locale}: missing the Responses row for ${gateway.host}\n${text}`)
+      assert.ok(text.includes(`${gateway.host} · Completions`), `${locale}: ${gateway.host} Completions row must name its protocol\n${text}`)
+      assert.ok(text.includes(`${gateway.host} · Responses`), `${locale}: ${gateway.host} Responses row must name its protocol\n${text}`)
+    }
+  }
+  setLocale('zh')
+})

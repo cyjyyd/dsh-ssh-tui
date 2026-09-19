@@ -719,7 +719,9 @@ export interface TuiConfig {
 type OnboardingProviderType =
   | 'official'
   | 'opencode-go'
+  | 'opencode-go-completions'
   | 'command-code'
+  | 'command-code-responses'
   | 'openai-completions'
   | 'openai-responses'
   | 'anthropic-messages'
@@ -750,6 +752,20 @@ function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>,
     api: 'openai-responses',
     defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   },
+  // The same gateway on its chat route. Zen's own listing (37 ids under
+  // `/zen/go/v1/models`) carries no `supported_endpoints` field, and the
+  // published Go table puts deepseek on `/chat/completions` while this pinned
+  // template was verified against `/responses` — both answer, so the verified
+  // default stays and this row is the way to the models the table lists as
+  // chat-only (GLM, Kimi, LongCat, MiMo, Hy). MiniMax and Qwen need
+  // `/messages`, which is a third protocol and not a second row of this one.
+  'opencode-go-completions': {
+    label: t('onboard.providerGoCompletions'),
+    defaultId: 'opencode-go-completions',
+    defaultBaseUrl: 'https://opencode.ai/zen/go/v1',
+    api: 'openai-completions',
+    defaultModels: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
   // A fixed provider: its chat route is OpenAI-completions, but billing uses
   // Command Code's own `/alpha/billing/credits` surface on the API root.
   'command-code': {
@@ -757,6 +773,20 @@ function providerTemplates(): Record<Exclude<OnboardingProviderType, 'catalog'>,
     defaultId: 'command-code',
     defaultBaseUrl: 'https://api.commandcode.ai/provider/v1',
     api: 'openai-completions',
+    defaultModels: ['deepseek/deepseek-v4.1-flash'],
+    defaultModelCapacity: { 'deepseek/deepseek-v4.1-flash': { contextWindow: 1_048_576 } },
+  },
+  // The same gateway and key on its Responses route. `GET /provider/v1/models`
+  // reports `supported_endpoints` per model: 55 of 71 accept `/responses` (all
+  // five deepseek ids except `deepseek-v4-flash-fast`), 8 accept only
+  // `/chat/completions`, and the Claude family only `/messages`. One provider
+  // entry cannot hold two protocols, so the choice stays with the user instead
+  // of a wholesale switch that would break those eight models.
+  'command-code-responses': {
+    label: t('onboard.providerCommandCodeResponses'),
+    defaultId: 'command-code-responses',
+    defaultBaseUrl: 'https://api.commandcode.ai/provider/v1',
+    api: 'openai-responses',
     defaultModels: ['deepseek/deepseek-v4.1-flash'],
     defaultModelCapacity: { 'deepseek/deepseek-v4.1-flash': { contextWindow: 1_048_576 } },
   },
@@ -8643,7 +8673,9 @@ export class SshTui {
     const templateEntries: ProviderListEntry[] = [
       { key: 'template:official', label: templates.official.label, detail: 'api.deepseek.com' },
       { key: 'template:opencode-go', label: templates['opencode-go'].label, detail: 'opencode.ai/zen/go · Responses' },
+      { key: 'template:opencode-go-completions', label: templates['opencode-go-completions'].label, detail: 'opencode.ai/zen/go · Completions' },
       { key: 'template:command-code', label: templates['command-code'].label, detail: 'api.commandcode.ai · Completions' },
+      { key: 'template:command-code-responses', label: templates['command-code-responses'].label, detail: 'api.commandcode.ai · Responses' },
       { key: 'template:openai-completions', label: templates['openai-completions'].label, detail: 'openai-completions' },
       { key: 'template:openai-responses', label: templates['openai-responses'].label, detail: 'openai-responses' },
       { key: 'template:anthropic-messages', label: templates['anthropic-messages'].label, detail: 'anthropic-messages' },

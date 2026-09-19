@@ -249,7 +249,13 @@ On first launch (when no API key is configured) the TUI opens a setup wizard:
 1. choose a provider template, matching the official Models page:
    - DeepSeek official;
    - OpenCode Go (`opencode.ai/zen/go/v1`, Responses protocol);
+   - OpenCode Go · Completions (same gateway on its chat route; Zen's model list
+     does not publish which route a model speaks, so pick this row for one that
+     only answers `/chat/completions`);
    - Command Code (`api.commandcode.ai`, Completions protocol, with its own quota);
+   - Command Code · Responses (same gateway and key on its Responses route; the
+     gateway lists 55 of 71 models on both routes, 8 on Completions only, and the
+     Claude family on Messages only — pick the row that matches your model);
    - custom OpenAI-compatible gateway (Completions);
    - custom OpenAI Responses gateway;
    - Anthropic Messages-compatible gateway;
