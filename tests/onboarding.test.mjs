@@ -59,6 +59,8 @@ test('every /setup wizard step paints its guidance copy', () => {
     'base-url': () => t('onboard.basePrompt', { fallback: 'https://api.deepseek.com' }),
     key: () => t('onboard.keyPrompt'),
     models: () => t('onboard.modelsPrompt'),
+    'models-pick': () => t('onboard.modelsCheckHint'),
+    'model-default': () => t('onboard.defaultModelPick'),
     confirm: () => t('onboard.confirmTitle'),
   }
   for (const locale of ['zh', 'en']) {
@@ -72,6 +74,28 @@ test('every /setup wizard step paints its guidance copy', () => {
     }
   }
   setLocale('zh')
+})
+
+test('the models picker paints the candidates, the checks and the hints', () => {
+  const { text } = dialogFrame('models-pick', {
+    modelCandidates: ['deepseek/deepseek-v4.1-flash', 'claude-sonnet-5'],
+    modelChecked: new Set([0]),
+    modelCursor: 0,
+  })
+  assert.ok(text.includes('◉ deepseek/deepseek-v4.1-flash'), `the checked pick must show as checked\n${text}`)
+  assert.ok(text.includes('○ claude-sonnet-5'), `an unchecked pick must show as open\n${text}`)
+  assert.ok(text.includes(t('onboard.modelsCheckHint')), `the keys must be on screen\n${text}`)
+})
+
+test('the session-model step lists only the models that were kept', () => {
+  const { text } = dialogFrame('model-default', {
+    modelCandidates: ['keep-me-first', 'keep-me-second'],
+    modelChecked: new Set([1]),
+    modelCursor: 0,
+  })
+  assert.ok(text.includes(t('onboard.defaultModelPick')), text)
+  assert.ok(text.includes('○ keep-me-second'), `the kept model must be listed\n${text}`)
+  assert.ok(!text.includes('keep-me-first'), `the dropped model must not be listed\n${text}`)
 })
 
 test('/setup API-key step prompts for the key and keeps it masked', () => {

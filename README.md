@@ -340,6 +340,14 @@ preset 保留它 `preset.yml` 里的名字不翻译。`/mode <id|名字>` 直接
 每个提供商上次的模型和思考强度会分开记住。`/setup` 只新增或更新当前这条
 API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。
 
+**一个网关就是一个提供商。** `llm-pi-ai` 把线路协议记在 provider 上（一条 route 只能
+一种协议），所以目录跨协议的网关在 `settings.yaml` 里本来会拆成 `command-code` /
+`command-code-completions` / `command-code-messages` 这样的兄弟行。`/provider`、
+`/model`、`/submodel` 把它们**当成一家**列出：模型列表取各行并集，选中后自动落到
+真正能发该协议的那一行（依据网关自己公布的 `supported_endpoints`；公布不了就沿用
+它已经配置在的那行），而记住你上次选择的键是网关注 id——所以下次打开仍然只有一行。
+Command Code 与 OpenCode Go 都是这种网关。
+
 子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：按父会话所选模型名
 近似匹配，`flash` 结尾的优先——DeepSeek 用 `deepseek-v4-flash`，xAI 用
 `grok-4.5`。`/model` 或 `/provider` 换提供商（OAuth / API Key 都一样）时会
@@ -437,7 +445,9 @@ DeepSeek 上、B 会话跑在 xAI 上；只记软件级默认值的话，resume 
 `llm-pi-ai.providers.<id>.models`，保证 Harness 可以正常调用。
 
 首次配置向导的自定义/OpenCode 提供商步骤中，输入模型 ID 前可按
-`Ctrl+F` 直接从端点拉取模型列表，免去手动输入。
+`Ctrl+F` 直接从端点拉取模型列表，免去手动输入。拉完按回车打开**勾选列表**：
+模板模型默认勾上，端点列出的只是候选，不会替你全写进配置；勾了多个时再问一次
+「本次会话用哪个模型」。想直接手写模型 ID 列表，输入并回车即可跳过这两步。
 
 向导会尽量自动填好上下文窗口：先读端点 `/models` 的容量字段，查不到再按模型名
 去内置 pi-ai 目录匹配（会剥离提供商写进模型名的思考档位后缀 `-high` / `-low` /

@@ -19,7 +19,7 @@ import { SshTui, handDeclaredReasoningEfforts, onboardingReasoningEfforts } from
  *    reached settings.
  */
 
-function makeTui({ section, credentials } = {}) {
+function makeTui({ section, credentials, llm } = {}) {
   const writes = []
   const settings = {
     get: ns => (ns === 'llm-pi-ai' ? section : undefined),
@@ -27,7 +27,7 @@ function makeTui({ section, credentials } = {}) {
     replace: async (ns, value) => { writes.push({ op: 'replace', ns, value }) },
     update: async (ns, value) => { writes.push({ op: 'update', ns, value }) },
   }
-  const services = { settings, ...(credentials === undefined ? {} : { credentials }) }
+  const services = { settings, ...(credentials === undefined ? {} : { credentials }), ...(llm === undefined ? {} : { llm }) }
   const ctx = { get: name => services[name], on() { return () => {} } }
   const agent = {
     id: 'main-session',
@@ -38,6 +38,27 @@ function makeTui({ section, credentials } = {}) {
   }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   return { tui, writes }
+}
+
+/** Wait for the models step's background listing to finish. */
+async function leaveModelsStep(tui) {
+  for (let i = 0; i < 400 && tui.onboarding.step === 'models'; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  return tui.onboarding.step
+}
+
+/**
+ * Answer the models step the way a user does now: Enter opens the picker, the
+ * given hotkeys toggle extra models in, Enter confirms, and a second Enter
+ * picks the session's model when more than one was kept.
+ */
+async function answerModelsStep(tui, toggles = []) {
+  tui.handleOnboardingChar('\r')
+  for (const key of toggles) tui.handleOnboardingChar(key)
+  tui.handleOnboardingChar('\r')
+  if (tui.onboarding.step === 'model-default') tui.handleOnboardingChar('\r')
+  await new Promise(resolve => setTimeout(resolve, 0))
 }
 
 function wizardState(overrides) {
@@ -74,27 +95,32 @@ test('other templates keep their existing declaration behavior', () => {
   assert.deepEqual(onboardingReasoningEfforts('opencode-go', 'max'), { off: null, max: 'max' })
 })
 
-test('the models step accepts the listing Ctrl+F fetched', () => {
+test('the models step asks which fetched models to keep, and which one to run', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['deepseek/deepseek-v4.1-flash', 'claude-sonnet-5'] })
   tui.input = ''
   tui.cursor = 0
-  tui.handleOnboardingChar('\r')
+  // Enter no longer swallows the whole listing: it opens the picker with the
+  // template's models checked, and '2' adds the second fetched model.
+  await answerModelsStep(tui, ['2'])
   assert.deepEqual(tui.onboarding.models, ['deepseek/deepseek-v4.1-flash', 'claude-sonnet-5'])
+  assert.equal(tui.onboarding.defaultModel, 'deepseek/deepseek-v4.1-flash')
   // This checkout resolves no catalog, so neither pick is sized and the wizard
   // asks for the route default before confirming (covered in context-window tests).
-  assert.equal(tui.onboarding.step, 'context')
+  // Leaving the step asks the gateway once more first, so it settles asynchronously.
+  assert.equal(await leaveModelsStep(tui), 'context')
   tui.handleOnboardingChar('\r')
   assert.equal(tui.onboarding.step, 'confirm')
 })
 
-test('the models step still falls back to the template default when nothing was fetched', () => {
+test('the models step still falls back to the template default when nothing was fetched', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: [] })
   tui.input = ''
   tui.cursor = 0
-  tui.handleOnboardingChar('\r')
+  await answerModelsStep(tui)
   assert.deepEqual(tui.onboarding.models, ['deepseek-v4-flash'])
+  assert.equal(tui.onboarding.defaultModel, 'deepseek-v4-flash')
 })
 
 test('an explicit effort on an undeclared model is persisted as its declaration', async () => {
@@ -221,4 +247,77 @@ test('/setup files each model of one gateway under the protocol it speaks', asyn
   assert.equal(byId['command-code-completions'].api, 'openai-completions')
   assert.deepEqual(byId['command-code-completions'].models.map(model => model.id), ['z-ai/glm-5.3-flash'])
   assert.equal(Object.keys(byId).length, 2)
+})
+
+test('leaving the models step sizes hand-typed picks from the endpoint', async () => {
+  const original = globalThis.fetch
+  const listingCalls = []
+  globalThis.fetch = async input => {
+    const url = String(input)
+    if (url.endsWith('/models')) {
+      listingCalls.push(url)
+      return new Response(JSON.stringify({ data: [{
+        id: 'deepseek/deepseek-v4.1-flash',
+        context_length: 1_000_000,
+        supported_endpoints: ['/chat/completions', '/responses'],
+      }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    return new Response('{}', { status: 404 })
+  }
+  try {
+    const llm = {
+      discoverModels: async () => [{
+        id: 'deepseek/deepseek-v4.1-flash',
+        name: 'DeepSeek V4.1 Flash',
+        contextWindow: 1_000_000,
+      }],
+    }
+    const { tui, writes } = makeTui({ section: { providers: {} }, credentials: { set: async () => {} }, llm })
+    tui.onboarding = wizardState({
+      providerType: 'command-code',
+      providerId: 'command-code',
+      baseUrl: '',
+      models: [],
+    })
+    tui.input = 'deepseek/deepseek-v4.1-flash'
+    tui.cursor = 0
+    tui.handleOnboardingChar('\r')
+    // A second Enter while the listing is in flight must not start another.
+    tui.handleOnboardingChar('\r')
+
+    assert.equal(await leaveModelsStep(tui), 'confirm')
+    assert.equal(listingCalls.length, 1)
+    assert.equal(tui.onboarding.modelCapacity.get('deepseek/deepseek-v4.1-flash').contextWindow, 1_000_000)
+    assert.deepEqual(
+      tui.onboarding.modelEndpoints.get('deepseek/deepseek-v4.1-flash'),
+      ['/chat/completions', '/responses'],
+    )
+
+    await tui.saveOnboarding()
+    const write = writes.find(entry => entry.op === 'mutate' && entry.ns === 'llm-pi-ai')
+    assert.ok(write)
+    assert.equal(write.ops[0].value.models[0].contextWindow, 1_000_000)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('an unreachable gateway still leaves the models step for the route default', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('offline') }
+  try {
+    const llm = { discoverModels: async () => { throw new Error('offline') } }
+    const { tui } = makeTui({ section: { providers: {} }, credentials: { set: async () => {} }, llm })
+    tui.onboarding = wizardState({ models: [] })
+    tui.input = 'mystery-model'
+    tui.cursor = 0
+    tui.handleOnboardingChar('\r')
+
+    // Nothing was sized, so the wizard asks for the route window instead of
+    // guessing one — and it never blocks on the dead endpoint.
+    assert.equal(await leaveModelsStep(tui), 'context')
+    assert.equal(tui.onboarding.models[0], 'mystery-model')
+  } finally {
+    globalThis.fetch = original
+  }
 })

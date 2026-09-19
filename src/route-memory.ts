@@ -8,8 +8,20 @@ import { installSettingsSection, settingsNamespace } from './dsh-compat.js'
 
 export const ROUTE_MEMORY_NAMESPACE = settingsNamespace('ssh-tui-routes')
 
-/** Settings schema for `$DSH_HOME/settings.yaml` under ssh-tui-routes. */
-export const ROUTE_MEMORY_SCHEMA = z.object({
+/** The shape `ssh-tui-routes` takes in `$DSH_HOME/settings.yaml`. */
+export interface RouteMemorySettings {
+  providers: Record<string, { model: string; reasoningEffort: string; updatedAt: number }>
+}
+
+/**
+ * Settings schema for `$DSH_HOME/settings.yaml` under ssh-tui-routes.
+ *
+ * The type argument is spelled out rather than inferred: `schemastery`'s
+ * builder names its own package internally, so an inferred schema makes `tsc`
+ * emit a declaration that references a path inside `node_modules` and fails
+ * with TS2742 on any layout that does not match this machine's.
+ */
+export const ROUTE_MEMORY_SCHEMA: z<RouteMemorySettings> = z.object({
   providers: z.dict(z.object({
     model: z.string(),
     reasoningEffort: z.string().default(''),

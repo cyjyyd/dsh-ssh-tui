@@ -262,7 +262,11 @@ On first launch (when no API key is configured) the TUI opens a setup wizard:
 2. for custom providers, enter a lowercase Provider ID (permanent), base URL,
    API key (masked while typing), and one or more model IDs — each step has a
    sensible template default. On the models step, press `Ctrl+F` to fetch the
-   current model list straight from the provider endpoint;
+   current model list straight from the provider endpoint, then press Enter to
+   open a checklist of what was fetched (the template's models are pre-checked:
+   the listing offers candidates, it does not configure them all for you). When
+   more than one model is kept, a second step picks which one this session
+   should run; typing a model list instead skips both questions;
 3. confirm and save.
 
 The wizard sizes each model's context window automatically: the endpoint
@@ -296,6 +300,17 @@ dsh --profile tui
 ```
 
 `--provider <id> --model <id>` remains available as a temporary override.
+
+**One gateway is one provider.** `llm-pi-ai` stores the wire protocol on the
+provider entry (one protocol per route), so a gateway whose catalogue spans
+protocols is kept as sibling rows — `command-code`,
+`command-code-completions`, `command-code-messages`. `/provider`, `/model` and
+`/submodel` present those as a single supplier: the model list is the union of
+the rows, a pick is filed on the row that can actually speak its protocol
+(taken from the gateway's own `supported_endpoints`, else from where the model
+is already configured), and the remembered choice is keyed by the gateway's id
+so the next `/provider` still shows one row. Command Code and OpenCode Go are
+both such gateways.
 
 You can reopen the wizard at any time with:
 

@@ -100,6 +100,7 @@ import {
   inspectClosesOn,
   moveQuestionCursor,
   optionsLength,
+  questionOptionIndex,
   questionSubmit,
   selectQuestionOptionByKey,
   type ConfirmDialog,
@@ -122,7 +123,13 @@ import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, se
 import { sameSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import {
   GATEWAY_PROTOCOL_SUFFIX,
+  GATEWAY_PROTOCOL_ENDPOINT,
+  GATEWAY_PROTOCOL_PREFERENCE,
+  advertisedProtocols,
+  baseProviderIdOf,
+  declaredProtocol,
   gatewayModelTable,
+  gatewayServesModel,
   isSiblingOf,
   siblingProviderId,
   siblingProtocolOf,
@@ -610,12 +617,17 @@ function discoverProviderModels(
  * table. Best-effort by design: no key, no field, a network error or a shape we
  * do not recognise all mean "no answer", never a failed setup.
  */
-async function fetchModelEndpoints(baseURL: string, apiKey: string): Promise<Map<string, readonly string[]> | undefined> {
+async function fetchModelEndpoints(
+  baseURL: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<Map<string, readonly string[]> | undefined> {
   if (baseURL === '' || apiKey === '') return undefined
   try {
     const response = await fetch(`${baseURL.replace(/\/+$/u, '')}/models`, {
       headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
+      // An outer signal (a picker that must not stall) wins when it is shorter.
+      signal: signal ?? AbortSignal.timeout(10_000),
     })
     if (!response.ok) return undefined
     const body = (await response.json()) as { data?: { id?: unknown; supported_endpoints?: unknown }[] }
@@ -854,12 +866,23 @@ function onboardTemplate(state: OnboardingState): ProviderTemplate {
 }
 
 interface OnboardingState {
-  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'context' | 'confirm'
+  step: 'provider' | 'id' | 'base-url' | 'key' | 'models' | 'models-pick' | 'model-default' | 'context' | 'confirm'
   providerType: OnboardingProviderType
   providerId: string
   baseUrl: string
   key: string
   models: string[]
+  /**
+   * The model this session should run once the wizard saves. Chosen explicitly
+   * on the models step; when absent the first configured model is used, which
+   * is what a typed model list has always meant.
+   */
+  defaultModel?: string
+  /** Models the picker step offers, and the indexes the user checked. */
+  modelCandidates?: string[]
+  modelChecked?: Set<number>
+  /** Highlight in either picker step: the candidate list, then the checked set. */
+  modelCursor?: number
   /**
    * `supported_endpoints` per model, when the gateway publishes them (Command
    * Code does). Captured while the key is in hand, because that is the only
@@ -885,6 +908,17 @@ interface OnboardingState {
   saving: boolean
   resolve(saved: boolean): void
 }
+
+/**
+ * The wizard steps that choose models, however they are presented: the id
+ * prompt, the multi-select picker, and the session-model pick.
+ */
+function isModelsStep(step: OnboardingState['step']): boolean {
+  return step === 'models' || step === 'models-pick' || step === 'model-default'
+}
+
+/** How many `<family>\0<model>` → row decisions are remembered. */
+const FAMILY_OWNER_CACHE_MAX = 512
 
 /** Lifecycle handle for a mounted interactive terminal channel. */
 export interface TuiController {
@@ -1268,6 +1302,19 @@ export class SshTui {
   private catalogLoad: Promise<CatalogPreset[] | undefined> | undefined
   /** Memoized id→window index over {@link catalogPresets}. */
   private catalogWindows: Map<string, number> | undefined
+  /** Wizard drafts whose models step is already asking the gateway, so a
+   *  second Enter cannot start a duplicate listing. */
+  private readonly finishingModels = new WeakSet<OnboardingState>()
+  /** `<base>\0<model>` → the family row last seen serving that model. */
+  /**
+   * `<base>\0<model>` → the family row last seen serving that model.
+   *
+   * Bounded: a gateway can publish hundreds of models and their rows are
+   * re-learned on every listing, so the oldest entries are dropped once the map
+   * passes FAMILY_OWNER_CACHE_MAX rather than growing for the life of the
+   * session. Losing an entry only costs one future "which row?" lookup.
+   */
+  private readonly familyModelOwner = new Map<string, string>()
   private input = ''
   private cursor = 0
   private inputFolded = false
@@ -2099,6 +2146,9 @@ export class SshTui {
         baseUrl: '',
         key: '',
         models: [],
+        modelCandidates: [],
+        modelChecked: new Set<number>(),
+        modelCursor: 0,
         modelCapacity: new Map(),
         catalogPresets: undefined,
         catalog: undefined,
@@ -2287,7 +2337,7 @@ export class SshTui {
       ...(model === undefined ? {} : { model }),
       routes: Object.keys(providers),
       routeModels: models.map(modelEntryId).filter((id): id is string => id !== undefined),
-      ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+      ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
       ...(sub.model === undefined ? {} : { subModel: sub.model }),
     }
   }
@@ -3998,8 +4048,44 @@ export class SshTui {
                 : t('onboard.default', { value: template.defaultModels.join(', ') }))
               if (template.api !== undefined) addDialog(t('onboard.ctrlF'))
               if (ob.providerType === 'catalog') addDialog(t('onboard.modelsCatalogHint'))
+              addDialog(t('onboard.modelsPickHint'))
               addDialog(t('onboard.enterEsc'))
               break
+            case 'models-pick': {
+              const candidates = ob.modelCandidates ?? []
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.modelsPick', { count: candidates.length }))
+              const start = pickerWindowStart(ob.modelCursor ?? 0, candidates.length)
+              const end = Math.min(candidates.length, start + PICKER_WINDOW)
+              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
+              for (let index = start; index < end; index += 1) {
+                const id = candidates[index]
+                if (id === undefined) continue
+                const focused = index === (ob.modelCursor ?? 0) ? '›' : ' '
+                const mark = (ob.modelChecked ?? new Set<number>()).has(index) ? '◉' : '○'
+                addDialog(` ${focused} ${mark} ${id}`)
+              }
+              if (end < candidates.length) addDialog(`  ${t('picker.moreBelow', { count: candidates.length - end })}`)
+              addDialog(t('onboard.modelsCheckHint'))
+              break
+            }
+            case 'model-default': {
+              const checked = this.checkedOnboardingModels(ob)
+              addDialog(t('onboard.providerLine', { label: providerLabel }))
+              addDialog(t('onboard.defaultModelPick'))
+              const start = pickerWindowStart(ob.modelCursor ?? 0, checked.length)
+              const end = Math.min(checked.length, start + PICKER_WINDOW)
+              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
+              for (let index = start; index < end; index += 1) {
+                const id = checked[index]
+                if (id === undefined) continue
+                const focused = index === (ob.modelCursor ?? 0) ? '›' : ' '
+                addDialog(` ${focused} ○ ${id}`)
+              }
+              if (end < checked.length) addDialog(`  ${t('picker.moreBelow', { count: checked.length - end })}`)
+              addDialog(t('onboard.pickHint'))
+              break
+            }
             case 'context':
               addDialog(t('onboard.providerLine', { label: providerLabel }))
               addDialog(t('onboard.contextPrompt'))
@@ -4018,6 +4104,9 @@ export class SshTui {
                 api: template.api ?? (ob.providerType === 'catalog' ? t('onboard.apiCatalog') : 'deepseek-official'),
               }))
               addDialog(t('onboard.confirmModels', { list: formatModelList(ob.models, 8) }))
+              if (ob.defaultModel !== undefined) {
+                addDialog(t('onboard.confirmDefaultModel', { model: ob.defaultModel }))
+              }
               if (ob.routeContextWindow !== undefined) {
                 addDialog(t('onboard.confirmContext', { value: String(ob.routeContextWindow) }))
               }
@@ -4247,7 +4336,7 @@ export class SshTui {
       provider,
       parentModel,
       subModel: sub.model,
-      ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+      ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
       ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
       // Quota and context pressure stay on the identity line, where they have
       // always been: B-1 moved them one row up into the strip, and a user
@@ -4465,7 +4554,7 @@ export class SshTui {
 
   private currentSelectionLabel(): string {
     const current = this.selectionRef?.current
-    const provider = this.currentProviderId()
+    const provider = this.displayProviderId(this.currentProviderId())
     const model = current?.model ?? this.agent.options.model ?? 'unknown'
     const effort = current?.reasoningEffort
     const kind = describeProviderRoute(provider).short
@@ -4489,14 +4578,18 @@ export class SshTui {
       this.write(t('title.done', { suffix: titleSuffix }))
       return
     }
-    if (this.agent.status === 'running') {
+    // A compaction is work in progress even when it runs between turns (the
+    // idle auto-compact), so it keeps the spinner title the way a running turn
+    // does — the same rule the footer's activity chip follows.
+    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+    if (this.agent.status === 'running' || compacting) {
       if (now - this.lastTitleUpdateAt < 800) return
       this.lastTitleUpdateAt = now
       const spinner = SPINNER[Math.floor(now / 800) % SPINNER.length]
-      let detail = t('title.running')
+      let detail = compacting ? t('title.compacting') : t('title.running')
       if (this.dialog?.kind === 'questions') {
         detail = planReviewOf(this.dialog.question) ? t('question.planTitle') : t('title.waitAnswer')
-      } else if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+      } else if (compacting) {
         detail = t('title.compacting')
       } else if (this.activeSubagents.size > 0) {
         detail = t('title.subagents', { count: this.activeSubagents.size })
@@ -5433,6 +5526,10 @@ export class SshTui {
         this.toolCallNames.clear()
         this.statsTracker.noteTurnEnd()
         this.stalledWarningShown = false
+        // A retry belongs to the turn that scheduled it: once the turn closes,
+        // the chip must not outlive it (a failed retry would otherwise leave
+        // "重试 n/m" on an idle footer until the next turn).
+        this.llmRetry = undefined
         this.pendingMessages.clear()
         // Aborted/errored turns may close without an assembled
         // assistant/message; never leave a half-streamed thinking block behind.
@@ -5602,6 +5699,12 @@ export class SshTui {
       if (this.llmRetry !== undefined) {
         this.pushRow({ kind: 'system', text: t('retry.started', { retry: this.llmRetry.retry }) })
       }
+      // The backoff is over and the retried request is in flight: the footer
+      // must go back to the ordinary running/waiting states instead of holding
+      // "retry n/m" until the next turn starts (which could be minutes later,
+      // or never — and a compaction ending in between fell back to this stale
+      // chip rather than to 运行中).
+      this.llmRetry = undefined
       this.markDirty()
       return
     }
@@ -6800,6 +6903,177 @@ export class SshTui {
     return section?.providers?.[provider]
   }
 
+  /**
+   * Every settings-backed row one gateway family occupies, base first.
+   *
+   * `llm-pi-ai` puts the wire protocol on the provider entry, so a gateway
+   * whose catalogue spans protocols (Command Code, OpenCode Go) is stored as
+   * sibling rows. To the user they are one supplier: the TUI lists, picks and
+   * remembers them under the family's base id, and files each picked model on
+   * the row that actually serves it.
+   *
+   * The `-responses` / `-completions` / `-messages` suffix is only a naming
+   * convention, so a row is adopted into the family only when it corroborates:
+   * it must speak the protocol its suffix names, point at the same endpoint,
+   * and (when both name one) carry the same display name. A provider someone
+   * legitimately called `foo-messages` on another host therefore stays its own
+   * supplier instead of vanishing from `/provider` behind `foo`. A family of
+   * one — the ordinary case, and a sibling whose base row is missing — stays
+   * exactly as configured.
+   */
+  private providerFamilyRows(provider: string): string[] {
+    if (provider === '') return []
+    const base = baseProviderIdOf(provider)
+    const baseRow = this.piAiProviderProfile(base)
+    const rows = [base]
+    for (const protocol of GATEWAY_PROTOCOL_PREFERENCE) {
+      const sibling = siblingProviderId(base, protocol)
+      if (sibling === provider || rows.includes(sibling)) {
+        if (this.isFamilyRow(baseRow, sibling, protocol)) rows.push(sibling)
+        continue
+      }
+      if (this.isFamilyRow(baseRow, sibling, protocol)) rows.push(sibling)
+    }
+    const present = rows.filter(row => this.piAiProviderProfile(row) !== undefined)
+    if (present.length <= 1) {
+      // A lone sibling is not a family — it is just this provider.
+      return baseRow !== undefined || present.includes(provider) ? present : [provider]
+    }
+    return present
+  }
+
+  /**
+   * Whether `sibling` is genuinely the same gateway as `base`, on another
+   * protocol: its `api` matches its suffix, its endpoint matches the base row's,
+   * and the two labels agree when both are set.
+   */
+  private isFamilyRow(
+    baseRow: LlmPiAiProviderProfile | undefined,
+    sibling: string,
+    protocol: GatewayProtocol,
+  ): boolean {
+    if (baseRow === undefined) return false
+    const profile = this.piAiProviderProfile(sibling)
+    if (profile === undefined) return false
+    const endpoint = (value: unknown): string =>
+      typeof value === 'string' ? value.replace(/\/+$/u, '').toLowerCase() : ''
+    const api = declaredProtocol(profile.api)
+    if (api !== undefined && api !== protocol) return false
+    const baseUrl = endpoint(baseRow.baseURL)
+    const siblingUrl = endpoint(profile.baseURL)
+    if (baseUrl !== '' && siblingUrl !== '' && baseUrl !== siblingUrl) return false
+    const baseLabel = typeof baseRow.displayName === 'string' ? baseRow.displayName.trim() : ''
+    const siblingLabel = typeof profile.displayName === 'string' ? profile.displayName.trim() : ''
+    if (baseLabel !== '' && siblingLabel !== '' && baseLabel !== siblingLabel) return false
+    return true
+  }
+
+  /** The id the TUI shows for a route: its family's base when it is spread. */
+  private displayProviderId(provider: string): string {
+    const rows = this.providerFamilyRows(provider)
+    return rows.length > 1 ? (rows[0] ?? provider) : provider
+  }
+
+  /** The models one row configures, as ids with the labels settings carry. */
+  private configuredModelsOf(row: string): { id: string; label?: string }[] {
+    const models = this.piAiProviderProfile(row)?.models
+    if (!Array.isArray(models)) return []
+    const out: { id: string; label?: string }[] = []
+    for (const raw of models) {
+      if (typeof raw === 'string') {
+        if (raw !== '') out.push({ id: raw })
+        continue
+      }
+      if (raw === null || typeof raw !== 'object') continue
+      const entry = raw as { id?: unknown; name?: unknown }
+      if (typeof entry.id !== 'string' || entry.id === '') continue
+      out.push({
+        id: entry.id,
+        ...(typeof entry.name === 'string' && entry.name !== '' ? { label: entry.name } : {}),
+      })
+    }
+    return out
+  }
+
+  /**
+   * The protocols the gateway publishes for one model, best-effort.
+   *
+   * Used when a model is being filed but no picker listed it yet (`/model <id>`
+   * on a new id, a `--model` override, a `/submodel` pin): the gateway's own
+   * answer is the only thing that can put it on a route that can send it.
+   * Any failure is "no opinion", never a blocked selection.
+   */
+  private async advertisedFor(family: string, model: string): Promise<GatewayProtocol[]> {
+    const rows = this.providerFamilyRows(family)
+    if (rows.length <= 1) return []
+    // A model the last listing already filed needs no second opinion, and that
+    // is the common case: `/model` re-picking a listed model must never wait on
+    // the gateway again. Only an unlisted id (a hand-typed one, a `--model`
+    // override) asks, and even then the wait is bounded — an unreachable gateway
+    // must not stall a selection for the endpoint's full timeout.
+    if (this.familyModelOwner.has(`${family}\u0000${model}`)) return []
+    if (this.configuredModelsOf(rows[0] ?? family).some(entry => entry.id === model)) return []
+    try {
+      const listing = await this.discoverGatewayListing(rows[0] ?? family, AbortSignal.timeout(5_000))
+      return advertisedProtocols(listing.endpoints, model)
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The row of a gateway family that serves `model`: the one learned from the
+   * last listing, else the one that already configures it, else the base —
+   * where a brand-new model lands and is re-filed from.
+   */
+  /**
+   * Record which row a family's model belongs to, keeping the map bounded.
+   *
+   * Re-inserting keeps a key fresh, and the oldest half is dropped once the cap
+   * is crossed, so a gateway whose catalogue is re-listed on every `/model`
+   * does not accumulate a second copy of itself each time.
+   */
+  private rememberFamilyOwner(base: string, model: string, row: string): void {
+    const key = `${base}\u0000${model}`
+    this.familyModelOwner.delete(key)
+    this.familyModelOwner.set(key, row)
+    if (this.familyModelOwner.size <= FAMILY_OWNER_CACHE_MAX) return
+    let remaining = Math.floor(FAMILY_OWNER_CACHE_MAX / 2)
+    for (const oldest of this.familyModelOwner.keys()) {
+      if (remaining <= 0) break
+      this.familyModelOwner.delete(oldest)
+      remaining -= 1
+    }
+  }
+
+  private familyOwnerRow(base: string, model: string, advertised?: readonly GatewayProtocol[]): string {
+    const rows = this.providerFamilyRows(base)
+    if (rows.length <= 1) return base
+    // What the gateway itself says comes first: a model no row configures and
+    // no picker listed (`/model <id>` on a new id, a `--model` override) still
+    // has a protocol, and filing it anywhere else makes the guard below refuse
+    // a model the gateway is happy to serve.
+    for (const protocol of advertised ?? []) {
+      const row = rows.find(candidate => declaredProtocol(this.piAiProviderProfile(candidate)?.api) === protocol)
+      if (row !== undefined) return row
+    }
+    // The row that actually served the model in the last listing is evidence,
+    // not a hint: it is the row the gateway said could send it. A row that
+    // merely has the model configured used to win here, which sent an explicit
+    // `/model <id>` back to the protocol the listing had just ruled out (the
+    // completions row is still listed first for a stale responses entry).
+    const learned = this.familyModelOwner.get(`${base}\u0000${model}`)
+    if (learned !== undefined && rows.includes(learned)) return learned
+    // No listing this run (a direct `/model <id>`, or an unreachable gateway):
+    // keep the placement that is already configured. A model on two rows takes
+    // the first, which is the family's own preference order — the same order
+    // the wizard would file it under.
+    for (const row of rows) {
+      if (this.configuredModelsOf(row).some(entry => entry.id === model)) return row
+    }
+    return rows[0] ?? base
+  }
+
   /** Default listing endpoint for a built-in OpenCode route with no stored base URL. */
   private openCodeListingBaseURL(provider: string): string | undefined {
     if (provider === 'opencode-go') return providerTemplates()['opencode-go'].defaultBaseUrl
@@ -6812,28 +7086,91 @@ export class SshTui {
    * OpenAI-compatible listing endpoint. The provider route is deliberately not
    * passed to discovery: pi-ai would answer a catalog route from its installed
    * registry, while the TUI wants the endpoint's current list.
+   *
+   * A row speaks exactly one protocol (`api` on the provider entry), so with a
+   * gateway that publishes `supported_endpoints` the list is narrowed to the
+   * models that row can actually serve — otherwise `/model` on
+   * `command-code-messages` would offer, and then persist, a model that only
+   * answers `/responses`.
    */
   private async discoverEndpointModels(provider: string): Promise<{ id: string; label: string }[]> {
+    const protocol = declaredProtocol(this.piAiProviderProfile(provider)?.api)
+    // Interactive callers get a shorter budget than the wizard's: `/model`
+    // falling back to the configured list after a few seconds reads as "this
+    // gateway is unreachable", while 15s reads as "the TUI hung".
+    const { models, endpoints } = await this.discoverGatewayListing(provider, AbortSignal.timeout(6_000))
+    return models.filter(model => gatewayServesModel(endpoints, model.id, protocol))
+  }
+
+  /**
+   * One gateway's own model listing: every model the endpoint returns plus the
+   * route table it publishes. The caller narrows it to a protocol; a gateway
+   * spread over rows asks once and files the answer per row, so opening a
+   * picker costs one listing instead of one per sibling.
+   */
+  private async discoverGatewayListing(provider: string, signal?: AbortSignal): Promise<{
+    models: { id: string; label: string }[]
+    endpoints: ReadonlyMap<string, readonly string[]> | undefined
+  }> {
     const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
     const profile = this.piAiProviderProfile(provider)
     const source = openCodeSourceFor(provider, llmPiAi)
     const baseURL = typeof profile?.baseURL === 'string' && profile.baseURL.trim() !== ''
       ? profile.baseURL.trim()
       : this.openCodeListingBaseURL(provider)
-    if (baseURL === undefined) return []
+    if (baseURL === undefined) return { models: [], endpoints: undefined }
     const api = typeof profile?.api === 'string' && profile.api.trim() !== '' ? profile.api.trim() : undefined
     const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== ''
       ? profile.apiKeyEnv.trim()
       : source?.apiKeyEnv
     const apiKey = apiKeyEnv === undefined ? undefined : await this.resolveCredential(apiKeyEnv)
     const llm = this.ctx.get('llm')
-    if (llm === undefined) return []
-    const discovered = await discoverProviderModels(llm, {
-      baseURL,
-      ...(api === undefined ? {} : { api }),
-      ...(apiKey === undefined ? {} : { apiKey }),
-    }, AbortSignal.timeout(15_000))
-    return discovered.map(model => ({ id: model.id, label: model.name || model.id }))
+    if (llm === undefined) return { models: [], endpoints: undefined }
+    const [discovered, endpoints] = await Promise.all([
+      discoverProviderModels(llm, {
+        baseURL,
+        ...(api === undefined ? {} : { api }),
+        ...(apiKey === undefined ? {} : { apiKey }),
+      }, signal ?? AbortSignal.timeout(15_000)).catch(() => [] as DiscoveredModel[]),
+      apiKey === undefined ? Promise.resolve(undefined) : fetchModelEndpoints(baseURL, apiKey, signal),
+    ])
+    // The route table is the point of asking a gateway that publishes one: it is
+    // what files each model on the protocol that can actually send it, and the
+    // discovered list alone cannot. A gateway whose listing answered from the
+    // installed catalog still gets its endpoints read here, and a gateway that
+    // publishes no table keeps the discovered list as-is.
+    const named = new Map(discovered.map(model => [model.id, model.name || model.id]))
+    const models = endpoints === undefined
+      ? discovered.map(model => ({ id: model.id, label: model.name || model.id }))
+      : [...endpoints.keys()].map(id => ({ id, label: named.get(id) ?? id }))
+    return { models, endpoints }
+  }
+
+  /**
+   * The row of the same gateway that the gateway itself says serves `model`,
+   * when that is not the row the caller is on. `undefined` when the gateway has
+   * no opinion, when the current row already serves it, or when the model would
+   * need a row that does not exist yet.
+   */
+  private rowServingModel(
+    provider: string,
+    modelId: string,
+    endpoints: ReadonlyMap<string, readonly string[]> | undefined,
+  ): string | undefined {
+    const protocol = declaredProtocol(this.piAiProviderProfile(provider)?.api)
+    if (gatewayServesModel(endpoints, modelId, protocol)) return undefined
+    const wanted = advertisedProtocols(endpoints, modelId)[0]
+    if (wanted === undefined) return undefined
+    // The base id is a row of its own: use it when it already speaks `wanted`,
+    // otherwise the sibling that does.
+    const base = baseProviderIdOf(provider)
+    const rows = declaredProtocol(this.piAiProviderProfile(base)?.api) === wanted
+      ? [base, siblingProviderId(base, wanted)]
+      : [siblingProviderId(base, wanted)]
+    for (const row of rows) {
+      if (row !== provider && this.piAiProviderProfile(row) !== undefined) return row
+    }
+    return undefined
   }
 
   /** Add one endpoint-listed model to the stored provider profile when needed. */
@@ -6855,6 +7192,39 @@ export class SshTui {
       if (typeof id === 'string' && id.length > 0) ids.add(id)
     }
     if (ids.has(modelId)) return true
+    // Reached by a direct `/model <id>` too, where the picker's own filter never
+    // ran: refuse to store a model this row's protocol cannot serve, and say
+    // which sibling row can.
+    const protocol = declaredProtocol(profile.api)
+    const baseURL = typeof profile.baseURL === 'string' && profile.baseURL.trim() !== ''
+      ? profile.baseURL.trim()
+      : this.openCodeListingBaseURL(provider)
+    if (protocol !== undefined && baseURL !== undefined) {
+      const apiKeyEnv = typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv.trim() !== '' ? profile.apiKeyEnv.trim() : undefined
+      const apiKey = apiKeyEnv === undefined ? undefined : await this.resolveCredential(apiKeyEnv)
+      const endpoints = apiKey === undefined ? undefined : await fetchModelEndpoints(baseURL, apiKey)
+      if (!gatewayServesModel(endpoints, modelId, protocol)) {
+        const target = this.rowServingModel(provider, modelId, endpoints)
+        // Report both names: the family is what `/provider` offers, the row is
+        // what the settings file calls it. Sending the user to a hidden row was
+        // a dead end — `/provider` lists families, so the hint names the family
+        // and `/model` (which files the pick on the right row itself).
+        const family = this.displayProviderId(provider)
+        this.pushRow({
+          kind: 'error',
+          text: t('model.wrongRoute', {
+            model: modelId,
+            provider: family === provider ? provider : `${family}（${provider}）`,
+            endpoint: GATEWAY_PROTOCOL_ENDPOINT[protocol],
+            hint: target === undefined
+              ? t('model.wrongRouteSetup')
+              : t('model.wrongRouteTarget', { provider: family }),
+          }),
+        })
+        this.markDirty()
+        return false
+      }
+    }
     const modelEntry: Record<string, unknown> = { id: modelId }
     // A model added here skips the wizard, so size it from the installed
     // catalog the same way `/setup` does; the route default covers a miss.
@@ -6863,13 +7233,17 @@ export class SshTui {
       const contextWindow = catalogContextWindow(modelId, catalogWindows)
       if (contextWindow !== undefined) modelEntry.contextWindow = contextWindow
     }
+    // Same rule `/setup` follows: a route whose dialect the installed catalog
+    // does not describe must still declare its offered levels, or the Harness
+    // reads the model as non-reasoning and refuses every effort the TUI offers.
     const reasoningEfforts = reasoningEffortsForDefault(profile.reasoning)
+      ?? (declaresOfferedReasoning(typeof profile.api === 'string' ? profile.api : '') ? handDeclaredReasoningEfforts() : undefined)
     if (reasoningEfforts !== undefined) modelEntry.reasoningEfforts = reasoningEfforts
     try {
       await settings.mutate(settingsNamespace('llm-pi-ai'), [
         { op: 'set', path: ['providers', provider, 'models'], value: [...models, modelEntry] },
       ])
-      this.pushRow({ kind: 'system', text: t('model.added', { model: modelId, provider }) })
+      this.pushRow({ kind: 'system', text: t('model.added', { model: modelId, provider: this.displayProviderId(provider) }) })
       this.markDirty()
       return true
     } catch (error) {
@@ -6917,15 +7291,20 @@ export class SshTui {
   /** Live adapter routes the TUI can switch to, plus the current selection. */
   private listSelectableProviders(): { id: string; label: string }[] {
     const llm = this.ctx.get('llm')
-    const current = this.currentProviderId()
+    const current = this.displayProviderId(this.currentProviderId())
     const seen = new Set<string>()
     const out: { id: string; label: string }[] = []
     const add = (id: string, name?: string): void => {
-      if (id === '' || seen.has(id)) return
-      seen.add(id)
-      const kind = describeProviderRoute(id)
-      const display = name !== undefined && name !== '' && name !== id ? name : kind.short
-      out.push({ id, label: `${display} · ${id}` })
+      if (id === '') return
+      // A gateway spread over protocol rows is one choice here: the rows are an
+      // implementation detail of `llm-pi-ai` (one wire protocol per entry), not
+      // something the user should have to pick between.
+      const row = this.displayProviderId(id)
+      if (row === '' || seen.has(row)) return
+      seen.add(row)
+      const kind = describeProviderRoute(row)
+      const display = name !== undefined && name !== '' && name !== row ? name : kind.short
+      out.push({ id: row, label: `${display} · ${row}` })
     }
     add(current)
     for (const info of llm?.listProviders() ?? []) add(info.id, info.name)
@@ -6944,6 +7323,8 @@ export class SshTui {
   ]
 
   private async loadModelOptions(provider: string): Promise<{ options: { id: string; label: string }[]; source: string }> {
+    const family = this.providerFamilyRows(provider)
+    if (family.length > 1) return this.loadFamilyModelOptions(family[0] ?? provider, family)
     const llm = this.ctx.get('llm')
     let options: { id: string; label: string }[] = []
     let source = t('model.configured')
@@ -6995,16 +7376,83 @@ export class SshTui {
     return { options, source }
   }
 
+  /**
+   * The model list of a gateway spread over protocol rows.
+   *
+   * Every row is asked what it serves and the answers are merged under the
+   * family's base id, so the user picks from one list. Each model remembers the
+   * row that offered it, which is what routes the pick back to the protocol
+   * that can actually send it — the split stays invisible end to end.
+   */
+  private async loadFamilyModelOptions(
+    base: string,
+    family: readonly string[],
+  ): Promise<{ options: { id: string; label: string }[]; source: string }> {
+    const llm = this.ctx.get('llm')
+    const options: { id: string; label: string }[] = []
+    const seen = new Set<string>()
+    const add = (row: string, id: string, label?: string): void => {
+      if (id === '' || seen.has(id)) return
+      seen.add(id)
+      this.rememberFamilyOwner(base, id, row)
+      options.push({ id, label: label !== undefined && label !== '' ? label : id })
+    }
+    const previousStatus = this.status
+    this.status = t('model.fetching', { provider: base })
+    this.markDirty()
+    try {
+      // The gateway's own listing is what decides which row serves what, so it
+      // is answered first and `add` keeps the first row that claims an id. Doing
+      // the configured rows first would let a leftover entry on the base row
+      // shadow the sibling the gateway actually files the model under — the
+      // picker would then show a model under a protocol that cannot send it,
+      // and `/model` would write it back onto that row.
+      const listings = await this.discoverGatewayListing(base, AbortSignal.timeout(6_000)).catch(() => undefined)
+      if (listings !== undefined) {
+        for (const row of family) {
+          const protocol = declaredProtocol(this.piAiProviderProfile(row)?.api)
+          for (const model of listings.models) {
+            if (gatewayServesModel(listings.endpoints, model.id, protocol)) add(row, model.id, model.label)
+          }
+        }
+      }
+      // Whatever the endpoint did not answer: the rows that already configure a
+      // model keep it (so a gateway that is down still offers its own list).
+      for (const row of family) {
+        for (const model of this.configuredModelsOf(row)) add(row, model.id, model.label)
+      }
+      // Models the installed catalog knows but neither source listed.
+      for (const row of family) {
+        try {
+          for (const model of (await llm?.listModels(row)) ?? []) add(row, model.id, model.name || model.id)
+        } catch {
+          // The endpoint listing stands alone when the catalog cannot be read.
+        }
+      }
+    } finally {
+      this.status = previousStatus
+      this.markDirty()
+    }
+    if (options.length === 0) {
+      const remembered = this.rememberedRoute(base)?.model
+      if (remembered !== undefined) options.push({ id: remembered, label: remembered })
+    }
+    return { options, source: options.length > 0 ? t('model.live') : t('model.configured') }
+  }
+
   /** /model: models and effort for the current provider only. */
   private async runModelCommand(): Promise<void> {
     const provider = this.currentProviderId()
+    // The list is the whole family's; the question names the gateway, not the
+    // protocol row the current request happens to use.
+    const display = this.displayProviderId(provider)
     const current = this.selectionRef?.current
     const loaded = await this.loadModelOptions(provider)
     let modelOptions = loaded.options
     if (current?.model !== undefined && !modelOptions.some(option => option.id === current.model)) {
       modelOptions = [{ id: current.model, label: current.model }, ...modelOptions]
     }
-    const selected = await this.pickModelOption(modelOptions, provider, loaded.source, current?.model)
+    const selected = await this.pickModelOption(modelOptions, display, loaded.source, current?.model)
     if (selected === undefined) return
     await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id))
   }
@@ -7012,7 +7460,10 @@ export class SshTui {
   /** /provider: pick a provider, then its model (remembered route pre-filled). */
   private async runProviderCommand(): Promise<void> {
     const providers = this.listSelectableProviders()
-    const current = this.currentProviderId()
+    // The list holds family ids, so the highlight must be asked for in the same
+    // vocabulary: a session on `command-code-messages` otherwise matched no row
+    // and fell back to index 0, pre-selecting the wrong supplier.
+    const current = this.displayProviderId(this.currentProviderId())
     if (providers.length === 0) {
       this.pushRow({ kind: 'error', text: t('provider.none') })
       this.markDirty()
@@ -7117,17 +7568,23 @@ export class SshTui {
     listed: readonly string[] = [],
     preferredEffort?: string,
   ): Promise<void> {
-    if (!(await this.ensureProviderModelConfigured(provider, modelId))) return
+    // One gateway, one choice: the picker offers the family's merged list, and
+    // the row that actually serves the model is resolved here so the selection
+    // lands on a route whose protocol can send it. The family base id is what
+    // the user sees and what the route memory remembers.
+    const display = this.displayProviderId(provider)
+    const target = this.familyOwnerRow(display, modelId, await this.advertisedFor(display, modelId))
+    if (!(await this.ensureProviderModelConfigured(target, modelId))) return
     const llm = this.ctx.get('llm')
     const current = this.selectionRef?.current
     let effortOptions: { id: string; label: string }[] = []
     try {
-      const info = await llm?.resolveModelInfo(provider, modelId)
+      const info = await llm?.resolveModelInfo(target, modelId)
       effortOptions = (info?.reasoning?.efforts ?? []).map(effort => ({ id: String(effort.id), label: effort.name }))
     } catch {
       effortOptions = []
     }
-    if (effortOptions.length === 0 && providerUsesLocalOAuth(provider)) {
+    if (effortOptions.length === 0 && providerUsesLocalOAuth(target)) {
       effortOptions = localOAuthEffortChoices(modelId)
     }
 
@@ -7147,8 +7604,8 @@ export class SshTui {
       })),
     ]
 
-    const rememberedEffort = this.rememberedRoute(provider)?.reasoningEffort ?? preferredEffort ?? ''
-    const currentEffort = current?.provider === provider
+    const rememberedEffort = this.rememberedRoute(display)?.reasoningEffort ?? preferredEffort ?? ''
+    const currentEffort = current?.provider === target
       ? String(current?.reasoningEffort ?? '')
       : rememberedEffort
     const currentIndex = Math.max(0, choices.findIndex(option => option.id === (currentEffort === '' ? undefined : currentEffort)))
@@ -7163,32 +7620,32 @@ export class SshTui {
       })),
     }, 0, 1, currentIndex)
     const effort = choices.find(option => option.label === effortAnswer.selected[0])?.id
-    if (isUndeclared && effort !== undefined) await this.declareReasoningEffort(provider, modelId, effort)
+    if (isUndeclared && effort !== undefined) await this.declareReasoningEffort(target, modelId, effort)
 
     const next: ModelSelection = {
-      provider,
+      provider: target,
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
     if (this.selectionRef !== undefined) this.selectionRef.current = next
     this.onSelectionChanged?.(next)
     await this.persistDefaultSelection(next)
-    await this.rememberRoute(next)
-    const kind = describeProviderRoute(provider)
+    await this.rememberRoute({ ...next, provider: display })
+    const kind = describeProviderRoute(display)
     const effortText = effort ?? t('effort.defaultShort')
     const note = isUndeclared && effort !== undefined ? t('effort.manualNote') : ''
     this.pushRow({
       kind: 'system',
-      text: t('effort.switchedModel', { kind: kind.kind, provider, model: modelId, effort: effortText, note }),
+      text: t('effort.switchedModel', { kind: kind.kind, provider: display, model: modelId, effort: effortText, note }),
     })
     const listedIds = listed.filter(id => id !== '__switch_provider__' && id !== '')
     const previousProvider = current?.provider ?? this.agent.options.provider ?? this.providerName
-    if (previousProvider !== provider) {
-      await this.syncSubagentToProvider(provider, listedIds, true)
-      this.clearQuotaForProvider(provider)
+    if (this.displayProviderId(previousProvider) !== display) {
+      await this.syncSubagentToProvider(display, listedIds, true)
+      this.clearQuotaForProvider(target)
       void this.refreshQuota({ reason: 'command', announce: false }).catch(() => {})
     } else {
-      await this.syncSubagentToProvider(provider, listedIds)
+      await this.syncSubagentToProvider(display, listedIds)
     }
     this.markDirty()
   }
@@ -7256,6 +7713,9 @@ export class SshTui {
     listed: readonly string[] = [],
     force = false,
   ): Promise<void> {
+    // Children follow the family the user sees, not the protocol row the parent
+    // request happens to use.
+    provider = this.displayProviderId(provider)
     const current = this.subagentSelection.current
     if (current.provider !== undefined) {
       if (!force) return
@@ -7295,7 +7755,7 @@ export class SshTui {
     provider: string,
     current: SubagentSelection,
   ): Promise<boolean> {
-    const pinned = current.provider ?? ''
+    const pinned = this.displayProviderId(current.provider ?? '')
     const keepLabel = t('sub.followKeepLabel', { provider: pinned })
     const followLabel = t('sub.followSwitchLabel', { provider })
     const answer = await this.askQuestion({
@@ -7350,6 +7810,8 @@ export class SshTui {
     options: { id: string; label: string }[]
     source: string
   }> {
+    const family = this.providerFamilyRows(provider)
+    if (family.length > 1) return this.loadFamilyModelOptions(family[0] ?? provider, family)
     const llm = this.ctx.get('llm')
     let options: { id: string; label: string }[] = []
     let source = t('model.configured')
@@ -7394,7 +7856,7 @@ export class SshTui {
     const current = this.subagentSelection.current
     const direct = arg.trim()
     if (direct.toLowerCase() === 'reset' || direct === '跟随' || direct === '默认') {
-      const parentProvider = this.currentProviderId()
+      const parentProvider = this.displayProviderId(this.currentProviderId())
       const nextModel = defaultSubagentModelForProvider(
         parentProvider,
         [],
@@ -7422,13 +7884,14 @@ export class SshTui {
       }
     }
 
-    let provider = this.effectiveSubagentProvider()
+    let provider = this.displayProviderId(this.effectiveSubagentProvider())
     let selectedId = direct
 
     if (selectedId === '') {
-      const parentProvider = this.currentProviderId()
+      const parentProvider = this.displayProviderId(this.currentProviderId())
       const providers = this.listSelectableProviders()
       const currentIndex = Math.max(0, providers.findIndex(option => option.id === provider))
+      const pinnedProvider = this.displayProviderId(current.provider ?? '')
       const pickedAnswer = await this.askQuestion({
         id: 'submodel-provider-pick',
         question: t('sub.pickProvider'),
@@ -7440,7 +7903,7 @@ export class SshTui {
           // pinned" just because the pin happens to name it.
           description: option.id === parentProvider
             ? t('sub.providerFollowsParent')
-            : option.id === current.provider
+            : option.id === pinnedProvider
               ? t('sub.providerPinned')
               : describeProviderRoute(option.id).kind,
         })),
@@ -7457,7 +7920,7 @@ export class SshTui {
       selectedId = selected.id
     }
     await this.commitSubagentRoute(provider, selectedId, {
-      pinProvider: provider !== this.currentProviderId(),
+      pinProvider: provider !== this.displayProviderId(this.currentProviderId()),
     })
   }
 
@@ -7467,10 +7930,14 @@ export class SshTui {
     modelId: string,
     options: { pinProvider: boolean },
   ): Promise<void> {
-    if (!(await this.ensureProviderModelConfigured(provider, modelId))) return
+    // The picker lists one row per gateway family; the model decides which
+    // protocol row underneath actually serves it.
+    const display = this.displayProviderId(provider)
+    const target = this.familyOwnerRow(display, modelId, await this.advertisedFor(display, modelId))
+    if (!(await this.ensureProviderModelConfigured(target, modelId))) return
     const effort = this.subagentSelection.current.reasoningEffort
     const next: SubagentSelection = {
-      ...(options.pinProvider ? { provider } : {}),
+      ...(options.pinProvider ? { provider: target } : {}),
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: effort }),
     }
@@ -7478,8 +7945,8 @@ export class SshTui {
     this.pushRow({
       kind: 'system',
       text: (options.pinProvider
-        ? t('sub.modelPinned', { model: modelId, provider })
-        : t('sub.modelFollow', { model: modelId, provider }))
+        ? t('sub.modelPinned', { model: modelId, provider: display })
+        : t('sub.modelFollow', { model: modelId, provider: display }))
         + (persisted ? '' : t('sub.sessionOnly')),
     })
     this.markDirty()
@@ -7488,6 +7955,7 @@ export class SshTui {
   /** /effort: pick or set the reasoning effort for the current model. */
   private async runEffortCommand(arg?: string): Promise<void> {
     const provider = this.currentProviderId()
+    const display = this.displayProviderId(provider)
     const current = this.selectionRef?.current
     if (current === undefined || current.model === undefined) {
       this.pushRow({ kind: 'error', text: t('effort.noModel') })
@@ -7554,8 +8022,8 @@ export class SshTui {
     const answer = await this.askQuestion({
       id: 'effort-pick',
       question: isUndeclared
-        ? t('effort.pickCurrentUndeclared', { provider, model: modelId })
-        : t('effort.pickCurrent', { provider, model: modelId }),
+        ? t('effort.pickCurrentUndeclared', { provider: display, model: modelId })
+        : t('effort.pickCurrent', { provider: display, model: modelId }),
       options: choices.map(c => ({
         label: c.label,
         description: c.id === currentEffort ? t('disconnect.current') : c.desc,
@@ -8313,6 +8781,8 @@ export class SshTui {
             return
           } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(-1)) {
             return
+          } else if (this.dialog?.kind === 'onboarding' && this.moveOnboardingModelCursor(-1)) {
+            return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
@@ -8328,6 +8798,8 @@ export class SshTui {
           } else if (this.moveQuestionCursor(1)) {
             return
           } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(1)) {
+            return
+          } else if (this.dialog?.kind === 'onboarding' && this.moveOnboardingModelCursor(1)) {
             return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
@@ -8751,6 +9223,99 @@ export class SshTui {
     return sized
   }
 
+  /**
+   * Leave the models step, after one best-effort trip to the gateway for what
+   * the picks are still missing: the context window / output cap of every model
+   * the listing has not described yet, and — for a gateway that spreads over
+   * several protocols — the endpoints each picked model answers.
+   *
+   * `Ctrl+F` stays as it was, but it is no longer the only way to learn these:
+   * a model typed by hand would otherwise be saved with no capacity at all, and
+   * with no endpoint data the split had nothing to file it by.
+   */
+  private async finishModelsStep(state: OnboardingState): Promise<void> {
+    if (this.onboarding !== state || !isModelsStep(state.step)) return
+    if (this.finishingModels.has(state)) return
+    this.finishingModels.add(state)
+    try {
+      const previousStatus = this.status
+      if (this.onboardingWantsEndpoint(state)) {
+        const fetching = t('onboard.fetchingModels')
+        this.status = fetching
+        this.markDirty()
+        await this.enrichOnboardingModels(state)
+        // Only take back the line this step put up: a turn that started while
+        // the listing was in flight owns the status now, and restoring the
+        // pre-fetch value would erase "turn 7 running" behind its back.
+        if (this.status === fetching) this.status = previousStatus
+      }
+      // The wizard may have been cancelled or reset while the fetch was in flight.
+      if (this.onboarding !== state || !isModelsStep(state.step)) return
+      // Size the picks before the confirm step so the route default the wizard
+      // persists is derived, not guessed: the listing first, the installed
+      // catalog second. Only when some pick stayed unsized does the route
+      // default matter, and only then is a step shown for it.
+      const sized = this.sizeOnboardingModels(state)
+      const unsized = state.models.filter(id => !sized.has(id))
+      if (unsized.length === 0) {
+        state.step = 'confirm'
+      } else {
+        state.routeContextWindow = suggestedRouteContextWindow(sized.values())
+          ?? HARNESS_DEFAULT_CONTEXT_WINDOW
+        state.step = 'context'
+      }
+      this.input = ''
+      this.cursor = 0
+      this.markDirty()
+    } finally {
+      this.finishingModels.delete(state)
+    }
+  }
+
+  /** Whether leaving the models step has anything left to ask the gateway for. */
+  private onboardingWantsEndpoint(state: OnboardingState): boolean {
+    if (onboardTemplate(state).protocols !== undefined && state.modelEndpoints === undefined) return true
+    return state.models.some(id => state.modelCapacity?.get(id)?.contextWindow === undefined)
+  }
+
+  /** Fill the picks' capacities and endpoints from the gateway; never fatal. */
+  private async enrichOnboardingModels(state: OnboardingState): Promise<void> {
+    const template = onboardTemplate(state)
+    const baseURL = state.baseUrl === '' ? template.defaultBaseUrl : state.baseUrl
+    if (baseURL === '') return
+    const wantsEndpoints = template.protocols !== undefined && state.modelEndpoints === undefined
+    const wantsCapacity = state.models.some(id => state.modelCapacity?.get(id)?.contextWindow === undefined)
+    const llm = this.ctx.get('llm')
+    if (wantsCapacity && llm !== undefined) {
+      try {
+        const discovered = await discoverProviderModels(llm, {
+          baseURL,
+          ...(template.api === undefined ? {} : { api: template.api }),
+          ...(state.key === '' ? {} : { apiKey: state.key }),
+        }, AbortSignal.timeout(8_000))
+        state.modelCapacity ??= new Map()
+        for (const model of discovered) {
+          if (!state.models.includes(model.id)) continue
+          const capacity = { ...(state.modelCapacity.get(model.id) ?? {}) }
+          if (capacity.contextWindow === undefined && model.contextWindow !== undefined) {
+            capacity.contextWindow = model.contextWindow
+          }
+          if (capacity.maxTokens === undefined && model.maxTokens !== undefined) {
+            capacity.maxTokens = model.maxTokens
+          }
+          if (Object.keys(capacity).length > 0) state.modelCapacity.set(model.id, capacity)
+        }
+      } catch {
+        // The listing is an enrichment, not a gate: the installed catalog and
+        // the route default still cover a gateway that cannot be listed.
+      }
+    }
+    if (wantsEndpoints) {
+      const endpoints = await fetchModelEndpoints(baseURL, state.key)
+      if (endpoints !== undefined) state.modelEndpoints = endpoints
+    }
+  }
+
   private handleOnboardingChar(text: string): void {
     const state = this.onboarding
     if (state === undefined) return
@@ -8808,7 +9373,70 @@ export class SshTui {
       case 'base-url':
       case 'key':
       case 'models':
+      case 'models-pick':
+      case 'model-default':
       case 'context': {
+        if (state.step === 'models-pick') {
+          // The step is already being left (the gateway listing is in flight):
+          // the pick is decided, so a stray key must not reopen it.
+          if (this.finishingModels.has(state)) return
+          const total = state.modelCandidates?.length ?? 0
+          if (total === 0) {
+            state.step = 'models'
+            this.markDirty()
+            return
+          }
+          const checked = state.modelChecked ?? (state.modelChecked = new Set<number>())
+          if (text === '\r' || text === '\n') {
+            const picked = this.checkedOnboardingModels(state)
+            if (picked.length === 0) {
+              this.pushRow({ kind: 'error', text: t('onboard.needModel') })
+              this.markDirty()
+              return
+            }
+            state.models = picked
+            state.defaultModel = picked[0]
+            if (picked.length > 1) {
+              state.step = 'model-default'
+              state.modelCursor = 0
+              this.markDirty()
+              return
+            }
+            this.advanceOnboarding()
+            return
+          }
+          if (text === ' ' || text === '　') {
+            const index = state.modelCursor ?? 0
+            if (checked.has(index)) checked.delete(index)
+            else checked.add(index)
+            this.markDirty()
+            return
+          }
+          const hotkey = questionOptionIndex(text, total)
+          if (hotkey !== undefined) {
+            state.modelCursor = hotkey
+            if (checked.has(hotkey)) checked.delete(hotkey)
+            else checked.add(hotkey)
+            this.markDirty()
+          }
+          return
+        }
+        if (state.step === 'model-default') {
+          if (this.finishingModels.has(state)) return
+          const picked = this.checkedOnboardingModels(state)
+          if (text === '\r' || text === '\n') {
+            const chosen = picked[Math.min(state.modelCursor ?? 0, Math.max(0, picked.length - 1))]
+            if (chosen !== undefined) state.defaultModel = chosen
+            this.advanceOnboarding()
+            return
+          }
+          const hotkey = questionOptionIndex(text, picked.length)
+          if (hotkey !== undefined) {
+            state.modelCursor = hotkey
+            this.markDirty()
+          }
+          return
+        }
         if (state.step === 'models' && text === '\x06') {
           void this.fetchOnboardingModels()
           return
@@ -8832,19 +9460,25 @@ export class SshTui {
             }
             state.key = value
           } else if (state.step === 'models') {
-            const template = onboardTemplate(state)
-            // Ctrl+F has already filled state.models; Enter accepts that
-            // listing instead of discarding it for the template's placeholder
-            // ids, which a generic gateway does not serve.
-            const parsed = value === ''
-              ? (state.models.length > 0 ? state.models : template.defaultModels)
-              : value.split(/[\s,，]+/u).filter(Boolean)
+            // Leaving the step is already under way (the gateway listing is in
+            // flight): a second Enter must not restart it or reopen the picker.
+            if (this.finishingModels.has(state)) return
+            if (value === '') {
+              // The default answer is a choice, not "take everything the listing
+              // returned": the picker shows the models and lets the user pick
+              // which to configure, then which one to run. A typed list stays
+              // the power-user path and skips both questions.
+              this.openOnboardingModelPicker(state)
+              return
+            }
+            const parsed = value.split(/[\s,，]+/u).filter(Boolean)
             if (parsed.length === 0) {
               this.pushRow({ kind: 'error', text: t('onboard.needModel') })
               this.markDirty()
               return
             }
             state.models = parsed
+            state.defaultModel = parsed[0]
           } else if (state.step === 'context') {
             // Enter keeps the pre-filled value; a typed number overrides it.
             if (value !== '') {
@@ -8887,6 +9521,12 @@ export class SshTui {
           state.baseUrl = ''
           state.key = ''
           state.models = []
+          // A restart must not inherit the previous run's picker: a stale
+          // `modelChecked` would pre-tick models from the provider being left.
+          state.defaultModel = undefined
+          state.modelCandidates = []
+          state.modelChecked = new Set<number>()
+          state.modelCursor = 0
           state.modelCapacity = new Map()
           this.input = ''
           this.cursor = 0
@@ -8907,26 +9547,103 @@ export class SshTui {
       state.step = 'key'
     } else if (state.step === 'key') {
       state.step = 'models'
-    } else if (state.step === 'models') {
-      // Size the picks before the confirm step so the route default the wizard
-      // persists is derived, not guessed: the listing first, the installed
-      // catalog second. Only when some pick stayed unsized does the route
-      // default matter, and only then is a step shown for it.
-      const sized = this.sizeOnboardingModels(state)
-      const unsized = state.models.filter(id => !sized.has(id))
-      if (unsized.length === 0) {
-        state.step = 'confirm'
-      } else {
-        state.routeContextWindow = suggestedRouteContextWindow(sized.values())
-          ?? HARNESS_DEFAULT_CONTEXT_WINDOW
-        state.step = 'context'
-      }
+    } else if (isModelsStep(state.step)) {
+      // Leaving the models step is asynchronous: the gateway is asked once more
+      // for whatever the picks are still missing (see finishModelsStep).
+      void this.finishModelsStep(state)
+      return
     } else if (state.step === 'context') {
       state.step = 'confirm'
     }
     this.input = ''
     this.cursor = 0
     this.markDirty()
+  }
+
+  /**
+   * Open the models picker: every model the listing offered — or the template's
+   * pinned ones when nothing was listed — with the template's models checked.
+   *
+   * Enter used to accept the whole listing, which quietly wrote every model of
+   * the gateway into settings and made the session's model whichever id came
+   * first. The picker makes both the set and the session's model explicit; a
+   * typed list still skips it.
+   */
+  private openOnboardingModelPicker(state: OnboardingState): void {
+    const template = onboardTemplate(state)
+    const candidates = [...new Set(
+      (state.models.length > 0 ? state.models : template.defaultModels).filter(id => id !== ''),
+    )]
+    if (candidates.length === 0) {
+      this.pushRow({ kind: 'error', text: t('onboard.needModel') })
+      this.markDirty()
+      return
+    }
+    const pinned = new Set(template.defaultModels)
+    const checked = new Set<number>()
+    candidates.forEach((id, index) => {
+      if (pinned.has(id)) checked.add(index)
+    })
+    if (checked.size === 0) checked.add(0)
+    state.modelCandidates = candidates
+    state.modelChecked = checked
+    state.modelCursor = Math.min(...checked)
+    state.step = 'models-pick'
+    this.input = ''
+    this.cursor = 0
+    this.markDirty()
+  }
+
+  /** The checked models of the wizard's picker, in listing order. */
+  private checkedOnboardingModels(state: OnboardingState): string[] {
+    const candidates = state.modelCandidates ?? []
+    return [...(state.modelChecked ?? new Set<number>())]
+      .sort((left, right) => left - right)
+      .map(index => candidates[index])
+      .filter((id): id is string => id !== undefined)
+  }
+
+  /** Move the highlight in either picker step. */
+  private moveOnboardingModelCursor(delta: number): boolean {
+    const state = this.onboarding
+    if (state === undefined) return false
+    if (state.step === 'models-pick') {
+      const total = state.modelCandidates?.length ?? 0
+      if (total === 0) return false
+      state.modelCursor = Math.max(0, Math.min(total - 1, (state.modelCursor ?? 0) + delta))
+      this.markDirty()
+      return true
+    }
+    if (state.step === 'model-default') {
+      const picked = this.checkedOnboardingModels(state)
+      if (picked.length === 0) return false
+      state.modelCursor = Math.max(0, Math.min(picked.length - 1, (state.modelCursor ?? 0) + delta))
+      this.markDirty()
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Esc in a picker step goes back one step instead of throwing the wizard
+   * away — the listing is the expensive part and the user is still choosing.
+   */
+  private stepBackOnboarding(): boolean {
+    const state = this.onboarding
+    if (state === undefined) return false
+    if (state.step === 'models-pick') {
+      state.step = 'models'
+      this.markDirty()
+      return true
+    }
+    if (state.step === 'model-default') {
+      state.step = 'models-pick'
+      const checked = [...(state.modelChecked ?? new Set<number>())]
+      state.modelCursor = checked.length === 0 ? 0 : Math.min(...checked)
+      this.markDirty()
+      return true
+    }
+    return false
   }
 
   /** Fetch the endpoint's model list into the onboarding wizard's models step. */
@@ -9010,7 +9727,7 @@ export class SshTui {
       if (state.providerType === 'official') {
         const envRef = 'DEEPSEEK_API_KEY'
         await this.saveCredential(credentials, envRef, state.key)
-        const model = state.models[0] ?? 'deepseek-v4-pro'
+        const model = state.defaultModel ?? state.models[0] ?? 'deepseek-v4-pro'
         await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: 'deepseek-official', model })
         if (this.selectionRef !== undefined) {
           this.selectionRef.current = { provider: 'deepseek-official', model }
@@ -9030,7 +9747,7 @@ export class SshTui {
         }
       } else {
         const envRef = envRefForId(state.providerId)
-        const model = state.models[0]
+        const model = state.defaultModel ?? state.models[0]
         // OpenCode / third-party (llm-pi-ai) routes have no adapter-level
         // reasoning default. Re-running setup must not silently drop the
         // effort that makes thinking arrive as `reasoning` blocks; default it
@@ -9053,8 +9770,6 @@ export class SshTui {
         // setup, or a hand-written profile): the pool is every model the gateway
         // has, so re-running setup re-homes them instead of duplicating or
         // dropping any.
-        const declaredProtocol = (value: unknown): GatewayProtocol | undefined =>
-          value === 'openai-responses' || value === 'openai-completions' || value === 'anthropic-messages' ? value : undefined
         const baseProtocol = declaredProtocol(existing?.api) ?? template.api ?? 'openai-completions'
         const siblingEntries = template.protocols === undefined
           ? []
@@ -9068,6 +9783,24 @@ export class SshTui {
           ...(Array.isArray(existing?.models) ? existing.models : []),
           ...siblingEntries.flatMap(entry => (Array.isArray(entry.profile?.models) ? entry.profile.models : [])),
         ]
+        // Where each model already sits, so the split re-homes only what the
+        // gateway itself says moved: a working placement is never relocated by
+        // the table, and `/setup` keeps the promise that an existing model list
+        // only grows.
+        const modelPlacement = new Map<string, GatewayProtocol>()
+        const recordPlacement = (models: unknown, protocol: GatewayProtocol): void => {
+          if (!Array.isArray(models)) return
+          for (const raw of models) {
+            const id = typeof raw === 'string'
+              ? raw
+              : typeof raw === 'object' && raw !== null && typeof (raw as { id?: unknown }).id === 'string'
+                ? (raw as { id: string }).id
+                : ''
+            if (id !== '' && !modelPlacement.has(id)) modelPlacement.set(id, protocol)
+          }
+        }
+        recordPlacement(existing?.models, baseProtocol)
+        for (const entry of siblingEntries) recordPlacement(entry.profile?.models, entry.protocol)
         // The confirm step can be reached without walking the models step (and
         // a saved catalog answer may have landed after it), so size the picks
         // here too: the call is idempotent and fills only missing windows.
@@ -9108,6 +9841,7 @@ export class SshTui {
           : splitModelsByProtocol({
               models: mergedIds,
               ...(state.modelEndpoints === undefined ? {} : { advertised: state.modelEndpoints }),
+              ...(modelPlacement.size === 0 ? {} : { existing: modelPlacement }),
               ...(gatewayModelTable(baseURL) === undefined ? {} : { table: gatewayModelTable(baseURL) }),
               fallback: baseProtocol,
               preference: template.protocols,
@@ -9324,7 +10058,11 @@ export class SshTui {
         return
       }
       if (this.dialog.kind === 'confirm') this.closeConfirm('cancel')
-      else if (this.dialog.kind === 'onboarding') this.cancelOnboarding()
+      else if (this.dialog.kind === 'onboarding') {
+        // Inside the models picker Esc steps back through the wizard's own
+        // steps; anywhere else it still abandons the wizard.
+        if (!this.stepBackOnboarding()) this.cancelOnboarding()
+      }
       else this.dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
       return
     }
@@ -9816,7 +10554,7 @@ export class SshTui {
             ...(quota === undefined ? {} : { quota }),
             ...(this.contextPressure === undefined ? {} : { context: this.contextPressure }),
             parentModel: model,
-            ...(sub.provider === undefined ? {} : { subProvider: sub.provider }),
+            ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
             subModel: sub.model,
             cwd: this.workspaceCwd(),
           })

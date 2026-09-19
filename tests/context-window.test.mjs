@@ -112,14 +112,37 @@ function wizardState(overrides = {}) {
   }
 }
 
-test('an unsized pick asks for the route window, pre-filled from the catalog', () => {
+/** Wait for the models step's background listing to settle the transition. */
+async function leaveModelsStep(tui) {
+  for (let i = 0; i < 400 && tui.onboarding.step === 'models'; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  return tui.onboarding.step
+}
+
+/**
+ * Answer the models step the way a user does now: Enter opens the picker, the
+ * given hotkeys toggle extra models in, Enter confirms, and a second Enter
+ * picks the session's model when more than one was kept.
+ */
+async function answerModelsStep(tui, toggles = []) {
+  tui.handleOnboardingChar('\r')
+  for (const key of toggles) tui.handleOnboardingChar(key)
+  tui.handleOnboardingChar('\r')
+  if (tui.onboarding.step === 'model-default') tui.handleOnboardingChar('\r')
+  await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+test('an unsized pick asks for the route window, pre-filled from the catalog', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['gemini-3.8-flash-high', 'gemini-3.6-flash-high', 'gemini-claude-sonnet-4-6'] })
   tui.input = ''
   tui.cursor = 0
-  tui.handleOnboardingChar('\r')
+  // Keep all three: the picker opens on the first, '2' and '3' toggle the rest.
+  await answerModelsStep(tui, ['2', '3'])
 
-  assert.equal(tui.onboarding.step, 'context')
+  // Leaving the models step asks the gateway once more, so it settles async.
+  assert.equal(await leaveModelsStep(tui), 'context')
   // 1,000,000 is what the two catalog-matched picks proved; the 3.8 alias,
   // which no catalog entry sizes, inherits it rather than the 262,144 default.
   assert.equal(tui.onboarding.routeContextWindow, 1_000_000)
@@ -131,7 +154,7 @@ test('an unsized pick asks for the route window, pre-filled from the catalog', (
   assert.equal(tui.onboarding.step, 'confirm')
 })
 
-test('a fully sized pick goes straight to confirm', () => {
+test('a fully sized pick goes straight to confirm', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({
     models: ['gemini-3.8-flash-high'],
@@ -139,18 +162,18 @@ test('a fully sized pick goes straight to confirm', () => {
   })
   tui.input = ''
   tui.cursor = 0
-  tui.handleOnboardingChar('\r')
+  await answerModelsStep(tui)
   assert.equal(tui.onboarding.step, 'confirm')
   assert.equal(tui.onboarding.routeContextWindow, undefined)
 })
 
-test('the context step takes a typed override and rejects nonsense', () => {
+test('the context step takes a typed override and rejects nonsense', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['gemini-3.8-flash-high'] })
   tui.input = ''
   tui.cursor = 0
-  tui.handleOnboardingChar('\r')
-  assert.equal(tui.onboarding.step, 'context')
+  await answerModelsStep(tui)
+  assert.equal(await leaveModelsStep(tui), 'context')
 
   tui.input = 'not-a-number'
   tui.handleOnboardingChar('\r')
@@ -208,12 +231,16 @@ test('a model added through /model is sized from the catalog too', async () => {
     providers: { gw: { api: 'openai-completions', models: [{ id: 'known' }] } },
   })
 
+  // The completions dialect cannot lean on an installed catalog entry, so the
+  // added model also declares the offered vocabulary — the same declaration
+  // `/setup` writes, without which the Harness calls the model non-reasoning.
+  const vocabulary = { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max', xhigh: 'xhigh' }
   assert.equal(await tui.ensureProviderModelConfigured('gw', 'gemini-3.6-flash-high'), true)
   assert.deepEqual(writes.at(-1).ops[0].value, [
     { id: 'known' },
-    { id: 'gemini-3.6-flash-high', contextWindow: 1_000_000 },
+    { id: 'gemini-3.6-flash-high', contextWindow: 1_000_000, reasoningEfforts: vocabulary },
   ])
 
   assert.equal(await tui.ensureProviderModelConfigured('gw', 'who-knows-9'), true)
-  assert.deepEqual(writes.at(-1).ops[0].value.at(-1), { id: 'who-knows-9' })
+  assert.deepEqual(writes.at(-1).ops[0].value.at(-1), { id: 'who-knows-9', reasoningEfforts: vocabulary })
 })

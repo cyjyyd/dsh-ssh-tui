@@ -366,7 +366,10 @@ export function footerActivity(input: FooterStatusInput): { kind: FooterActivity
   if (input.planReview) return { kind: 'plan-review', text: t('footer.planReview') }
   if (input.waitingQuestion) return { kind: 'waiting', text: t('footer.waiting') }
   if (input.compacting) return { kind: 'compacting', text: t('footer.compacting') }
-  if (input.retry !== undefined) {
+  // Only a running turn can be retrying: a chip left over from a finished turn
+  // (a missed event, or a retry of a background request such as the session
+  // title) must not hide the state the user is actually in.
+  if (input.running && input.retry !== undefined) {
     return { kind: 'retry', text: t('footer.retry', { retry: input.retry.retry, max: input.retry.maxRetries }) }
   }
   if (input.subagents > 0) return { kind: 'subagents', text: t('footer.subagents', { count: input.subagents }) }
