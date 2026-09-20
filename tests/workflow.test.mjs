@@ -16,6 +16,17 @@ import { fileURLToPath } from 'node:url'
  */
 const WORKFLOW = join(dirname(fileURLToPath(import.meta.url)), '..', '.github', 'workflows', 'ci.yml')
 
+/**
+ * The file as GitHub sees it, whatever this checkout's line endings are.
+ *
+ * A Windows checkout is CRLF (`core.autocrlf`), and every check below is
+ * line-based, so an un-normalized read finds no jobs at all — which is exactly
+ * how this test failed on the Windows leg the first time it ran there.
+ */
+function readWorkflow() {
+  return readFileSync(WORKFLOW, 'utf8').replaceAll('\r\n', '\n')
+}
+
 /** Parse YAML, refusing duplicate mapping keys (which GitHub rejects outright). */
 function parseStrict(text) {
   // A hand-rolled reader for the subset this file uses would hide the very
@@ -66,7 +77,7 @@ function jobStepBlocks(text, job) {
 }
 
 test('every workflow step has exactly one run/uses, so GitHub can parse it', () => {
-  const text = readFileSync(WORKFLOW, 'utf8')
+  const text = readWorkflow()
   const jobs = jobNames(text)
   assert.ok(jobs.length > 0, 'the workflow must define jobs')
   for (const job of jobs) {
@@ -89,14 +100,23 @@ test('every workflow step has exactly one run/uses, so GitHub can parse it', () 
 test('the Windows leg drives the real TUI, not just the unit suite', () => {
   // The three Windows bugs this repo shipped were all in code no Windows run
   // ever executed. Losing this step would quietly restore that gap.
-  const text = readFileSync(WORKFLOW, 'utf8')
+  const text = readWorkflow()
   const windows = jobStepBlocks(text, 'test-windows').join('\n')
   assert.match(windows, /probe-home\.mjs --probe/u, 'the boot probe must run on Windows')
   assert.match(windows, /tui-drop-probe\.mjs/u, 'and the drop/reattach probe')
 })
 
+test('a CRLF checkout parses the same as an LF one', () => {
+  // Pinned because this is how the test itself broke on Windows: the checks are
+  // line-based, and `readWorkflow` is what keeps a CRLF checkout from finding
+  // zero jobs.
+  const crlf = readFileSync(WORKFLOW, 'utf8').replaceAll('\n', '\r\n')
+  assert.deepEqual(jobNames(crlf.replaceAll('\r\n', '\n')), jobNames(readWorkflow()))
+  assert.ok(jobStepBlocks(crlf.replaceAll('\r\n', '\n'), 'test-windows').length > 0)
+})
+
 test('the workflow is valid YAML when a parser is available', async () => {
-  const text = readFileSync(WORKFLOW, 'utf8')
+  const text = readWorkflow()
   const parsed = await parseStrict(text)
   if (parsed === undefined) return // no yaml dependency in this checkout
   assert.ok(parsed.jobs !== undefined, 'the workflow must keep its jobs')
