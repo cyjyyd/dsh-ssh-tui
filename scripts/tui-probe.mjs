@@ -21,13 +21,17 @@ import { lstatSync } from 'node:fs'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
-const { sessionLockLookupPaths } = await import(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js'))
+// `import()` needs a URL, not a path: on Windows `D:\…` is rejected with
+// ERR_UNSUPPORTED_ESM_URL_SCHEME, which is what the first Windows CI run hit.
+const { sessionLockLookupPaths } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js')).href,
+)
 
 const USAGE = `usage: node scripts/tui-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -56,7 +60,7 @@ function plain(text) {
 async function loadPty() {
   try {
     const resolved = require.resolve('node-pty', { paths: [process.cwd()] })
-    const mod = await import(resolved)
+    const mod = await import(pathToFileURL(resolved).href)
     return mod.default ?? mod
   } catch {
     return undefined
