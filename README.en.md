@@ -713,6 +713,11 @@ Find your symptom; each answer is what to do, not a change log.
   the reasoning effort, `/status` shows the current pair.
 - **No `tok/s`** — that turn had no measurable model tokens; a step with only a first-token
   time shows `首字 1.2s`.
+- **The footer is stuck on "compacting" and `/compact` says one is already running** — the Host
+  exited mid-compaction, so the log has a `compaction/start` with no `end` and the resumed card
+  stays on "running" forever. Restart and resume the same session: the replay settles every such
+  compaction as interrupted, which frees the footer and the command again. Before 0.7.2 the same
+  restart still helps (the stale card is never written back to the log).
 - **The plan strip asked for leftover todos only once** — that is deliberate: one reminder
   per open list, so a turn end never spawns another turn forever. To see it again, complete
   the list and start a new one.
