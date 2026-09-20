@@ -109,9 +109,12 @@ test('the Windows leg drives the real TUI, not just the unit suite', () => {
 test('a CRLF checkout parses the same as an LF one', () => {
   // Pinned because this is how the test itself broke on Windows: the checks are
   // line-based, and `readWorkflow` is what keeps a CRLF checkout from finding
-  // zero jobs.
-  const crlf = readFileSync(WORKFLOW, 'utf8').replaceAll('\n', '\r\n')
-  assert.deepEqual(jobNames(crlf.replaceAll('\r\n', '\n')), jobNames(readWorkflow()))
+  // zero jobs. Build the CRLF form from the normalized text — converting a file
+  // that is *already* CRLF doubles the carriage returns instead.
+  const lf = readWorkflow()
+  const crlf = lf.replaceAll('\n', '\r\n')
+  assert.equal(jobNames(crlf).length, 0, 'an un-normalized CRLF read finds no jobs, which is the bug')
+  assert.deepEqual(jobNames(crlf.replaceAll('\r\n', '\n')), jobNames(lf))
   assert.ok(jobStepBlocks(crlf.replaceAll('\r\n', '\n'), 'test-windows').length > 0)
 })
 
