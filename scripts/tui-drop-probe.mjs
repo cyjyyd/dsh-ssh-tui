@@ -44,6 +44,10 @@ const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const { sessionLockLookupPaths } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js')).href,
 )
+// The seam: Windows has no signals, so a hard kill there is TerminateProcess.
+const { IS_WINDOWS } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/platform.js')).href,
+)
 
 const USAGE = `usage: node scripts/tui-drop-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -87,6 +91,18 @@ async function readLock(sessionId, home) {
     }
   }
   return undefined
+}
+
+/**
+ * Kill a window the way a dropped SSH link does: no goodbye, no cleanup.
+ *
+ * Windows has no signals — node-pty throws "Signals not supported on windows."
+ * — so the hard kill there is a plain terminate (TerminateProcess), which is
+ * just as abrupt as SIGKILL is on POSIX.
+ */
+function hardKillWindow(term) {
+  if (IS_WINDOWS) term.kill()
+  else term.kill('SIGKILL')
 }
 
 async function killHostByLock(sessionId, home) {
@@ -212,7 +228,7 @@ async function runProbe({ sessionId, keep, home }) {
     // 2. The link drops: the whole window dies without a goodbye. SSH gives the
     //    launcher no chance to hand the terminal back, and this is what the Host
     //    has to survive.
-    a.term.kill('SIGKILL')
+    hardKillWindow(a.term)
     await delay(2_000)
     // An idle session whose window died is allowed to let its Host go: the
     // policy keeps a Host only while a turn is running. Either way the session
