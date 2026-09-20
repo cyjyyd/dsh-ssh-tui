@@ -19,8 +19,9 @@ import { SshTui } from '../lib/tui.js'
  */
 setLocale('zh')
 
-function makeTui(status = 'running') {
-  const ctx = { get: () => undefined, on() { return () => {} } }
+function makeTui(status = 'running', { commands } = {}) {
+  const services = { ...(commands === undefined ? {} : { commands }) }
+  const ctx = { get: name => services[name], on() { return () => {} } }
   const agent = {
     id: 'main-session',
     options: {},
@@ -104,4 +105,88 @@ test('the footer never renders a retry chip while the turn is idle', () => {
   assert.equal(footerActivity({ ...base, retry: { retry: 1, maxRetries: 5 } }).kind, 'idle')
   assert.equal(footerActivity({ ...base, running: true, retry: { retry: 1, maxRetries: 5 } }).kind, 'retry')
   assert.equal(footerActivity({ ...base, running: true, compacting: true, retry: { retry: 1, maxRetries: 5 } }).kind, 'compacting')
+})
+
+/** A `/compact` dispatcher that counts how many times the command ran. */
+function compactDispatcher() {
+  const ran = []
+  return {
+    ran,
+    commands: {
+      list: () => [],
+      execute: async () => { ran.push(Date.now()); return undefined },
+    },
+  }
+}
+
+/** A parent log with only the events given, as `replayHistory` reads it. */
+function replayAgent(events, status = 'idle') {
+  return {
+    id: 'main-session',
+    options: {},
+    status,
+    session: { id: 'main-session', seq: events.length, eventAt: seq => events[seq] },
+    cancel() {},
+  }
+}
+
+test('an abandoned compaction stops blocking /compact after a replay', async () => {
+  // The Host writes compaction/start before the work and compaction/end after
+  // it, so a Host that dies in between leaves an open start in the durable log.
+  // Replaying it used to recreate a card stuck on "running": the footer said
+  // 压缩中 forever and every later /compact was refused as "already compacting".
+  const { commands, ran } = compactDispatcher()
+  const agent = replayAgent([{
+    type: 'compaction/start',
+    time: Date.now() - 60 * 60_000,
+    data: { compactionId: 'abandoned-1', turn: 4 },
+  }])
+  const ctx = { get: name => (name === 'commands' ? commands : undefined), on() { return () => {} } }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // The real entry point: what a resume actually runs.
+  await tui.replayHistory()
+
+  const card = tui.rows.find(row => row.kind === 'compaction')
+  assert.equal(card?.status, 'error', 'the open card is settled as interrupted')
+  assert.match(String(card?.error ?? ''), /中断/u)
+  assert.doesNotMatch(activityLine(tui), /压缩中/, 'and the footer is free again')
+
+  tui.runCommand('/compact')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(ran.length, 1, '/compact is dispatchable again')
+})
+
+test('a fresh compaction still blocks /compact, a stale one does not', async () => {
+  const { commands, ran } = compactDispatcher()
+  const { tui, agent } = makeTui('idle', { commands })
+  send(tui, agent, 'compaction/start', { compactionId: 'live-1', turn: 7 })
+  assert.match(activityLine(tui), /压缩中/, 'a real compaction owns the chip')
+
+  tui.runCommand('/compact')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(ran.length, 0, 'the busy refusal stands while it is genuinely running')
+
+  // The same card, an hour later: its Host cannot still be compacting.
+  const card = tui.rows.find(row => row.kind === 'compaction')
+  card.startedAt = Date.now() - 60 * 60_000
+  assert.doesNotMatch(activityLine(tui), /压缩中/, 'a stale card stops claiming the chip')
+  tui.runCommand('/compact')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(ran.length, 1, 'and no longer blocks the command')
+  assert.equal(card.status, 'error', 'the stale card is settled')
+})
+
+test('an end whose id matches no card still closes the compaction in flight', () => {
+  // The Host runs at most one compaction at a time, so an end event that names
+  // an unknown id belongs to the newest running card. Returning undefined here
+  // used to strand that card on "running" forever.
+  const { tui, agent } = makeTui('idle')
+  send(tui, agent, 'compaction/start', { compactionId: 'a', turn: 3 })
+  send(tui, agent, 'compaction/summary', { compactionId: 'a', summary: [{ type: 'text', text: 'kept' }] })
+  send(tui, agent, 'compaction/end', { compactionId: 'b', turn: 3 })
+
+  const card = tui.rows.find(row => row.kind === 'compaction')
+  assert.notEqual(card?.status, 'running', 'the card is closed even though the id differed')
+  assert.equal(card?.summary, 'kept', 'and keeps the summary it had already collected')
+  assert.doesNotMatch(activityLine(tui), /压缩中/)
 })

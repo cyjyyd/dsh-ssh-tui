@@ -4432,19 +4432,22 @@ test('compaction start/prune/end show a progress card instead of staying silent'
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // Real wall-clock times: a compaction whose start is ancient is one the Host
+  // abandoned, and the TUI settles those as interrupted on sight.
+  const base = Date.now()
   tui.handleSessionEvent(agent.session, {
     type: 'compaction/start',
-    time: 1000,
+    time: base,
     data: { compactionId: 'c1', sourceCommandId: 'cmd-1' },
   })
   tui.handleSessionEvent(agent.session, {
     type: 'compaction/prune',
-    time: 1100,
+    time: base + 100,
     data: { compactionId: 'c1', shadowedTokenCount: 2500 },
   })
   tui.handleSessionEvent(agent.session, {
     type: 'compaction/prune',
-    time: 1200,
+    time: base + 200,
     data: { compactionId: 'c1', shadowedTokenCount: 1500 },
   })
   let card = tui.rows.find(row => row.kind === 'compaction')
@@ -4455,12 +4458,12 @@ test('compaction start/prune/end show a progress card instead of staying silent'
   assert.ok(mid.some(line => line.includes('压缩上下文') && line.includes('4K')))
   tui.handleSessionEvent(agent.session, {
     type: 'compaction/summary',
-    time: 1300,
+    time: base + 300,
     data: { compactionId: 'c1', summary: [{ type: 'text', text: 'Kept the SSH paint work.' }] },
   })
   tui.handleSessionEvent(agent.session, {
     type: 'compaction/end',
-    time: 1400,
+    time: base + 400,
     data: { compactionId: 'c1' },
   })
   card = tui.rows.find(row => row.kind === 'compaction')

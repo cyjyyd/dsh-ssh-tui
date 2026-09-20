@@ -640,6 +640,7 @@ export const zh: Record<string, string> = {
   'compact.prepare': '准备摘要',
   'compact.running': '压缩上下文 · {detail}',
   'compact.failed': '压缩失败 · {error}',
+  'compact.interrupted': '压缩被中断（Host 在压缩过程中退出，没有写下结束事件）',
   'compact.done': '压缩完成 · {detail}',
   'compact.status': '压缩上下文…',
   'compact.bodyRunning': '  正在压缩会话上下文，完成后旧工具结果会被摘要替换。',

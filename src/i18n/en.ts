@@ -640,6 +640,7 @@ export const en: Record<string, string> = {
   'compact.prepare': 'preparing summary',
   'compact.running': 'compacting · {detail}',
   'compact.failed': 'compact failed · {error}',
+  'compact.interrupted': 'compaction was interrupted (the Host exited mid-compaction and never wrote an end event)',
   'compact.done': 'compacted · {detail}',
   'compact.status': 'compacting…',
   'compact.bodyRunning': '  Compacting session context; old tool results will be replaced by a summary.',

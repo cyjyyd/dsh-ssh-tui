@@ -917,6 +917,15 @@ function isModelsStep(step: OnboardingState['step']): boolean {
   return step === 'models' || step === 'models-pick' || step === 'model-default'
 }
 
+/**
+ * How long a compaction may claim to be running before it is treated as
+ * abandoned. A real one finishes in seconds to a couple of minutes; the Host
+ * dying mid-compaction leaves `compaction/start` in the log with no end, and
+ * that row would otherwise keep the footer on 压缩中 and refuse /compact for
+ * the rest of the session's life.
+ */
+const COMPACTION_STALE_MS = 15 * 60_000
+
 /** How many `<family>\0<model>` → row decisions are remembered. */
 const FAMILY_OWNER_CACHE_MAX = 512
 
@@ -1981,7 +1990,7 @@ export class SshTui {
           || (row.kind === 'question' && row.status === 'waiting')
           || (row.kind === 'plan' && (row.active || row.pending || row.todos.some(item => item.status === 'in_progress')))
           || (row.kind === 'goal' && (row.phase === 'active' || row.phase === 'blocked'))
-          || (row.kind === 'compaction' && row.status === 'running'))
+          || (row.kind === 'compaction' && this.compactionRunning()))
       if (animating && now - this.lastPaintAt >= Math.max(this.paintIntervalMs, 200)) {
         this.dirty = true
       }
@@ -2039,6 +2048,9 @@ export class SshTui {
       // and become the next child's courtesy name after --resume.
       this.pendingSubagentTasks = []
       this.settleUnfinishedReplayChips()
+      // A compaction whose start has no end anywhere in the durable log was
+      // abandoned by the Host; nothing more can arrive for it.
+      this.settleUnfinishedCompactions()
     }
     for (const item of parked) {
       if (this.disposed) return
@@ -2475,7 +2487,7 @@ export class SshTui {
     if (this.streaming !== undefined) return true
     if (this.openToolCalls.size > 0) return true
     if (this.llmRetry !== undefined) return true
-    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return true
+    if (this.compactionRunning()) return true
     return false
   }
 
@@ -2927,7 +2939,7 @@ export class SshTui {
   private waitCardVisible(): boolean {
     if (this.agent.status !== 'running') return false
     if (this.streaming?.text) return false
-    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
+    if (this.compactionRunning()) return false
     if (this.dialog?.kind === 'questions' || this.dialog?.kind === 'confirm') return false
     return true
   }
@@ -4312,7 +4324,7 @@ export class SshTui {
       ? formatFooterBalance(this.balanceSnapshot)
       : undefined
     const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
-    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+    const compacting = this.compactionRunning()
     const parentModel = current?.model ?? this.agent.options.model ?? ''
     const sub = this.subagentSelection.current
     const footer = {
@@ -4581,7 +4593,7 @@ export class SshTui {
     // A compaction is work in progress even when it runs between turns (the
     // idle auto-compact), so it keeps the spinner title the way a running turn
     // does — the same rule the footer's activity chip follows.
-    const compacting = this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+    const compacting = this.compactionRunning()
     if (this.agent.status === 'running' || compacting) {
       if (now - this.lastTitleUpdateAt < 800) return
       this.lastTitleUpdateAt = now
@@ -5728,7 +5740,55 @@ export class SshTui {
         row.kind === 'compaction' && row.compactionId === id)
       if (named !== undefined) return named
     }
-    return undefined
+    // An event whose id matches no card still belongs to the compaction in
+    // flight: the Host runs at most one at a time, so the newest running card is
+    // the only candidate. Without this a mismatched (or absent) id left the row
+    // running forever — the same stuck state an abandoned Host produces.
+    return this.runningCompactions().at(-1)
+  }
+
+  /**
+   * Compaction cards that can still be in flight: not finished, and within the
+   * window a real compaction could take. A stale card is treated as not running
+   * so it cannot hold the footer, the spinner, or `/compact` hostage.
+   */
+  private runningCompactions(now = Date.now()): Extract<Row, { kind: 'compaction' }>[] {
+    return this.rows.filter((row): row is Extract<Row, { kind: 'compaction' }> =>
+      row.kind === 'compaction'
+      && row.status === 'running'
+      && now - row.startedAt < COMPACTION_STALE_MS)
+  }
+
+  /** Whether a compaction is genuinely in flight right now. */
+  private compactionRunning(): boolean {
+    return this.runningCompactions().length > 0
+  }
+
+  /**
+   * Close compaction cards whose Host is gone.
+   *
+   * `compaction/start` is written before the work and `compaction/end` after it,
+   * so a Host that exits in between leaves an open start in the durable log.
+   * Replaying that log faithfully used to recreate a card stuck on "running"
+   * forever: the footer said 压缩中, the spinner kept animating, and every later
+   * `/compact` was refused as "already compacting". After a full replay nothing
+   * more can arrive for those starts, so they are settled here.
+   *
+   * `staleOnly` keeps the same sweep usable while the session is live, where a
+   * compaction that is merely slow must not be closed under it.
+   */
+  private settleUnfinishedCompactions(options: { staleOnly?: boolean } = {}): void {
+    const now = Date.now()
+    let settled = false
+    for (const row of this.rows) {
+      if (row.kind !== 'compaction' || row.status !== 'running') continue
+      if (options.staleOnly === true && now - row.startedAt < COMPACTION_STALE_MS) continue
+      row.status = 'error'
+      row.endedAt = row.startedAt === 0 ? now : row.startedAt
+      row.error = t('compact.interrupted')
+      settled = true
+    }
+    if (settled) this.markDirty()
   }
 
   private handleCompactionEvent(type: string, event: SessionEvent): void {
@@ -5837,9 +5897,12 @@ export class SshTui {
 
   private canRunCompactCommand(): boolean {
     if (this.replaying || this.agentGone || this.exiting) return false
+    // A card left running by a Host that died would otherwise refuse /compact
+    // for the rest of the session; its age decides whether it is still real.
+    this.settleUnfinishedCompactions({ staleOnly: true })
     if (this.agent.status === 'running') return false
     if (this.idleCompactInFlight) return false
-    if (this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) return false
+    if (this.compactionRunning()) return false
     return this.ctx.get('commands') !== undefined
   }
 
@@ -5861,8 +5924,13 @@ export class SshTui {
       if (reason === 'user') this.pushRow({ kind: 'error', text: t('cmd.unknown', { command: 'compact' }) })
       return
     }
+    // A card left running by a Host that died is closed here rather than
+    // refusing the user for the rest of the session: its age decides whether it
+    // is still real. The footer already ignores a stale card, but the card
+    // itself must stop rendering as running too.
+    this.settleUnfinishedCompactions({ staleOnly: true })
     if (this.agent.status === 'running'
-      || this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+      || this.compactionRunning()) {
       if (reason === 'user') this.pushRow({ kind: 'error', text: t('compact.busy') })
       this.markDirty()
       return
@@ -5892,7 +5960,7 @@ export class SshTui {
         return
       }
       const compactionRunning = (): boolean =>
-        this.rows.some(row => row.kind === 'compaction' && row.status === 'running')
+        this.compactionRunning()
       const releaseIfSettled = (): void => {
         queueMicrotask(() => {
           if (!compactionRunning()) this.idleCompactInFlight = false
@@ -5990,7 +6058,7 @@ export class SshTui {
       if (this.status.startsWith(t('compact.short')) || this.status.startsWith('compact')) {
         this.status = this.agent.status === 'running' ? 'running' : 'idle'
       }
-      if (!this.rows.some(row => row.kind === 'compaction' && row.status === 'running')) {
+      if (!this.compactionRunning()) {
         this.idleCompactInFlight = false
       }
       this.markDirty()
