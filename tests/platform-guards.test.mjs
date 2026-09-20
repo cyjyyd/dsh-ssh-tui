@@ -13,6 +13,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { colorDepth } from '../lib/color-depth.js'
+import { hostSpawnOptions } from '../lib/display-sock.js'
 import { resolveDshInvocation } from '../lib/update-check.js'
 
 const SRC = join(import.meta.dirname, '..', 'src')
@@ -79,4 +80,45 @@ test('the dsh invocation is spawnable on this platform', () => {
     const ownEntry = invocation.prefix.length > 0
     assert.equal(invocation.shell, !ownEntry, `win32 needs a shell exactly when it has no entry: ${JSON.stringify(invocation)}`)
   }
+})
+
+test('the Host is started in a way that never flashes console windows', () => {
+  // Both halves are Windows bugs that only ever showed up on a real desktop:
+  //
+  // * `detached: true` is DETACHED_PROCESS there, which leaves the Host with no
+  //   console at all — and Windows ignores CREATE_NO_WINDOW (what `windowsHide`
+  //   sets) when DETACHED_PROCESS is present. Every console child the Host then
+  //   starts has to allocate its own console, so each tool call flashed a
+  //   terminal window over the TUI.
+  // * `windowsHide` must stay on, or the Host's own window appears.
+  const windows = hostSpawnOptions('win32')
+  assert.equal(windows.detached, false, 'a detached Host has no console to lend its children')
+  assert.equal(windows.windowsHide, true, 'and its own console must stay invisible')
+
+  // POSIX keeps setsid: that is what survives a hung-up terminal there, and
+  // there is no console window to flash.
+  const posix = hostSpawnOptions('linux')
+  assert.equal(posix.detached, true)
+  assert.equal(posix.windowsHide, true)
+  assert.deepEqual(hostSpawnOptions('darwin'), posix, 'macOS behaves like Linux')
+})
+
+test('every spawn in src/ hides a console window on Windows', () => {
+  // A child started from a console-less process allocates a visible console, so
+  // each spawn site is a window waiting to flash. The scan runs on Linux too:
+  // a new spawn without the flag fails here instead of on a user's desktop.
+  const missing = []
+  for (const name of readdirSync(SRC).filter(file => file.endsWith('.ts'))) {
+    const source = stripComments(readFileSync(join(SRC, name), 'utf8'))
+    const spawns = [
+      ...source.matchAll(/\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(/gu),
+    ]
+    if (spawns.length === 0) continue
+    // display-sock.ts computes the flags in `hostSpawnOptions` (asserted
+    // above) rather than spelling them out, so its helper counts as the flag —
+    // but any *other* file still has to name `windowsHide` itself.
+    const declared = source.includes('windowsHide') || source.includes('hostSpawnOptions')
+    if (!declared) missing.push(name)
+  }
+  assert.deepEqual(missing, [], 'spawn sites without windowsHide')
 })

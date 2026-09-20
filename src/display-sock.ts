@@ -762,8 +762,37 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
   }
 }
 
+/**
+ * How to start the background Host so it outlives this process *and* does not
+ * make its own children flash console windows on Windows.
+ *
+ * POSIX wants `detached: true` (setsid) so the Host survives the launcher and a
+ * hung-up terminal.
+ *
+ * Windows is the opposite: `detached: true` maps to DETACHED_PROCESS, which
+ * gives the Host **no console at all**, and Windows ignores CREATE_NO_WINDOW
+ * (what `windowsHide` sets) when DETACHED_PROCESS is present. Every console
+ * child the Host then starts — each tool call, every shell, node, git — has to
+ * allocate its own console, which is a visible window flashing over the TUI.
+ * Dropping `detached` there lets `windowsHide` do its job: the Host gets its
+ * own invisible console, and descendants inherit it instead of creating one.
+ * The Host still outlives the launcher: Windows does not kill children with
+ * their parent, and its console is its own, so closing the user's terminal does
+ * not reach it either.
+ *
+ * Pure and platform-parameterised so the Windows branch can be asserted from
+ * Linux (see docs/platform.md).
+ */
+export function hostSpawnOptions(platform: NodeJS.Platform = process.platform): {
+  detached: boolean
+  windowsHide: boolean
+} {
+  const windows = platform === 'win32'
+  return { detached: !windows, windowsHide: true }
+}
+
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
-export function spawnDetachedHost(sessionId: string): SpawnedHost {
+export function spawnDetachedHost(sessionId: string, platform: NodeJS.Platform = process.platform): SpawnedHost {
   const sock = sessionSockPath(sessionId)
   // On Windows the channel is a pipe name, which is not a file path: the log
   // must live in the state directory next to the locks instead.
@@ -781,10 +810,7 @@ export function spawnDetachedHost(sessionId: string): SpawnedHost {
     // relative home would otherwise resolve differently there and the two
     // processes would compute different channel names.
     env: { ...process.env, [TUI_HOST_ENV]: '1', DSH_HOME: resolveDshHome() },
-    detached: true,
-    // A detached Host has no console on Windows; hide the console window that
-    // would otherwise flash on screen when it is created.
-    windowsHide: true,
+    ...hostSpawnOptions(platform),
     stdio: ['ignore', 'ignore', errFd ?? 'ignore'],
   })
   if (errFd !== undefined) {

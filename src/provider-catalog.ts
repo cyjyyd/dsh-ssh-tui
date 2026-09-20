@@ -150,6 +150,9 @@ export function readProviderCatalog(anchors: Array<string | undefined>): Promise
         ['--input-type=module', '-e', CHILD_SCRIPT],
         {
           stdio: ['ignore', 'pipe', 'ignore'],
+          // This runs from the Host as well as the launcher; without the flag a
+          // Windows console child allocates a window of its own.
+          windowsHide: true,
           env: {
             ...process.env,
             DSH_CATALOG_ANCHORS: JSON.stringify(anchors.filter((a): a is string => a !== undefined && a !== '')),
