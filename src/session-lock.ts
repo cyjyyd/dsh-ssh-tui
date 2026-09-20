@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
+import { usesProcessIdentity } from './platform.js'
 import { displaySockExists, isPipePath, resolveDshHome, sessionLabel, sessionSockLookupPaths, sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
@@ -327,7 +328,7 @@ export async function lockOwnerIsAlive(lock: SessionLockInfo): Promise<boolean> 
   const pid = lock.pid
   if (!Number.isInteger(pid) || pid <= 0) return false
   if (!processIsAlive(pid)) return false
-  if (process.platform === 'win32') {
+  if (usesProcessIdentity()) {
     return windowsProcessMatchesLock(lock, await windowsProcessIdentity(lock))
   }
   if (lock.bootId !== undefined && lock.pidStart !== undefined) {

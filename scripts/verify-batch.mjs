@@ -25,6 +25,9 @@ const STEPS = [
   { id: 'typecheck', label: 'typecheck', command: 'npm', args: ['run', 'typecheck'], timeoutMs: 300_000 },
   { id: 'test', label: 'full suite', command: 'npm', args: ['test'], timeoutMs: 900_000 },
   { id: 'probe', label: 'pty probe (real profile)', command: 'node', args: ['scripts/tui-probe.mjs'], timeoutMs: 300_000 },
+  // The same probe on a profile this repo built itself: the path CI and a fresh
+  // machine take, and the only one Windows can take.
+  { id: 'home', label: 'pty probe (throwaway home)', command: 'node', args: ['scripts/probe-home.mjs', '--probe'], timeoutMs: 900_000 },
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },

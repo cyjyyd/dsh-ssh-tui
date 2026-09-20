@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { ROSTER_PATCH_BLOCK, ensureRosterRows, rosterPatchPath, rosterPatchText } from '../lib/preset-rows.js'
+import { ROSTER_BLOCK } from '../scripts/profile-rows.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -17,15 +18,17 @@ test('the roster block mounts the roster and the two preset host services', () =
   assert.equal(ROSTER_PATCH_BLOCK.endsWith('\n'), true)
 })
 
-test('the install script and the runtime write the same block', async () => {
+test('the install path and the runtime write the same block', async () => {
   // The published package does not ship scripts/, so the runtime owns a copy.
   // A drift here would make the in-app repair write a different roster than the
   // installer does; fail instead. Windows checkouts carry CRLF, and the block
   // itself is a template literal, so normalise before comparing.
-  const script = (await readFile(join(root, 'scripts', 'ensure-profile-rows.sh'), 'utf8')).replaceAll('\r\n', '\n')
-  const match = /const block = `([\s\S]*?)`\n/u.exec(script)
-  assert.ok(match, 'the script must define its block as a template literal')
-  assert.equal(match[1], ROSTER_PATCH_BLOCK)
+  //
+  // The block lives in `scripts/profile-rows.mjs` (the shell wrapper and the CI
+  // probe bootstrap both call it), not in the `.sh` — that one is a thin
+  // wrapper now, so reading it as text would compare nothing. It is imported
+  // rather than scraped because the module interpolates the module name.
+  assert.equal(ROSTER_BLOCK, ROSTER_PATCH_BLOCK)
 })
 
 test('rosterPatchText replaces the empty template and appends to a used patch', () => {

@@ -62,6 +62,14 @@ jobs:
       - run: node --test --test-reporter=tap --test-reporter-destination=test-output.txt --test-reporter=spec --test-reporter-destination=stdout "tests/*.test.mjs"
       - name: Annotate the failing tests
         if: failure()
+      # End to end on a real PTY, against a profile this repo builds for itself:
+      # a headless runner has no ~/.dsh, which is why this never ran here before.
+      # The rc.1 legs skip it (their peer tree cannot boot a host).
+      - name: End-to-end PTY probe (throwaway profile)
+        if: matrix.dsh == '0.1.5-rc.2'
+        run: |
+          npm install -g pnpm@10 --no-audit --no-fund
+          node scripts/probe-home.mjs --probe
         run: node scripts/ci-annotate-failures.mjs test-output.txt
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
@@ -81,3 +89,13 @@ jobs:
       - name: Annotate the failing tests
         if: failure()
         run: node scripts/ci-annotate-failures.mjs test-output.txt
+
+      # Windows is where "it worked on Linux" stopped being evidence: this drives
+      # the real TUI in a ConPTY on a real Windows host, so a lifecycle that only
+      # holds on POSIX fails here instead of on a user's desktop.
+      - name: End-to-end PTY probe (ConPTY, throwaway profile)
+        run: |
+          npm install -g pnpm@10 --no-audit --no-fund
+          node scripts/probe-home.mjs --probe
+      - name: End-to-end drop/reattach probe (ConPTY)
+        run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs

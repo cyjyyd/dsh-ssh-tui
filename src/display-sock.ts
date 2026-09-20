@@ -26,6 +26,7 @@ import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:f
 import { homedir } from 'node:os'
 import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
+import { hostSpawnOptions, usesSigwinch } from './platform.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -762,35 +763,6 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
   }
 }
 
-/**
- * How to start the background Host so it outlives this process *and* does not
- * make its own children flash console windows on Windows.
- *
- * POSIX wants `detached: true` (setsid) so the Host survives the launcher and a
- * hung-up terminal.
- *
- * Windows is the opposite: `detached: true` maps to DETACHED_PROCESS, which
- * gives the Host **no console at all**, and Windows ignores CREATE_NO_WINDOW
- * (what `windowsHide` sets) when DETACHED_PROCESS is present. Every console
- * child the Host then starts — each tool call, every shell, node, git — has to
- * allocate its own console, which is a visible window flashing over the TUI.
- * Dropping `detached` there lets `windowsHide` do its job: the Host gets its
- * own invisible console, and descendants inherit it instead of creating one.
- * The Host still outlives the launcher: Windows does not kill children with
- * their parent, and its console is its own, so closing the user's terminal does
- * not reach it either.
- *
- * Pure and platform-parameterised so the Windows branch can be asserted from
- * Linux (see docs/platform.md).
- */
-export function hostSpawnOptions(platform: NodeJS.Platform = process.platform): {
-  detached: boolean
-  windowsHide: boolean
-} {
-  const windows = platform === 'win32'
-  return { detached: !windows, windowsHide: true }
-}
-
 /** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
 export function spawnDetachedHost(sessionId: string, platform: NodeJS.Platform = process.platform): SpawnedHost {
   const sock = sessionSockPath(sessionId)
@@ -932,7 +904,7 @@ export async function runDisplayRelay(
         resizeTimer = undefined
       }
       stdout.off('resize', onResize)
-      if (process.platform !== 'win32') {
+      if (usesSigwinch()) {
         signals.off('SIGWINCH', onResize)
       }
       try {
@@ -1064,7 +1036,7 @@ export async function runDisplayRelay(
           }
           pendingBytes = 0
           stdout.on('resize', onResize)
-          if (process.platform !== 'win32') {
+          if (usesSigwinch()) {
             signals.on('SIGWINCH', onResize)
           }
         } catch (error) {
