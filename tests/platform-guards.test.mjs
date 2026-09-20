@@ -13,7 +13,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { colorDepth } from '../lib/color-depth.js'
-import { hostSpawnOptions } from '../lib/display-sock.js'
+import { hostSpawnOptions } from '../lib/platform.js'
 import { resolveDshInvocation } from '../lib/update-check.js'
 
 const SRC = join(import.meta.dirname, '..', 'src')
@@ -114,11 +114,33 @@ test('every spawn in src/ hides a console window on Windows', () => {
       ...source.matchAll(/\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(/gu),
     ]
     if (spawns.length === 0) continue
-    // display-sock.ts computes the flags in `hostSpawnOptions` (asserted
-    // above) rather than spelling them out, so its helper counts as the flag —
-    // but any *other* file still has to name `windowsHide` itself.
+    // display-sock.ts computes the flags in `hostSpawnOptions` (asserted above)
+    // rather than spelling them out, so its helper counts as the flag — but any
+    // *other* file still has to name `windowsHide` itself.
     const declared = source.includes('windowsHide') || source.includes('hostSpawnOptions')
     if (!declared) missing.push(name)
   }
   assert.deepEqual(missing, [], 'spawn sites without windowsHide')
+})
+
+test('platform decisions live in the seam, not in feature code', () => {
+  // A comparison buried in a feature is a Windows path nobody runs until a user
+  // does: the three Windows bugs this repo shipped were each one such line.
+  // Passing `process.platform` as a *default* is fine — that is the injectable
+  // shape — so only the comparison is banned, and only outside the seam.
+  const SEAM = 'platform.ts'
+  const banned = /process\.platform\s*[!=]==?/
+  const offenders = []
+  for (const name of readdirSync(SRC).filter(file => file.endsWith('.ts'))) {
+    if (name === SEAM) continue
+    const source = stripComments(readFileSync(join(SRC, name), 'utf8'))
+    source.split('\n').forEach((line, index) => {
+      if (banned.test(line)) offenders.push(`${name}:${index + 1}: ${line.trim()}`)
+    })
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'move the decision into src/platform.ts and import it (or take `platform` as a parameter)',
+  )
 })

@@ -13,10 +13,14 @@
 
 ## 四条规则
 
-1. **平台判断必须可注入、可断言。**
+1. **平台判断必须可注入、可断言，而且只准住在一个文件里。**
    不要写 `process.platform === 'win32' ? … : …` 藏在 IO 深处；写成纯函数参数（例：`colorDepth(env, platform)`、
-   `resolveDshInvocation({ platform, argv, exists })`），然后在用例里把 Windows 那一支**显式跑一遍**——
-   这样在 Linux 上也能变红，而不是等用户在 Windows 上撞见。
+   `resolveDshInvocation({ platform, argv, exists })`、`hostSpawnOptions(platform)`），然后在用例里把 Windows
+   那一支**显式跑一遍**——这样在 Linux 上也能变红，而不是等用户在 Windows 上撞见。
+   `src/platform.ts` 是唯一的"决策"归属地（`IS_WINDOWS`、`usesSigwinch`、`envFileName`、`shellName`、
+   `hostSpawnOptions`、`displayHomePath`、`usesProcessIdentity`）；`tests/platform-guards.test.mjs` 会扫描
+   `src/`，**任何 `process.platform` 比较出现在该文件之外就红**（把 `process.platform` 当默认参数是允许的，
+   那正是可注入的形状）。
 
 2. **起进程不要用裸命令名。**
    `spawn('dsh')` / `execFile('dsh')` 在 Windows 上要么找不到、要么必须过 shell。首选
@@ -45,7 +49,14 @@
 ```bash
 node --test tests/platform-guards.test.mjs   # 静态扫描 + 平台分支断言
 node --test "tests/*.test.mjs"               # 全套；Windows 专属分支用注入的平台跑
+node scripts/probe-home.mjs --probe          # 真 PTY 端到端：自己造一个 profile，不碰 ~/.dsh
+node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重连
 ```
+
+`scripts/probe-home.mjs` 是这一批新增的地基：它用 Node（不是 bash）造一个一次性 `DSH_HOME` +
+`tui` profile（`--from-default-profile headless` → 去掉模板自带的 headless app → `dsh plugin add link:<repo>`
+→ 挂 preset 名单），跑完探针再删掉。**CI 的 Windows 腿与 Linux rc.2 腿都跑它**，所以"真 Windows 生命周期"
+从这一批起有 CI 覆盖；`PROBE_REQUIRE_PTY=1` 让探针在 node-pty 缺失时**失败而不是跳过**——跳过的探针不是覆盖。
 
 `test-windows` 腿会在真实 Windows 上跑同一套用例，其中：
 
@@ -63,3 +74,36 @@ node --test "tests/*.test.mjs"               # 全套；Windows 专属分支用�
 上面两个 bug 它一个都复现不了，只会多一套需要维护的环境。Wine 能跑 `cmd.exe` 与 `.cmd`，但装 Windows 版
 Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows 的分支变成可在 Linux 变红的断言**，
 真实平台交给 CI 的那条腿。
+
+## Windows 欠债清单（0.7.3 起）
+
+这一批（0.7.2 之后的 P0）只做了"地基"：把 Windows 的 bug 从"用户发现"变成"CI 发现"，并把平台判断收进
+`src/platform.ts`。下面这些是**已知、未做**的，按建议顺序排；每条都写成可验收的形式，做完才从清单里删。
+
+### P1：先补有风险的
+
+1. **文件权限在 Windows 上是空操作。** `0o600` / `0o700`（20 处）在 Windows 静默无效，而它们守着
+   `~/.dsh/.credentials.yaml`、`tui-locks/*`、`tui-socks/*.err`、`env.cmd` 这些含密钥或会话信息的文件。
+   二选一：用 `icacls` 把 ACL 收到当前用户；或明确降级并在文档里写清。
+   *验收*：Windows 上新装并首启后，上述文件的 ACL 只含当前用户；收紧动作走 `src/platform.ts` 且参数可在 Linux 断言。
+2. **Windows 生命周期写成规范 + 断言。** 明确四种情况的期望：SSH 断连、用户关掉终端窗口、TUI 崩溃、Host 崩溃。
+   Windows 没有 SIGHUP，正确信号是管道 EOF + `Get-Process` 判活；"关掉终端后 Host 还活着"这条**目前只有手工验证过**。
+   *验收*：`tui-drop-probe` 在 ConPTY 上覆盖"关掉终端窗口"这一条；规范落在本文件。
+3. **路径与编码。** 带空格/非 ASCII/长路径的 `DSH_HOME`；`\.\pipe\` 名字长度与字符约束；CRLF 对转录与补丁文件的影响；
+   `%USERPROFILE%` 与 `$HOME` 不一致时的行为（`displayHomePath` 已有分支，但没在真机上断言过）。
+
+### P2：体验与分发
+
+4. **终端能力矩阵。** Windows Terminal 与 conhost 分别支持什么：真彩/256 色、鼠标、括号粘贴、OSC 52（`/copy`）、
+   alt-screen、resize。逐项给"用/不用/降级"，而不是猜（`colorDepth` 是先例）。
+   *验收*：一张表 + 一组断言，且 conhost 下不出现依赖新能力的绘制。
+5. **分发与脚本去 bash 化。** `scripts/*.sh`（install / verify / uninstall / smoke）在 Windows 上等于不存在。
+   照 `probe-home.mjs` 的样子给 Node 或 PowerShell 等价物，README 补 Windows 快速上手（含"装不上先看什么"）。
+6. **用户可见的 Windows 文档。** 本文件是维护者视角；普通用户需要的是已知限制清单与 `/doctor` 的读法。
+
+### 这一批已经做完的（P0）
+
+- Windows 腿与 Linux rc.2 腿跑**真 ConPTY 端到端探针**（boot/resize/diag/doctor/copy/preset/输入/退出 + 断连重连）；
+- `scripts/probe-home.mjs`：不碰开发者 `~/.dsh` 的一次性 profile，CI 与本地同一条路；
+- `ensure-profile-rows` 逻辑从 bash 迁到 `scripts/profile-rows.mjs`（Windows 也能挂名单）；
+- `src/platform.ts` + "比较只准在这里"的静态守卫；`detached`/`windowsHide` 的控制台窗口修复进了 `hostSpawnOptions`。

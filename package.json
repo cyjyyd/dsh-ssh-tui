@@ -85,6 +85,8 @@
     "install:npm": "bash scripts/install-npm.sh",
     "uninstall:dsh": "bash scripts/uninstall.sh",
     "verify:dsh": "bash scripts/verify.sh",
+    "probe:home": "node scripts/probe-home.mjs --probe",
+    "probe:home:drop": "node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs",
     "screenshots": "npm run build && node scripts/capture-readme-frames.mjs",
     "screenshots:slow": "npm run build && node scripts/capture-slow-link.mjs"
   },

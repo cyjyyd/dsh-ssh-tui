@@ -120,6 +120,7 @@ import {
   windowTranscript,
 } from './rows.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
+import { displayHomePath, envFileName, IS_WINDOWS, usesSigwinch } from './platform.js'
 import { sameSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import {
   GATEWAY_PROTOCOL_SUFFIX,
@@ -1021,7 +1022,6 @@ const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 const QUOTA_RETRY_MS = 15_000
 
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
-const IS_WINDOWS = process.platform === 'win32'
 
 function dshHomeDir(): string {
   return resolveDshHome()
@@ -1045,22 +1045,10 @@ function hostDshVersion(): string {
 }
 
 function displayDshPath(file: string): string {
-  const home = dshHomeDir()
-  if (IS_WINDOWS) {
-    const profile = process.env.USERPROFILE
-    if (profile !== undefined && home.toLowerCase().startsWith(profile.toLowerCase())) {
-      const rest = home.slice(profile.length)
-      return `%USERPROFILE%${rest}\\${file}`.replaceAll('/', '\\')
-    }
-    return `${home}\\${file}`.replaceAll('/', '\\')
-  }
-  const userHome = homedir()
-  if (home === userHome) return `~/.dsh/${file}`
-  if (home.startsWith(`${userHome}/`)) return `~/${home.slice(userHome.length + 1)}/${file}`
-  return join(home, file)
+  return displayHomePath(dshHomeDir(), file)
 }
 
-const DSH_ENV_FILE = join(dshHomeDir(), IS_WINDOWS ? 'env.cmd' : 'env.sh')
+const DSH_ENV_FILE = join(dshHomeDir(), envFileName())
 
 const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
   {
@@ -1623,7 +1611,7 @@ export class SshTui {
     process.stdin.setRawMode(true)
     process.stdin.resume()
     process.stdout.on('resize', this.onDirectResize)
-    if (process.platform !== 'win32') {
+    if (usesSigwinch()) {
       process.on('SIGWINCH', this.onDirectResize)
     }
     process.stdin.prependListener('end', this.handleHangupStream)
@@ -10019,14 +10007,14 @@ export class SshTui {
         ? IS_WINDOWS
           ? t('onboard.envShadowWin', { env: envRef })
           : t('onboard.envShadowUnix', { env: envRef })
-        : t('onboard.credMissing', { path: displayDshPath(IS_WINDOWS ? 'env.cmd' : 'env.sh') }),
+        : t('onboard.credMissing', { path: displayDshPath(envFileName()) }),
     })
   }
 
   /** Write launch-environment overrides so they beat system-injected variables. */
   private async writeLaunchEnv(entries: Record<string, string>): Promise<void> {
     const home = dshHomeDir()
-    const file = join(home, IS_WINDOWS ? 'env.cmd' : 'env.sh')
+    const file = join(home, envFileName())
     await mkdir(home, { recursive: true, mode: 0o700 })
 
     if (IS_WINDOWS) {

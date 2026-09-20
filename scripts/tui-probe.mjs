@@ -149,6 +149,11 @@ function clipboardWrites(text) {
 async function runProbe({ sessionId, keep, home, lineMode }) {
   const pty = await loadPty()
   if (pty === undefined) {
+    // CI sets PROBE_REQUIRE_PTY: a skipped probe must not read as coverage.
+    if (process.env.PROBE_REQUIRE_PTY === '1') {
+      console.log('FAIL: node-pty is unavailable, so the TUI cannot be driven on a PTY here (PROBE_REQUIRE_PTY=1)')
+      return 1
+    }
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
     return 0
   }
