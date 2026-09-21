@@ -22,7 +22,7 @@ import {
   type ResumableSessionPager,
 } from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
-import { terminalCapabilities } from './terminal-caps.js'
+import { terminalCapabilities, type TerminalCapabilities } from './terminal-caps.js'
 import { truncateToWidth } from './term-text.js'
 import { TerminalInputGuard } from './terminal-input.js'
 import { t } from './i18n/index.js'
@@ -441,6 +441,8 @@ export interface SessionPickerOptions {
   stdin?: NodeJS.ReadStream
   stdout?: NodeJS.WriteStream
   openPager?: typeof openResumableSessionPager
+  /** The terminal to act on; defaults to reading the environment (tests inject). */
+  terminalCaps?: TerminalCapabilities
 }
 
 export async function showSessionPicker(
@@ -454,7 +456,7 @@ export async function showSessionPicker(
   const stdin = options.stdin ?? process.stdin
   const stdout = options.stdout ?? process.stdout
   const openPager = options.openPager ?? openResumableSessionPager
-  const useAltScreen = terminalCapabilities().alternateScreen
+  const useAltScreen = (options.terminalCaps ?? terminalCapabilities()).alternateScreen
   const decoder = new StringDecoder('utf8')
   stdin.setRawMode(true)
   stdin.resume()
@@ -594,7 +596,9 @@ export async function showSessionPicker(
       }
       stdin.pause()
       try {
-        stdout.write(`\x1b[0m\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}\n`)
+        // Unconditional for the same reason as the TUI teardown: a leave that is
+        // skipped strands the screen, a leave that was not needed is ignored.
+        stdout.write(`\x1b[0m\x1b[?25h\x1b[?1049l\n`)
       } catch {
         // The TTY may already be gone (EPIPE/ERR_STREAM_DESTROYED).
       }

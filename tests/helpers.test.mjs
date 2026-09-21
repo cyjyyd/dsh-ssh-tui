@@ -4,6 +4,12 @@ import { setLocale, t } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
 import { pinEmojiCells, stripAnsi } from '../lib/term-text.js'
+import { terminalCapabilities } from '../lib/terminal-caps.js'
+
+/** A terminal with every capability, so a test asserts the full sequence set
+ *  instead of inheriting whatever TERM the runner happens to have. */
+const fullTerminal = () => terminalCapabilities({ env: { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, platform: 'linux' })
+
 setLocale('zh')
 
 import {
@@ -1024,6 +1030,9 @@ test('reattach after detached completion does not idle-exit the host', async () 
     color: false,
     headlessDisplay: true,
     disconnectPolicy: 'continue',
+    // The assertion below is about the sequences a capable terminal receives;
+    // without this the suite's meaning would depend on the runner's TERM.
+    terminalCaps: fullTerminal(),
     onHangup: () => { hangups.push('hung') },
     onReattach: () => { reattaches.push('up') },
   })

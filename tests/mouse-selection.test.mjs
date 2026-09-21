@@ -5,6 +5,12 @@ import { setLocale } from '../lib/i18n/index.js'
 import { displayWidth, stripAnsi } from '../lib/term-text.js'
 import { SshTui } from '../lib/tui.js'
 import { allText } from './wait.mjs'
+import { terminalCapabilities } from '../lib/terminal-caps.js'
+
+/** A terminal with every capability, so a test asserts the full sequence set
+ *  instead of inheriting whatever TERM the runner happens to have. */
+const fullTerminal = () => terminalCapabilities({ env: { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, platform: 'linux' })
+
 
 /**
  * Free-form copy of a model reply: drag across it and the text goes to the
@@ -27,7 +33,8 @@ function fixture({ color = false } = {}) {
     on() { return () => {} },
   }
   const agent = { id: 's', options: {}, status: 'idle', session: { id: 's', events: [] }, cancel() {} }
-  const tui = new SshTui(ctx, agent, { sessionId: 's', color, headlessDisplay: true })
+  // This file asserts mouse sequences: pin the terminal rather than inherit it.
+  const tui = new SshTui(ctx, agent, { sessionId: 's', color, headlessDisplay: true, terminalCaps: fullTerminal() })
   void ui
   return tui
 }

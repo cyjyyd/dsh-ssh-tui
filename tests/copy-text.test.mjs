@@ -86,3 +86,32 @@ test('clicking an OSC 8 column copies the URL instead of toggling a card', () =>
     else process.env.DSH_TUI_TERM_CAPS = previousCaps
   }
 })
+
+test('the clipboard caveat is said once per session, not after every copy', () => {
+  // The caveat is now shown on every terminal the table does not promise OSC 52
+  // for — which includes VTE (GNOME/XFCE), the most common Linux desktop
+  // terminal. Once per session is what keeps that honest without becoming noise,
+  // and rows are the only place that can be asserted: the painted byte stream
+  // repeats the transcript on every repaint.
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  process.env.DSH_TUI_TERM_CAPS = 'no-osc52'
+  try {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.write = () => {}
+    tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
+    tui.focusedRow = tui.rows[0]
+
+    const caveats = () => tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('OSC 52')).length
+    tui.runCommand('/copy')
+    assert.equal(caveats(), 1, 'the first copy explains why the clipboard may be empty')
+    tui.rows.push({ kind: 'assistant', text: '第二条' })
+    tui.focusedRow = tui.rows.at(-1)
+    tui.runCommand('/copy')
+    assert.equal(caveats(), 1, 'and the second copy does not repeat it')
+  } finally {
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
+  }
+})

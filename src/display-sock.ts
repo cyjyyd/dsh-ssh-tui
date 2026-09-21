@@ -927,7 +927,10 @@ export async function runDisplayRelay(
         try {
           stdout.write('\x1b]0;\x07')
           stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-          stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h${useAltScreen ? '\x1b[?1049l' : ''}`)
+          // Leaving is always safe (an unused mode is ignored) and skipping it
+          // is not: this relay may be the only one that gets to restore a screen
+          // the Host entered under a different classification.
+          stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l`)
         } catch {
           // TTY may already be gone
         }

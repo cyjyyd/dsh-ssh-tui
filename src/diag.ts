@@ -70,6 +70,9 @@ export interface DiagSnapshot {
     alternateScreen: boolean
     osc52: boolean
     osc8: boolean
+    title: boolean
+    /** `DSH_TUI_TERM_CAPS` tokens that were rejected (typos), for the row. */
+    ignoredOverrides: readonly string[]
   }
   /**
    * What the palette resolved to and which hints decided it. A "no colour on
@@ -194,6 +197,8 @@ function describeTerminal(): NonNullable<DiagSnapshot['terminal']> {
     alternateScreen: caps.alternateScreen,
     osc52: caps.osc52,
     osc8: caps.osc8,
+    title: caps.title,
+    ignoredOverrides: caps.ignoredOverrides,
   }
 }
 
@@ -229,6 +234,10 @@ export function formatDiag(snapshot: DiagSnapshot): string[] {
       alt: snapshot.terminal.alternateScreen ? yes : no,
       osc52: snapshot.terminal.osc52 ? yes : no,
       osc8: snapshot.terminal.osc8 ? yes : no,
+      title: snapshot.terminal.title ? yes : no,
+      ignored: snapshot.terminal.ignoredOverrides.length === 0
+        ? ''
+        : t('diag.terminalIgnored', { tokens: snapshot.terminal.ignoredOverrides.join(' ') }),
     }))
   }
   lines.push(t('diag.rowSession', { session: snapshot.sessionId }))

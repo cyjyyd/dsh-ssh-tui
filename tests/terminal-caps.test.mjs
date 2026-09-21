@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   bracketedPasteSequence, detectTerminalFamily, mouseDisableSequence, mouseEnableSequence,
-  osc52Impossible, parseCapsOverride, terminalCapabilities,
+  parseCapsOverride, parseCapsOverrideReport, terminalCapabilities,
 } from '../lib/terminal-caps.js'
 
 /**
@@ -52,7 +52,7 @@ const XFCE_TERMINAL = {
 /** An old VTE (0.48, e.g. a long-term distribution): no OSC 52 and no OSC 8. */
 const OLD_VTE = { TERM: 'xterm', VTE_VERSION: '4800' }
 
-const KONSOLE = { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '230800' }
+const KONSOLE = { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '250400' }
 const OLD_KONSOLE = { TERM: 'xterm-256color', KONSOLE_VERSION: '210400' }
 const XTERM = { TERM: 'xterm-256color', COLORTERM: 'truecolor' }
 const TMUX = { TERM: 'tmux-256color', TMUX: '/tmp/tmux-1000/default,1234,0', COLORTERM: 'truecolor' }
@@ -81,40 +81,44 @@ test('a legacy Windows console keeps the mouse but loses clipboard and links', (
   // never writes the clipboard.
   assert.equal(c.osc52, false)
   assert.equal(c.osc8, false)
-  // Mouse and paste stay on: conhost has had VT mouse input since Windows 10
-  // 1703, and the sequences are ignored rather than harmful if it has not.
+  // Mouse stays on: conhost has had VT mouse input since Windows 10 1703, and
+  // mouse reporting is how cards expand.
   assert.equal(c.mouse, true)
   assert.equal(c.mouseSgr, true)
-  assert.equal(c.bracketedPaste, true)
+  // Bracketed paste only reached conhost in 2022-11 (Windows 11 22H2), and the
+  // PowerShell/cmd case this row is about is usually older than that.
+  assert.equal(c.bracketedPaste, false)
   // An empty TERM on Windows is normal, so colour must survive it.
   assert.notEqual(c.colors, 'none')
 })
 
-test('GNOME Terminal and XFCE Terminal are the VTE family, and both get OSC 52', () => {
+test('the VTE family is never promised OSC 52, whatever its version', () => {
+  // VTE has never implemented it (GNOME/vte#125 is still open, and the widget
+  // only parses the sequence). Claiming it here was the worst case in the whole
+  // table: GNOME Terminal is the most common Linux desktop terminal, so the
+  // promise reached the most users and `/copy` reported a copy nobody made.
   for (const [env, program] of [[GNOME_TERMINAL, 'gnome-terminal'], [XFCE_TERMINAL, 'xfce4-terminal']]) {
     const c = caps(env)
     assert.equal(c.family, 'vte')
     assert.match(c.label, new RegExp(program, 'u'))
     assert.match(c.label, /VTE 7000/u)
-    assert.equal(c.osc52, true, `${program} supports OSC 52 from VTE 0.52`)
-    assert.equal(c.osc8, true)
+    assert.equal(c.osc52, false, `${program} ignores OSC 52`)
+    assert.equal(c.osc8, true, 'OSC 8 has been in VTE since 0.50')
     assert.equal(c.mouseSgr, true)
     assert.equal(c.alternateScreen, true)
   }
+  assert.equal(caps(OLD_VTE).osc52, false)
+  assert.equal(caps(OLD_VTE).osc8, false, 'OSC 8 predates 0.50 only on ancient VTE')
+  assert.equal(caps(OLD_VTE).mouse, true)
 })
 
-test('an older VTE keeps the mouse but is not promised OSC 52 or OSC 8', () => {
-  const c = caps(OLD_VTE)
-  assert.equal(c.family, 'vte')
-  assert.equal(c.osc52, false)
-  assert.equal(c.osc8, false)
-  assert.equal(c.mouse, true)
-})
-
-test('Konsole is recognised, and its version gates OSC 52', () => {
+test('Konsole is recognised, and OSC 52 needs 24.12', () => {
   assert.equal(caps(KONSOLE).family, 'konsole')
-  assert.equal(caps(KONSOLE).osc52, true)
-  assert.equal(caps(OLD_KONSOLE).osc52, false)
+  assert.equal(caps(KONSOLE).osc52, true, '24.12 is where the write-only patch shipped')
+  assert.equal(caps(OLD_KONSOLE).osc52, false, '21.04 predates it by three years')
+  // The boundary itself: 24.08 missed the cut, 24.12 made it.
+  assert.equal(caps({ TERM: 'xterm-256color', KONSOLE_VERSION: '240800' }).osc52, false)
+  assert.equal(caps({ TERM: 'xterm-256color', KONSOLE_VERSION: '241200' }).osc52, true)
 })
 
 test('tmux and screen are recognised through their own markers', () => {
@@ -181,14 +185,17 @@ test('the emitted sequences match the declared capabilities', () => {
   // that hurts, and `l` on a mode that was never enabled is ignored.
   assert.equal(mouseDisableSequence(), '\x1b[?1000l\x1b[?1002l\x1b[?1006l')
 
-  // SGR off but mouse on: the legacy encoding is still asked for, without 1006.
-  const legacy = caps({ TERM: 'xterm-256color', DSH_TUI_TERM_CAPS: 'no-mouseSgr' })
-  assert.equal(mouseEnableSequence(legacy), '\x1b[?1002h\x1b[?1000h')
 })
 
 test('user overrides beat detection, in both directions', () => {
   assert.equal(caps({ ...GNOME_TERMINAL, DSH_TUI_TERM_CAPS: 'no-mouse' }).mouse, false)
-  assert.equal(caps({ ...LINUX_CONSOLE, DSH_TUI_TERM_CAPS: 'mouse' }).mouse, true)
+  // Forcing the mouse on a terminal we judged SGR-less brings SGR with it: the
+  // parser reads SGR reports only, so a bare `mouse` would otherwise be cleared
+  // and look like the override did nothing.
+  const forced = caps({ ...LINUX_CONSOLE, DSH_TUI_TERM_CAPS: 'mouse' })
+  assert.equal(forced.mouse, true)
+  assert.equal(forced.mouseSgr, true)
+  assert.equal(mouseEnableSequence(forced), '\x1b[?1006h\x1b[?1002h\x1b[?1000h')
   assert.equal(caps({ ...GNOME_TERMINAL, DSH_TUI_TERM_CAPS: 'osc52=false' }).osc52, false)
   assert.equal(caps({ ...LINUX_CONSOLE, DSH_TUI_TERM_CAPS: 'alternateScreen' }).alternateScreen, true)
   // Turning the mouse off drops the modes that only make sense with it.
@@ -200,12 +207,32 @@ test('user overrides beat detection, in both directions', () => {
   assert.equal(caps({ ...GNOME_TERMINAL, DSH_TUI_OSC8: '0' }).osc8, false)
 })
 
-test('the override parser accepts the documented spellings and ignores typos', () => {
+test('the override parser accepts the documented spellings and rejects the rest', () => {
   assert.deepEqual(parseCapsOverride('no-mouse'), { mouse: false })
   assert.deepEqual(parseCapsOverride('mouse=0'), { mouse: false })
-  assert.deepEqual(parseCapsOverride('mouse=yes, osc8=off'), { mouse: true, osc8: false })
-  assert.deepEqual(parseCapsOverride('nonsense'), {})
+  // `mouse` carries the set the table gives a mouse terminal (SGR + drag).
+  assert.deepEqual(parseCapsOverride('mouse=yes, osc8=off'), { mouse: true, mouseSgr: true, mouseDrag: true, osc8: false })
+  assert.deepEqual(parseCapsOverride('mouse,no-mouseDrag'), { mouse: true, mouseSgr: true, mouseDrag: false })
+  // The spaced spelling used to invert the meaning: `mouse = false` parsed as
+  // the bare name `mouse`, i.e. true, and `osc52 = false` re-enabled the very
+  // promise the user was trying to withdraw.
+  assert.deepEqual(parseCapsOverride('mouse = false'), { mouse: false })
+  assert.deepEqual(parseCapsOverride('osc52 = false'), { osc52: false })
+  assert.deepEqual(parseCapsOverride(' no-mouse , osc52 = off '), { mouse: false, osc52: false })
+  // A value outside the two vocabularies, an unknown name and a dangling `no-`
+  // are refused rather than guessed.
+  for (const bad of ['mouse=maybe', 'mouse=', 'mouse==false', 'nonsense', 'no-', 'no-no-mouse', 'MOUSE=false']) {
+    assert.deepEqual(parseCapsOverride(bad), {}, `"${bad}" must not be guessed at`)
+  }
   assert.deepEqual(parseCapsOverride(''), {})
+})
+
+test('rejected override tokens are reported, not swallowed', () => {
+  // `/diag` is the only place a user can find out why their override did nothing.
+  const report = parseCapsOverrideReport('no-mouse,mouse=maybe,bogus,osc52=false')
+  assert.deepEqual(report.overrides, { mouse: false, osc52: false })
+  assert.deepEqual(report.ignored, ['mouse=maybe', 'bogus'])
+  assert.deepEqual(caps({ TERM: 'xterm-256color', DSH_TUI_TERM_CAPS: 'bogus,no-osc8' }).ignoredOverrides, ['bogus'])
 })
 
 test('the classifier names the family for the diagnostics line', () => {
@@ -225,22 +252,32 @@ test('a named TERM on Windows is that terminal, not conhost', () => {
   assert.equal(caps.family, 'xterm')
   // …while PowerShell and cmd.exe stay conhost.
   assert.equal(terminalCapabilities({ env: {}, platform: 'win32' }).family, 'windows-console')
+  // A POSIX console name on Windows can only be a wrapper: reading it as the
+  // Linux console would drop the mouse, paste and the alternate screen on a
+  // ConPTY that has all three.
+  assert.equal(terminalCapabilities({ env: { TERM: 'linux' }, platform: 'win32' }).family, 'windows-console')
+  assert.equal(terminalCapabilities({ env: { TERM: 'linux' }, platform: 'linux' }).family, 'linux-console')
 })
 
-test('the clipboard hint fires only where OSC 52 cannot work at all', () => {
-  // Nagging every terminal that is merely unpromised (xterm, tmux, an unknown
-  // TERM) would turn a one-off surprise into permanent noise.
-  assert.equal(osc52Impossible(caps(WINDOWS_CONSOLE, 'win32')), true)
-  assert.equal(osc52Impossible(caps(LINUX_CONSOLE)), true)
-  assert.equal(osc52Impossible(caps(SCREEN)), true)
-  assert.equal(osc52Impossible(caps(XTERM)), false)
-  assert.equal(osc52Impossible(caps(TMUX)), false)
-  assert.equal(osc52Impossible(caps(DUMB)), false)
-  assert.equal(osc52Impossible(caps(WINDOWS_TERMINAL, 'win32')), false)
-  // An explicit `osc52` override is the user saying their terminal does handle
-  // it, and it silences the note — otherwise the one terminal where the note
-  // matters most could not be quietened.
-  assert.equal(osc52Impossible(terminalCapabilities({
-    env: { ...WINDOWS_CONSOLE, DSH_TUI_TERM_CAPS: 'osc52' }, platform: 'win32',
-  })), false)
+test('the clipboard caveat follows the capability, and an override silences it', () => {
+  // The TUI shows the caveat once per session whenever `osc52` is false — which
+  // now includes the VTE desktops, because that is where the silent empty
+  // clipboard actually happens. What is pinned here is that the flag the TUI
+  // reads is the one the override changes.
+  const unpromised = [caps(WINDOWS_CONSOLE, 'win32'), caps(GNOME_TERMINAL), caps(XTERM), caps(TMUX), caps(DUMB)]
+  for (const c of unpromised) assert.equal(c.osc52, false, `${c.family} is not promised OSC 52`)
+  for (const env of [WINDOWS_TERMINAL, { ...WINDOWS_CONSOLE, DSH_TUI_TERM_CAPS: 'osc52' }, { ...GNOME_TERMINAL, DSH_TUI_TERM_CAPS: 'osc52' }]) {
+    const platform = env === WINDOWS_TERMINAL ? 'win32' : 'linux'
+    assert.equal(caps(env, platform).osc52, true, 'the flag can be turned on deliberately')
+  }
+})
+
+test('a mouse without SGR is no mouse, because the parser reads SGR only', () => {
+  // Enabling `?1000h` without `?1006h` captures the terminal's mouse and then
+  // drops every report: the user loses native selection *and* gets nothing.
+  const legacy = caps({ TERM: 'xterm-256color', DSH_TUI_TERM_CAPS: 'no-mouseSgr' })
+  assert.equal(legacy.mouseSgr, false)
+  assert.equal(legacy.mouse, false)
+  assert.equal(legacy.mouseDrag, false)
+  assert.equal(mouseEnableSequence(legacy), '')
 })

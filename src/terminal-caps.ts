@@ -59,6 +59,8 @@ export interface TerminalCapabilities {
   osc8: boolean
   /** OSC 0/2 window-title updates are honoured. */
   title: boolean
+  /** `DSH_TUI_TERM_CAPS` tokens that were rejected, for `/diag` to report. */
+  ignoredOverrides: readonly string[]
 }
 
 /** Everything the classifier reads. `platform` and `env` are injectable. */
@@ -70,22 +72,76 @@ export interface TerminalProbe {
 /** Capability names a user may force on or off through `DSH_TUI_TERM_CAPS`. */
 const TOGGLEABLE = ['mouse', 'mouseSgr', 'mouseDrag', 'bracketedPaste', 'alternateScreen', 'osc52', 'osc8', 'title'] as const
 
-/** `no-mouse,osc52=false,no-alternateScreen` → the overrides to apply. */
-export function parseCapsOverride(raw: string): Partial<Record<(typeof TOGGLEABLE)[number], boolean>> {
-  const out: Partial<Record<(typeof TOGGLEABLE)[number], boolean>> = {}
-  for (const piece of raw.split(/[\s,]+/u)) {
+const TRUTHY = new Set(['1', 'true', 'on', 'yes'])
+const FALSY = new Set(['0', 'false', 'off', 'no'])
+
+/**
+ * Parse `DSH_TUI_TERM_CAPS`.
+ *
+ * `no-mouse`, `mouse`, `mouse=false` and `mouse = false` all mean what they
+ * look like: the `=` binds first, so the spaced spelling cannot silently invert
+ * into the opposite answer (it did, and `osc52 = false` then *re-enabled* the
+ * clipboard promise). A value outside the two vocabularies, an unknown name or a
+ * bare `no-` is rejected rather than guessed, and the rejects are returned so
+ * `/diag` can show them — this variable is the only feedback channel a user has
+ * when an override does not appear to work.
+ */
+export function parseCapsOverrideReport(raw: string): {
+  overrides: Partial<Record<(typeof TOGGLEABLE)[number], boolean>>
+  ignored: string[]
+} {
+  const overrides: Partial<Record<(typeof TOGGLEABLE)[number], boolean>> = {}
+  const ignored: string[] = []
+  // Bind `=` before splitting on whitespace: `mouse = false` must not become the
+  // bare name `mouse` plus two junk tokens, which read as "on".
+  for (const piece of raw.replace(/\s*=\s*/gu, '=').split(/[\s,]+/u)) {
     const token = piece.trim()
     if (token === '') continue
     const [rawName, rawValue] = token.split('=')
     const name = (rawName ?? '').trim()
+    const value = rawValue === undefined ? undefined : rawValue.trim().toLowerCase()
     const negated = name.startsWith('no-')
     const key = (negated ? name.slice(3) : name) as (typeof TOGGLEABLE)[number]
-    if (!TOGGLEABLE.includes(key)) continue
-    if (negated) out[key] = false
-    else if (rawValue === undefined) out[key] = true
-    else out[key] = !['0', 'false', 'off', 'no'].includes(rawValue.trim().toLowerCase())
+    const known = name !== 'no-' && TOGGLEABLE.includes(key)
+    if (!known) {
+      ignored.push(token)
+      continue
+    }
+    if (negated) {
+      // `no-mouse=false` is not a spelling worth guessing at.
+      if (value !== undefined) {
+        ignored.push(token)
+        continue
+      }
+      overrides[key] = false
+      continue
+    }
+    if (value === undefined || TRUTHY.has(value)) {
+      overrides[key] = true
+      // Asking for the mouse asks for the whole set the table gives a mouse
+      // terminal: SGR (the only encoding this parser reads, so a bare `mouse`
+      // would otherwise be cleared by the cascade and appear to do nothing) and
+      // held-button motion, without which a drag never arrives. `no-mouseDrag`
+      // on its own still opts out of the drag.
+      if (key === 'mouse' || key === 'mouseSgr') {
+        overrides.mouse = true
+        overrides.mouseSgr = true
+        if (overrides.mouseDrag === undefined) overrides.mouseDrag = true
+      }
+      continue
+    }
+    if (FALSY.has(value)) {
+      overrides[key] = false
+      continue
+    }
+    ignored.push(token)
   }
-  return out
+  return { overrides, ignored }
+}
+
+/** The overrides alone, for callers that do not report. */
+export function parseCapsOverride(raw: string): Partial<Record<(typeof TOGGLEABLE)[number], boolean>> {
+  return parseCapsOverrideReport(raw).overrides
 }
 
 /** A version-ish number out of `VTE_VERSION` / `KONSOLE_VERSION`, or undefined. */
@@ -126,7 +182,13 @@ export function detectTerminalFamily(probe: TerminalProbe = {}): { family: Termi
     return { family: 'screen', label: `screen (TERM=${term || 'unset'})` }
   }
   if (term === 'dumb') return { family: 'dumb', label: 'dumb terminal (assuming the xterm baseline)' }
-  if (term === 'linux') return { family: 'linux-console', label: 'Linux virtual console' }
+  // `linux` (and the old VT names) are POSIX console names: on Windows they can
+  // only come from a wrapper, and the capabilities they describe — no mouse, no
+  // paste, no alternate screen — are not what the ConPTY behind that wrapper
+  // has. The Windows classification below decides instead.
+  if (platform !== 'win32' && (term === 'linux' || term === 'vt100' || term === 'vt220')) {
+    return { family: 'linux-console', label: 'Linux virtual console' }
+  }
 
   const vte = numericVersion(env.VTE_VERSION)
   if (vte !== undefined) {
@@ -150,9 +212,19 @@ export function detectTerminalFamily(probe: TerminalProbe = {}): { family: Termi
     // through to the TERM matching below rather than being read as conhost.
     if (term === '') return { family: 'windows-console', label: 'Windows console (conhost)' }
   }
-  if (term === '' ) return { family: 'unknown', label: 'unknown (TERM unset)' }
+  if (term === '') {
+    return platform === 'win32'
+      ? { family: 'windows-console', label: 'Windows console (conhost)' }
+      : { family: 'unknown', label: 'unknown (TERM unset)' }
+  }
   if (term.includes('xterm') || term.includes('rxvt') || term.includes('alacritty') || term.includes('kitty') || term.includes('wezterm')) {
     return { family: 'xterm', label: `${term}` }
+  }
+  if (platform === 'win32') {
+    // A Windows host whose TERM names nothing we know (a wrapper handing us
+    // `linux`, or anything else): conhost is what is actually underneath, and
+    // `unknown` would claim bracketed paste and hyperlinks this console lacks.
+    return { family: 'windows-console', label: 'Windows console (conhost)' }
   }
   return { family: 'unknown', label: term }
 }
@@ -170,7 +242,7 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
   const { family, label } = detectTerminalFamily({ env, platform })
   const colors = colorDepth(env, platform)
 
-  const base: Omit<TerminalCapabilities, 'family' | 'label' | 'colors'> = {
+  const base: Omit<TerminalCapabilities, 'family' | 'label' | 'colors' | 'ignoredOverrides'> = {
     // A terminal that paints nothing is not a terminal we may drive.
     mouse: false,
     mouseSgr: false,
@@ -201,7 +273,13 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
         // conhost never writes the clipboard and ignores hyperlinks, which is
         // what `/copy` has to say out loud there.
         mouse: true, mouseSgr: true, mouseDrag: true,
-        bracketedPaste: true, alternateScreen: true,
+        // Bracketed paste reached conhost only in 2022-11 (Windows 11 22H2), and
+        // Windows 10 is still the PowerShell/cmd case this row is about. The
+        // paste path survives without it (a multi-line burst is still treated as
+        // one paste), so under-claiming here costs nothing and the matrix stays
+        // true for the older console.
+        bracketedPaste: false,
+        alternateScreen: true,
         osc52: false, osc8: false, title: true,
       })
       break
@@ -209,9 +287,14 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
       Object.assign(base, {
         mouse: true, mouseSgr: true, mouseDrag: true,
         bracketedPaste: true, alternateScreen: true,
-        // OSC 52 arrived in VTE 0.52; OSC 8 in 0.50. Older VTE is still around
-        // on long-term distributions, so the version decides.
-        osc52: (numericVersion(env.VTE_VERSION) ?? 0) >= 5200,
+        // VTE has never implemented OSC 52: the request is still open upstream
+        // (GNOME/vte#125) and the widget only *parses* the sequence. Every VTE
+        // desktop shares the gap — GNOME Terminal, XFCE Terminal, MATE, Tilix,
+        // Terminator, Ptyxis — which made this the single most common terminal
+        // to promise a clipboard write it silently drops. `?` would be kinder
+        // than `no`, but the user cannot tell the difference when pasting.
+        osc52: false,
+        // OSC 8 arrived in VTE 0.50, so long-term distributions can lack it.
         osc8: (numericVersion(env.VTE_VERSION) ?? 0) >= 5000,
         title: true,
       })
@@ -220,9 +303,11 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
       Object.assign(base, {
         mouse: true, mouseSgr: true, mouseDrag: true,
         bracketedPaste: true, alternateScreen: true,
-        // OSC 52 landed in Konsole 21.12, and KONSOLE_VERSION is YYMMDD
-        // (`230800` is 23.08), so the comparison is against 211200.
-        osc52: (numericVersion(env.KONSOLE_VERSION) ?? 0) >= 211200,
+        // Write-only OSC 52 landed in Konsole 24.12 (KDE bug 372116; the patch
+        // was merged 2024-07 and 24.08 missed the cut), and KONSOLE_VERSION is
+        // YYMMDD (`241200` is 24.12) — so Kubuntu 22.04/24.04 and Debian 12 all
+        // ignore the write. 21.12 was Konsole's OSC 8.
+        osc52: (numericVersion(env.KONSOLE_VERSION) ?? 0) >= 241200,
         osc8: true, title: true,
       })
       break
@@ -287,30 +372,23 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
   if (envFlag(env.DSH_TUI_NO_ALT_SCREEN) === true) base.alternateScreen = false
   const osc8Flag = envFlag(env.DSH_TUI_OSC8)
   if (osc8Flag !== undefined) base.osc8 = osc8Flag
-  Object.assign(base, parseCapsOverride(env.DSH_TUI_TERM_CAPS ?? ''))
+  const override = parseCapsOverrideReport(env.DSH_TUI_TERM_CAPS ?? '')
+  Object.assign(base, override.overrides)
   if (base.mouse === false) {
     base.mouseSgr = false
     base.mouseDrag = false
   }
+  if (base.mouseSgr === false) {
+    // The parser understands SGR reports only (`\x1b[<b;x;yM`); enabling the
+    // legacy X10 encoding would capture the terminal's mouse and deliver events
+    // the TUI drops — dead mouse *and* no native selection. So no SGR means no
+    // mouse. (Asking for the mouse turns SGR on with it — see the parser — so
+    // this only bites when SGR was refused on purpose.)
+    base.mouse = false
+    base.mouseDrag = false
+  }
 
-  return { family, label, colors, ...base }
-}
-
-/**
- * Terminals where OSC 52 cannot work at all, so a clipboard write must be
- * followed by an explanation.
- *
- * Deliberately narrower than `osc52 === false`: xterm and tmux are only
- * *unpromised* (both work once configured), and a dumb or unlabelled terminal
- * gets the benefit of the doubt. Nagging on all of them would turn a one-off
- * surprise into permanent noise.
- */
-export function osc52Impossible(caps: TerminalCapabilities): boolean {
-  // The effective capability, not the family alone: `DSH_TUI_TERM_CAPS=osc52` is
-  // the user saying their terminal does handle it (a patched conhost, a wrapper
-  // that relays it), and that must silence the note rather than be ignored.
-  if (caps.osc52) return false
-  return caps.family === 'windows-console' || caps.family === 'linux-console' || caps.family === 'screen'
+  return { family, label, colors, ignoredOverrides: override.ignored, ...base }
 }
 
 /** Mouse-tracking sequences to enable, in one write. Empty when unsupported. */

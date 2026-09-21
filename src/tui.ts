@@ -125,7 +125,6 @@ import {
   bracketedPasteSequence,
   mouseDisableSequence,
   mouseEnableSequence,
-  osc52Impossible,
   terminalCapabilities,
   type TerminalCapabilities,
 } from './terminal-caps.js'
@@ -744,6 +743,12 @@ export interface TuiConfig {
   selectionRef?: ModelSelectionRef
   /** Settings-backed model/effort selection applied to subagent requests. */
   subagentSelection?: SubagentSelectionRef
+  /**
+   * The terminal capabilities to act on. Defaults to reading the environment;
+   * tests pass their own so a suite does not change meaning with the terminal
+   * it happens to run in (`TERM=linux node --test` used to fail three cases).
+   */
+  terminalCaps?: TerminalCapabilities
   /** Active agent-preset id (standard/code/minimal/cordis/...). */
   presetId?: string
   /** Display name of the active preset. */
@@ -1379,6 +1384,8 @@ export class SshTui {
    * alternate screen are only claimed where the terminal has them.
    */
   private readonly terminalCaps: TerminalCapabilities
+  /** The OSC 52 caveat is worth saying once, not after every copy. */
+  private osc52HintShown = false
   private agentGone = false
   private onboarding: OnboardingState | undefined
   private commandSuggestions: { name: string; description: string; local: boolean }[] = []
@@ -1570,7 +1577,7 @@ export class SshTui {
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.presetId = config.presetId ?? 'standard'
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
-    this.terminalCaps = terminalCapabilities()
+    this.terminalCaps = config.terminalCaps ?? terminalCapabilities()
     this.useAlternateScreen = !this.lineMode && this.terminalCaps.alternateScreen
     this.paintLink = detectSshSession() ? 'ssh' : 'local'
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
@@ -2252,7 +2259,11 @@ export class SshTui {
       try {
         process.stdout.write('\x1b]0;\x07')
         process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-        process.stdout.write(`${mouseDisableSequence()}${bracketedPasteSequence(this.terminalCaps, false)}\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+        // Leave the alternate screen unconditionally, the way every mouse mode is
+        // disabled: `?1049l` on a terminal that never entered is ignored, while
+        // *skipping* it after a reattach whose relay classified the terminal
+        // differently leaves the user stuck in a screen they cannot scroll.
+        process.stdout.write(`${mouseDisableSequence()}${bracketedPasteSequence(this.terminalCaps, false)}\x1b[?25h\x1b[?1049l`)
       } catch (error) {
         if (!isHangupErrno(error)) {
           try {
@@ -3128,7 +3139,7 @@ export class SshTui {
     const note = planDockNote(plan)
     lines.push(this.styleLine('plan-dock', padToWidth(`   ${note}`, width)))
     if (plan.planMarkdown !== undefined && plan.planMarkdown !== '') {
-      const markdown = renderMarkdownLines(plan.planMarkdown, inner, this.color)
+      const markdown = renderMarkdownLines(plan.planMarkdown, inner, this.color, this.terminalCaps.osc8)
       const budget = Math.max(4, Math.min(12, markdown.length))
       for (const line of markdown.slice(0, budget)) {
         lines.push(`${clipAnsiToWidth(`  ${line}`, width)}\x1b[0m`)
@@ -3705,7 +3716,7 @@ export class SshTui {
     }
     const pushRow = (kind: DisplayKind, text: string, ref?: Row): void => {
       if (kind === 'assistant') {
-        for (const line of renderMarkdownLines(text, width, this.color)) {
+        for (const line of renderMarkdownLines(text, width, this.color, this.terminalCaps.osc8)) {
           addDisplay(line, ref)
         }
         return
@@ -3847,7 +3858,7 @@ export class SshTui {
         if (row.expanded) {
           addDisplay(this.styleLine('plan-dock', `   ${planDockNote({ ...row, active: false, pending: false })}`), row)
           if (row.planMarkdown !== undefined && row.planMarkdown !== '') {
-            for (const line of renderMarkdownLines(row.planMarkdown, Math.max(1, width - 2), this.color).slice(0, 8)) {
+            for (const line of renderMarkdownLines(row.planMarkdown, Math.max(1, width - 2), this.color, this.terminalCaps.osc8).slice(0, 8)) {
               addDisplay(`  ${line}`, row)
             }
           }
@@ -3884,7 +3895,7 @@ export class SshTui {
           }
           if (row.detail !== undefined && row.detail !== '') {
             if (row.intent === 'plan-review') {
-              for (const line of renderMarkdownLines(row.detail, Math.max(1, width - 2), this.color)) {
+              for (const line of renderMarkdownLines(row.detail, Math.max(1, width - 2), this.color, this.terminalCaps.osc8)) {
                 addDisplay(`  ${line}`, row)
               }
             } else {
@@ -4152,7 +4163,7 @@ export class SshTui {
           addDialog(t('dialog.planReview', { index: d.index + 1, total: d.total }) + (d.question.header === undefined ? '' : ` · ${d.question.header}`))
           addDialog(d.question.question)
           if (d.question.detail !== undefined && d.question.detail !== '') {
-            for (const line of renderMarkdownLines(d.question.detail, Math.max(1, width - 2), this.color).slice(0, 16)) {
+            for (const line of renderMarkdownLines(d.question.detail, Math.max(1, width - 2), this.color, this.terminalCaps.osc8).slice(0, 16)) {
               dialogLines.push(this.styleLine('assistant', line))
             }
           }
@@ -4595,6 +4606,9 @@ export class SshTui {
   /** Refresh the terminal window title (throttled while running). */
   private updateTerminalTitle(): void {
     if (this.exiting || this.lineMode) return
+    // A console that has no title to set (the Linux virtual console) would take
+    // the escape as noise; the matrix says so, so honour it.
+    if (!this.terminalCaps.title) return
     const now = Date.now()
     // Completion wins over a still-running agent status: the turn/end event
     // lands before agent/status flips to idle, and the title must not stay
@@ -10344,12 +10358,14 @@ export class SshTui {
     this.leaveHistoryBrowse()
     this.write(osc52Clipboard(text))
     this.pushRow({ kind: 'system', text: notice })
-    // The write is a request the terminal may ignore — conhost never reads OSC
-    // 52, xterm gates it behind `allowWindowOps`, tmux needs `set-clipboard on`.
-    // The write still goes out (it does work on all three when configured), but
-    // where the capability table is unsure the user is told, instead of finding
-    // out when they paste.
-    if (osc52Impossible(this.terminalCaps)) {
+    // The write is a request the terminal may ignore: VTE (GNOME/XFCE/…) has
+    // never implemented OSC 52, conhost and screen cannot, Konsole only from
+    // 24.12, and xterm/tmux need configuration. The write still goes out — it is
+    // how the terminals that *do* honour it work — but where the table does not
+    // promise it the user is told once per session rather than at every copy, or
+    // not at all until they paste into an empty clipboard.
+    if (!this.terminalCaps.osc52 && !this.osc52HintShown) {
+      this.osc52HintShown = true
       this.pushRow({ kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) })
     }
     this.markDirty()

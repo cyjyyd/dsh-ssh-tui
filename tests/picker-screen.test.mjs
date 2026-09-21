@@ -10,6 +10,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { showSessionPicker } from '../lib/picker.js'
 import { screen } from './screen.mjs'
+import { terminalCapabilities } from '../lib/terminal-caps.js'
+
+/** A terminal with every capability, so a test asserts the full sequence set
+ *  instead of inheriting whatever TERM the runner happens to have. */
+const fullTerminal = () => terminalCapabilities({ env: { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, platform: 'linux' })
+
 
 const ANSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 
@@ -73,7 +79,9 @@ const SESSIONS = [
 test('a cancelled picker gives the alternate screen back with the transcript intact', async () => {
   const io = pickerStreams(60, 12)
   const { ctx, openPager } = listingContext(SESSIONS)
-  const settled = showSessionPicker(ctx, false, undefined, { ...io, openPager })
+  // The picker's screen ownership is what is under test, so the terminal is
+  // declared rather than taken from the runner's environment.
+  const settled = showSessionPicker(ctx, false, undefined, { ...io, openPager, terminalCaps: fullTerminal() })
   await waitFor(() => io.writes.join('').includes('修复绘制残留'), 'the first listing')
   io.type('\x1b')                       // Esc: cancel (the 60 ms hold releases it)
   assert.equal(await settled, null)

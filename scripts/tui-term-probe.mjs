@@ -40,22 +40,31 @@ const PROFILES = [
   {
     name: 'GNOME Terminal (VTE 0.70)',
     env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'gnome-terminal' },
-    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
+    // VTE never implemented OSC 52, so this is the terminal where the caveat
+    // matters most — the case the first version of this table got wrong.
+    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'XFCE Terminal (VTE 0.70)',
     env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'xfce4-terminal' },
-    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
+    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
-    name: 'Konsole 23.08',
+    name: 'Konsole 23.08 (before OSC 52)',
     env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '230800' },
+    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
+  },
+  {
+    name: 'Konsole 24.12 (OSC 52 landed here)',
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '241200' },
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
   },
   {
     name: 'tmux',
     env: { TERM: 'tmux-256color', TMUX: '/tmp/tmux-1000/default,1,0' },
-    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
+    // tmux forwards OSC 52 only with `set-clipboard on`, so it is unpromised and
+    // the user is told once.
+    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'screen',
@@ -71,8 +80,8 @@ const PROFILES = [
     name: 'dumb terminal',
     env: { TERM: 'dumb' },
     // An unlabelled terminal keeps the baseline (the escapes are ignored where
-    // unsupported) but is promised no clipboard, and is not nagged about it.
-    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
+    // unsupported) but is promised no clipboard, so it gets the caveat once.
+    expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'Windows Terminal',
@@ -86,7 +95,8 @@ const PROFILES = [
     name: 'Windows console (conhost)',
     win32Only: true,
     env: { SESSIONNAME: 'Console' },
-    expect: { term: '', mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
+    // No bracketed paste: conhost only gained `?2004` in Windows 11 22H2.
+    expect: { term: '', mouse: true, sgr: true, paste: false, alt: true, clipboardHint: true },
   },
 ]
 

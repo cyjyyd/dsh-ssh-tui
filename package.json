@@ -50,7 +50,8 @@
     "docs/screenshots/headless.png",
     "docs/screenshots/workspace.png",
     "docs/screenshots/slow-link.gif",
-    "LICENSE"
+    "LICENSE",
+    "docs/terminals.md"
   ],
   "license": "MIT",
   "dsh": {

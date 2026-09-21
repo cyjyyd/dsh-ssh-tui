@@ -88,6 +88,9 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
    也继承）。argv 由纯函数 `restrictPathArgs()` 生成因此在 Linux 可断言；
    **效果**由 `tests/platform-permissions.test.mjs` 里一条只在 `win32` 跑的用例在真实 Windows 上验证
    （断言 ACL 里没有 `Users` / `Everyone` / `Authenticated Users`，且当前用户在里面）。
+   **发版前审查（对抗性子代理）修掉的两件事**：`restrictPathToUserSync` 在 ES module 里用了 `require`
+   （抛错被 best-effort 吞掉 → 静默无效）；`icacls` 的授权对象改用 `%USERDOMAIN%\%USERNAME%`，
+   否则域机器上裸用户名可能解析到同名的本机账户，去掉继承后用户自己反而读不到密钥。
    接入点：`env.cmd`/`env.sh`（API Key）、`.credentials.yaml`（`/setup` 写完之后）、
    SuperGrok token（OAuth refresh token）、`tui-locks/`、`tui-socks/` 与其 `*.err`、
    `tui-session-routes.json`、`tui-session-index.json`。全部 best-effort：收紧失败绝不让刚写成功的配置丢失。
