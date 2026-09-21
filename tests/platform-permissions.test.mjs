@@ -40,7 +40,11 @@ test('the user to grant comes from the environment, and only on win32', () => {
   assert.equal(aclUserName({ USER: 'alice' }, 'linux'), undefined)
 })
 
-test('a POSIX restriction is a chmod, and it really tightens the file', async () => {
+// Windows cannot express 0o600 at all — `chmod` there only toggles the
+// read-only bit and `stat` reports 0o666/0o444 — so the POSIX half of this
+// primitive is asserted on the legs that have POSIX filesystems, and the Windows
+// leg asserts the ACL instead (below).
+test('a POSIX restriction is a chmod, and it really tightens the file', { skip: process.platform === 'win32' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-acl-'))
   const file = join(dir, 'env.sh')
   writeFileSync(file, 'export API_KEY=secret\n', { mode: 0o644 })
