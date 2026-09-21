@@ -160,6 +160,12 @@ async function probeProfile(pty, { env: extra, name, expect }) {
   } catch (error) {
     try { term.kill() } catch { /* already gone */ }
     throw error
+  } finally {
+    // ConPTY keeps handles that outlive the child, and this probe starts nine
+    // windows in one process: without disposing each one the script finishes its
+    // work and then never exits (which is exactly how the first Windows run of
+    // this probe hung with every profile already reported OK).
+    try { term.kill() } catch { /* already gone */ }
   }
   return output
 }
@@ -228,5 +234,8 @@ async function main() {
 }
 
 if (process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  process.exitCode = await main()
+  const code = await main()
+  // Explicit, for the same reason: a standalone diagnostic must not be held open
+  // by a terminal handle it no longer needs.
+  process.exit(code)
 }
