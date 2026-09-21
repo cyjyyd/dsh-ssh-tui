@@ -73,6 +73,10 @@ const PROFILES = [
   },
   {
     name: 'Linux virtual console',
+    // A Linux VT only exists on a POSIX host: on Windows the same TERM can only
+    // come from a wrapper, and the platform wins (see terminal-caps.ts), so the
+    // profile is skipped there rather than asserting a state that cannot occur.
+    posixOnly: true,
     env: { TERM: 'linux' },
     expect: { mouse: false, sgr: false, paste: false, alt: false, clipboardHint: true },
   },
@@ -213,9 +217,11 @@ async function main() {
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
     return 0
   }
-  const profiles = PROFILES.filter(profile => profile.win32Only !== true || IS_WINDOWS)
-  const skipped = PROFILES.filter(profile => profile.win32Only === true && !IS_WINDOWS)
-  console.log(`probing ${profiles.length} terminal profiles${skipped.length === 0 ? '' : ` (${skipped.length} Windows-only skipped)`}`)
+  const profiles = PROFILES.filter(profile =>
+    (profile.win32Only !== true || IS_WINDOWS) && (profile.posixOnly !== true || !IS_WINDOWS))
+  const skipped = PROFILES.filter(profile =>
+    (profile.win32Only === true && !IS_WINDOWS) || (profile.posixOnly === true && IS_WINDOWS))
+  console.log(`probing ${profiles.length} terminal profiles${skipped.length === 0 ? '' : ` (${skipped.length} platform-specific skipped)`}`)
 
   const failures = []
   for (const profile of profiles) {
