@@ -142,10 +142,13 @@ export function detectTerminalFamily(probe: TerminalProbe = {}): { family: Termi
     if ((env.WT_SESSION ?? '').trim() !== '') {
       return { family: 'windows-terminal', label: 'Windows Terminal' }
     }
-    // No WT_SESSION on Windows: conhost — the classic console host. It may or
-    // may not have VT processing enabled (that is a per-console flag this
-    // process cannot read), which is why the capability table is conservative.
-    return { family: 'windows-console', label: 'Windows console (conhost)' }
+    // An empty TERM is what PowerShell and cmd.exe report: that is conhost, the
+    // classic console host, and it is the one Windows terminal without OSC 52.
+    // A *named* TERM means something else is driving the console — Git-Bash and
+    // MSYS2 set `xterm-256color`, mintty identifies itself the same way — and
+    // those are xterm-family terminals that do more than conhost, so they fall
+    // through to the TERM matching below rather than being read as conhost.
+    if (term === '') return { family: 'windows-console', label: 'Windows console (conhost)' }
   }
   if (term === '' ) return { family: 'unknown', label: 'unknown (TERM unset)' }
   if (term.includes('xterm') || term.includes('rxvt') || term.includes('alacritty') || term.includes('kitty') || term.includes('wezterm')) {

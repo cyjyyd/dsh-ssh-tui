@@ -29,6 +29,12 @@ test('/copy writes OSC 52 and a workspace notice', () => {
     session: { id: 'main-session', events: [] },
     cancel() {},
   }
+  // These tests are about the copy plumbing, not the terminal in front of the
+  // runner: on a Windows or `TERM=dumb` host the capability table would add the
+  // "this terminal may ignore OSC 52" line and the notice asserted below would
+  // no longer be the newest row. Declare the clipboard as working instead.
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  process.env.DSH_TUI_TERM_CAPS = 'osc52'
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   tui.write = (chunk) => { writes.push(String(chunk)) }
   tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
@@ -42,11 +48,16 @@ test('/copy writes OSC 52 and a workspace notice', () => {
   assert.match(String(notice), /最近回复/)
   tui.handleChar('a')
   assert.equal(tui.input, 'a')
+  if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+  else process.env.DSH_TUI_TERM_CAPS = previousCaps
 })
 
 test('clicking an OSC 8 column copies the URL instead of toggling a card', () => {
   const previous = process.env.DSH_TUI_OSC8
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
   process.env.DSH_TUI_OSC8 = '1'
+  // Same reason as above: the OSC 52 notice must not displace the URL notice.
+  process.env.DSH_TUI_TERM_CAPS = 'osc52'
   const writes = []
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
@@ -71,5 +82,7 @@ test('clicking an OSC 8 column copies the URL instead of toggling a card', () =>
   } finally {
     if (previous === undefined) delete process.env.DSH_TUI_OSC8
     else process.env.DSH_TUI_OSC8 = previous
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
   }
 })

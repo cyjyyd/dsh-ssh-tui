@@ -209,9 +209,22 @@ test('the override parser accepts the documented spellings and ignores typos', (
 })
 
 test('the classifier names the family for the diagnostics line', () => {
-  assert.equal(detectTerminalFamily({ env: GNOME_TERMINAL }).label, 'gnome-terminal (VTE 7000)')
+  // Every assertion states the platform: the same environment means different
+  // things on Windows (an empty TERM is normal there) and on POSIX.
+  assert.equal(detectTerminalFamily({ env: GNOME_TERMINAL, platform: 'linux' }).label, 'gnome-terminal (VTE 7000)')
   assert.equal(detectTerminalFamily({ env: WINDOWS_CONSOLE, platform: 'win32' }).label, 'Windows console (conhost)')
-  assert.equal(detectTerminalFamily({ env: { TERM: 'xterm-256color' } }).family, 'xterm')
+  assert.equal(detectTerminalFamily({ env: { TERM: 'xterm-256color' }, platform: 'linux' }).family, 'xterm')
+})
+
+test('a named TERM on Windows is that terminal, not conhost', () => {
+  // Git-Bash, MSYS2 and mintty all set TERM and none of them export WT_SESSION:
+  // reading them as conhost would drop OSC 52 and mislabel every /diag report.
+  const gitBash = detectTerminalFamily({ env: { TERM: 'xterm-256color' }, platform: 'win32' })
+  assert.equal(gitBash.family, 'xterm')
+  const caps = terminalCapabilities({ env: { TERM: 'xterm-256color' }, platform: 'win32' })
+  assert.equal(caps.family, 'xterm')
+  // …while PowerShell and cmd.exe stay conhost.
+  assert.equal(terminalCapabilities({ env: {}, platform: 'win32' }).family, 'windows-console')
 })
 
 test('the clipboard hint fires only where OSC 52 cannot work at all', () => {

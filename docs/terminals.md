@@ -25,7 +25,8 @@
 | 终端 | 识别依据 | 配色 | 鼠标(1000/1002/1006) | 括号粘贴 | 备用屏 | OSC 52 剪贴板 | OSC 8 超链接 | 标题 |
 |---|---|---|---|---|---|---|---|---|
 | **Windows Terminal** | `WT_SESSION` | truecolor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **Windows 控制台（conhost）** | win32 且无 `WT_SESSION` | 16 色（`TERM` 为空是正常的） | ✓ | ✓ | ✓ | — | — | ✓ |
+| **Windows 控制台（conhost）** | win32、无 `WT_SESSION`、`TERM` 为空 | 16 色（`TERM` 为空是正常的） | ✓ | ✓ | ✓ | — | — | ✓ |
+| **Git-Bash / MSYS2 / mintty** | win32 但 `TERM` 有名字（如 `xterm-256color`） | truecolor | ✓ | ✓ | ✓ | ? | ✓ | ✓ |
 | **GNOME Terminal** | `VTE_VERSION` ≥ 5200 | truecolor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **XFCE Terminal / MATE / Tilix / Terminator** | 同上（同一套 VTE） | truecolor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **旧 VTE（< 0.52）** | `VTE_VERSION` < 5200 | truecolor | ✓ | ✓ | ✓ | — | — | ✓ |
@@ -74,6 +75,7 @@ DSH_TUI_COLOR_DEPTH=none    # 只影响配色（见 color-depth.ts）
 
 ## 已知限制
 
+- **PowerShell / cmd.exe 的 `TERM` 为空**：那正是 conhost 的特征；Git-Bash / MSYS2 / mintty 会设 `TERM`，因此走 xterm 基线。
 - **旧版 Windows 控制台（无 VT 处理）**：Windows 10 之前的 conhost 不认这些转义序列，
   用 `DSH_TUI_NO_ALT_SCREEN=1` 或 `DSH_TUI_TERM_CAPS=no-alternateScreen,no-mouse` 退到最朴素模式。
 - **代码页不是 UTF-8 的 Windows 控制台**：框线与 emoji 会花。TUI 不改你的控制台代码页
