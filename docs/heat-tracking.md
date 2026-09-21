@@ -93,7 +93,12 @@ token 只发给 `api.github.com`（不随重定向外发），不打印、不写
 3. 目录几乎不送人（14 天 1 次），搜索是第二大来源，releases/issues 页几乎没人看；
 4. dshfind 卡片仍挂 **0.6.3**，是最大的静默流失点，发版后要催一次收录刷新。
 
-## 0.7.2 计划（2026-09-21 上午 CST）
+## 0.7.2 已发布（2026-09-21）
+
+> 发版完成：`e08c1d7` → tag `v0.7.2` → npm `latest`/`next` = `0.7.2` → GitHub Release（正文含当日基线）。
+> 下面是当时的计划，保留作为记录；下一批见文末「0.7.3」。
+
+### 当日计划（存档）
 
 - 依据：发版脉冲 48 小时衰减 → 等更久不会多出信号，只多了主分支未验收的风险；工作日曝光好于周末；
 - 门禁：`node scripts/verify-batch.mjs` 全绿（typecheck · 全套单测 · 6 个 PTY 探针）、CI 四条腿全绿、0 issue；
@@ -122,3 +127,22 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
    node_modules 的符号链接布局（TS2742）。
 
 > 日期是用户确认的窗口；版本号、tag 与 npm 仍按 [release.md](release.md) 的规则执行。
+
+## 0.7.3 计划（2026-09-22 起）
+
+**先合 PR #2**（分支 `windows-ci-foundation`，四条腿已全绿）：Windows 真 ConPTY 端到端进 CI +
+`src/platform.ts` 收口平台决策。它是后面所有 Windows 修法的地基——没有它，Windows 的问题仍然只能靠用户实测发现。
+
+**再按 `docs/platform.md` 的欠债清单做 P1**（有风险、优先）：
+
+1. **Windows 文件权限不是空操作**：20 处 `0o600/0o700` 在 Windows 静默无效，而它们守着
+   `.credentials.yaml`、`tui-locks/*`、`tui-socks/*.err`、`env.cmd`。用 `icacls` 收到当前用户，或明确降级并写进文档。
+2. **生命周期规范 + 断言**：SSH 断连 / 关掉终端窗口 / TUI 崩溃 / Host 崩溃四种情况的期望行为；
+   "关掉终端后 Host 还活着"目前**只有手工验证过**（P0 的 drop 探针只覆盖了杀窗口这一种）。
+3. **路径与编码**：空格/非 ASCII/长路径的 `DSH_HOME`、`\\.\\pipe\\` 名字约束、CRLF、`%USERPROFILE%` 与 `$HOME` 不一致。
+
+**P2 视 Windows 用户量决定**：终端能力矩阵（Windows Terminal vs conhost）、分发去 bash 化、用户可见的 Windows 文档。
+
+**发版窗口**：仍按热度曲线选（见上文「发版窗口怎么定」），P0 合并后建议先跑一周采样再定日期。
+
+**遗留动作（非代码）**：dshfind 卡片仍挂 **0.6.3**，发版后催一次收录刷新（最新基线见本次 Release 正文）。
