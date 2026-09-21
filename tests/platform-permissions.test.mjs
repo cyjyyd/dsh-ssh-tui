@@ -34,7 +34,14 @@ test('the icacls argv removes inheritance and grants one user', () => {
 })
 
 test('the user to grant comes from the environment, and only on win32', () => {
-  assert.equal(aclUserName({ USERNAME: 'alice' }, 'win32'), 'alice')
+  // Qualified with the domain where one is reported: a bare name can resolve to
+  // the machine-local account of the same name on a domain-joined box, and a
+  // grant to the wrong account — inheritance already removed — locks the user
+  // out of their own keys.
+  assert.equal(aclUserName({ USERNAME: 'alice', USERDOMAIN: 'CORP' }, 'win32'), 'CORP\\alice')
+  assert.equal(aclUserName({ USERNAME: 'alice', USERDOMAIN: 'WORKSTATION' }, 'win32'), 'WORKSTATION\\alice')
+  assert.equal(aclUserName({ USERNAME: 'alice' }, 'win32'), 'alice', 'no domain known: bare name')
+  assert.equal(aclUserName({ USERNAME: 'CORP\\alice' }, 'win32'), 'CORP\\alice', 'already qualified')
   assert.equal(aclUserName({ USER: 'fallback' }, 'win32'), 'fallback')
   assert.equal(aclUserName({}, 'win32'), undefined, 'no user means no ACL call at all')
   assert.equal(aclUserName({ USER: 'alice' }, 'linux'), undefined)

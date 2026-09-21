@@ -120,17 +120,25 @@ export function displayHomePath(
  * save its own settings.
  */
 
-/** The user `icacls` should grant, or undefined when the environment has none. */
+/**
+ * The account `icacls` should grant, or undefined when the environment has none.
+ *
+ * `%USERDOMAIN%\%USERNAME%` where both are present: on a domain-joined machine a
+ * bare name can resolve to the machine-local account of the same name, and a
+ * grant to the wrong account — with inheritance already removed — would leave
+ * the user's own API keys inaccessible to them.
+ */
 export function aclUserName(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (platform !== 'win32') return undefined
-  for (const key of ['USERNAME', 'USER']) {
-    const value = (env[key] ?? '').trim()
-    if (value !== '') return value
-  }
-  return undefined
+  const name = (env.USERNAME ?? env.USER ?? '').trim()
+  if (name === '') return undefined
+  const domain = (env.USERDOMAIN ?? '').trim()
+  // A name that already carries a domain (`DOMAIN\user`) is left alone.
+  if (domain === '' || name.includes('\\')) return name
+  return `${domain}\\${name}`
 }
 
 /**
