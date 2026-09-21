@@ -145,4 +145,20 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
 
 **发版窗口**：仍按热度曲线选（见上文「发版窗口怎么定」），P0 合并后建议先跑一周采样再定日期。
 
-**遗留动作（非代码）**：dshfind 卡片仍挂 **0.6.3**，发版后催一次收录刷新（最新基线见本次 Release 正文）。
+**遗留动作（非代码）**：dshfind 卡片仍挂 **0.6.3**。2026-09-21 查清了卡点，结论如下（不必再猜）：
+
+- dshfind 的 `sync-plugins.yml`（每日 02:17 UTC）分两步：`sync:db` 拉 GitHub 指标（**每日**），
+  `probe:install --deadline 8` 才写安装方式与版本（`plugins.pkg_version`，取自
+  `raw.githubusercontent.com/<repo>/HEAD/package.json`）；卡片的「版本」属于后者，徽章的 ★ 属于前者
+  ——所以 ★ 是新的、版本是旧的。
+- `probe:install` 只重探 **`install_probed_at` 超过 7 天**的行（`DEFAULT_STALE_DAYS = 7`），
+  按 **stars DESC** 排序、8 分钟上限，探不完就留给下一轮（脚本刻意容忍"这轮没问全"）。
+- 该仓库 09-08→09-14 的每日同步**连续 cancelled**（35 分钟 job 超时，其 workflow 注释自己记录了这类事故）；
+  我们 package.json 等于 `0.6.3` 的窗口只有 **09-15 05:34–09:10 UTC**，说明我们这行就是那次（09-15 07:47 被
+  cancelled 的运行在中途）被读到的。
+- 因此**下一次自然重探在 09-22 08:0x UTC 之后**，最近几轮的待探集合都能跑完（09-20：1315/1315），
+  预期 09-22 10:17 CST 那轮卡片变成 0.7.2。
+- 若 09-23 之后仍是 0.6.3：说明我们这行的抓取在其环境里失败（失败会沿用旧事实且**不刷新** `probed_at`，
+  于是每天重试每天失败）。两条输入我们这边实测都正常（`HEAD/package.json` → 0.7.2、npm `latest` → 0.7.2），
+  届时向 dshfind 维护者要一次点名重探：`gh workflow run sync-plugins.yml -f only=cyjyyd/dsh-ssh-tui`
+  （该 workflow 注明 `--only` 无视新鲜度）。
