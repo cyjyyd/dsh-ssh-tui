@@ -73,6 +73,13 @@ DSH_TUI_COLOR_DEPTH=none    # 只影响配色（见 color-depth.ts）
 终端：gnome-terminal (VTE 7000)（vte）· 鼠标 是 · 括号粘贴 是 · 备用屏 是 · OSC52 是 · OSC8 是
 ```
 
+## 键盘与输入
+
+键位这一侧不按终端分家：解析器同时吃传统 xterm 序列（`\x1b[H`、`\x1b[3~`、SS3 `\x1bO…`）
+与 kitty/CSI-u 编码（例如 `\x1b[99;6u` 是 Ctrl+Shift+C，kitty、wezterm、foot 等默认或可开启），
+粘贴走 `?2004h` 的括号标记（不支持的终端退化成逐行输入，见上表）。
+Windows 与 Linux 的差异只在**改键**文件里：`/keys` 写出的键名与各终端实际发出的字节一一对应。
+
 ## 已知限制
 
 - **PowerShell / cmd.exe 的 `TERM` 为空**：那正是 conhost 的特征；Git-Bash / MSYS2 / mintty 会设 `TERM`，因此走 xterm 基线。
