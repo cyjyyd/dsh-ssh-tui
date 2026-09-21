@@ -27,6 +27,7 @@ import { homedir } from 'node:os'
 import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
 import { hostSpawnOptions, usesSigwinch } from './platform.js'
+import { terminalCapabilities } from './terminal-caps.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -852,8 +853,9 @@ export async function runDisplayRelay(
   const stdin = options.stdin ?? process.stdin
   const stdout = options.stdout ?? process.stdout
   const signals = options.signals ?? process
-  const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
-    && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+  // The relay and the Host must agree on the screen: both ask the capability
+  // table, so a console without an alternate screen never gets half of one.
+  const useAltScreen = terminalCapabilities().alternateScreen
   return await new Promise((resolve, reject) => {
     const socket = createConnection(path)
     const reader = new FrameReader()

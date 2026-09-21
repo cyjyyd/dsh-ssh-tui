@@ -7,6 +7,7 @@
 
 import { t } from './i18n/index.js'
 import { lineModeEnabled } from './line-mode.js'
+import { terminalCapabilities } from './terminal-caps.js'
 import { padAnsiToWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
 import { detectSshSession, RTT_SAMPLE_TIMEOUT_MS, TerminalInputPump } from './terminal-input.js'
 
@@ -473,8 +474,10 @@ export function writeBootSplash(message: string, color = true): void {
   const detail = color
     ? `\x1b[36m${truncateToWidth(message, width)}\x1b[0m`
     : truncateToWidth(message, width)
-  const useAlt = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
-    && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+  // The capability table, not the raw switch: a Linux virtual console has no
+  // alternate screen to return to, and entering one there costs the scrollback
+  // the user navigates with.
+  const useAlt = terminalCapabilities().alternateScreen
   try {
     process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${'─'.repeat(width)}\n${pinEmojiCells(detail)}\n`)
   } catch {

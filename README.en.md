@@ -695,6 +695,11 @@ Find your symptom; each answer is what to do, not a change log.
 - **Whole-row backgrounds are too loud on a dark terminal** — `DSH_TUI_COLOR_DEPTH=none`
   drops them; diffs still read through `+`/`-`.
 
+- **Terminal compatibility** — what each terminal is allowed and promised (Windows Terminal,
+  conhost, GNOME, XFCE, Konsole, xterm, tmux, screen, the Linux console) is tabulated in
+  [docs/terminals.md](docs/terminals.md); `/diag` prints the verdict it used, and
+  `DSH_TUI_TERM_CAPS` overrides it.
+
 ### Status line and quota
 
 - **The quota widget shows `░░░░░░░░ ?%`** — no reading has arrived yet (the API is slow or

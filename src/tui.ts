@@ -121,6 +121,14 @@ import {
 } from './rows.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
 import { displayHomePath, envFileName, IS_WINDOWS, usesSigwinch } from './platform.js'
+import {
+  bracketedPasteSequence,
+  mouseDisableSequence,
+  mouseEnableSequence,
+  osc52Impossible,
+  terminalCapabilities,
+  type TerminalCapabilities,
+} from './terminal-caps.js'
 import { sameSessionRoute, sessionRouteInput, type SessionRoute } from './session-route.js'
 import {
   GATEWAY_PROTOCOL_SUFFIX,
@@ -1365,6 +1373,12 @@ export class SshTui {
   /** Last route reported to the launcher; a repaint must not report it again. */
   private lastSessionRoute: SessionRoute | undefined
   private readonly useAlternateScreen: boolean
+  /**
+   * What the terminal in front of us can do. Read from the environment at
+   * construction (see `terminal-caps.ts`): the mouse, bracketed paste and the
+   * alternate screen are only claimed where the terminal has them.
+   */
+  private readonly terminalCaps: TerminalCapabilities
   private agentGone = false
   private onboarding: OnboardingState | undefined
   private commandSuggestions: { name: string; description: string; local: boolean }[] = []
@@ -1556,8 +1570,8 @@ export class SshTui {
     this.disconnectPolicy = config.disconnectPolicy ?? this.readDisconnectPolicy()
     this.presetId = config.presetId ?? 'standard'
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
-    this.useAlternateScreen = !this.lineMode
-      && process.env.DSH_TUI_NO_ALT_SCREEN !== '1' && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+    this.terminalCaps = terminalCapabilities()
+    this.useAlternateScreen = !this.lineMode && this.terminalCaps.alternateScreen
     this.paintLink = detectSshSession() ? 'ssh' : 'local'
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
       ssh: this.paintLink === 'ssh',
@@ -1626,7 +1640,7 @@ export class SshTui {
       this.bootBackgroundTasks()
       return
     }
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.write(this.enterScreenSequence())
     this.render()
     this.updateTerminalTitle()
     void this.calibratePaintInterval().finally(() => {
@@ -1635,6 +1649,18 @@ export class SshTui {
       this.startRenderTimer()
     })
     this.bootBackgroundTasks()
+  }
+
+  /**
+   * Take over the screen: alternate screen where it is safe, then the input
+   * modes the terminal actually supports, then hide the cursor.
+   *
+   * Joining the parts here (rather than at each call site) is what keeps
+   * `start`, a reattach and a teardown from drifting apart — the reattach path
+   * used to duplicate this string verbatim.
+   */
+  private enterScreenSequence(): string {
+    return `${this.useAlternateScreen ? '\x1b[?1049h' : ''}${mouseEnableSequence(this.terminalCaps)}${bracketedPasteSequence(this.terminalCaps, true)}\x1b[?25l`
   }
 
   private bindAgentEvents(): void {
@@ -2226,7 +2252,7 @@ export class SshTui {
       try {
         process.stdout.write('\x1b]0;\x07')
         process.stdout.write('\x1b[0m\x1b[2J\x1b[3J\x1b[H')
-        process.stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
+        process.stdout.write(`${mouseDisableSequence()}${bracketedPasteSequence(this.terminalCaps, false)}\x1b[?25h${this.useAlternateScreen ? '\x1b[?1049l' : ''}`)
       } catch (error) {
         if (!isHangupErrno(error)) {
           try {
@@ -2771,7 +2797,7 @@ export class SshTui {
       void this.onReattach?.()
       return
     }
-    this.write(`${this.useAlternateScreen ? '\x1b[?1049h' : ''}\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l`)
+    this.write(this.enterScreenSequence())
     this.forceFullPaint = true
     this.dirty = true
     // The user is back: say so, with how many times this Host has been
@@ -10309,6 +10335,14 @@ export class SshTui {
     this.leaveHistoryBrowse()
     this.write(osc52Clipboard(text))
     this.pushRow({ kind: 'system', text: notice })
+    // The write is a request the terminal may ignore — conhost never reads OSC
+    // 52, xterm gates it behind `allowWindowOps`, tmux needs `set-clipboard on`.
+    // The write still goes out (it does work on all three when configured), but
+    // where the capability table is unsure the user is told, instead of finding
+    // out when they paste.
+    if (osc52Impossible(this.terminalCaps)) {
+      this.pushRow({ kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) })
+    }
     this.markDirty()
   }
 

@@ -17,6 +17,7 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { colorDepth } from './color-depth.js'
+import { terminalCapabilities } from './terminal-caps.js'
 import { t } from './i18n/index.js'
 import {
   displaySockExists,
@@ -55,6 +56,21 @@ export interface DiagSnapshot {
   hostVersion: string
   nodeVersion: string
   platform: string
+  /**
+   * Which terminal we classified, and the capabilities we then claimed. A
+   * Windows report that says "the mouse does nothing" or "copy did nothing" is
+   * otherwise guesswork: conhost and Windows Terminal look identical from the
+   * transcript, and the claimed flags are what the TUI actually acted on.
+   */
+  terminal?: {
+    family: string
+    label: string
+    mouse: boolean
+    bracketedPaste: boolean
+    alternateScreen: boolean
+    osc52: boolean
+    osc8: boolean
+  }
   /**
    * What the palette resolved to and which hints decided it. A "no colour on
    * Windows" report is otherwise guesswork: `TERM` is unset there by default.
@@ -167,6 +183,20 @@ export function diagVerdicts(snapshot: DiagSnapshot): string[] {
 }
 
 /** The whole report as transcript lines. Pure. */
+/** The terminal facts `/diag` reports, from the capability classifier. */
+function describeTerminal(): NonNullable<DiagSnapshot['terminal']> {
+  const caps = terminalCapabilities()
+  return {
+    family: caps.family,
+    label: caps.label,
+    mouse: caps.mouse,
+    bracketedPaste: caps.bracketedPaste,
+    alternateScreen: caps.alternateScreen,
+    osc52: caps.osc52,
+    osc8: caps.osc8,
+  }
+}
+
 export function formatDiag(snapshot: DiagSnapshot): string[] {
   const yes = t('diag.yes')
   const no = t('diag.no')
@@ -188,6 +218,17 @@ export function formatDiag(snapshot: DiagSnapshot): string[] {
         ? t('diag.colorUnset')
         : snapshot.color.colorTerm,
       wt: snapshot.color.windowsTerminal ? yes : no,
+    }))
+  }
+  if (snapshot.terminal !== undefined) {
+    lines.push(t('diag.rowTerminal', {
+      label: snapshot.terminal.label,
+      family: snapshot.terminal.family,
+      mouse: snapshot.terminal.mouse ? yes : no,
+      paste: snapshot.terminal.bracketedPaste ? yes : no,
+      alt: snapshot.terminal.alternateScreen ? yes : no,
+      osc52: snapshot.terminal.osc52 ? yes : no,
+      osc8: snapshot.terminal.osc8 ? yes : no,
     }))
   }
   lines.push(t('diag.rowSession', { session: snapshot.sessionId }))
@@ -334,6 +375,10 @@ export async function collectDiag(options: {
     hostVersion: options.hostVersion,
     nodeVersion: process.version,
     platform: `${process.platform} ${process.arch}`,
+    // Classified here rather than passed in: /diag must describe the terminal
+    // this process is actually attached to, and the classifier only reads the
+    // environment.
+    terminal: describeTerminal(),
     color: options.color ?? {
       depth: String(colorDepth(process.env)),
       ...((process.env.TERM ?? '') === '' ? {} : { term: process.env.TERM }),

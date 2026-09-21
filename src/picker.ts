@@ -22,6 +22,7 @@ import {
   type ResumableSessionPager,
 } from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
+import { terminalCapabilities } from './terminal-caps.js'
 import { truncateToWidth } from './term-text.js'
 import { TerminalInputGuard } from './terminal-input.js'
 import { t } from './i18n/index.js'
@@ -453,8 +454,7 @@ export async function showSessionPicker(
   const stdin = options.stdin ?? process.stdin
   const stdout = options.stdout ?? process.stdout
   const openPager = options.openPager ?? openResumableSessionPager
-  const useAltScreen = process.env.DSH_TUI_NO_ALT_SCREEN !== '1'
-    && process.env.DSH_TUI_NO_ALT_SCREEN !== 'true'
+  const useAltScreen = terminalCapabilities().alternateScreen
   const decoder = new StringDecoder('utf8')
   stdin.setRawMode(true)
   stdin.resume()

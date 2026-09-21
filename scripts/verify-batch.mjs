@@ -28,6 +28,9 @@ const STEPS = [
   // The same probe on a profile this repo built itself: the path CI and a fresh
   // machine take, and the only one Windows can take.
   { id: 'home', label: 'pty probe (throwaway home)', command: 'node', args: ['scripts/probe-home.mjs', '--probe'], timeoutMs: 900_000 },
+  // One boot per terminal family, asserting the escapes each would get: the
+  // capability table is cheap to unit test, the wiring is what shipped wrong.
+  { id: 'term', label: 'pty terminal-capability probe', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-term-probe.mjs'], timeoutMs: 900_000 },
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },

@@ -597,6 +597,10 @@ npm run build
 - **标题栏 / 铃声不生效**：终端需支持 OSC 0 与 BEL；`DSH_TUI_NO_BELL=1` 可关闭铃声。
 - **深色终端下整行底色太抢眼**：`DSH_TUI_COLOR_DEPTH=none` 去掉底色，diff 仍用 `+`/`-` 区分。
 
+- **终端兼容性**：每个终端允许发什么、承诺什么（Windows Terminal / conhost / GNOME / XFCE / Konsole /
+  xterm / tmux / screen / Linux 控制台）见 [docs/terminals.md](docs/terminals.md)；
+  判定依据写在 `/diag` 的「终端」一行，判定错了用 `DSH_TUI_TERM_CAPS` 覆盖。
+
 ### 状态栏与额度
 
 - **额度条显示 `░░░░░░░░ ?%`**：**还没拿到读数**（接口慢或不通），不是 0%。TUI 每 15 秒重试一次，拿到后自动替换成

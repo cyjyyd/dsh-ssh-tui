@@ -71,6 +71,9 @@ jobs:
         run: |
           npm install -g pnpm@10 --no-audit --no-fund
           node scripts/probe-home.mjs --probe
+      - name: Terminal-capability probe
+        if: matrix.dsh == '0.1.5-rc.2'
+        run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
   # path only gets real coverage on a Windows runner.
@@ -99,3 +102,7 @@ jobs:
           node scripts/probe-home.mjs --probe
       - name: End-to-end drop/reattach probe (ConPTY)
         run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
+      # The Windows-only terminal profiles (Windows Terminal, conhost) need a real
+      # win32 platform, so this leg is the only one that can run them.
+      - name: Terminal-capability probe (incl. Windows profiles)
+        run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
