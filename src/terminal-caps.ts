@@ -306,6 +306,10 @@ export function terminalCapabilities(probe: TerminalProbe = {}): TerminalCapabil
  * surprise into permanent noise.
  */
 export function osc52Impossible(caps: TerminalCapabilities): boolean {
+  // The effective capability, not the family alone: `DSH_TUI_TERM_CAPS=osc52` is
+  // the user saying their terminal does handle it (a patched conhost, a wrapper
+  // that relays it), and that must silence the note rather than be ignored.
+  if (caps.osc52) return false
   return caps.family === 'windows-console' || caps.family === 'linux-console' || caps.family === 'screen'
 }
 

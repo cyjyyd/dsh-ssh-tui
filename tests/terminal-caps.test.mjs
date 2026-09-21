@@ -237,4 +237,10 @@ test('the clipboard hint fires only where OSC 52 cannot work at all', () => {
   assert.equal(osc52Impossible(caps(TMUX)), false)
   assert.equal(osc52Impossible(caps(DUMB)), false)
   assert.equal(osc52Impossible(caps(WINDOWS_TERMINAL, 'win32')), false)
+  // An explicit `osc52` override is the user saying their terminal does handle
+  // it, and it silences the note — otherwise the one terminal where the note
+  // matters most could not be quietened.
+  assert.equal(osc52Impossible(terminalCapabilities({
+    env: { ...WINDOWS_CONSOLE, DSH_TUI_TERM_CAPS: 'osc52' }, platform: 'win32',
+  })), false)
 })
