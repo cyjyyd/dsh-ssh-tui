@@ -601,6 +601,10 @@ npm run build
   xterm / tmux / screen / Linux 控制台）见 [docs/terminals.md](docs/terminals.md)；
   判定依据写在 `/diag` 的「终端」一行，判定错了用 `DSH_TUI_TERM_CAPS` 覆盖。
 
+- **文件权限**：`env.sh`/`env.cmd`（含 API Key）、`.credentials.yaml`、SuperGrok token、锁与套接字目录
+  在 POSIX 上是 `0600`/`0700`，在 Windows 上是**只授权当前用户**的 ACL（`icacls` 去掉继承）。
+  `DSH_HOME` 放在共享目录时这一点尤其重要。
+
 ### 状态栏与额度
 
 - **额度条显示 `░░░░░░░░ ?%`**：**还没拿到读数**（接口慢或不通），不是 0%。TUI 每 15 秒重试一次，拿到后自动替换成

@@ -13,6 +13,8 @@
  * *comparison* outside this file — so the next one fails in review rather than on
  * a desktop.
  */
+import { spawnSync } from 'node:child_process'
+import { chmodSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -96,4 +98,125 @@ export function displayHomePath(
   if (home === userHome) return `~/.dsh/${file}`
   if (home.startsWith(`${userHome}/`)) return `~/${home.slice(userHome.length + 1)}/${file}`
   return join(home, file)
+}
+
+/**
+ * Who owns the files this plugin writes, and how to keep it that way.
+ *
+ * On POSIX the `mode` passed to `writeFile`/`mkdir` (`0o600`, `0o700`) is the
+ * whole story. **On Windows it is silently ignored**, and the files that matter
+ * here are not cosmetic: `env.cmd` carries API keys, the SuperGrok token file
+ * carries an OAuth grant, and the lock/socket directories carry session
+ * metadata. What they get instead is the ACL inherited from their parent — fine
+ * under `%USERPROFILE%\.dsh`, and *not* fine when `DSH_HOME` points somewhere
+ * shared (`C:\dsh`, a network share, a machine where `Users` can read the
+ * directory), which is exactly when nobody notices.
+ *
+ * So the intent is applied explicitly: `icacls` with inheritance removed and a
+ * single grant to the current user. The argv is built by a pure function so it
+ * can be asserted on Linux; applying it is best-effort by design — a machine
+ * without `icacls`, or a path held open by another process, must not fail the
+ * write that just succeeded. Failing closed here would mean a TUI that cannot
+ * save its own settings.
+ */
+
+/** The user `icacls` should grant, or undefined when the environment has none. */
+export function aclUserName(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (platform !== 'win32') return undefined
+  for (const key of ['USERNAME', 'USER']) {
+    const value = (env[key] ?? '').trim()
+    if (value !== '') return value
+  }
+  return undefined
+}
+
+/**
+ * The exact `icacls` arguments for one path.
+ *
+ * `/inheritance:r` drops what the parent offered (this is the part that matters:
+ * adding a grant without removing inheritance leaves `Users` in place), and
+ * `(OI)(CI)` makes a directory's grant apply to what is created inside it —
+ * without it every new lock file would need its own call.
+ */
+export function restrictPathArgs(path: string, user: string, options: { directory?: boolean } = {}): string[] {
+  const grant = options.directory === true ? `${user}:(OI)(CI)F` : `${user}:F`
+  return [path, '/inheritance:r', '/grant:r', grant]
+}
+
+/** Directories and files whose contents must not be readable by other users. */
+export interface RestrictDeps {
+  /** Runner for `icacls`; injected by tests. Returns true on success. */
+  run?: (command: string, args: string[]) => boolean
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * Apply `mode` on POSIX, a single-user ACL on Windows.
+ *
+ * Returns whether the restriction was applied. Never throws: the caller has
+ * already written the file, and a permission call is not worth losing it over.
+ */
+export async function restrictPathToUser(
+  path: string,
+  options: { mode: number; directory?: boolean } & RestrictDeps = { mode: 0o600 },
+): Promise<boolean> {
+  const platform = options.platform ?? process.platform
+  try {
+    if (platform !== 'win32') {
+      const { chmod } = await import('node:fs/promises')
+      await chmod(path, options.mode)
+      return true
+    }
+    const user = aclUserName(options.env, platform)
+    if (user === undefined) return false
+    const args = restrictPathArgs(path, user, { directory: options.directory === true })
+    if (options.run !== undefined) return options.run('icacls', args)
+    return await runIcaclsAsync('icacls', args)
+  } catch {
+    return false
+  }
+}
+
+/** Synchronous twin, for the sites that create their file with `openSync`. */
+export function restrictPathToUserSync(
+  path: string,
+  options: { mode: number; directory?: boolean } & RestrictDeps = { mode: 0o600 },
+): boolean {
+  const platform = options.platform ?? process.platform
+  try {
+    if (platform !== 'win32') {
+      chmodSync(path, options.mode)
+      return true
+    }
+    const user = aclUserName(options.env, platform)
+    if (user === undefined) return false
+    const run = options.run ?? runIcaclsSync
+    return run('icacls', restrictPathArgs(path, user, { directory: options.directory === true }))
+  } catch {
+    return false
+  }
+}
+
+/** `icacls`, synchronously, with a hidden window and a short leash. */
+function runIcaclsSync(command: string, args: string[]): boolean {
+  const result = spawnSync(command, args, { stdio: 'ignore', windowsHide: true, timeout: 5_000 })
+  return result.status === 0
+}
+
+/** Async form, so a slow `icacls` never blocks a paint. */
+function runIcaclsAsync(command: string, args: string[]): Promise<boolean> {
+  return import('node:child_process').then(({ spawn }) => new Promise<boolean>(resolve => {
+    try {
+      const child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+      const timer = setTimeout(() => { try { child.kill() } catch { /* gone */ } resolve(false) }, 5_000)
+      child.on('error', () => { clearTimeout(timer); resolve(false) })
+      child.on('exit', code => { clearTimeout(timer); resolve(code === 0) })
+    } catch {
+      resolve(false)
+    }
+  }))
 }

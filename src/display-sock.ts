@@ -26,7 +26,7 @@ import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:f
 import { homedir } from 'node:os'
 import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
-import { hostSpawnOptions, usesSigwinch } from './platform.js'
+import { hostSpawnOptions, restrictPathToUserSync, usesSigwinch } from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
 
 export const FRAME_STDIN = 1
@@ -773,7 +773,11 @@ export function spawnDetachedHost(sessionId: string, platform: NodeJS.Platform =
   let errFd: number | undefined
   try {
     mkdirSync(dirname(errFile), { recursive: true, mode: 0o700 })
+    // The Host's stderr can quote a provider error; the directory and the log
+    // both get the intent applied, since `mode` is POSIX-only.
+    restrictPathToUserSync(dirname(errFile), { mode: 0o700, directory: true })
     errFd = openSync(errFile, 'w')
+    restrictPathToUserSync(errFile, { mode: 0o600 })
   } catch {
     errFd = undefined
   }

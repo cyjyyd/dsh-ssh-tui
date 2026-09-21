@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
-import { usesProcessIdentity } from './platform.js'
+import { restrictPathToUser, usesProcessIdentity } from './platform.js'
 import { displaySockExists, isPipePath, resolveDshHome, sessionLabel, sessionSockLookupPaths, sessionSockPath } from './display-sock.js'
 
 export type SessionLockState = 'attached' | 'paused' | 'running-detached'
@@ -366,7 +366,9 @@ export async function readSessionLock(
 
 export async function writeSessionLock(path: string, info: SessionLockInfo): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  await restrictPathToUser(dirname(path), { mode: 0o700, directory: true })
   await writeFile(path, `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 })
+  await restrictPathToUser(path, { mode: 0o600 })
 }
 
 export async function acquireSessionLock(

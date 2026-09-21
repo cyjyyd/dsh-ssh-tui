@@ -4,6 +4,7 @@
  */
 
 import { resolveDshHome } from './display-sock.js'
+import { restrictPathToUser } from './platform.js'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -97,8 +98,14 @@ export async function saveSessionIndex(
     await mkdir(dirname(path), { recursive: true })
     await writeFile(tmp, body, { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, path)
+    // `mode` is a POSIX-only promise: on Windows the intent is an ACL, and the
+    // index names every session on the machine.
+    await restrictPathToUser(path, { mode: 0o600 })
   } catch {
-    try { await writeFile(path, body, { encoding: 'utf8', mode: 0o600 }) } catch { /* best-effort */ }
+    try {
+      await writeFile(path, body, { encoding: 'utf8', mode: 0o600 })
+      await restrictPathToUser(path, { mode: 0o600 })
+    } catch { /* best-effort */ }
   }
 }
 

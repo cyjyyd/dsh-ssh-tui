@@ -700,6 +700,10 @@ Find your symptom; each answer is what to do, not a change log.
   [docs/terminals.md](docs/terminals.md); `/diag` prints the verdict it used, and
   `DSH_TUI_TERM_CAPS` overrides it.
 
+- **File permissions** — `env.sh`/`env.cmd` (API keys), `.credentials.yaml`, the SuperGrok token and the
+  lock/socket directories are `0600`/`0700` on POSIX, and on Windows a single-user ACL (`icacls` with
+  inheritance removed). That matters when `DSH_HOME` lives somewhere shared.
+
 ### Status line and quota
 
 - **The quota widget shows `░░░░░░░░ ?%`** — no reading has arrived yet (the API is slow or

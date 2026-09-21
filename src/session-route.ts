@@ -23,6 +23,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { resolveDshHome } from './display-sock.js'
+import { restrictPathToUser } from './platform.js'
 import { adoptSessionSubagentSelection, normalizeSubagentSelection, type SubagentSelectionRef } from './subagent-model.js'
 
 /** Subagent route as this session ran it; no provider means "follows parent". */
@@ -162,10 +163,12 @@ export async function saveSessionRoutes(
     await mkdir(dirname(path), { recursive: true })
     await writeFile(tmp, body, { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, path)
+    await restrictPathToUser(path, { mode: 0o600 })
     return true
   } catch {
     try {
       await writeFile(path, body, { encoding: 'utf8', mode: 0o600 })
+      await restrictPathToUser(path, { mode: 0o600 })
       return true
     } catch {
       // A route that cannot be written is a session that starts from the

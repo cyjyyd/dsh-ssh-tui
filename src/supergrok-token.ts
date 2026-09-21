@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { t } from './i18n/index.js'
+import { restrictPathToUser } from './platform.js'
 
 export const SUPERGROK_AUTH_PATHS = [
   join(homedir(), '.grok-bridge', 'auth.json'),
@@ -131,6 +132,9 @@ export async function persistSuperGrokToken(
   }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+  // An OAuth refresh token: on Windows `mode` does nothing, so the ACL is the
+  // only thing standing between it and every other account on the machine.
+  await restrictPathToUser(path, { mode: 0o600 })
   const stored = parseSuperGrokAuthFile(record, path)
   if (stored === undefined) throw new Error(t('grok.writeFail', { path }))
   return stored

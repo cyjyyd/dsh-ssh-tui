@@ -82,10 +82,17 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
 
 ### P1：先补有风险的
 
-1. **文件权限在 Windows 上是空操作。** `0o600` / `0o700`（20 处）在 Windows 静默无效，而它们守着
-   `~/.dsh/.credentials.yaml`、`tui-locks/*`、`tui-socks/*.err`、`env.cmd` 这些含密钥或会话信息的文件。
-   二选一：用 `icacls` 把 ACL 收到当前用户；或明确降级并在文档里写清。
-   *验收*：Windows 上新装并首启后，上述文件的 ACL 只含当前用户；收紧动作走 `src/platform.ts` 且参数可在 Linux 断言。
+1. ~~**文件权限在 Windows 上是空操作。**~~ **已完成（P1-2）**：`restrictPathToUser()` /
+   `restrictPathToUserSync()`（`src/platform.ts`）把同一意图在两端都落实——POSIX 是 `chmod`，
+   Windows 是 `icacls <path> /inheritance:r /grant:r <user>:F`（目录加 `(OI)(CI)`，这样目录里新建的文件
+   也继承）。argv 由纯函数 `restrictPathArgs()` 生成因此在 Linux 可断言；
+   **效果**由 `tests/platform-permissions.test.mjs` 里一条只在 `win32` 跑的用例在真实 Windows 上验证
+   （断言 ACL 里没有 `Users` / `Everyone` / `Authenticated Users`，且当前用户在里面）。
+   接入点：`env.cmd`/`env.sh`（API Key）、`.credentials.yaml`（`/setup` 写完之后）、
+   SuperGrok token（OAuth refresh token）、`tui-locks/`、`tui-socks/` 与其 `*.err`、
+   `tui-session-routes.json`、`tui-session-index.json`。全部 best-effort：收紧失败绝不让刚写成功的配置丢失。
+   *顺带修掉的 POSIX 缺陷*：宿主 stderr 日志过去用 `openSync(path,'w')` 创建、**没有任何 mode**，
+   在默认 umask 下是 0644——那段 stderr 可能引用 provider 报错；现在与目录一起收紧到 0600/0700。
 2. **Windows 生命周期写成规范 + 断言。** 明确四种情况的期望：SSH 断连、用户关掉终端窗口、TUI 崩溃、Host 崩溃。
    Windows 没有 SIGHUP，正确信号是管道 EOF + `Get-Process` 判活；"关掉终端后 Host 还活着"这条**目前只有手工验证过**。
    *验收*：`tui-drop-probe` 在 ConPTY 上覆盖"关掉终端窗口"这一条；规范落在本文件。

@@ -135,8 +135,10 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
 
 **再按 `docs/platform.md` 的欠债清单做 P1**（有风险、优先）：
 
-1. **Windows 文件权限不是空操作**：20 处 `0o600/0o700` 在 Windows 静默无效，而它们守着
-   `.credentials.yaml`、`tui-locks/*`、`tui-socks/*.err`、`env.cmd`。用 `icacls` 收到当前用户，或明确降级并写进文档。
+1. ~~**Windows 文件权限不是空操作**~~ **已完成（P1-2）**：`restrictPathToUser()` 把 `0o600/0o700` 的意图
+   在 Windows 上变成 `icacls /inheritance:r /grant:r <user>:F`（目录带 `(OI)(CI)`），接入 env 文件、
+   `.credentials.yaml`、SuperGrok token、锁/套接字目录与宿主 stderr 日志；真实 ACL 由 Windows 腿上的用例断言。
+   （顺带修掉：宿主 stderr 日志过去没有任何 mode，POSIX 下是 0644。）
 2. **生命周期规范 + 断言**：SSH 断连 / 关掉终端窗口 / TUI 崩溃 / Host 崩溃四种情况的期望行为；
    "关掉终端后 Host 还活着"目前**只有手工验证过**（P0 的 drop 探针只覆盖了杀窗口这一种）。
 3. **路径与编码**：空格/非 ASCII/长路径的 `DSH_HOME`、`\\.\\pipe\\` 名字约束、CRLF、`%USERPROFILE%` 与 `$HOME` 不一致。
