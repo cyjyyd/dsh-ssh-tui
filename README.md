@@ -140,6 +140,11 @@ dsh --profile tui          # 必须在真实终端 / SSH 会话里
 `--resume`）；模型思考 / 回复 / 工具 / 子代理等忙碌状态则 **Host 留下**。
 重新 SSH 后同一条命令会优先接入那个进程（选择器标「可接入」），不要再开第二份 Host：
 
+**Windows 例外**：Windows 上宿主是启动器的**非 detached** 子进程——不这样每次工具调用都会闪一个
+控制台窗口——而非 detached 子进程会被 Windows 放进"父进程退出即一起终止"的 job。所以关掉终端窗口
+（或 SSH 客户端窗口）会连带结束正在跑的回合；会话本身不会坏，`--resume` 从日志重建。
+POSIX（Linux/macOS）才保活。见 [docs/platform.md](docs/platform.md) 的《四种死法》。
+
 ```bash
 dsh --profile tui --resume                 # 选择器（活进程优先接入）
 dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从日志恢复

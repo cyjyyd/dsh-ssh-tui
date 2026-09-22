@@ -737,6 +737,12 @@ Find your symptom; each answer is what to do, not a change log.
   a subagent): the turn is cancelled by default and the Host stays, so
   `dsh --profile tui --resume` attaches to it; `/disconnect continue` lets it run to
   completion instead. Do not start a second Host.
+  **Windows is the exception**: there the Host is a *non-detached* child of the launcher —
+  that is what keeps every tool call from flashing a console window — and Windows puts a
+  non-detached child in a job that dies with its parent. Closing the terminal (or the SSH
+  window) therefore ends a running turn as well; the session itself is not damaged and
+  `--resume` rebuilds it from the log. Keeping the Host alive is POSIX-only for now
+  (tracked as P1-4 in `docs/platform.md`).
 - **After reconnecting there is an extra notice line, `^[[17;1R` flashes, and the link chip
   goes hollow** — upgrade; the automatic retry stays in raw mode and drops queued bytes, so
   those replies are no longer echoed.

@@ -198,20 +198,30 @@ function assertHomeIsCoherent(home) {
  * The busy drop: lose the terminal while a turn is in flight, then come back.
  *
  * This is the half `tui-drop-probe.mjs` cannot reach — it closes an *idle*
- * session, whose Host exits by policy. Here the Host must survive, and the
- * reconnected window must say what happened: that it was reconnected, and that
- * an approval arrived while nobody could confirm it.
- *
- * Two deaths, and the platform decides which are distinguishable:
+ * session, whose Host exits by policy. Two deaths, and on POSIX they promise the
+ * same thing: the turn is running in a Host that was `setsid`'d, so it runs to
+ * the end with nobody attached and the next window re-attaches to that same
+ * process. The reconnected window then says what happened.
  *
  *   close   the terminal goes away under a running launcher (the user closed
- *           the window, the SSH link dropped). The Host has its own console on
- *           Windows and its own session on POSIX, so it must outlive it.
- *   crash   the launcher process dies abruptly. Same promise: the turn is
- *           running in the Host, so nothing the user was waiting on is lost.
+ *           the window, the SSH link dropped).
+ *   crash   the launcher process dies abruptly. On Windows both are the same
+ *           call (`scripts/pty-window.mjs`) — no signals exist there — so the
+ *           assertion is about the Host, never about the manner of death.
  *
- * On Windows both are the same call (`scripts/pty-window.mjs`), which is why
- * the assertion is the surviving Host, not the manner of death.
+ * **Windows cannot keep this promise, and the probe says so instead of
+ * pretending.** The Host there is spawned *non-detached* on purpose: that is
+ * what keeps every tool call from flashing a console window, because
+ * `detached: true` is DETACHED_PROCESS and Windows then ignores the
+ * `CREATE_NO_WINDOW` that `windowsHide` sets (see `hostSpawnOptions`). A
+ * non-detached child is assigned by libuv to its global job object, which is
+ * created with `KILL_ON_JOB_CLOSE`: the launcher goes, the job closes, and the
+ * Host is terminated with it. So closing the window ends the session's compute
+ * on Windows — the in-flight turn is lost, and what has to hold instead is that
+ * nothing is *corrupted*: no Host left holding the lock, no zombie relay, and a
+ * session that comes back from its own log. `P1-4` in `docs/platform.md` tracks
+ * giving the Host its own hidden console, which is what would let the POSIX
+ * assertion be used here too (and this branch to be deleted).
  */
 async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash, check, waitFor, delay, plain, output }) {
   firstWindow.write('describe the deployment\r')
@@ -227,11 +237,22 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
   // both count.
   const lockPid = (await readLock(sessionId, home))?.lock?.pid ?? 0
   const survived = Number.isInteger(lockPid) && lockPid > 0 && isAlive(lockPid)
-  check(
-    survived,
-    `a busy ${crash ? 'crash' : 'window close'} must leave the Host running (pid ${lockPid} is gone)`,
-  )
-  console.log(`host after the drop: ${survived ? 'still running (lock held)' : 'exited — the keep-alive policy failed'}`)
+  console.log(`host after the drop: ${survived ? 'still running (lock held)' : 'gone'}`)
+  if (IS_WINDOWS) {
+    // The documented Windows behaviour, asserted so a change to it is noticed:
+    // if this starts failing, a Host survived a closed window and the POSIX
+    // assertion below is the one that should replace it (P1-4 landed).
+    check(
+      !survived,
+      'a closed window on Windows must not leave a Host behind holding the lock'
+      + ` (pid ${lockPid} is still alive — see docs/platform.md, the Windows lifecycle row)`,
+    )
+  } else {
+    check(
+      survived,
+      `a busy ${crash ? 'crash' : 'window close'} must leave the Host running (pid ${lockPid} is gone)`,
+    )
+  }
 
   const second = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {
     name: 'xterm-256color',
@@ -244,16 +265,33 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
   second.onData(chunk => { secondOutput += chunk })
   try {
     await waitFor(() => secondOutput.includes('DeepSeek Harness'), 60_000, 'the boot banner in the new window')
-    await waitFor(() => plain(secondOutput).includes('已重连 1 次'), 30_000, 'the reconnect notice')
-    check(plain(secondOutput).includes('已重连 1 次'), 'the resumed window must say the user was away')
-    // The turn kept running in the Host while nobody was attached, so its output
-    // is in the transcript the new window repaints.
-    check(
-      plain(secondOutput).includes('BUSY-STREAM'),
-      'the turn that kept running during the gap must be in the repainted transcript',
-    )
-    const notice = plain(secondOutput).split('\n').find(line => line.includes('已重连 1 次'))
-    console.log(`reconnect notice: ${notice?.trim().slice(0, 80)}`)
+    if (IS_WINDOWS) {
+      // Nothing to re-attach to: this window boots a Host from the log, so there
+      // is no gap for a "reconnected" line to report and the partial stream
+      // (never flushed) is not in the transcript either. Durability is the
+      // promise that still holds on this platform.
+      await waitFor(
+        () => /空闲|idle/u.test(plain(secondOutput)),
+        60_000,
+        'the idle status line in the new window',
+      )
+      check(
+        plain(secondOutput).includes('describe the deployment'),
+        'the session log must replay what the closed window left behind;'
+        + ` screen tail: ${JSON.stringify(plain(secondOutput).slice(-300))}`,
+      )
+    } else {
+      await waitFor(() => plain(secondOutput).includes('已重连 1 次'), 30_000, 'the reconnect notice')
+      check(plain(secondOutput).includes('已重连 1 次'), 'the resumed window must say the user was away')
+      // The turn kept running in the Host while nobody was attached, so its
+      // output is in the transcript the new window repaints.
+      check(
+        plain(secondOutput).includes('BUSY-STREAM'),
+        'the turn that kept running during the gap must be in the repainted transcript',
+      )
+      const notice = plain(secondOutput).split('\n').find(line => line.includes('已重连 1 次'))
+      console.log(`reconnect notice: ${notice?.trim().slice(0, 80)}`)
+    }
 
     second.write('\x15')
     second.write('/exit\r')
@@ -373,10 +411,10 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
         for (const problem of problems) console.error(`  - ${problem}`)
         return 1
       }
-      console.log(
-        `OK: a turn survived the window ${crash ? 'being killed mid-flight' : 'closing mid-flight'},`
-        + ' and the resumed window reported it',
-      )
+      console.log(IS_WINDOWS
+        ? `OK: the window ${crash ? 'crash' : 'close'} left no Host behind, and the session came back from its log`
+        : `OK: a turn survived the window ${crash ? 'being killed mid-flight' : 'closing mid-flight'},`
+          + ' and the resumed window reported it')
       return 0
     }
 
@@ -445,7 +483,11 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     if (!keep) {
       await killHostByLock(sessionId, home)
       await removeSessionDir(home, sessionId)
-      await rm(home, { recursive: true, force: true })
+      // Best-effort: on Windows a Host that is still tearing down can hold the
+      // directory (EBUSY/EPERM), and failing the probe on its own cleanup would
+      // hide the verdict it just printed.
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        .catch(error => console.log(`(left ${home} behind: ${error.code ?? error.message})`))
     }
   }
 

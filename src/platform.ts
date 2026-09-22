@@ -55,16 +55,23 @@ export function usesProcessIdentity(platform: NodeJS.Platform = process.platform
  * POSIX wants `detached: true` (setsid) so the Host survives the launcher and a
  * hung-up terminal.
  *
- * Windows is the opposite: `detached: true` maps to DETACHED_PROCESS, which
- * gives the Host **no console at all**, and Windows ignores CREATE_NO_WINDOW
- * (what `windowsHide` sets) when DETACHED_PROCESS is present. Every console
- * child the Host then starts — each tool call, every shell, node, git — has to
- * allocate its own console, which is a visible window flashing over the TUI.
- * Dropping `detached` there lets `windowsHide` do its job: the Host gets its
- * own invisible console, and descendants inherit it instead of creating one.
- * The Host still outlives the launcher: Windows does not kill children with
- * their parent, and its console is its own, so closing the user's terminal does
- * not reach it either.
+ * Windows is the opposite, and the trade-off is forced: `detached: true` maps to
+ * DETACHED_PROCESS, and Windows ignores CREATE_NO_WINDOW (what `windowsHide`
+ * sets) when DETACHED_PROCESS is present. Every console child the Host then
+ * starts — each tool call, every shell, node, git — allocates its own console,
+ * which is a visible window flashing over the TUI. So the Host is spawned
+ * non-detached and inherits the launcher's console; descendants inherit it too
+ * instead of creating one.
+ *
+ * The price is on the lifecycle side, and it is real (measured on the Windows CI
+ * leg by `scripts/tui-mock-probe.mjs --busy`, not reasoned about): libuv assigns
+ * a non-detached child to its global job object, which is created with
+ * KILL_ON_JOB_CLOSE. The launcher dies, the job closes, and the Host is
+ * terminated with it — so on Windows a closed terminal window (or an SSH client
+ * window) ends the session's compute, the in-flight turn is lost, and what
+ * survives is the durable log that `--resume` rebuilds from. Giving the Host its
+ * own hidden console is the only way to have both, and Node cannot ask for one
+ * (`CREATE_NEW_CONSOLE` is not exposed) — tracked as P1-4 in `docs/platform.md`.
  */
 export function hostSpawnOptions(platform: NodeJS.Platform = process.platform): {
   detached: boolean
