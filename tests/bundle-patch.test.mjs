@@ -56,6 +56,27 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(manifest.engines?.node, '>=22.19')
 })
 
+test('root specs for the family-pinned packages are exact, not floating', async () => {
+  // The 0.1.5-rc.3 family moved these from caret ranges to exact pins. A root
+  // spec that floats (`^4.0.1`) resolves above the pin (`4.0.2`), and npm then
+  // cannot satisfy the family's exact peer — the install dies with ERESOLVE.
+  // That is not hypothetical: upstream published cordis 4.0.3/4.0.4,
+  // cordis-plugin-loader 1.0.4/1.0.5 and schemastery 3.18.3/3.18.4 on
+  // 2026-09-22, minutes before a CI run, and every leg went red on `npm install`.
+  // Bumping these is deliberate and comes with bumping the dsh family pin.
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  const versionOf = name => manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]
+  for (const [name, pinned] of [
+    ['@deepseek-ai/cordis', '4.0.2'],
+    ['@deepseek-ai/cordis-plugin-loader', '1.0.3'],
+    ['@deepseek-ai/schemastery', '3.18.2'],
+  ]) {
+    assert.equal(versionOf(name), pinned, `${name} must stay pinned to what the family pins`)
+  }
+  // The peer ranges stay ranges: consumers resolve cordis from their host.
+  assert.equal(manifest.peerDependencies?.['@deepseek-ai/cordis'], '^4.0.1')
+})
+
 test('declared dsh range admits every release marked compatible', async () => {
   const semver = (await import('semver')).default
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))

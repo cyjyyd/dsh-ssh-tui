@@ -53,6 +53,13 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 - **跑过了才准标 `compatible`**：`npm install`（切到该版本）→ `npx tsc --noEmit` → `node --test` →
   `probe-home --probe`、`probe-home --probe --script tui-drop-probe.mjs`、`tui-mock-probe --busy`。
   只做了类型层面的判断、或者只看了上游 changelog 的，写 `unknown`。
+- **根部的 `@deepseek-ai` 规格必须跟着族的钉版走。** rc.3 把 cordis / cordis-plugin-loader /
+  schemastery 从 caret 改成了精确钉版，而这三个我们也在根部声明。根上写 `^4.0.1` 会解析到比钉版更高的
+  版本，npm 就再也满足不了族里的精确 peer，安装直接 ERESOLVE——**2026-09-22 15:36–15:37 上游同时发了
+  cordis 4.0.3/4.0.4、loader 1.0.4/1.0.5、schemastery 3.18.3/3.18.4，几分钟后四条 CI 腿全部倒在
+  `npm install` 上**（在那之前 25 分钟还是绿的）。所以 `dependencies`/`devDependencies` 里这三个写死
+  （`4.0.2` / `1.0.3` / `3.18.2`），`peerDependencies` 里保持区间（消费者那边由宿主提供）。
+  `tests/bundle-patch.test.mjs` 会把这条钉住；要动它们就跟族一起动。
 - **范围不要提前放宽。** 只有在真跑绿之后才把新版本纳入范围与 CI 腿；没跑过的版本宁可让
   `dsh` 拒绝加载（明确的"还不支持"），也不要静默地放进来。未验证就声明兼容，等于把
   "反正没测过"翻译成"用户装得上但没人知道会怎样"。
