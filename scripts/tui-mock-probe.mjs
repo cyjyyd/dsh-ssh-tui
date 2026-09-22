@@ -349,11 +349,23 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
   second.onData(chunk => { secondOutput += chunk })
   try {
     await waitFor(() => secondOutput.includes('DeepSeek Harness'), 60_000, 'the boot banner in the new window')
-    if (IS_WINDOWS) {
+    if (bootstrapped) {
+      // The Host is still there, so this window re-attaches to the process that
+      // kept working: it reports the gap, and the turn that finished meanwhile is
+      // in the transcript it repaints.
+      await waitFor(() => plain(secondOutput).includes('已重连 1 次'), 30_000, 'the reconnect notice')
+      check(plain(secondOutput).includes('已重连 1 次'), 'the resumed window must say the user was away')
+      check(
+        plain(secondOutput).includes('BUSY-STREAM'),
+        'the turn that kept running during the gap must be in the repainted transcript',
+      )
+      const notice = plain(secondOutput).split('\n').find(line => line.includes('已重连 1 次'))
+      console.log(`reconnect notice: ${notice?.trim().slice(0, 80)}`)
+    } else {
       // Nothing to re-attach to: this window boots a Host from the log, so there
       // is no gap for a "reconnected" line to report and the partial stream
       // (never flushed) is not in the transcript either. Durability is the
-      // promise that still holds on this platform.
+      // promise that still holds on the fallback path.
       await waitFor(
         () => /空闲|idle/u.test(plain(secondOutput)),
         60_000,
@@ -364,17 +376,6 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
         'the session log must replay what the closed window left behind;'
         + ` screen tail: ${JSON.stringify(plain(secondOutput).slice(-300))}`,
       )
-    } else {
-      await waitFor(() => plain(secondOutput).includes('已重连 1 次'), 30_000, 'the reconnect notice')
-      check(plain(secondOutput).includes('已重连 1 次'), 'the resumed window must say the user was away')
-      // The turn kept running in the Host while nobody was attached, so its
-      // output is in the transcript the new window repaints.
-      check(
-        plain(secondOutput).includes('BUSY-STREAM'),
-        'the turn that kept running during the gap must be in the repainted transcript',
-      )
-      const notice = plain(secondOutput).split('\n').find(line => line.includes('已重连 1 次'))
-      console.log(`reconnect notice: ${notice?.trim().slice(0, 80)}`)
     }
 
     second.write('\x15')
@@ -390,6 +391,9 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
   } finally {
     try { second.kill() } catch { /* already gone */ }
   }
+  // Which promise was asserted, so the verdict printed by the caller says the
+  // same thing the assertions just did.
+  return { bootstrapped }
 }
 
 async function runProbe({ keep, busy, crash, cols, rows }) {
@@ -483,7 +487,7 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     await waitFor(text => /空闲|idle/u.test(text), 60_000, 'the idle status line')
 
     if (busy) {
-      await runBusyDrop({
+      const { bootstrapped } = await runBusyDrop({
         pty, CLI, env, home, sessionId, output: () => output, firstWindow: term, crash,
         check, waitFor, delay, plain,
       })
@@ -495,10 +499,10 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
         for (const problem of problems) console.error(`  - ${problem}`)
         return 1
       }
-      console.log(IS_WINDOWS
-        ? `OK: the window ${crash ? 'crash' : 'close'} left no Host behind, and the session came back from its log`
-        : `OK: a turn survived the window ${crash ? 'being killed mid-flight' : 'closing mid-flight'},`
-          + ' and the resumed window reported it')
+      console.log(bootstrapped
+        ? `OK: a turn survived the window ${crash ? 'being killed mid-flight' : 'closing mid-flight'},`
+          + ' and the resumed window reported it'
+        : `OK: the window ${crash ? 'crash' : 'close'} left no Host behind, and the session came back from its log`)
       return 0
     }
 
