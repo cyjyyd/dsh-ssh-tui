@@ -120,7 +120,14 @@ import {
   windowTranscript,
 } from './rows.js'
 import { detachFromSshSession, DisplayHost, isTuiHostProcess, resolveDshHome, sessionSockPath } from './display-sock.js'
-import { displayHomePath, envFileName, IS_WINDOWS, restrictPathToUser, usesSigwinch } from './platform.js'
+import {
+  displayHomePath,
+  envFileName,
+  hostHasOwnConsole,
+  IS_WINDOWS,
+  restrictPathToUser,
+  usesSigwinch,
+} from './platform.js'
 import {
   bracketedPasteSequence,
   mouseDisableSequence,
@@ -1603,6 +1610,14 @@ export class SshTui {
     }
     if (config.restoredRoute !== undefined) {
       this.pushRow({ kind: 'system', text: sessionRouteNotice(config.restoredRoute) })
+    }
+    // Windows only, and only on the fallback path: with no PowerShell there is
+    // no hidden console, so the Host is a direct child and closing the window
+    // ends the session's compute. Say it at boot rather than let the user find
+    // out by closing the window mid-turn. A bootstrapped Windows Host and every
+    // POSIX Host keep running, so neither says anything.
+    if (isTuiHostProcess() && !hostHasOwnConsole()) {
+      this.pushRow({ kind: 'system', text: t('boot.directHost') })
     }
     for (const notice of config.launchNotices ?? []) {
       this.pushRow({ kind: notice.kind, text: notice.text })

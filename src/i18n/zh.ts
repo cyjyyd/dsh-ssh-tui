@@ -220,6 +220,11 @@ export const zh: Record<string, string> = {
   'boot.starting': '正在启动会话…',
   'boot.host': '正在拉起后台 Host…',
   'boot.resume': '正在载入历史会话…',
+  // Windows only, and only on the fallback path (no PowerShell to start the Host
+  // with a hidden console): this is the build where closing the window ends the
+  // session's compute, so the user should hear it from the TUI, not the hard way.
+  'boot.directHost': '宿主是直接子进程（未找到系统 PowerShell）：关闭终端窗口会结束本会话，'
+    + '历史仍可 --resume 恢复。',
   'prompt.contextPrefix': '(context) {text}',
   'turn.failed': 'Turn {turn} failed: {error}',
   'agent.disposed': 'Agent was disposed; press Ctrl+C to exit.',

@@ -17,16 +17,22 @@
  *   6 rtt     — relay → host (u32be milliseconds; 0xffffffff = unknown)
  *   7 replaced — host → relay, then close (a newer Display took the session)
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { createHash } from 'node:crypto'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { mkdir, readFile, unlink } from 'node:fs/promises'
-import { closeSync, constants as fsConstants, mkdirSync, openSync } from 'node:fs'
+import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
-import { hostSpawnOptions, restrictPathToUserSync, usesSigwinch } from './platform.js'
+import {
+  bootstrapEnv,
+  hostBootstrapCommand,
+  hostSpawnOptions,
+  restrictPathToUserSync,
+  usesSigwinch,
+} from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
 
 export const FRAME_STDIN = 1
@@ -91,6 +97,13 @@ export function isTuiHostProcess(env: NodeJS.ProcessEnv = process.env): boolean 
  * path fails with ENOENT/EACCES and the Host never listens.
  */
 export const WINDOWS_PIPE_PREFIX = '\\\\.\\pipe\\'
+
+/**
+ * How long the hidden-console bootstrap may take to report the Host's pid. It
+ * covers a cold PowerShell start on a busy machine, and nothing of the Host's
+ * own boot: `Start-Process -PassThru` returns as soon as the process exists.
+ */
+const HOST_BOOTSTRAP_TIMEOUT_MS = 15_000
 
 /** Windows rejects pipe names longer than 256 chars; leave generous headroom. */
 const WINDOWS_PIPE_MAX = 200
@@ -220,6 +233,20 @@ export function sessionErrPath(
   const sock = sessionSockPath(sessionId, dshHome, platform)
   if (isPipePath(sock)) return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 64)}.err`)
   return `${sock}.err`
+}
+
+/**
+ * Where the hidden-console bootstrap writes the Host's pid.
+ *
+ * On `\\.\pipe\` Windows there is no socket file to derive a name from, and the
+ * state directory already holds the per-session lock and stderr log, so the pid
+ * file lives beside them. It is removed as soon as it has been read.
+ */
+export function sessionBootstrapPidPath(sessionId: string, dshHome: string = defaultDshHome()): string {
+  // Same label budget as the stderr log next to it: these live in the state
+  // directory rather than next to a socket file, and a long name here is
+  // MAX_PATH budget spent for nothing.
+  return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 64)}.boot.pid`)
 }
 
 /** Pre-digest Host stderr log next to the 0.7.1 socket, when that name differs. */
@@ -562,6 +589,43 @@ function watchHostExit(child: ChildProcess): HostExitWatch {
 }
 
 /**
+ * Watch a Host this process did not spawn itself.
+ *
+ * The hidden-console bootstrap (see `hostBootstrapCommand`) starts the Host
+ * through PowerShell, so there is no `ChildProcess` handle to listen on — the
+ * only handle on the Host is the pid it printed. Polling that pid is enough for
+ * what the watch is for: a Host that dies before its display socket appears
+ * should be reported at once instead of after the whole boot timeout. The code
+ * is unknown here (null), and the poll interval is the detection delay; the
+ * watch is disposed as soon as the channel is up, so it never runs for the life
+ * of the session.
+ */
+const HOST_PID_POLL_MS = 250
+
+function watchHostPid(pid: number): HostExitWatch {
+  let settle: (code: number | null) => void = () => {}
+  const exited = new Promise<number | null>(resolve => { settle = resolve })
+  let timer: NodeJS.Timeout | undefined
+  const tick = (): void => {
+    if (!isPidAlive(pid)) {
+      timer = undefined
+      settle(null)
+      return
+    }
+    timer = setTimeout(tick, HOST_PID_POLL_MS)
+    timer.unref?.()
+  }
+  tick()
+  return {
+    exited,
+    dispose(): void {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+    },
+  }
+}
+
+/**
  * How long a dead-pid report waits for the child's `exit` event before giving
  * up on its code. The event is normally delivered within a tick; the bound only
  * exists so a host that never reports still fails fast.
@@ -764,8 +828,92 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
   }
 }
 
-/** Spawn a detached Host copy of this `dsh` invocation and return its sock path. */
-export function spawnDetachedHost(sessionId: string, platform: NodeJS.Platform = process.platform): SpawnedHost {
+/** Test seam for {@link spawnDetachedHost}; production passes nothing. */
+export interface SpawnHostOptions {
+  /** Start the Host through this command instead of resolving the real one. */
+  bootstrap?: { command: string; args: string[] } | undefined
+  /** How long the bootstrap may take to report a pid (Windows PowerShell start). */
+  bootstrapTimeoutMs?: number
+}
+
+/**
+ * Start the Host through the hidden-console bootstrap and return its pid, or
+ * `undefined` when the bootstrap could not report one.
+ *
+ * `spawnSync` on purpose. The pid has to be in hand before this function
+ * returns (the caller watches it, and the fallback must never leave two Hosts
+ * for one session), and the cost is one bounded wait while the boot splash is
+ * already on screen. PowerShell exits as soon as `Start-Process` has created the
+ * Host, so the wait is its own start-up, not the Host's.
+ *
+ * Falling back is safe exactly when nothing was printed: `Start-Process -PassThru`
+ * either starts the Host and prints its id, or throws before starting anything
+ * (`$ErrorActionPreference = 'Stop'`). A *timeout* is the one case where a Host
+ * might exist and the pid was lost, so it does not fall back — it reports.
+ */
+export function spawnHostThroughBootstrap(
+  bootstrap: { command: string; args: string[] },
+  options: {
+    env: NodeJS.ProcessEnv
+    platform: NodeJS.Platform
+    timeoutMs: number
+    /** File the bootstrap writes the Host's pid to. */
+    pidFile: string
+  },
+): { pid: number } | undefined {
+  // A pid file left by an earlier boot would be read as this one's answer.
+  try { rmSync(options.pidFile, { force: true }) } catch { /* best effort */ }
+  const result = spawnSync(bootstrap.command, bootstrap.args, {
+    env: options.env,
+    ...hostSpawnOptions(options.platform),
+    // No pipes at all. `Start-Process` may hand this script's stdio to the Host,
+    // and a live reader of that pipe would wait for the Host to exit instead of
+    // for the bootstrap: measured here as a 15 s stall before the pid was read.
+    // The pid travels through a file, and the Host's own stderr is redirected by
+    // the script itself.
+    stdio: ['ignore', 'ignore', 'ignore'],
+    timeout: options.timeoutMs,
+  })
+  let written = ''
+  try {
+    written = readFileSync(options.pidFile, 'utf8').trim()
+  } catch {
+    // No file: nothing was started (or the script failed before writing it).
+  }
+  try { rmSync(options.pidFile, { force: true }) } catch { /* best effort */ }
+  const match = /^(\d+)$/u.exec(written)
+  if (match !== null) {
+    const pid = Number(match[1])
+    // Checked before the timeout: a bootstrap that wrote the pid and then hung
+    // still started exactly one Host, and that pid is the answer.
+    if (Number.isInteger(pid) && pid > 0) return { pid }
+  }
+  const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+  if (timedOut || result.signal !== null) {
+    throw new Error(
+      `dsh-ssh-tui: the hidden-console bootstrap did not report a host pid in ${options.timeoutMs}ms;`
+      + ' refusing to start a second host for this session',
+    )
+  }
+  return undefined
+}
+
+/**
+ * Spawn a detached Host copy of this `dsh` invocation and return its sock path.
+ *
+ * On Windows the Host goes through {@link hostBootstrapCommand} when the OS
+ * PowerShell is available: a direct spawn there cannot both survive the
+ * launcher (libuv's `KILL_ON_JOB_CLOSE` job takes a non-detached child with it)
+ * and avoid flashing console windows (`detached` is DETACHED_PROCESS, which makes
+ * Windows ignore `CREATE_NO_WINDOW`). The bootstrap gives the Host a console of
+ * its own, hidden — see `docs/platform.md`. Without it, the direct spawn below
+ * is still what runs, with the old semantics.
+ */
+export function spawnDetachedHost(
+  sessionId: string,
+  platform: NodeJS.Platform = process.platform,
+  options: SpawnHostOptions = {},
+): SpawnedHost {
   const sock = sessionSockPath(sessionId)
   // On Windows the channel is a pipe name, which is not a file path: the log
   // must live in the state directory next to the locks instead.
@@ -781,12 +929,49 @@ export function spawnDetachedHost(sessionId: string, platform: NodeJS.Platform =
   } catch {
     errFd = undefined
   }
-  const child = spawn(process.execPath, hostArgvForSession(sessionId), {
-    // DSH_HOME is pinned to the resolved absolute path: the Host chdirs into
-    // the session's working directory before it listens, so an unset, blank or
-    // relative home would otherwise resolve differently there and the two
-    // processes would compute different channel names.
-    env: { ...process.env, [TUI_HOST_ENV]: '1', DSH_HOME: resolveDshHome() },
+  // DSH_HOME is pinned to the resolved absolute path: the Host chdirs into the
+  // session's working directory before it listens, so an unset, blank or
+  // relative home would otherwise resolve differently there and the two
+  // processes would compute different channel names.
+  const env = { ...process.env, [TUI_HOST_ENV]: '1', DSH_HOME: resolveDshHome() }
+  const argv = hostArgvForSession(sessionId)
+  // Without the stderr log there is nowhere to redirect the Host's stderr, and
+  // leaving it un-redirected would hand it this process's stdio; the direct
+  // spawn is the honest fallback there.
+  const pidFile = sessionBootstrapPidPath(sessionId)
+  const bootstrap = options.bootstrap ?? (errFd === undefined ? undefined : hostBootstrapCommand({
+    platform,
+    execPath: process.execPath,
+    argv,
+    stderrFile: errFile,
+    pidFile,
+  }))
+  let started: { pid: number } | undefined
+  if (bootstrap !== undefined) {
+    started = spawnHostThroughBootstrap(bootstrap, {
+      // The marker rides the bootstrap's environment, which `Start-Process`
+      // passes on to the Host.
+      env: bootstrapEnv(env),
+      platform,
+      timeoutMs: options.bootstrapTimeoutMs ?? HOST_BOOTSTRAP_TIMEOUT_MS,
+      pidFile,
+    })
+    if (started !== undefined) {
+      // The bootstrap redirects the Host's stderr to this path itself, so this
+      // process must not keep a descriptor on it.
+      if (errFd !== undefined) {
+        try { closeSync(errFd) } catch { /* ignore */ }
+      }
+      return {
+        pid: started.pid,
+        sock,
+        exitWatch: watchHostPid(started.pid),
+        ...errFd === undefined ? {} : { errFile },
+      }
+    }
+  }
+  const child = spawn(process.execPath, argv, {
+    env,
     ...hostSpawnOptions(platform),
     stdio: ['ignore', 'ignore', errFd ?? 'ignore'],
   })

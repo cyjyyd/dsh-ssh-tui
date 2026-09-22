@@ -140,10 +140,10 @@ dsh --profile tui          # 必须在真实终端 / SSH 会话里
 `--resume`）；模型思考 / 回复 / 工具 / 子代理等忙碌状态则 **Host 留下**。
 重新 SSH 后同一条命令会优先接入那个进程（选择器标「可接入」），不要再开第二份 Host：
 
-**Windows 例外**：Windows 上宿主是启动器的**非 detached** 子进程——不这样每次工具调用都会闪一个
-控制台窗口——而非 detached 子进程会被 Windows 放进"父进程退出即一起终止"的 job。所以关掉终端窗口
-（或 SSH 客户端窗口）会连带结束正在跑的回合；会话本身不会坏，`--resume` 从日志重建。
-POSIX（Linux/macOS）才保活。见 [docs/platform.md](docs/platform.md) 的《四种死法》。
+Windows 上也一样保活，但走的路不同：宿主由系统 PowerShell 的 `Start-Process -WindowStyle Hidden`
+拉起，因此有**自己的隐形控制台**（既不随用户的窗口关闭，也不会让工具调用闪窗）。唯一的例外是
+机器上找不到 PowerShell：那时回退成直接子进程，关窗会连带结束正在跑的回合（会话不坏，
+`--resume` 从日志重建），**并且启动横幅下面会有一行提示**说明这一点。见 [docs/platform.md](docs/platform.md) 的《四种死法》。
 
 ```bash
 dsh --profile tui --resume                 # 选择器（活进程优先接入）

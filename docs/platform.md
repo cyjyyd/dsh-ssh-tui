@@ -51,6 +51,7 @@ node --test tests/platform-guards.test.mjs   # 静态扫描 + 平台分支断言
 node --test "tests/*.test.mjs"               # 全套；Windows 专属分支用注入的平台跑
 node scripts/probe-home.mjs --probe          # 真 PTY 端到端：自己造一个 profile，不碰 ~/.dsh
 node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重连 + 宿主崩溃恢复
+node --test tests/host-bootstrap.test.mjs     # 隐形控制台启动器的引号/编码/回退/超时分支（纯函数，Linux 可跑）
 node scripts/tui-mock-probe.mjs --busy         # 回合进行中关窗：宿主必须活着（Windows 上就是 ConPTY 拆除）
 node scripts/tui-mock-probe.mjs --busy --crash # 同一场景，但启动器是被 SIGKILL/TerminateProcess 打死的
 ```
@@ -92,16 +93,17 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
 | 情况 | 平台交付的机制 | 启动器（relay） | 宿主（Host） | 用户看到什么 | 断言在哪 |
 |---|---|---|---|---|---|
 | **SSH 断连** | POSIX：控制终端消失 → 内核对前台进程组发 SIGHUP，stdin 读 EIO/EOF。Windows：SSH 客户端那一侧就是 ConPTY 被拆，没有 SIGHUP 可发 | `detachFromSshSession()` 先摘掉默认处置（不摘的话 `dsh` 会在插件反应过来之前拆掉整棵树），之后由 relay 自己的处理器收尾：`finish('signal')` → `quiet()` 还原终端 → 退出 0 | 显示通道 `close` → `handleDisplayDetach` → `handleHangup`。**忙** → `hostKeptAlive` + 保留计时器（`armDetachedIdleTimer`），回合继续跑；**闲** → flush 会话日志后退出 129 | shell 拿回 TTY；`--resume` 时转录还在；宿主被保留时（**仅 POSIX**，Windows 见下一行）重连多一行"已重连 1 次" | `tui-drop-probe.mjs`（POSIX 腿断言退出码 0）、`tui-mock-probe.mjs --busy`、`tests/idle-exit.test.mjs` |
-| **关掉终端窗口** | POSIX：与上一行同一个 SIGHUP。Windows：ConPTY 拆除 + 控制台关闭事件，而且**宿主跟着启动器一起死**——原因是硬约束，不是 bug 漏修：宿主必须非 detached 才有 `windowsHide`（detached = `DETACHED_PROCESS`，Windows 会因此忽略 `CREATE_NO_WINDOW`，于是每次工具调用都闪一个控制台窗口），而非 detached 的子进程会被 libuv 放进它那个 `KILL_ON_JOB_CLOSE` 的全局 job 对象：启动器一死，job 关闭，宿主被一起终止 | 同 SSH 断连。差别只在 Windows：启动器是被终止的，没有优雅退出的机会——所以那条腿只承诺"退出了"，**不承诺退出码** | POSIX：忙则留下、闲则按 idle-exit 退出（`DSH_TUI_IDLE_EXIT_MS`）。Windows：与启动器同生共死，不会留下僵尸宿主或卡住的锁 | POSIX：另一个窗口 `--resume` 接入活进程，关窗前跑的回合跑完，并报"已重连 1 次"。Windows：回合随窗口一起没（未落盘的流式片段丢失），`--resume` 从日志把会话重建出来 | POSIX：`tui-mock-probe.mjs --busy` 断言宿主仍在 + 重连通知 + 转录里有跑完的回合。Windows：同一个探针断言相反的一面——**没有**宿主残留、日志重放出用户消息、窗口能正常退出（关窗前那句"宿主必须活着"在 Windows 上会红，这是有意的：P1-4 落地时应当把它翻回来） |
+| **关掉终端窗口** | POSIX：与上一行同一个 SIGHUP。Windows：ConPTY 拆除 + 控制台关闭事件——**宿主不受影响**，因为它不再挂在用户那个控制台上：`hostBootstrapCommand` 经系统 PowerShell 用 `Start-Process -WindowStyle Hidden` 起宿主（`CREATE_NEW_CONSOLE` + `SW_HIDE`），宿主有了自己的隐形控制台，也不在启动器的 `KILL_ON_JOB_CLOSE` job 里 | 同 SSH 断连。差别只在 Windows：启动器是被终止的，没有优雅退出的机会——所以那条腿只承诺"退出了"，**不承诺退出码** | POSIX：忙则留下、闲则按 idle-exit 退出（`DSH_TUI_IDLE_EXIT_MS`）。Windows：同样留下（忙）或退出（闲）；**没有 PowerShell 的机器**回退到直接 spawn，此时与启动器同生共死，且不会留下僵尸宿主或卡住的锁 | 两个平台一样：另一个窗口 `--resume` 接入活进程，关窗前跑的回合跑完，并报"已重连 1 次" | `tui-mock-probe.mjs --busy`：两个平台都断言宿主存活 + 重连通知 + 转录里有跑完的回合；Windows 另外断言宿主**确实挂在自己的控制台上**（`GetConsoleProcessList`），把它与"根本没有控制台"区分开——后者也能活过关窗，但会让每次工具调用闪窗 |
 | **TUI 崩溃** | POSIX：SIGKILL。Windows：TerminateProcess（没有信号，与关窗是同一个调用） | 进程直接消失：没有 goodbye、没有终端还原、没有锁更新 | 只看到一次没有 goodbye 的通道 `close`，与 SSH 断连走同一条路——宿主分不出、也不需要分出这两者 | 同上；当时在跑的回合由宿主跑完 | `tui-mock-probe.mjs --busy --crash`；`verify-batch` 的 `busycrash` 步 |
 | **宿主崩溃** | 宿主进程消失（`kill -9` / TerminateProcess）。锁文件会留下一个死 pid | relay 看到通道 `close` → `finish('host-closed')`；5 秒恢复窗口（`ATTACH_RECOVERY_WINDOW_MS`）内自动重起宿主并重放转录；超窗或反复失败 → `flapping` 报告 + 还原终端退出（有界，不挂死） | 进程没了；死 pid 由 `session-lock.ts` 判活识破，不会被当成"还在跑" | 窗口留着、转录重放、还能继续输入；坏情况下退回 shell 并给出提示 | `tui-drop-probe.mjs`（杀宿主 → 窗口必须自己回来）、`tests/attach.test.mjs`、`tests/session-lock.test.mjs` |
 
-> Windows 上"关掉窗口"这一条与 SSH 断连是同一条路径：那边没有 SIGHUP 可发，而宿主与启动器共享控制台
-> 又在同一个 job 里，所以只要启动器没了，宿主就没了。**这条差异是真机上量出来的**：P1-3 的探针第一次跑
-> `test-windows` 就把它照出来了（此前 `hostSpawnOptions` 的注释断言"宿主有自己的控制台，关窗够不到它"，
-> 那是错的）。修法只有一条路：让宿主有自己的**隐形**控制台（`CREATE_NEW_CONSOLE` + `SW_HIDE`），
-> Node 的 `spawn` 不暴露这个标志，得走一层能设它的启动器（PowerShell `Start-Process -WindowStyle Hidden`
-> 或一个原生 shim），代价与风险见 P1-4。
+> Windows 这一条的来历值得记下来：P1-3 的探针第一次跑 `test-windows` 就把"关窗后宿主还活着"证伪了——
+> 当时的直接 spawn 让宿主既共享启动器的控制台、又落在 libuv 的 `KILL_ON_JOB_CLOSE` job 里，
+> 而 `hostSpawnOptions` 的注释还写着"它有自己的控制台"（错的）。两条要求在直接 spawn 上互斥
+> （非 detached 才有 `windowsHide`；detached = `DETACHED_PROCESS` 又会让 Windows 忽略 `CREATE_NO_WINDOW`），
+> 所以 P1-4 换成经系统 PowerShell 起宿主：`Start-Process -WindowStyle Hidden` 能同时要到一个**自己的**、
+> **隐形的**控制台，pid 通过文件回传（走管道会被宿主继承，读管道的人就得等宿主退出——这条是本地量出来的
+> 15 秒卡顿）。没有 PowerShell 时按老路直接 spawn，探针会改口断言"没有残留宿主"。
 
 两条贯穿四条的不变量：
 
@@ -142,22 +144,28 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
    自己把它换回来"。
    **这条断言第一次在真 Windows 上跑就翻出了真问题**：Windows 上宿主活不过关窗（libuv 的
    `KILL_ON_JOB_CLOSE` job + 共享控制台），而当时的注释还写着"宿主有自己的控制台，关窗够不到它"。
-   探针因此改成按平台断言：POSIX 断言宿主存活，Windows 断言"没有残留宿主 + 日志能重建会话 +
-   窗口正常退出"，并把修法立成 P1-4。Windows 上没有 SIGHUP 可发（`kill('SIGHUP')` 直接抛错），
+   探针因此改成按平台断言：POSIX 断言宿主存活，Windows 当时只能断言"没有残留宿主 + 日志能重建会话 +
+   窗口正常退出"，并把修法立成 P1-4——P1-4 落地后 Windows 已经翻回与 POSIX 相同的断言（见下一条）。Windows 上没有 SIGHUP 可发（`kill('SIGHUP')` 直接抛错），
    判活一律靠通道 EOF + pid 判活（POSIX `kill(pid,0)`、Windows `Get-Process`）。
-3. **Windows 上让宿主活过"关掉终端窗口"。** 现状：宿主非 detached（为的是不闪控制台窗口），
-   于是被 libuv 放进 `KILL_ON_JOB_CLOSE` 的全局 job，并继承启动器的控制台——启动器一死，宿主一起死，
-   关窗前正在跑的回合随之丢失（日志仍可 `--resume` 重建）。目标：宿主有自己的**隐形**控制台，
-   既不被用户的控制台关闭事件带走，也不因为无控制台而让每个工具调用弹窗。
-   *候选实现*：把宿主 spawn 交给一层能设 `CREATE_NEW_CONSOLE` + `SW_HIDE` 的启动器——
-   PowerShell `Start-Process -WindowStyle Hidden -PassThru`（要处理 pid/退出码/引号与 PowerShell 依赖），
-   或一个极小的原生 shim（多一个需要随包分发的二进制）。Node 的 `spawn` 只暴露 `detached`/`windowsHide`，
-   拿不到 `CREATE_NEW_CONSOLE`，所以纯 Node 无解。
-   *验收*：`tui-mock-probe.mjs --busy` 在 `test-windows` 腿上翻回 POSIX 那半断言（宿主必须存活、
-   重连窗口报"已重连"、转录里有跑完的回合），同时**不重新引入**闪窗（这条只能人工在真机确认，
-   见《在 Linux 上如何自检》末尾那条说明）。
-   *代价*：多一层进程与启动延迟（PowerShell 冷启动 ~0.5–1s），以及一个新的失败面（找不到解释器）。
-   **需要用户拍板再做**：这是"平台差异"与"额外依赖"之间的取舍，不是纯 bug 修复。
+3. ~~**Windows 上让宿主活过"关掉终端窗口"。**~~ **已完成（P1-4）**：宿主改由 `hostBootstrapCommand`
+   （`src/platform.ts`）经**系统 PowerShell**（`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`，
+   不是可选的 PowerShell 7）启动：`Start-Process -WindowStyle Hidden -PassThru` 就是
+   `CREATE_NEW_CONSOLE` + `SW_HIDE`，宿主因此有自己的隐形控制台、且不在启动器的
+   `KILL_ON_JOB_CLOSE` job 里，关窗再也带不走它。细节与踩到的坑：
+   **pid 通过文件回传，不走管道**——`Start-Process` 会把 PowerShell 的 stdio 交给宿主，读管道的人
+   就得等宿主退出（本地实测：`spawnSync` 卡满 15 秒超时才拿到 pid，测试里 258ms vs 15269ms 的差距）；
+   命令行的引号按 `CreateProcess` 规则自己算（`windowsCommandLine()`），因为 `-ArgumentList`
+   不做任何引号处理，而 `DSH_HOME` 带空格是常态；整段脚本用 `-EncodedCommand`（UTF-16LE base64）送进去，
+   不存在被二次解析的注入面（`psQuote()` 另有一层单引号转义）。
+   **回退是安全的**：`Start-Process` 在启动前抛错（`$ErrorActionPreference='Stop'`）就不会写出 pid 文件，
+   此时回退到直接 spawn（旧行为）；唯独**超时**不回退——那种情况下宿主可能已经起来、只是 pid 丢了，
+   再起一个会让同一会话有两个宿主，所以直接报错。
+   回退时**用户能在会话里看到**：宿主启动横幅下多一行说明（`boot.directHost`，仅 Windows 且只在
+   回退路径上出现）——这条差异不该靠"关窗试试"发现。
+   *验收*：`tests/host-bootstrap.test.mjs` 在 Linux 上断言全部纯函数与回退/超时分支（引号、脚本、
+   base64、pid 文件、回退、`ETIMEDOUT` 拒绝二次启动、pid watch）；`tui-mock-probe.mjs --busy` 在
+   `test-windows` 腿上断言宿主存活、**并且**它挂在自己的控制台上（`GetConsoleProcessList`）而
+   不是"没有控制台"。*仍然只能人工确认的*：那个控制台窗口确实是隐藏的（CI 只能证明它独立存在）。
 
 4. **路径与编码。** 带空格/非 ASCII/长路径的 `DSH_HOME`；`\.\pipe\` 名字长度与字符约束；CRLF 对转录与补丁文件的影响；
    `%USERPROFILE%` 与 `$HOME` 不一致时的行为（`displayHomePath` 已有分支，但没在真机上断言过）。

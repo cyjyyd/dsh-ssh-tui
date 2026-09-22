@@ -27,6 +27,7 @@
 import { lstatSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { fork } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -45,6 +46,9 @@ const { sessionLockLookupPaths } = await import(
 // why Windows cannot tell "closed" and "crashed" apart).
 const { closeWindow, crashWindow, windowDeathNote, IS_WINDOWS } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'pty-window.mjs')).href,
+)
+const { hostBootstrapCommand } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/platform.js')).href,
 )
 
 const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy [--crash]] [--keep] [--cols N] [--rows N]
@@ -195,6 +199,55 @@ function assertHomeIsCoherent(home) {
 }
 
 /**
+ * The console a pid is attached to, as Windows sees it — `[]` when it has none.
+ *
+ * A process can be attached to exactly one console, and the question can only be
+ * asked from a process that is not: node-pty ships the agent that does
+ * `FreeConsole`/`AttachConsole` + `GetConsoleProcessList` in a child, which is
+ * the same call its own `kill()` uses to enumerate a pty's processes. `undefined`
+ * means the question could not be asked at all (no node-pty, no agent).
+ */
+async function consoleProcessList(pid) {
+  let agent
+  try {
+    agent = require.resolve('node-pty/lib/conpty_console_list_agent.js', { paths: [ROOT] })
+  } catch {
+    return undefined
+  }
+  return await new Promise(resolve => {
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const child = fork(agent, [String(pid)], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+    const timer = setTimeout(() => {
+      try { child.kill() } catch { /* already gone */ }
+      finish(undefined)
+    }, 10_000)
+    child.once('message', message => {
+      clearTimeout(timer)
+      try { child.kill() } catch { /* already gone */ }
+      const list = message?.consoleProcessList
+      finish(Array.isArray(list) ? list.map(Number) : undefined)
+    })
+    child.once('error', () => { clearTimeout(timer); finish(undefined) })
+    child.once('exit', () => { clearTimeout(timer); finish(undefined) })
+  })
+}
+
+/** How the Host is started here — the hidden-console bootstrap, or a direct spawn. */
+function usesHiddenConsoleBootstrap() {
+  return hostBootstrapCommand({
+    platform: process.platform,
+    execPath: process.execPath,
+    argv: ['probe-availability-check'],
+    pidFile: join(tmpdir(), 'dsh-tui-mock-probe.pid'),
+  }) !== undefined
+}
+
+/**
  * The busy drop: lose the terminal while a turn is in flight, then come back.
  *
  * This is the half `tui-drop-probe.mjs` cannot reach — it closes an *idle*
@@ -209,19 +262,22 @@ function assertHomeIsCoherent(home) {
  *           call (`scripts/pty-window.mjs`) — no signals exist there — so the
  *           assertion is about the Host, never about the manner of death.
  *
- * **Windows cannot keep this promise, and the probe says so instead of
- * pretending.** The Host there is spawned *non-detached* on purpose: that is
- * what keeps every tool call from flashing a console window, because
- * `detached: true` is DETACHED_PROCESS and Windows then ignores the
- * `CREATE_NO_WINDOW` that `windowsHide` sets (see `hostSpawnOptions`). A
- * non-detached child is assigned by libuv to its global job object, which is
- * created with `KILL_ON_JOB_CLOSE`: the launcher goes, the job closes, and the
- * Host is terminated with it. So closing the window ends the session's compute
- * on Windows — the in-flight turn is lost, and what has to hold instead is that
- * nothing is *corrupted*: no Host left holding the lock, no zombie relay, and a
- * session that comes back from its own log. `P1-4` in `docs/platform.md` tracks
- * giving the Host its own hidden console, which is what would let the POSIX
- * assertion be used here too (and this branch to be deleted).
+ * Windows used to be unable to keep it: the Host there was spawned
+ * *non-detached* on purpose (that is what keeps every tool call from flashing a
+ * console window, because `detached: true` is DETACHED_PROCESS and Windows then
+ * ignores the `CREATE_NO_WINDOW` that `windowsHide` sets), and libuv assigns a
+ * non-detached child to its global job object, created with
+ * `KILL_ON_JOB_CLOSE` — the launcher went, the job closed, the Host went with it.
+ * P1-4 fixed that by starting the Host through the OS PowerShell with
+ * `Start-Process -WindowStyle Hidden`, which gives it a console of its own,
+ * invisible and outside this job (`hostBootstrapCommand`). So the same
+ * assertions run on both platforms now, and Windows additionally proves the
+ * *mechanism*: the Host is attached to a console, and it is not the launcher's.
+ *
+ * On a Windows box without PowerShell the bootstrap is unavailable and the
+ * direct spawn is what runs — the old behaviour, deliberately kept as a
+ * fallback. That is the one case where this probe asserts the fallback instead,
+ * and it says so in the log.
  */
 async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash, check, waitFor, delay, plain, output }) {
   firstWindow.write('describe the deployment\r')
@@ -238,20 +294,48 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash,
   const lockPid = (await readLock(sessionId, home))?.lock?.pid ?? 0
   const survived = Number.isInteger(lockPid) && lockPid > 0 && isAlive(lockPid)
   console.log(`host after the drop: ${survived ? 'still running (lock held)' : 'gone'}`)
-  if (IS_WINDOWS) {
-    // The documented Windows behaviour, asserted so a change to it is noticed:
-    // if this starts failing, a Host survived a closed window and the POSIX
-    // assertion below is the one that should replace it (P1-4 landed).
-    check(
-      !survived,
-      'a closed window on Windows must not leave a Host behind holding the lock'
-      + ` (pid ${lockPid} is still alive — see docs/platform.md, the Windows lifecycle row)`,
-    )
-  } else {
+  const bootstrapped = !IS_WINDOWS || usesHiddenConsoleBootstrap()
+  if (bootstrapped) {
     check(
       survived,
       `a busy ${crash ? 'crash' : 'window close'} must leave the Host running (pid ${lockPid} is gone)`,
     )
+  } else {
+    console.log(
+      'note: no hidden-console bootstrap on this box (PowerShell not found), so the Host is a '
+      + 'direct child and goes down with the launcher; asserting that instead of survival',
+    )
+    check(
+      !survived,
+      'without the bootstrap a closed window must not leave a Host behind holding the lock'
+      + ` (pid ${lockPid} is still alive)`,
+    )
+  }
+
+  if (IS_WINDOWS && bootstrapped && survived) {
+    // Why the Host survived, not just that it did: it is attached to a console
+    // of its own, and that console is not the launcher's. Without this the
+    // survival assertion cannot tell the fix apart from a Host that simply has
+    // no console at all — which would survive too, and bring back the flashing
+    // console windows that the direct spawn exists to avoid. Only a human on a
+    // real desktop can confirm the console is *invisible*; this proves it is
+    // separate, which is the half that decides survival.
+    const launcherConsole = await consoleProcessList(firstWindow.pid)
+    const hostConsole = await consoleProcessList(lockPid)
+    if (launcherConsole === undefined || hostConsole === undefined) {
+      check(false, "the console-ownership check needs node-pty's console-list agent, which did not answer")
+    } else {
+      check(
+        hostConsole.includes(lockPid),
+        `the Host (pid ${lockPid}) must be attached to a console; got ${JSON.stringify(hostConsole)}`,
+      )
+      check(
+        !hostConsole.includes(firstWindow.pid),
+        "the Host must not share the launcher console: that is what a closed window takes down"
+        + ` (launcher ${JSON.stringify(launcherConsole)}, host ${JSON.stringify(hostConsole)})`,
+      )
+      console.log(`consoles: launcher ${JSON.stringify(launcherConsole)}, host ${JSON.stringify(hostConsole)}`)
+    }
   }
 
   const second = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {

@@ -14,7 +14,7 @@
  * a desktop.
  */
 import { spawnSync } from 'node:child_process'
-import { chmodSync } from 'node:fs'
+import { chmodSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -63,15 +63,19 @@ export function usesProcessIdentity(platform: NodeJS.Platform = process.platform
  * non-detached and inherits the launcher's console; descendants inherit it too
  * instead of creating one.
  *
- * The price is on the lifecycle side, and it is real (measured on the Windows CI
+ * The price *was* on the lifecycle side, and it was measured (on the Windows CI
  * leg by `scripts/tui-mock-probe.mjs --busy`, not reasoned about): libuv assigns
  * a non-detached child to its global job object, which is created with
- * KILL_ON_JOB_CLOSE. The launcher dies, the job closes, and the Host is
- * terminated with it — so on Windows a closed terminal window (or an SSH client
- * window) ends the session's compute, the in-flight turn is lost, and what
- * survives is the durable log that `--resume` rebuilds from. Giving the Host its
- * own hidden console is the only way to have both, and Node cannot ask for one
- * (`CREATE_NEW_CONSOLE` is not exposed) — tracked as P1-4 in `docs/platform.md`.
+ * KILL_ON_JOB_CLOSE. The launcher died, the job closed, and the Host was
+ * terminated with it — a closed terminal window ended the session's compute.
+ *
+ * This function still returns `detached: false` there, because it describes a
+ * *direct* spawn, and a direct spawn cannot have both properties: Node exposes
+ * `detached` (DETACHED_PROCESS, which makes Windows ignore CREATE_NO_WINDOW) and
+ * `windowsHide`, but not `CREATE_NEW_CONSOLE`. The way out is to not spawn the
+ * Host directly on Windows: {@link hostBootstrapCommand} starts it through the
+ * OS PowerShell, which *can* ask for a new console and hide it. This direct path
+ * stays as the fallback for a Windows box without PowerShell.
  */
 export function hostSpawnOptions(platform: NodeJS.Platform = process.platform): {
   detached: boolean
@@ -79,6 +83,188 @@ export function hostSpawnOptions(platform: NodeJS.Platform = process.platform): 
 } {
   const windows = platform === 'win32'
   return { detached: !windows, windowsHide: true }
+}
+
+/**
+ * The Windows PowerShell that ships with the operating system.
+ *
+ * `powershell.exe` and not `pwsh.exe`: the latter is PowerShell 7, an optional
+ * install, while 5.1 is part of Windows 10/11. `%SystemRoot%` is where it lives
+ * (`%windir%` is the legacy spelling of the same thing); when neither is set
+ * there is nothing to find, and the caller falls back to a direct spawn.
+ */
+export function windowsPowerShellPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.SystemRoot?.trim() || env.windir?.trim()
+  if (raw === undefined || raw === '') return undefined
+  // Spelled with backslashes explicitly rather than with `join`: this is a
+  // Windows path no matter which platform is asking, and the tests assert it on
+  // Linux. A trailing separator (or a forward slash, which Windows accepts) is
+  // normalised away so the result is the same string everywhere.
+  const root = raw.replaceAll('/', '\\').replace(/\\+$/u, '')
+  return `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/** A PowerShell single-quoted literal; `''` is the only escape inside one. */
+export function psQuote(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/**
+ * Quote one argv array into a Windows command line, the way `CreateProcess`
+ * parses it back (the rule from "Everyone quotes command line arguments the
+ * wrong way"): wrap in double quotes when the argument is empty or contains
+ * whitespace or a quote, double the backslashes that precede a quote, and double
+ * trailing backslashes before the closing quote. `Start-Process -ArgumentList`
+ * joins its array with spaces and adds no quoting of its own, so the line has to
+ * be right before it is handed over — a `DSH_HOME` with a space in it is the
+ * normal case, not the exotic one.
+ */
+export function windowsCommandLine(argv: string[]): string {
+  return argv.map(quoteWindowsArgument).join(' ')
+}
+
+function quoteWindowsArgument(argument: string): string {
+  if (argument !== '' && !/[\s"]/u.test(argument)) return argument
+  let quoted = '"'
+  let backslashes = 0
+  for (const character of argument) {
+    if (character === '\\') {
+      backslashes += 1
+      continue
+    }
+    if (character === '"') {
+      quoted += '\\'.repeat(backslashes * 2 + 1) + '"'
+      backslashes = 0
+      continue
+    }
+    quoted += '\\'.repeat(backslashes) + character
+    backslashes = 0
+  }
+  return quoted + '\\'.repeat(backslashes * 2) + '"'
+}
+
+/** `-EncodedCommand` wants base64 of UTF-16LE, which is also what dodges quoting. */
+export function encodePowerShellCommand(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
+/**
+ * The bootstrap script: start the Host with **its own console, hidden**, and
+ * print its pid so the launcher can watch it.
+ *
+ * `Start-Process -WindowStyle Hidden` is the only way to ask for this from a
+ * Node process. It is ShellExecuteEx/CreateProcess with `CREATE_NEW_CONSOLE` and
+ * `SW_HIDE`: the Host gets a console of its own, so closing the user's terminal
+ * no longer takes it down, and that console is invisible, so the tool calls that
+ * inherit it do not flash. `-PassThru` gives the object whose `Id` is printed;
+ * `-RedirectStandardError` keeps the Host's stderr log, which the direct spawn
+ * used to feed through an inherited fd.
+ *
+ * The whole script travels as an encoded command, so nothing in it is ever
+ * re-parsed by a shell.
+ */
+export function hiddenConsoleHostScript(options: {
+  execPath: string
+  argv: string[]
+  /** Where the Host's stderr goes; omitted only in tests. */
+  stderrFile?: string
+  /** Where the Host's pid is written for the launcher to read. */
+  pidFile: string
+}): string {
+  const redirect = options.stderrFile === undefined
+    ? ''
+    : ` -RedirectStandardError ${psQuote(options.stderrFile)}`
+  return [
+    `$ErrorActionPreference = 'Stop'`,
+    `$dshHost = Start-Process -FilePath ${psQuote(options.execPath)}`
+      + ` -ArgumentList ${psQuote(windowsCommandLine(options.argv))}`
+      + ` -WindowStyle Hidden -PassThru${redirect}`,
+    // Written to a file rather than to stdout: the launcher's pipe to this
+    // script would be inherited by the Host, and whoever reads that pipe waits
+    // for the Host to exit. A pid file has no such handle.
+    `[IO.File]::WriteAllText(${psQuote(options.pidFile)}, [string]$dshHost.Id)`,
+  ].join('; ')
+}
+
+/**
+ * Set on the Host's environment by the bootstrap below, through
+ * {@link bootstrapEnv}.
+ *
+ * The Host cannot ask whether it has a console of its own — Node exposes no such
+ * question — so the launcher tells it. That is what lets the one build where the
+ * lifecycle promise does not hold (Windows, no PowerShell, direct child) say so
+ * at boot instead of letting the user discover it by closing the window.
+ */
+export const TUI_HOST_START_ENV = 'DSH_TUI_HOST_START'
+
+/** Marker value for a Host started with a hidden console of its own. */
+export const TUI_HOST_START_BOOTSTRAP = 'hidden-console'
+
+/** The environment the bootstrap hands to the Host: the marker is added here. */
+export function bootstrapEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, [TUI_HOST_START_ENV]: TUI_HOST_START_BOOTSTRAP }
+}
+
+/**
+ * Whether this Host survives its terminal being closed.
+ *
+ * POSIX always does (`setsid`); Windows does exactly when the bootstrap started
+ * it. A Windows Host without the marker is the fallback direct child, which
+ * libuv's `KILL_ON_JOB_CLOSE` job takes down with the launcher — the one case
+ * worth a boot notice.
+ */
+export function hostHasOwnConsole(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform !== 'win32' || env[TUI_HOST_START_ENV] === TUI_HOST_START_BOOTSTRAP
+}
+
+/** How the Host is started when it must not be a direct child. */
+export interface HostBootstrapCommand {
+  command: string
+  args: string[]
+}
+
+/**
+ * The hidden-console bootstrap for this platform, or `undefined` when the Host
+ * should be spawned directly.
+ *
+ * Windows only, and only when the OS PowerShell is really there: the caller
+ * falls back to {@link hostSpawnOptions}, which keeps the boot working (without
+ * the survival property) on a machine where PowerShell is missing or blocked.
+ * `exists` is injectable so the decision is assertable on Linux.
+ */
+export function hostBootstrapCommand(options: {
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+  exists?: (path: string) => boolean
+  execPath: string
+  argv: string[]
+  stderrFile?: string
+  pidFile: string
+}): HostBootstrapCommand | undefined {
+  if ((options.platform ?? process.platform) !== 'win32') return undefined
+  const powerShell = windowsPowerShellPath(options.env ?? process.env)
+  if (powerShell === undefined) return undefined
+  if (!(options.exists ?? existsSync)(powerShell)) return undefined
+  const script = hiddenConsoleHostScript({
+    execPath: options.execPath,
+    argv: options.argv,
+    pidFile: options.pidFile,
+    ...options.stderrFile === undefined ? {} : { stderrFile: options.stderrFile },
+  })
+  return {
+    command: powerShell,
+    args: [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      encodePowerShellCommand(script),
+    ],
+  }
 }
 
 /**

@@ -220,6 +220,11 @@ export const en: Record<string, string> = {
   'boot.starting': 'Starting session…',
   'boot.host': 'Starting the background host…',
   'boot.resume': 'Loading history session…',
+  // Windows only, and only on the fallback path (no PowerShell to start the Host
+  // with a hidden console): this is the build where closing the window ends the
+  // session's compute, so the user should hear it from the TUI, not the hard way.
+  'boot.directHost': 'The host is a direct child (no system PowerShell found): closing the terminal '
+    + 'window ends this session. The history is still there for --resume.',
   'prompt.contextPrefix': '(context) {text}',
   'turn.failed': 'Turn {turn} failed: {error}',
   'agent.disposed': 'Agent was disposed; press Ctrl+C to exit.',
