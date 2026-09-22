@@ -13,8 +13,8 @@
    发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.2)`、`test (0.1.5-rc.1)`、
-   `test (0.1.2-rc.1)`、`test-windows`）**全部 success**，再 `npm publish`。
+   tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.1)`、`test (0.1.2-rc.1)`、
+   `test-windows`）**全部 success**，再 `npm publish`。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
 
 ## 允许 / 不允许
@@ -68,7 +68,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
-| `latest` | `0.1.5-rc.2` | `compatible`（有 CI 腿） |
+| `latest` | `0.1.5-rc.2` | `compatible`（0.7.2 就是对着它发的，CI 绿）；rc.3 发布后这条腿**取消了**：rc.2 自己的 caret 兄弟范围会解析成混版族，npm 直接 ERESOLVE，而它与 rc.3 的 API 逐字节相同（见下） |
 | `next` | `0.1.5-rc.3`（09-22 发布） | `compatible`：本地全套 888 项（885 通过 / 0 失败）+ 三个探针全绿后声明，并进了 CI 腿 |
 | `alpha` | `0.1.7-alpha.1`（09-22） | 范围外，不声明 |
 | — | `0.1.6-alpha.1`（09-15）、`0.1.6-alpha.2`（09-17） | 范围外，不声明；**0.1.6 还没有 rc**。alpha.2 已证实会破 `agent/created` 的编译，修法已在代码里 |

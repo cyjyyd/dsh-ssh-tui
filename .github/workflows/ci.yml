@@ -18,12 +18,22 @@ jobs:
         # rc.2), so npm nests a second @deepseek-ai/dsh-scope and the agent
         # runtime loads two module instances — `agent-presets` then refuses to
         # compose an unscoped context and the TUI never starts. One version for
-        # the whole family keeps a single copy. `latest` (rc.2) keeps its own
-        # leg because that is what a plain install gets; 0.1.2-rc.1 stays as the
-        # oldest supported stack; 0.1.5-rc.1 is still covered because every
-        # non-default leg rewrites the @deepseek-ai/dsh-* devDependencies and
-        # resolves from scratch.
-        dsh: ["0.1.5-rc.3", "0.1.5-rc.2", "0.1.5-rc.1", "0.1.2-rc.1"]
+        # the whole family keeps a single copy. 0.1.2-rc.1 stays as the oldest
+        # supported stack; 0.1.5-rc.1 is still covered because every non-default
+        # leg rewrites the @deepseek-ai/dsh-* devDependencies and resolves from
+        # scratch.
+        #
+        # rc.2 (`latest`) has no leg, deliberately. Upstream published rc.3 with
+        # exact sibling pins; rc.2's caret ranges therefore resolve to a mixed
+        # family in a fresh install now (peer @deepseek-ai/dsh-invariants@^0.1.5-rc.3
+        # from dsh-storage-domain@0.1.5-rc.3 against a root pinned to rc.2) and npm
+        # fails the install with ERESOLVE. Building that leg anyway needs
+        # --legacy-peer-deps, which nests the duplicate module copies the comment
+        # above exists to avoid — and rc.2's published API is identical to rc.3's
+        # (all 31 packages diffed: 0 .d.ts changes, 0 member-level changes), so the
+        # leg would assert nothing the rc.3 leg does not. `dshReleases` still
+        # carries rc.2 as compatible: 0.7.2 shipped against it with CI green.
+        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

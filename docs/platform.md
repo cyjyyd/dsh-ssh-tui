@@ -164,14 +164,14 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
 
 ### P2：体验与分发
 
-4. ~~**终端能力矩阵。**~~ **已完成（P1-1）**：`src/terminal-caps.ts` 一处判定、`docs/terminals.md` 一张表
+5. ~~**终端能力矩阵。**~~ **已完成（P1-1）**：`src/terminal-caps.ts` 一处判定、`docs/terminals.md` 一张表
    （Windows Terminal / conhost / VTE 系 / Konsole / xterm / tmux / screen / Linux 控制台 / dumb），
    `tests/terminal-caps.test.mjs` 一终端一 fixture，`scripts/tui-term-probe.mjs` 每种终端真起一次 TUI
    断言实际发出的序列（Windows 两个 profile 只在 `test-windows` 腿上跑）。剩余：不支持的终端上的
    **ASCII 回退渲染**（代码页非 UTF-8 的 conhost、非 UTF-8 locale）。
-5. **分发与脚本去 bash 化。** `scripts/*.sh`（install / verify / uninstall / smoke）在 Windows 上等于不存在。
+6. **分发与脚本去 bash 化。** `scripts/*.sh`（install / verify / uninstall / smoke）在 Windows 上等于不存在。
    照 `probe-home.mjs` 的样子给 Node 或 PowerShell 等价物，README 补 Windows 快速上手（含"装不上先看什么"）。
-6. **用户可见的 Windows 文档。** 本文件是维护者视角；普通用户需要的是已知限制清单与 `/doctor` 的读法。
+7. **用户可见的 Windows 文档。** 本文件是维护者视角；普通用户需要的是已知限制清单与 `/doctor` 的读法。
 
 ### 这一批已经做完的（P0）
 
