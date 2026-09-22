@@ -530,8 +530,7 @@ export function quotaWindowTag(period: QuotaPeriod | undefined): string {
 
 /**
  * The badge the footer shows instead of the billing plan's own label:
- * `SuperGrok`, `OC·GO` (OpenCode Go), `CC·GOAT` (Command Code Goat),
- * `A2` (AIClient2API panel: the upstream subscription, e.g. Google AI Pro).
+ * `SuperGrok`, `OC·GO` (OpenCode Go), `CC·GOAT` (Command Code Goat).
  *
  * The long names live in `/quota`; this one has to survive next to a model id.
  * Without a `source` (a hand-built snapshot) the plan label is matched instead,
@@ -545,10 +544,6 @@ export function shortQuotaPlanName(snapshot: { plan: string; source?: QuotaSourc
     const tier = plan === '' || plan.toLowerCase() === 'command code' ? '' : plan.toUpperCase()
     return tier === '' ? 'CC' : `CC·${tier}`
   }
-  // The panel label is the upstream plan (a Google AI tier, an account email…),
-  // which is exactly what does not fit here; the provider type already tells the
-  // user which mount of the proxy this is.
-  if (snapshot.source === 'aiclient2api') return 'A2'
   if (/supergrok/iu.test(plan)) return 'SuperGrok'
   if (/opencode/iu.test(plan)) return 'OC·GO'
   if (/goat/iu.test(plan)) return 'CC·GOAT'

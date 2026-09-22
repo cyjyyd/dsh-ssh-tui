@@ -299,9 +299,6 @@ import {
   COMMAND_CODE_SUBSCRIPTIONS_URL,
   COMMAND_CODE_USAGE_URL,
   commandCodePeriodStart,
-  aiClient2ApiSourceFor,
-  aiClient2ApiUsagePath,
-  AICLIENT2API_LOGIN_PATH,
   commandCodeSourceFor,
   crossedQuotaThresholds,
   DEEPSEEK_PUBLIC_BASE_URL,
@@ -314,7 +311,6 @@ import {
   OPENCODE_ZEN_BASE_URL,
   openCodeApiErrorMessage,
   openCodeSourceFor,
-  parseAiClient2ApiUsage,
   parseCommandCodeQuota,
   parseDeepSeekBalance,
   parseOpenAiCompatibleBalance,
@@ -327,7 +323,6 @@ import {
   SUPERGROK_BILLING_URL,
   tightestQuotaWindow,
   type AccountBalanceSnapshot,
-  type AiClient2ApiSource,
   type CommandCodeSource,
   type LlmPiAiProviderProfile,
   type LlmPiAiSection,
@@ -503,10 +498,7 @@ export {
   formatQuotaSnapshot,
   formatQuotaStatusLine,
   joinUrl,
-  aiClient2ApiSourceFor,
-  aiClient2ApiUsagePath,
   openCodeSourceFor,
-  parseAiClient2ApiUsage,
   parseCommandCodeQuota,
   parseDeepSeekBalance,
   parseOpenAiCompatibleBalance,
@@ -8820,11 +8812,6 @@ export class SshTui {
       }
     }
     const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
-    // AIClient2API mounts every provider under `/<providerType>/v1`, so a panel
-    // route is recognized before the balance probes: its quota lives on the
-    // panel, not on an OpenAI-style `/user/balance`.
-    const aiClient2Api = aiClient2ApiSourceFor(provider, llmPiAi)
-    if (aiClient2Api !== null) return await this.fetchAiClient2ApiQuota(aiClient2Api)
     const commandCode = commandCodeSourceFor(provider, llmPiAi)
     if (commandCode !== null) return this.fetchCommandCodeQuota(commandCode)
     const source = openCodeSourceFor(provider, llmPiAi)
@@ -8839,41 +8826,12 @@ export class SshTui {
     return resolveFreshSuperGrokToken(options)
   }
 
-  /**
-   * Panel tokens are per login and the panel is the only reader of the quota,
-   * so they are cached per origin for this session. A 401 means the cached one
-   * went stale (or the panel restarted) and is retried once with a fresh login.
-   */
-  private readonly aiClient2ApiTokens = new Map<string, string>()
-
-  /**
-   * A rejected password is remembered for a cooldown, because A2 counts failed
-   * logins and locks the panel when they run out ("4 attempts remaining"). The
-   * quota refresh runs at start and every ten steps, so retrying a wrong
-   * password on each pass would spend a user's remaining attempts within a
-   * minute; the cached message is re-thrown instead until the cooldown expires
-   * or a correct credential is configured.
-   */
-  private readonly aiClient2ApiLoginFailures = new Map<string, { at: number; message: string }>()
-
-  /** Long enough that a wrong credential is fixed, not hammered. */
-  private static readonly A2_LOGIN_COOLDOWN_MS = 10 * 60_000
-
-  /** One JSON request, with the status kept so a 401 can be handled, not thrown. */
-  private async requestJson(
-    url: string,
-    options: { headers: Record<string, string>; label: string; method?: string; body?: string },
-  ): Promise<{ status: number; ok: boolean; payload: unknown }> {
+  private async fetchJson(url: string, headers: Record<string, string>, label: string): Promise<unknown> {
     let response: Response
     try {
-      response = await fetch(url, {
-        method: options.method ?? 'GET',
-        headers: options.headers,
-        ...options.body === undefined ? {} : { body: options.body },
-        signal: AbortSignal.timeout(15_000),
-      })
+      response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) })
     } catch (error) {
-      throw new Error(t('usage.fetchFail', { label: options.label, error: errorChain(error) }))
+      throw new Error(t('usage.fetchFail', { label, error: errorChain(error) }))
     }
     let payload: unknown
     try {
@@ -8881,87 +8839,10 @@ export class SshTui {
     } catch {
       payload = undefined
     }
-    return { status: response.status, ok: response.ok, payload }
-  }
-
-  private async fetchJson(url: string, headers: Record<string, string>, label: string): Promise<unknown> {
-    const { ok, status, payload } = await this.requestJson(url, { headers, label })
-    if (!ok) throw new Error(t('usage.http', { label, status }))
+    if (!response.ok) {
+      throw new Error(t('usage.http', { label, status: response.status }))
+    }
     return payload
-  }
-
-  /**
-   * `POST /api/login`: the panel password becomes a session token.
-   *
-   * The panel's own message is preferred in the failure, because it is the one
-   * that says what to do ("Incorrect password. 3 attempts remaining.").
-   */
-  private async aiClient2ApiLogin(source: AiClient2ApiSource, password: string): Promise<string> {
-    const { ok, status, payload } = await this.requestJson(joinUrl(source.origin, AICLIENT2API_LOGIN_PATH), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ password }),
-      label: source.label,
-    })
-    if (!ok) {
-      const detail = openCodeApiErrorMessage(payload)
-      const message = detail === ''
-        ? t('usage.a2Login', { label: source.label, status })
-        : t('usage.a2LoginDetail', { label: source.label, status, detail })
-      // Only a rejected credential is worth a cooldown; a 5xx or a proxy error
-      // is transient and the next refresh may well succeed.
-      if (status === 401 || status === 403) {
-        this.aiClient2ApiLoginFailures.set(source.origin, { at: Date.now(), message })
-      }
-      throw new Error(message)
-    }
-    const token = typeof payload === 'object' && payload !== null && !Array.isArray(payload)
-      ? (payload as Record<string, unknown>).token
-      : undefined
-    if (typeof token !== 'string' || token.trim() === '') throw new Error(t('usage.a2NoToken', { label: source.label }))
-    this.aiClient2ApiLoginFailures.delete(source.origin)
-    return token.trim()
-  }
-
-  /** Log in unless a rejected password is still cooling down. */
-  private async aiClient2ApiTokenFromPassword(source: AiClient2ApiSource, password: string): Promise<string> {
-    const failed = this.aiClient2ApiLoginFailures.get(source.origin)
-    if (failed !== undefined && Date.now() - failed.at < SshTui.A2_LOGIN_COOLDOWN_MS) {
-      throw new Error(failed.message)
-    }
-    return await this.aiClient2ApiLogin(source, password)
-  }
-
-  /**
-   * Read the panel's usage view for this provider type.
-   *
-   * The AI key deliberately does not work here — A2 answers 401 for management
-   * routes — so the credential is the panel's, taken from
-   * `AICLIENT2API_PASSWORD` (exchanged for a token) or `AICLIENT2API_TOKEN`
-   * (copied from a browser session). Neither is ever written to the transcript.
-   */
-  private async fetchAiClient2ApiQuota(source: AiClient2ApiSource): Promise<QuotaSnapshot> {
-    const password = await this.resolveCredential(source.passwordEnv)
-    const configuredToken = await this.resolveCredential(source.tokenEnv)
-    let token = this.aiClient2ApiTokens.get(source.origin) ?? configuredToken
-    if (token === undefined) {
-      if (password === undefined) throw new Error(t('usage.a2NoCred', { env: source.passwordEnv, token: source.tokenEnv }))
-      token = await this.aiClient2ApiTokenFromPassword(source, password)
-      this.aiClient2ApiTokens.set(source.origin, token)
-    }
-    const url = joinUrl(source.origin, aiClient2ApiUsagePath(source.providerType))
-    const headers = { authorization: `Bearer ${token}`, accept: 'application/json' }
-    let response = await this.requestJson(url, { headers, label: source.label })
-    if (response.status === 401 && password !== undefined) {
-      token = await this.aiClient2ApiTokenFromPassword(source, password)
-      this.aiClient2ApiTokens.set(source.origin, token)
-      response = await this.requestJson(url, {
-        headers: { ...headers, authorization: `Bearer ${token}` },
-        label: source.label,
-      })
-    }
-    if (!response.ok) throw new Error(t('usage.http', { label: source.label, status: response.status }))
-    return parseAiClient2ApiUsage(response.payload, source.provider)
   }
 
   // ── keyboard ────────────────────────────────────────────────────────────

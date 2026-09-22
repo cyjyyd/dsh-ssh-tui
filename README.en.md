@@ -487,18 +487,9 @@ labelled `(images ok)` in the command list and completion hints.
 - **SuperGrok** reads `GET cli-chat-proxy.grok.com/v1/billing` (weekly remaining %);
 - **OpenCode Go** reads the official `/v1/usage` windows (5-hour / week / month);
 - **Command Code** reads `/alpha/billing/credits` (5-hour / week windows plus the USD credit pool);
-- **An AIClient2API (A2) panel** — a route shaped `https://panel/<providerType>/v1`, e.g. an
-  A2-proxied `gemini-antigravity` — is read through the panel's
-  `GET /api/usage/<providerType>`, which reports the *upstream subscription's* own quota: for
-  antigravity that is the Google AI plan's per-model remaining % and reset time, one row per
-  account when the pool has several. The panel is a management surface and the API key cannot
-  read it (A2 answers 401), so it needs its own credential, either
-  `AICLIENT2API_PASSWORD` (the panel login password, exchanged for a token; preferred) or
-  `AICLIENT2API_TOKEN` (copied from a browser session). Both live in `env.sh`/`env.cmd` or the
-  credential store and never appear in the transcript;
 - **OpenCode Zen** is metered — the TUI points at `https://opencode.ai/zen`.
 
-OpenCode Go / Command Code / SuperGrok / A2 panel quota is fetched silently at start and every 10
+OpenCode Go / Command Code / SuperGrok quota is fetched silently at start and every 10
 model steps (every 4 when an hourly window is near a threshold). The footer
 shows plan name + remaining bar + percent; on a narrow row the plan name
 drops first. DeepSeek official and queryable OpenAI-compatible gateways put

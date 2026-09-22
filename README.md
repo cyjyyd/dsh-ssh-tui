@@ -387,15 +387,9 @@ Command Code 与 OpenCode Go 都是这种网关。
 - **SuperGrok**：`GET cli-chat-proxy.grok.com/v1/billing`，显示本周剩余%；
 - **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
 - **Command Code**：官方 `/alpha/billing/credits`，滚动 5 小时 / 本周剩余% + 月度额度余额（USD）；
-- **AIClient2API（A2）面板**：路由形如 `https://面板/<providerType>/v1`（例如用 A2 反代的
-  `gemini-antigravity`）时，读面板的 `GET /api/usage/<providerType>`，显示**上游订阅自己的**额度
-  ——antigravity 就是谷歌 AI 订阅的逐模型剩余%与重置时间，号池多账号时每行带账号名。
-  面板是管理接口，**API Key 读不到**（会 401），所以要另配一个面板凭据（二选一）：
-  `AICLIENT2API_PASSWORD`（面板登录密码，TUI 用它换 token；推荐）或 `AICLIENT2API_TOKEN`
-  （从浏览器会话里复制的 token）。写进 `env.sh`/`env.cmd` 或凭据库都行，**不会**出现在转录里；
 - **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
 
-OpenCode Go / Command Code / SuperGrok / A2 面板 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方和可查询的 OpenAI 兼容网关把剩余余额画进底栏（`余额 86.42 CNY`）。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询默认每 **10 步**一次；小时窗口接近阈值时改 4 步。
+OpenCode Go / Command Code / SuperGrok 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方和可查询的 OpenAI 兼容网关把剩余余额画进底栏（`余额 86.42 CNY`）。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询默认每 **10 步**一次；小时窗口接近阈值时改 4 步。
 
 ## 配置
 
@@ -620,7 +614,7 @@ npm run build
 
 - **额度条显示 `░░░░░░░░ ?%`**：**还没拿到读数**（接口慢或不通），不是 0%。TUI 每 15 秒重试一次，拿到后自动替换成
   真实数值与窗口；一直不变成数值时用 `/quota` 看具体报错。
-- **没有额度条**：只有 SuperGrok / OpenCode Go / Command Code / AIClient2API 面板有额度；DeepSeek 显示的是余额行，Zen 是计量制。
+- **没有额度条**：只有 SuperGrok / OpenCode Go / Command Code 有额度；DeepSeek 显示的是余额行，Zen 是计量制。
 - **`5Hr` / `1Wk` / `1Mo` 是什么**：该数值所属的额度窗口。默认显示**最小窗口**（5 小时 → 周 → 月），
   `/quota` 列出全部窗口、剩余比例与重置时间。告警仍按"最紧的那个窗口"触发。
 - **状态栏模型名没有提供商前缀**：状态行只显示模型名（`provider/model` 会截断成模型名），完整路由在顶栏与 `/status`；
