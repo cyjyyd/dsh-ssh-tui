@@ -14,6 +14,7 @@ import {
   windowsPowerShellPath,
 } from '../lib/platform.js'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -130,16 +131,41 @@ test('the bootstrap is Windows-only and falls back when PowerShell is absent', (
   assert.ok(script.includes('bin.js'), script)
 })
 
+/**
+ * A stand-in for the PowerShell bootstrap that works on every platform.
+ *
+ * It has to mirror the real contract exactly: start a process that outlives it,
+ * write *that* process's pid to the pid file, and **exit**. Writing its own pid
+ * and staying alive is subtly wrong in a way this test caught — `spawnSync`
+ * waits for the bootstrap to exit, so the "bootstrap" sat there until its
+ * timeout, got killed, and left the test holding a dead pid (15 s and a failure
+ * that looked like the pid watch's). `/bin/sh` was the first version and it made
+ * the whole file fail on Windows: no such path there, so the spawn fell through
+ * to the fallback and every later test was cancelled by the drained loop.
+ */
+function nodeBootstrap(pidFile) {
+  const start = 'const { spawn } = require("node:child_process");'
+    + 'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],'
+    + ' { detached: true, stdio: "ignore" });'
+    + 'child.unref();'
+  return {
+    command: process.execPath,
+    args: [
+      '-e',
+      `${start}require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
+    ],
+  }
+}
+
+/** A bootstrap that starts nothing: exits 0 and writes no pid file. */
+function idleBootstrap(pidFile) {
+  return { command: process.execPath, args: ['-e', 'process.exit(0)'] }
+}
+
 test('a bootstrap that reports a pid is taken, and its pid is what gets watched', async () => {
   const pidFile = sessionBootstrapPidPath('bootstrap-pid-test')
-  const spawned = spawnDetachedHost('bootstrap-pid-test', 'linux', {
-    // A real, long-lived process this process did not spawn: the shell writes
-    // the pid of the backgrounded sleep, exactly like the bootstrap writes the
-    // Host's id.
-    bootstrap: {
-      command: '/bin/sh',
-      args: ['-c', `sleep 30 & echo $! > ${pidFile}`],
-    },
+  const spawned = spawnDetachedHost('bootstrap-pid-test', process.platform, {
+    bootstrap: nodeBootstrap(pidFile),
   })
   assert.equal(Number.isInteger(spawned.pid) && spawned.pid > 0, true)
   assert.equal(spawned.exitWatch !== undefined, true)
@@ -161,19 +187,17 @@ test('a bootstrap that reports a pid is taken, and its pid is what gets watched'
 test('a bootstrap that starts nothing falls back instead of reporting a failure', () => {
   // Exit 0 with no pid: `Start-Process` never ran (it throws rather than
   // returning nothing), so there is no Host to duplicate.
-  const options = pidFile => ({ env: {}, platform: 'linux', timeoutMs: 5_000, pidFile })
-  assert.equal(
-    spawnHostThroughBootstrap({ command: '/bin/sh', args: ['-c', 'true'] }, options('/tmp/nope.pid')),
-    undefined,
-  )
+  const pidFile = join(tmpdir(), `dsh-bootstrap-none-${process.pid}.pid`)
+  const options = { env: {}, platform: process.platform, timeoutMs: 10_000, pidFile }
+  assert.equal(spawnHostThroughBootstrap(idleBootstrap(pidFile), options), undefined)
   // A missing interpreter is the same story.
   assert.equal(
-    spawnHostThroughBootstrap({ command: '/nonexistent/powershell', args: [] }, options('/tmp/nope.pid')),
+    spawnHostThroughBootstrap({ command: join(tmpdir(), 'dsh-no-such-powershell'), args: [] }, options),
     undefined,
   )
   // A non-zero exit is PowerShell failing before it started anything.
   assert.equal(
-    spawnHostThroughBootstrap({ command: '/bin/sh', args: ['-c', 'exit 3'] }, options('/tmp/nope.pid')),
+    spawnHostThroughBootstrap({ command: process.execPath, args: ['-e', 'process.exit(3)'] }, options),
     undefined,
   )
 })
@@ -183,8 +207,13 @@ test('a bootstrap that hangs reports instead of starting a second Host', () => {
   // lost. Starting another one would put two Hosts on one session.
   assert.throws(
     () => spawnHostThroughBootstrap(
-      { command: '/bin/sh', args: ['-c', 'sleep 30'] },
-      { env: {}, platform: 'win32', timeoutMs: 400, pidFile: '/tmp/hang.pid' },
+      { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] },
+      {
+        env: {},
+        platform: process.platform,
+        timeoutMs: 400,
+        pidFile: join(tmpdir(), `dsh-bootstrap-hang-${process.pid}.pid`),
+      },
     ),
     /did not report a host pid in 400ms; refusing to start a second host/u,
   )

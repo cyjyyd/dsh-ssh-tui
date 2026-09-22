@@ -68,12 +68,19 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   const versionOf = name => manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]
   for (const [name, pinned] of [
     ['@deepseek-ai/cordis', '4.0.2'],
+    ['@deepseek-ai/cordis-plugin-hmr', '1.0.17'],
+    ['@deepseek-ai/cordis-plugin-include', '1.0.7'],
     ['@deepseek-ai/cordis-plugin-loader', '1.0.3'],
+    ['@deepseek-ai/cordis-plugin-timer', '1.1.4'],
     ['@deepseek-ai/schemastery', '3.18.2'],
   ]) {
     assert.equal(versionOf(name), pinned, `${name} must stay pinned to what the family pins`)
   }
-  // The peer ranges stay ranges: consumers resolve cordis from their host.
+  // The four cordis plugins are here for the same reason and are not imported:
+  // cordis peers them optionally, so without a root pin npm takes the newest
+  // (`include@1.0.9` on the 0.1.2-rc.1 leg) and that one demands `cordis ~4.0.4`,
+  // which the pinned 4.0.2 can never satisfy. The peer ranges stay ranges:
+  // consumers resolve cordis from their host.
   assert.equal(manifest.peerDependencies?.['@deepseek-ai/cordis'], '^4.0.1')
 })
 
