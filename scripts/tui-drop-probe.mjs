@@ -14,11 +14,16 @@
  * What it drives:
  *
  *   window A   boot the throwaway session, run /status (a short report that
- *              carries the session id), then die by SIGKILL — no goodbye, no
- *              chance to hand the terminal back: the drop as SSH delivers it
+ *              carries the session id), then lose its terminal the way the
+ *              platform does it — SIGHUP on POSIX, ConPTY teardown on Windows
+ *              (see `scripts/pty-window.mjs`) — and exit without leaving a
+ *              zombie holding the display
  *   window B   `--resume` the same session in a fresh PTY: the transcript must
  *              still be there, typing must reach the prompt, and neither window
  *              may have echoed a cursor reply as `[17;1R`
+ *   the Host   killed outright while window B is attached: the launcher must
+ *              replace it and re-attach instead of handing the user back to the
+ *              shell — the "Host 崩溃" row of the lifecycle spec
  *
  * Usage:
  *   node scripts/tui-drop-probe.mjs                 # create a throwaway session
@@ -44,9 +49,10 @@ const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const { sessionLockLookupPaths } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js')).href,
 )
-// The seam: Windows has no signals, so a hard kill there is TerminateProcess.
-const { IS_WINDOWS } = await import(
-  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/platform.js')).href,
+// The seam: how a window dies differs per platform, and the spec says which
+// primitive each death maps to. One module owns that so the probes cannot drift.
+const { closeWindow, windowDeathNote, IS_WINDOWS } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'pty-window.mjs')).href,
 )
 
 const USAGE = `usage: node scripts/tui-drop-probe.mjs [--session <id>] [--keep] [--home <dir>]
@@ -93,18 +99,6 @@ async function readLock(sessionId, home) {
   return undefined
 }
 
-/**
- * Kill a window the way a dropped SSH link does: no goodbye, no cleanup.
- *
- * Windows has no signals — node-pty throws "Signals not supported on windows."
- * — so the hard kill there is a plain terminate (TerminateProcess), which is
- * just as abrupt as SIGKILL is on POSIX.
- */
-function hardKillWindow(term) {
-  if (IS_WINDOWS) term.kill()
-  else term.kill('SIGKILL')
-}
-
 async function killHostByLock(sessionId, home) {
   try {
     const held = await readLock(sessionId, home)
@@ -126,6 +120,16 @@ async function removeSessionDir(home, sessionId) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     await rm(join(home, 'sessions', entry.name, sessionId), { recursive: true, force: true })
+  }
+}
+
+/** True when the pid still exists (signal 0 is the portable liveness probe). */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -180,8 +184,9 @@ async function runProbe({ sessionId, keep, home }) {
       cwd: process.cwd(),
       env,
     })
-    const window = { label, term, output: '' }
+    const window = { label, term, output: '', exited: undefined }
     term.onData(chunk => { window.output += chunk })
+    term.onExit(({ exitCode }) => { window.exited = exitCode })
     windows.push(window)
     return window
   }
@@ -204,6 +209,22 @@ async function runProbe({ sessionId, keep, home }) {
     })
   })
 
+  /**
+   * The launcher is gone — asked two ways on purpose. Windows can keep the pid
+   * answering `kill(pid, 0)` while a handle to it is still open, and node-pty's
+   * exit event is the one that carries the code but only arrives once the ConPTY
+   * output socket closes. Either answer means the window is not lingering.
+   */
+  const waitForWindowGone = async (window, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (window.exited !== undefined) return true
+      if (!isAlive(window.term.pid)) return true
+      if (Date.now() >= deadline) return false
+      await delay(100)
+    }
+  }
+
   const problems = []
   const check = (condition, message) => {
     if (!condition) problems.push(message)
@@ -225,10 +246,23 @@ async function runProbe({ sessionId, keep, home }) {
     const aShowsSession = plain(a.output).includes(createdSessionId)
     check(aShowsSession, 'window A must show the session id in its transcript')
 
-    // 2. The link drops: the whole window dies without a goodbye. SSH gives the
-    //    launcher no chance to hand the terminal back, and this is what the Host
-    //    has to survive.
-    hardKillWindow(a.term)
+    // 2. The link drops: the terminal goes away under a launcher that is still
+    //    running. SSH gives it the platform's hangup and nothing else — no
+    //    goodbye, no chance to choose its exit. The Host has to survive it, and
+    //    the launcher must not stay behind as a zombie holding a dead display.
+    console.log(`window A: ${windowDeathNote('close')}`)
+    closeWindow(a.term)
+    const aGone = await waitForWindowGone(a, 10_000)
+    check(
+      aGone,
+      'the launcher must exit when its terminal goes away instead of lingering as a zombie',
+    )
+    if (aGone && !IS_WINDOWS) {
+      // On POSIX the hangup is a signal the launcher handles: it restores the
+      // terminal and leaves 0. Windows has no signal to handle — the ConPTY
+      // teardown terminates it — so only "it exited" is promised there.
+      check(a.exited === 0, `the hung-up launcher must exit 0 on POSIX (got ${a.exited ?? 'no exit event'})`)
+    }
     await delay(2_000)
     // An idle session whose window died is allowed to let its Host go: the
     // policy keeps a Host only while a turn is running. Either way the session
@@ -270,7 +304,32 @@ async function runProbe({ sessionId, keep, home }) {
     const garbage = /\[17;1R/u.test(plain(a.output)) || /\[17;1R/u.test(plain(b.output))
     check(!garbage, 'a cursor reply must never be echoed into the prompt')
 
-    // 6. And the window itself still exits cleanly.
+    // 6. The Host itself dies while window B is attached. The launcher is
+    //    supposed to absorb this on its own: `host-closed` lands inside the
+    //    recovery window, so it starts a fresh Host and re-attaches. The user
+    //    keeps the window and the transcript instead of being handed back to
+    //    the shell with a "flapping" message.
+    //
+    //    The lock file alone cannot prove the Host is gone — a dead Host leaves
+    //    one behind — so ask the pid, then wait for a *live* Host to answer:
+    //    each `/status` typed below only comes back if a new Host is serving.
+    const beforeCrash = b.output.length
+    await killHostByLock(createdSessionId, home)
+    let recovered = false
+    for (let attempt = 0; attempt < 10 && !recovered; attempt += 1) {
+      await delay(2_500)
+      b.term.write('/status\r')
+      await delay(500)
+      recovered = plain(b.output.slice(beforeCrash)).includes(createdSessionId)
+    }
+    check(recovered, 'a crashed Host must be replaced and re-attached automatically, not left to the user')
+    check(
+      b.exited === undefined,
+      `the attached window must not exit when its Host dies (exited with ${b.exited})`,
+    )
+    console.log(`host after the crash: ${recovered ? 'replaced and re-attached' : 'never came back'}`)
+
+    // 7. And the window itself still exits cleanly.
     const beforeExit = b.output.length
     b.term.write('\x15')
     b.term.write('/exit\r')
@@ -299,7 +358,7 @@ async function runProbe({ sessionId, keep, home }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: the dropped window was resumed with its transcript, a working prompt, and no garbage')
+  console.log('OK: the dropped window was resumed with its transcript, a working prompt, no garbage, and a crashed Host came back on its own')
   return 0
 }
 

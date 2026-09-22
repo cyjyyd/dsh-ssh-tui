@@ -27,6 +27,7 @@
 import { lstatSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
@@ -40,12 +41,20 @@ const ROOT = process.cwd()
 const { sessionLockLookupPaths } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/session-lock.js')).href,
 )
+// How a window dies is per-platform and lives in one place (see its header for
+// why Windows cannot tell "closed" and "crashed" apart).
+const { closeWindow, crashWindow, windowDeathNote, IS_WINDOWS } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'pty-window.mjs')).href,
+)
 
-const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy] [--keep] [--cols N] [--rows N]
+const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy [--crash]] [--keep] [--cols N] [--rows N]
 
   (no args)   synthesize a profile, run a scripted turn, verify copy and find
-  --busy      run the busy-drop scenario instead: kill the window mid-turn and
-              check the Host survives, then that the reconnected window says so
+  --busy      run the busy-drop scenario instead: close the window mid-turn the
+              way this platform closes it and check the Host survives, then that
+              the reconnected window says so
+  --crash     with --busy: the TUI process dies abruptly instead (SIGKILL on
+              POSIX; on Windows the same TerminateProcess as a window close)
   --keep      leave the throwaway home behind (its path is printed)
   --cols N    terminal width to drive (default 110; narrow widths force wraps)
   --rows N    terminal height to drive (default 32)`
@@ -110,7 +119,9 @@ function locateOnScreen(text, needle) {
 }
 
 async function synthesizeHome() {
-  const home = await mkdtemp('/tmp/dsh-tui-mock-')
+  // `tmpdir()`, not `/tmp`: on Windows that literal is drive-relative (`C:\tmp`),
+  // which need not exist, and `mkdtemp` does not create parents.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-mock-'))
   const profile = join(home, 'profiles', 'tui')
   await mkdir(join(profile, 'node_modules'), { recursive: true })
   await writeFile(join(profile, 'package.json'), `${JSON.stringify({
@@ -123,7 +134,9 @@ async function synthesizeHome() {
   // The plugin's own patch layer: what a real install writes is a superset, but
   // the probe needs no roster to render a reply.
   await writeFile(join(profile, 'cordis.patch.yml'), '[]\n')
-  await symlink(ROOT, join(profile, 'node_modules', 'dsh-ssh-tui'), 'dir')
+  // A directory symlink needs SeCreateSymbolicLinkPrivilege on Windows; a
+  // junction needs none and resolves identically (`ROOT` is absolute).
+  await symlink(ROOT, join(profile, 'node_modules', 'dsh-ssh-tui'), IS_WINDOWS ? 'junction' : 'dir')
   return home
 }
 
@@ -182,27 +195,43 @@ function assertHomeIsCoherent(home) {
 }
 
 /**
- * The busy drop: kill the window while a turn is in flight, then come back.
+ * The busy drop: lose the terminal while a turn is in flight, then come back.
  *
- * This is the half `tui-drop-probe.mjs` cannot reach — it kills an *idle*
+ * This is the half `tui-drop-probe.mjs` cannot reach — it closes an *idle*
  * session, whose Host exits by policy. Here the Host must survive, and the
  * reconnected window must say what happened: that it was reconnected, and that
  * an approval arrived while nobody could confirm it.
+ *
+ * Two deaths, and the platform decides which are distinguishable:
+ *
+ *   close   the terminal goes away under a running launcher (the user closed
+ *           the window, the SSH link dropped). The Host has its own console on
+ *           Windows and its own session on POSIX, so it must outlive it.
+ *   crash   the launcher process dies abruptly. Same promise: the turn is
+ *           running in the Host, so nothing the user was waiting on is lost.
+ *
+ * On Windows both are the same call (`scripts/pty-window.mjs`), which is why
+ * the assertion is the surviving Host, not the manner of death.
  */
-async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, check, waitFor, delay, plain, output }) {
+async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, crash, check, waitFor, delay, plain, output }) {
   firstWindow.write('describe the deployment\r')
   await waitFor(() => plain(output()).includes('BUSY-STREAM'), 60_000, 'the streamed reply to start')
 
-  // The drop: SIGKILL, so the launcher never gets to hand the terminal back.
-  firstWindow.kill('SIGKILL')
+  // The drop: no goodbye, no chance for the launcher to hand the terminal back.
+  console.log(`window: ${windowDeathNote(crash ? 'crash' : 'close')}`)
+  if (crash) crashWindow(firstWindow)
+  else closeWindow(firstWindow)
   await delay(2_000)
   // The lock file alone is not proof: a Host that died leaves one behind. Ask
   // the pid whether it is still there. The 0.7.1 name and the digested name
   // both count.
   const lockPid = (await readLock(sessionId, home))?.lock?.pid ?? 0
   const survived = Number.isInteger(lockPid) && lockPid > 0 && isAlive(lockPid)
-  check(survived, `a busy drop must leave the Host running (pid ${lockPid} is gone)`)
-  console.log(`host after the busy drop: ${survived ? 'still running (lock held)' : 'exited — the keep-alive policy failed'}`)
+  check(
+    survived,
+    `a busy ${crash ? 'crash' : 'window close'} must leave the Host running (pid ${lockPid} is gone)`,
+  )
+  console.log(`host after the drop: ${survived ? 'still running (lock held)' : 'exited — the keep-alive policy failed'}`)
 
   const second = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {
     name: 'xterm-256color',
@@ -241,7 +270,7 @@ async function runBusyDrop({ pty, CLI, env, home, sessionId, firstWindow, check,
   }
 }
 
-async function runProbe({ keep, busy, cols, rows }) {
+async function runProbe({ keep, busy, crash, cols, rows }) {
   const pty = await loadModule('node-pty')
   if (pty === undefined) {
     console.log('SKIP: node-pty is unavailable, so the TUI cannot be driven on a PTY here')
@@ -333,7 +362,8 @@ async function runProbe({ keep, busy, cols, rows }) {
 
     if (busy) {
       await runBusyDrop({
-        pty, CLI, env, home, sessionId, output: () => output, firstWindow: term, check, waitFor, delay, plain,
+        pty, CLI, env, home, sessionId, output: () => output, firstWindow: term, crash,
+        check, waitFor, delay, plain,
       })
       // The verdict is printed here too: returning straight out of the scenario
       // would skip it, and a probe that swallows its own failures is worse than
@@ -343,7 +373,10 @@ async function runProbe({ keep, busy, cols, rows }) {
         for (const problem of problems) console.error(`  - ${problem}`)
         return 1
       }
-      console.log('OK: a turn survived the window being killed mid-flight, and the resumed window reported it')
+      console.log(
+        `OK: a turn survived the window ${crash ? 'being killed mid-flight' : 'closing mid-flight'},`
+        + ' and the resumed window reported it',
+      )
       return 0
     }
 
@@ -426,11 +459,12 @@ async function runProbe({ keep, busy, cols, rows }) {
 }
 
 function parseArgs(argv) {
-  const parsed = { keep: false, busy: false, cols: 110, rows: 32 }
+  const parsed = { keep: false, busy: false, crash: false, cols: 110, rows: 32 }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--keep') parsed.keep = true
     else if (arg === '--busy') parsed.busy = true
+    else if (arg === '--crash') parsed.crash = true
     else if (arg === '--cols') parsed.cols = Number(argv[++index]) || 110
     else if (arg === '--rows') parsed.rows = Number(argv[++index]) || 32
     else if (arg === '--help' || arg === '-h') {

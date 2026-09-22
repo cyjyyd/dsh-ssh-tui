@@ -104,6 +104,14 @@ test('the Windows leg drives the real TUI, not just the unit suite', () => {
   const windows = jobStepBlocks(text, 'test-windows').join('\n')
   assert.match(windows, /probe-home\.mjs --probe/u, 'the boot probe must run on Windows')
   assert.match(windows, /tui-drop-probe\.mjs/u, 'and the drop/reattach probe')
+  // "The Host outlives a closed window" was hand-verified on one desktop before
+  // this step existed; a ConPTY teardown mid-turn is the only place a Windows
+  // run can still falsify it.
+  assert.match(
+    windows,
+    /tui-mock-probe\.mjs --busy/u,
+    'and the busy-drop probe, which is where the Host surviving a closed window is asserted',
+  )
 })
 
 test('a CRLF checkout parses the same as an LF one', () => {

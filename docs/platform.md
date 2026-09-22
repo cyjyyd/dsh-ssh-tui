@@ -50,7 +50,9 @@
 node --test tests/platform-guards.test.mjs   # 静态扫描 + 平台分支断言
 node --test "tests/*.test.mjs"               # 全套；Windows 专属分支用注入的平台跑
 node scripts/probe-home.mjs --probe          # 真 PTY 端到端：自己造一个 profile，不碰 ~/.dsh
-node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重连
+node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重连 + 宿主崩溃恢复
+node scripts/tui-mock-probe.mjs --busy         # 回合进行中关窗：宿主必须活着（Windows 上就是 ConPTY 拆除）
+node scripts/tui-mock-probe.mjs --busy --crash # 同一场景，但启动器是被 SIGKILL/TerminateProcess 打死的
 ```
 
 `scripts/probe-home.mjs` 是这一批新增的地基：它用 Node（不是 bash）造一个一次性 `DSH_HOME` +
@@ -62,7 +64,10 @@ node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重�
 
 - `platform-guards` 用**真实环境**断言"Windows 下色深不为 none"与"`resolveDshInvocation` 在本平台可执行"，
   并静态扫描每个 spawn 的 `windowsHide`（这条在 Linux 也红）；
-- `update-check` / `color-depth` / `diag` 的用例覆盖各自的 Windows 分支。
+- `update-check` / `color-depth` / `diag` 的用例覆盖各自的 Windows 分支；
+- 真 ConPTY 上跑 `tui-drop-probe`（关窗/重连 + 杀宿主后自动换一个）与 `tui-mock-probe --busy`
+  （回合进行中关窗，宿主必须活着）——"关掉终端窗口"这条承诺过去只有手工验证，现在由这条腿证伪。
+  `tests/workflow.test.mjs` 会把这三个探针步骤钉在 `test-windows` 里，删掉就红。
 
 因此：**改到环境变量、子进程、路径、终端能力时，先想"这条在 Windows 上哪个分支会被走到"**，
 把那个分支写成可注入的纯函数并断言它；实在无法纯化的（真 PTY、ConPTY、命名管道），就在 PR 里说明
@@ -74,6 +79,33 @@ node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs   # 断连/重�
 上面两个 bug 它一个都复现不了，只会多一套需要维护的环境。Wine 能跑 `cmd.exe` 与 `.cmd`，但装 Windows 版
 Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows 的分支变成可在 Linux 变红的断言**，
 真实平台交给 CI 的那条腿。
+
+## 四种死法：期望与断言（0.7.3 起）
+
+"关掉终端窗口之后宿主还活着"曾经只是在一台机器上手工验证过的一句话。这一节是规范，四条各配一个断言；
+探针里"怎么让窗口死"只有一个归属地（`scripts/pty-window.mjs`），免得两个探针各模拟各的。
+
+四条都守同一条原则：**判活不靠信号**。Windows 发不出信号（`term.kill('SIGHUP')` 直接抛
+"Signals not supported on windows."；`process.kill(pid, 'SIGHUP')` 同样不行），能用的只有通道 EOF
+（socket / 命名管道关闭）与 pid 判活（POSIX `kill(pid, 0)`、Windows `Get-Process`）。
+
+| 情况 | 平台交付的机制 | 启动器（relay） | 宿主（Host） | 用户看到什么 | 断言在哪 |
+|---|---|---|---|---|---|
+| **SSH 断连** | POSIX：控制终端消失 → 内核对前台进程组发 SIGHUP，stdin 读 EIO/EOF。Windows：SSH 客户端那一侧就是 ConPTY 被拆，没有 SIGHUP 可发 | `detachFromSshSession()` 先摘掉默认处置（不摘的话 `dsh` 会在插件反应过来之前拆掉整棵树），之后由 relay 自己的处理器收尾：`finish('signal')` → `quiet()` 还原终端 → 退出 0 | 显示通道 `close` → `handleDisplayDetach` → `handleHangup`。**忙** → `hostKeptAlive` + 保留计时器（`armDetachedIdleTimer`），回合继续跑；**闲** → flush 会话日志后退出 129 | shell 拿回 TTY；`--resume` 时转录还在；宿主被保留时重连多一行"已重连 1 次" | `tui-drop-probe.mjs`（POSIX 腿断言退出码 0）、`tui-mock-probe.mjs --busy`、`tests/idle-exit.test.mjs` |
+| **关掉终端窗口** | Windows：窗口关闭 → ConPTY 拆除 → 控制台关闭事件。**关键不对称**：宿主是用 `windowsHide: true`（`CREATE_NO_WINDOW`）起的，因此它有自己的隐形控制台、不附着在用户那个控制台上（那段推理写在 `hostSpawnOptions` 的注释里），收不到关闭事件。POSIX：与上一行同一个 SIGHUP | 同 SSH 断连。差别只在 Windows：启动器是被终止的，没有优雅退出的机会——所以那条腿只承诺"退出了"，**不承诺退出码** | 忙则留下、闲则按 idle-exit 退出（`DSH_TUI_IDLE_EXIT_MS`） | 另一个窗口 `--resume` 接着用；关窗前正在跑的回合会跑完 | `tui-drop-probe.mjs`（关窗路径）、**`tui-mock-probe.mjs --busy`：回合进行中关窗 → 宿主进程必须还在，重连窗口要报"已重连"且转录里有跑完的回合**——两个探针都在 `test-windows` 腿上跑 |
+| **TUI 崩溃** | POSIX：SIGKILL。Windows：TerminateProcess（没有信号，与关窗是同一个调用） | 进程直接消失：没有 goodbye、没有终端还原、没有锁更新 | 只看到一次没有 goodbye 的通道 `close`，与 SSH 断连走同一条路——宿主分不出、也不需要分出这两者 | 同上；当时在跑的回合由宿主跑完 | `tui-mock-probe.mjs --busy --crash`；`verify-batch` 的 `busycrash` 步 |
+| **宿主崩溃** | 宿主进程消失（`kill -9` / TerminateProcess）。锁文件会留下一个死 pid | relay 看到通道 `close` → `finish('host-closed')`；5 秒恢复窗口（`ATTACH_RECOVERY_WINDOW_MS`）内自动重起宿主并重放转录；超窗或反复失败 → `flapping` 报告 + 还原终端退出（有界，不挂死） | 进程没了；死 pid 由 `session-lock.ts` 判活识破，不会被当成"还在跑" | 窗口留着、转录重放、还能继续输入；坏情况下退回 shell 并给出提示 | `tui-drop-probe.mjs`（杀宿主 → 窗口必须自己回来）、`tests/attach.test.mjs`、`tests/session-lock.test.mjs` |
+
+两条贯穿四条的不变量：
+
+1. **不许留下僵尸启动器。** 终端没了以后启动器必须退出：它是唯一持有显示器的人，留着就会和下一个窗口
+   抢（历史 bug：两个窗口互相踢，每圈全屏重绘，还在 cooked 模式下把光标回包 `^[[17;1R` 回显到屏幕上）。
+   Windows 上"退出了"就是全部承诺——控制台被拆时进程是被终止的，退出码没有意义。
+2. **"离开"序列无条件发。** 还原终端（`?1049l` 等）只由启动器写，且不因为"我没进过备用屏"而跳过：
+   漏发的代价是把用户留在备用屏里，而未进过备用屏时多发一次是无害的。
+3. **忙的定义只有一处**（`isBusyForHangupKeepalive`）：正在跑的回合 / 活着的子代理 / 流式输出 /
+   打开的工具调用 / LLM 重试 / 压缩中。空闲——包括回合已结算后停在审批对话框上——**不算忙**，
+   直接退出，不留残留进程。
 
 ## Windows 欠债清单（0.7.3 起）
 
@@ -96,9 +128,13 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
    `tui-session-routes.json`、`tui-session-index.json`。全部 best-effort：收紧失败绝不让刚写成功的配置丢失。
    *顺带修掉的 POSIX 缺陷*：宿主 stderr 日志过去用 `openSync(path,'w')` 创建、**没有任何 mode**，
    在默认 umask 下是 0644——那段 stderr 可能引用 provider 报错；现在与目录一起收紧到 0600/0700。
-2. **Windows 生命周期写成规范 + 断言。** 明确四种情况的期望：SSH 断连、用户关掉终端窗口、TUI 崩溃、Host 崩溃。
-   Windows 没有 SIGHUP，正确信号是管道 EOF + `Get-Process` 判活；"关掉终端后 Host 还活着"这条**目前只有手工验证过**。
-   *验收*：`tui-drop-probe` 在 ConPTY 上覆盖"关掉终端窗口"这一条；规范落在本文件。
+2. ~~**Windows 生命周期写成规范 + 断言。**~~ **已完成（P1-3）**：四种情况（SSH 断连、关掉终端窗口、
+   TUI 崩溃、宿主崩溃）的期望写在下面《四种死法》一节，触发器与断言一起；"关掉终端窗口后宿主还活着"
+   不再是手工验证——`tui-mock-probe.mjs --busy` 在**回合进行中**按平台关窗（POSIX 发 SIGHUP，
+   Windows 拆 ConPTY）并断言宿主进程还在、重连后的窗口报"已重连"且转录里有跑完的回合，这一条已进
+   `test-windows` 腿；`tui-drop-probe.mjs` 另外补了"宿主崩溃 → 启动器自己把它换回来"。
+   Windows 上没有 SIGHUP 可发（`kill('SIGHUP')` 直接抛错），判活一律靠通道 EOF + pid 判活
+   （POSIX `kill(pid,0)`、Windows `Get-Process`）。
 3. **路径与编码。** 带空格/非 ASCII/长路径的 `DSH_HOME`；`\.\pipe\` 名字长度与字符约束；CRLF 对转录与补丁文件的影响；
    `%USERPROFILE%` 与 `$HOME` 不一致时的行为（`displayHomePath` 已有分支，但没在真机上断言过）。
 

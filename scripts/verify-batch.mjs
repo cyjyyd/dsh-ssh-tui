@@ -34,7 +34,12 @@ const STEPS = [
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },
-  { id: 'busy', label: 'pty busy-drop probe', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy'], timeoutMs: 300_000 },
+  // Both halves of the busy drop: the window closing under a running turn (the
+  // promise the lifecycle spec makes about a closed terminal) and the launcher
+  // crashing outright. On Windows the two are the same call — `scripts/pty-window.mjs`
+  // — so the assertion there is the surviving Host, not the manner of death.
+  { id: 'busy', label: 'pty busy-drop probe (window closed)', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy'], timeoutMs: 300_000 },
+  { id: 'busycrash', label: 'pty busy-drop probe (TUI crashed)', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy', '--crash'], timeoutMs: 300_000 },
   { id: 'linemode', label: 'pty line-mode probe', command: 'node', args: ['scripts/tui-probe.mjs', '--line-mode'], timeoutMs: 300_000 },
   // Rendered footer frames: the escape-body leak of B-1 passed every unit test
   // (they fed the fitter unstyled chips) and was only visible on a frame.
@@ -107,7 +112,7 @@ function parseArgs(argv) {
     if (arg === '--batch') parsed.batch = argv[++index]
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,route,busy,linemode,footer]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,route,busy,busycrash,linemode,footer]')
       process.exit(0)
     } else {
       console.error(`unknown argument: ${arg}`)
