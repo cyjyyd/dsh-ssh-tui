@@ -39,6 +39,8 @@ test('manifest declares exact dshReleases for the store window', async () => {
     '0.1.5-alpha.1',
     '0.1.5-alpha.2',
     '0.1.5-rc.1',
+    '0.1.5-rc.2',
+    '0.1.5-rc.3',
   ]) {
     const status = releases[version]
     assert.ok(status === 'compatible' || status === 'incompatible' || status === 'unknown', version)
@@ -49,6 +51,8 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.1.5-alpha.1'], 'compatible')
   assert.equal(releases['0.1.5-alpha.2'], 'compatible')
   assert.equal(releases['0.1.5-rc.1'], 'compatible')
+  assert.equal(releases['0.1.5-rc.2'], 'compatible')
+  assert.equal(releases['0.1.5-rc.3'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })
 
@@ -67,11 +71,19 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.5-alpha.2'), true)
   assert.equal(inRange('0.1.5-rc.1'), true)
   assert.equal(inRange('0.1.5-rc.2'), true)
+  assert.equal(inRange('0.1.5-rc.3'), true)
   assert.equal(inRange('0.1.5'), true)
   assert.equal(inRange('0.1.1-rc.2'), false)
   assert.equal(inRange('0.1.3-alpha.1'), false)
+  // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
+  // admit them. A prerelease only satisfies a comparator set when a comparator
+  // with the *same* [major, minor, patch] tuple carries one, so these stay out
+  // until a 0.1.6 rc has been run and declared — refusing an untested line beats
+  // silently claiming it.
   assert.equal(inRange('0.1.6-alpha.1'), false)
+  assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
+  assert.equal(inRange('0.1.7-alpha.1'), false)
   assert.equal(semver.maxSatisfying(['0.1.2-rc.1', '0.1.5-rc.1'], range), '0.1.5-rc.1')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {

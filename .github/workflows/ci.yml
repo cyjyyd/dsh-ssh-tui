@@ -9,24 +9,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the whole dsh family to 0.1.5-rc.2 (upstream `next`).
-        # Pinning it to rc.1 does not resolve: several rc.1 packages peer-range
+        # package.json pins the whole dsh family to 0.1.5-rc.3 (upstream `next`).
+        # rc.3 was run against the suite and both lifecycle probes before it was
+        # declared compatible; the pinned family is what the default leg and the
+        # Windows leg resolve, so the newest host is the one most exercised.
+        # Pinning to rc.1 does not resolve: several rc.1 packages peer-range
         # `^0.1.5-rc.2` siblings (dsh-storage-domain rc.2 wants dsh-invariants
         # rc.2), so npm nests a second @deepseek-ai/dsh-scope and the agent
         # runtime loads two module instances — `agent-presets` then refuses to
         # compose an unscoped context and the TUI never starts. One version for
-        # the whole family keeps a single copy. 0.1.2-rc.1 stays as the oldest
-        # supported stack; 0.1.5-rc.1 (npm `latest`) is still covered because
-        # every non-default leg rewrites the @deepseek-ai/dsh-* devDependencies
-        # and resolves from scratch.
-        dsh: ["0.1.5-rc.2", "0.1.5-rc.1", "0.1.2-rc.1"]
+        # the whole family keeps a single copy. `latest` (rc.2) keeps its own
+        # leg because that is what a plain install gets; 0.1.2-rc.1 stays as the
+        # oldest supported stack; 0.1.5-rc.1 is still covered because every
+        # non-default leg rewrites the @deepseek-ai/dsh-* devDependencies and
+        # resolves from scratch.
+        dsh: ["0.1.5-rc.3", "0.1.5-rc.2", "0.1.5-rc.1", "0.1.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
-        if: matrix.dsh != '0.1.5-rc.2'
+        if: matrix.dsh != '0.1.5-rc.3'
         run: |
           node -e "
             const fs = require('node:fs');
@@ -67,18 +71,18 @@ jobs:
       # a headless runner has no ~/.dsh, which is why this never ran here before.
       # The rc.1 legs skip it (their peer tree cannot boot a host).
       - name: End-to-end PTY probe (throwaway profile)
-        if: matrix.dsh == '0.1.5-rc.2'
+        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1'
         run: |
           npm install -g pnpm@10 --no-audit --no-fund
           node scripts/probe-home.mjs --probe
       - name: Terminal-capability probe
-        if: matrix.dsh == '0.1.5-rc.2'
+        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1'
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.
       - name: Busy-drop probe (window closed mid-turn)
-        if: matrix.dsh == '0.1.5-rc.2'
+        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1'
         run: node scripts/tui-mock-probe.mjs --busy
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup

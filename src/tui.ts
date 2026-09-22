@@ -11048,7 +11048,16 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     else process.exit(1)
   }
 
-  const disposeCreated = ctx.on('agent/created', ({ agent }) => start(agent))
+  // The explicit `return undefined` is deliberate, not noise: 0.1.6-alpha.2 turns
+  // `agent/created` into a serial event whose handler must return
+  // `undefined | Promise<undefined>`, and a bare `void` body is *not* assignable
+  // to that (verified by compiling this file against the published 0.1.6-alpha.2
+  // types: TS2322/TS2345). Returning `undefined` satisfies the whole 0.1.5 line
+  // too, so the handler is ready for the next line without a compat branch.
+  const disposeCreated = ctx.on('agent/created', ({ agent }) => {
+    start(agent)
+    return undefined
+  })
   const disposeFailure = ctx.on('agent-loop/config-start-failed', ({ sessionId: failedSessionId, error }) => fail(failedSessionId, error))
 
   const stopWaiting = (): void => {
