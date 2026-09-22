@@ -163,7 +163,11 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
    回退时**用户能在会话里看到**：宿主启动横幅下多一行说明（`boot.directHost`，仅 Windows 且只在
    回退路径上出现）——这条差异不该靠"关窗试试"发现。
    *验收*：`tests/host-bootstrap.test.mjs` 在 Linux 上断言全部纯函数与回退/超时分支（引号、脚本、
-   base64、pid 文件、回退、`ETIMEDOUT` 拒绝二次启动、pid watch）；`tui-mock-probe.mjs --busy` 在
+   base64、pid 文件、回退、`ETIMEDOUT` 拒绝二次启动、pid watch 必须能解析——这条单独跑在子进程里，
+   因为 unref 掉的轮询定时器会让事件循环先空掉，CI 上表现为"Promise resolution is still pending but
+   the event loop has already resolved"并把它后面的用例一起取消）；
+   原先基于 fixture 的 `tests/display-host-e2e.test.mjs` 用 `bootstrap: null` 明确走直接 spawn——
+   它断言的是子进程退出码与继承的 stderr，而 bootstrap 只回一个 pid；`tui-mock-probe.mjs --busy` 在
    `test-windows` 腿上断言宿主存活、**并且**它挂在自己的控制台上（`GetConsoleProcessList`）而
    不是"没有控制台"。*仍然只能人工确认的*：那个控制台窗口确实是隐藏的（CI 只能证明它独立存在）。
 

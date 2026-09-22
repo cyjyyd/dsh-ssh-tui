@@ -599,10 +599,21 @@ function watchHostExit(child: ChildProcess): HostExitWatch {
  * is unknown here (null), and the poll interval is the detection delay; the
  * watch is disposed as soon as the channel is up, so it never runs for the life
  * of the session.
+ *
+ * The poll timer is deliberately **not** unref'd. `exited` is a promise this
+ * watch is the only thing that can resolve, and an unref'd timer does not keep
+ * the event loop alive: a caller that awaits nothing else — a test, or a
+ * launcher whose only remaining work is the boot — let the loop drain first and
+ * never saw the answer (node:test reports that as "Promise resolution is still
+ * pending but the event loop has already resolved", which is how this was
+ * found). Every caller disposes the watch once the channel is up, and
+ * `waitForDisplaySock` disposes it in its `finally`, so holding the loop for the
+ * boot window is the point rather than a leak.
  */
 const HOST_PID_POLL_MS = 250
 
-function watchHostPid(pid: number): HostExitWatch {
+/** Exported for the test that pins its loop-ref behaviour; not public API. */
+export function watchHostPid(pid: number): HostExitWatch {
   let settle: (code: number | null) => void = () => {}
   const exited = new Promise<number | null>(resolve => { settle = resolve })
   let timer: NodeJS.Timeout | undefined
@@ -613,7 +624,6 @@ function watchHostPid(pid: number): HostExitWatch {
       return
     }
     timer = setTimeout(tick, HOST_PID_POLL_MS)
-    timer.unref?.()
   }
   tick()
   return {
@@ -830,8 +840,17 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
 
 /** Test seam for {@link spawnDetachedHost}; production passes nothing. */
 export interface SpawnHostOptions {
-  /** Start the Host through this command instead of resolving the real one. */
-  bootstrap?: { command: string; args: string[] } | undefined
+  /**
+   * Start the Host through this command instead of resolving the real one, or
+   * `null` to spawn it directly even where a bootstrap exists.
+   *
+   * `null` is for the tests that are about the *direct* path — the fixture Hosts
+   * in `tests/display-host-e2e.test.mjs` assert on the child's exit code, which
+   * only a real child handle can report (a pid watch resolves `null`). The
+   * bootstrap has its own coverage: the builders on every platform, and the real
+   * Windows probes end to end.
+   */
+  bootstrap?: { command: string; args: string[] } | null | undefined
   /** How long the bootstrap may take to report a pid (Windows PowerShell start). */
   bootstrapTimeoutMs?: number
 }
@@ -939,13 +958,15 @@ export function spawnDetachedHost(
   // leaving it un-redirected would hand it this process's stdio; the direct
   // spawn is the honest fallback there.
   const pidFile = sessionBootstrapPidPath(sessionId)
-  const bootstrap = options.bootstrap ?? (errFd === undefined ? undefined : hostBootstrapCommand({
-    platform,
-    execPath: process.execPath,
-    argv,
-    stderrFile: errFile,
-    pidFile,
-  }))
+  const bootstrap = options.bootstrap === null
+    ? undefined
+    : options.bootstrap ?? (errFd === undefined ? undefined : hostBootstrapCommand({
+        platform,
+        execPath: process.execPath,
+        argv,
+        stderrFile: errFile,
+        pidFile,
+      }))
   let started: { pid: number } | undefined
   if (bootstrap !== undefined) {
     started = spawnHostThroughBootstrap(bootstrap, {

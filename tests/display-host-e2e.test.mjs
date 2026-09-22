@@ -16,6 +16,14 @@ const CRASH_FIXTURE = join(import.meta.dirname, 'fixtures', 'display-host-crash.
  * `spawnDetachedHost` re-runs this invocation (argv + execArgv) with the
  * `--resume` flag; point it at the fixture and drop the test runner's own
  * flags so the child is a plain Host process.
+ *
+ * `bootstrap: null` forces the direct spawn even where the platform has a
+ * hidden-console bootstrap (Windows). These tests are about the direct path's
+ * plumbing — a real child handle, its `exit` code and its inherited stderr —
+ * which the bootstrap deliberately does not provide: it reports a pid and
+ * nothing else (`watchHostPid` resolves `null`). The bootstrap is covered by the
+ * builders in `tests/host-bootstrap.test.mjs` and, end to end, by the Windows
+ * leg's probes, which boot a real session through this launcher.
  */
 function spawnFixtureHost(fixture, sessionId) {
   const argv = process.argv
@@ -23,7 +31,7 @@ function spawnFixtureHost(fixture, sessionId) {
   process.argv = [process.execPath, fixture]
   process.execArgv = []
   try {
-    return spawnDetachedHost(sessionId)
+    return spawnDetachedHost(sessionId, process.platform, { bootstrap: null })
   } finally {
     process.argv = argv
     process.execArgv = execArgv
@@ -37,7 +45,9 @@ async function withHome(t) {
   t.after(async () => {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
-    await rm(home, { recursive: true, force: true })
+    // A Host that was just killed can still hold its stderr log open on Windows
+    // (EBUSY); retrying keeps a cleanup failure from hiding the verdict.
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   })
   return home
 }

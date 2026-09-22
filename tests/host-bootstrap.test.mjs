@@ -13,12 +13,18 @@ import {
   windowsCommandLine,
   windowsPowerShellPath,
 } from '../lib/platform.js'
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   sessionBootstrapPidPath,
   sessionSockPath,
   spawnDetachedHost,
   spawnHostThroughBootstrap,
+  watchHostPid,
 } from '../lib/display-sock.js'
+
+const DISPLAY_SOCK = pathToFileURL(join(import.meta.dirname, '..', 'lib', 'display-sock.js')).href
 
 /**
  * P1-4: the Windows Host has to survive the launcher *and* not flash console
@@ -204,4 +210,32 @@ test('the Host is told how it was started, and only the fallback build warns', (
   assert.equal(hostHasOwnConsole(env, 'win32'), true)
   assert.equal(hostHasOwnConsole({}, 'win32'), false)
   assert.equal(hostHasOwnConsole({ [TUI_HOST_START_ENV]: 'something-else' }, 'win32'), false)
+})
+
+test('the pid watch resolves with nothing else holding the event loop', () => {
+  // The bug this pins: the poll timer was unref'd, so a caller that awaited
+  // `exited` and had nothing else pending let the loop drain first. In CI that
+  // surfaced as `Promise resolution is still pending but the event loop has
+  // already resolved` and node:test cancelled the rest of the file. Run it in
+  // its own process with the child *and* the kill timer unref'd, so the watch's
+  // own timer is the only thing that can hold the loop.
+  const script = `
+    import { spawn } from 'node:child_process'
+    import { watchHostPid } from ${JSON.stringify(DISPLAY_SOCK)}
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    child.unref()
+    const watch = watchHostPid(child.pid)
+    setTimeout(() => { try { process.kill(child.pid, 'SIGKILL') } catch {} }, 150).unref()
+    const code = await watch.exited
+    watch.dispose()
+    console.log('resolved', code)
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  })
+  assert.equal(result.status, 0, `the watcher process exited early:\n${result.stderr}`)
+  assert.match(result.stdout, /resolved null/u)
+  // And the watch itself is what answered: `watchHostPid` is the only thing here.
+  assert.equal(typeof watchHostPid, 'function')
 })
