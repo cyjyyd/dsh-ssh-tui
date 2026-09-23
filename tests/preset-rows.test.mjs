@@ -5,8 +5,15 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { ROSTER_PATCH_BLOCK, ensureRosterRows, rosterPatchPath, rosterPatchText } from '../lib/preset-rows.js'
-import { ROSTER_BLOCK } from '../scripts/profile-rows.mjs'
+import {
+  FORMS_PATCH_BLOCK,
+  ROSTER_PATCH_BLOCK,
+  ensureRosterRows,
+  rosterPatchPath,
+  rosterPatchText,
+  rosterRows,
+} from '../lib/preset-rows.js'
+import { FORMS_BLOCK, ROSTER_BLOCK } from '../scripts/profile-rows.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -18,7 +25,19 @@ test('the roster block mounts the roster and the two preset host services', () =
   assert.equal(ROSTER_PATCH_BLOCK.endsWith('\n'), true)
 })
 
-test('the install path and the runtime write the same block', async () => {
+test('the 0.1.7 block mounts the agent-plane rows the base does not', () => {
+  // 0.1.7 has no roster to mount: presets became per-session rows a surface
+  // composes, and dsh-base keeps the agent plane for the TUI. The three rows
+  // here are what upstream's own standard preset owns beyond the base.
+  assert.match(FORMS_PATCH_BLOCK, /- id: persona\n\s+name: '@deepseek-ai\/dsh-persona'\n\s+config:\n\s+suffix: /)
+  assert.match(FORMS_PATCH_BLOCK, /- id: tool-ask-user\n\s+name: '@deepseek-ai\/dsh-tool-ask-user'/)
+  assert.match(FORMS_PATCH_BLOCK, /- id: present\n\s+name: '@deepseek-ai\/dsh-tool-present'/)
+  assert.equal(FORMS_PATCH_BLOCK.includes('dsh-agent-presets'), false)
+  assert.deepEqual(rosterRows('legacy').map(row => row.id), ['agent-presets', 'code-runtime', 'subagent-model-selection-settings'])
+  assert.deepEqual(rosterRows('forms').map(row => row.id), ['persona', 'tool-ask-user', 'present'])
+})
+
+test('the install path and the runtime write the same block, on both lines', async () => {
   // The published package does not ship scripts/, so the runtime owns a copy.
   // A drift here would make the in-app repair write a different roster than the
   // installer does; fail instead. Windows checkouts carry CRLF, and the block
@@ -29,6 +48,7 @@ test('the install path and the runtime write the same block', async () => {
   // wrapper now, so reading it as text would compare nothing. It is imported
   // rather than scraped because the module interpolates the module name.
   assert.equal(ROSTER_BLOCK, ROSTER_PATCH_BLOCK)
+  assert.equal(FORMS_BLOCK, FORMS_PATCH_BLOCK)
 })
 
 test('rosterPatchText replaces the empty template and appends to a used patch', () => {
@@ -55,6 +75,19 @@ test('rosterPatchText is idempotent', () => {
   assert.ok(once !== undefined)
   assert.equal(rosterPatchText(once), undefined)
   assert.equal(rosterPatchText(ROSTER_PATCH_BLOCK), undefined)
+})
+
+test('the 0.1.7 line repairs the agent-plane rows and never the dead ones', () => {
+  const fromTemplate = rosterPatchText('[]', 'forms')
+  assert.ok(fromTemplate !== undefined)
+  assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-persona'"))
+  assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-tool-ask-user'"))
+  assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-tool-present'"))
+  // Neither row resolves on 0.1.7: the plural package has no release there, and
+  // `code-runtime-worker-thread` was replaced by the base's `ptc-runtime`.
+  assert.equal(fromTemplate.includes('dsh-agent-presets'), false)
+  assert.equal(fromTemplate.includes('code-runtime-worker-thread'), false)
+  assert.equal(rosterPatchText(fromTemplate, 'forms'), undefined, 'idempotent')
 })
 
 test('a partially mounted roster gains only the rows it lacks', () => {

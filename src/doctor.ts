@@ -27,7 +27,9 @@ import {
   missingRosterRows,
   patchNamesRow,
   rosterPatchPath,
+  rosterRows,
   ROSTER_ROWS,
+  type HostGeneration,
   type PatchAnalysis,
   type PatchRowRef,
   type RosterRow,
@@ -79,6 +81,12 @@ export interface DoctorFacts {
   bundleRows: readonly PatchRowRef[]
   /** The manifest's compatibility declaration, when the package is readable. */
   compatibility?: { range?: string; releases: Record<string, string> }
+  /**
+   * Which settings protocol the host speaks; decides which rows a terminal
+   * profile has to mount itself. Absent means the 0.1.5 line, so a snapshot
+   * built before this field existed keeps its verdicts.
+   */
+  generation?: HostGeneration
   /** Distinct installs of `@deepseek-ai/dsh-scope` found from the anchors. */
   scopeCopies: readonly string[]
   /** Absent when routing could not be read (no settings service). */
@@ -128,8 +136,27 @@ export function doctorChecks(facts: DoctorFacts): DoctorCheck[] {
   }
 
   // 2. The roster service: without it /mode cannot switch and the preset-owned
-  //    tools are absent from the catalog.
-  if (facts.services.roster) {
+  //    tools are absent from the catalog. 0.1.7 deleted that service — the
+  //    agent is composed process-wide — so there the patch text is the only
+  //    evidence, and the rows that matter are the ones the shipped standard
+  //    preset owns beyond the base (persona, ask_user_question, present).
+  const generation = facts.generation ?? 'legacy'
+  if (generation === 'forms') {
+    const missing = analysis.parseable ? missingRosterRows(analysis.rows, rosterRows(generation)) : []
+    if (!analysis.parseable) {
+      checks.push({ id: 'agent-plane', status: 'warn', summary: t('doctor.forms.unknown'), details: [] })
+    } else if (missing.length === 0) {
+      checks.push({ id: 'agent-plane', status: 'ok', summary: t('doctor.forms.ok'), details: [] })
+    } else {
+      checks.push({
+        id: 'agent-plane',
+        status: 'warn',
+        summary: t('doctor.forms.warn'),
+        details: missing.map(row => t('doctor.detail.missingRow', { id: row.id })),
+        fixable: true,
+      })
+    }
+  } else if (facts.services.roster) {
     checks.push({ id: 'roster', status: 'ok', summary: t('doctor.roster.ok'), details: [] })
   } else {
     const declared = rosterRow !== undefined && analysis.parseable && patchNamesRow(analysis.rows, rosterRow)
@@ -147,38 +174,42 @@ export function doctorChecks(facts: DoctorFacts): DoctorCheck[] {
   }
 
   // 3. code-runtime: the PTC preset mounts it, so its absence is the second
-  //    half of the same regression.
-  if (facts.services.codeRuntime) {
-    checks.push({ id: 'code-runtime', status: 'ok', summary: t('doctor.codeRuntime.ok'), details: [] })
-  } else {
-    const declared = codeRuntimeRow !== undefined && analysis.parseable && patchNamesRow(analysis.rows, codeRuntimeRow)
-    checks.push({
-      id: 'code-runtime',
-      status: 'fail',
-      summary: t('doctor.codeRuntime.fail'),
-      details: codeRuntimeRow === undefined
-        ? []
-        : declared
-          ? [t('doctor.detail.declaredNoService', { id: codeRuntimeRow.id })]
-          : [t('doctor.detail.missingRow', { id: codeRuntimeRow.id })],
-      fixable: !declared,
-    })
-  }
+  //    half of the same regression. Both the row and the preset are 0.1.5
+  //    things; 0.1.7's base mounts `ptc-runtime` itself.
+  if (generation === 'legacy') {
+    if (facts.services.codeRuntime) {
+      checks.push({ id: 'code-runtime', status: 'ok', summary: t('doctor.codeRuntime.ok'), details: [] })
+    } else {
+      const declared = codeRuntimeRow !== undefined && analysis.parseable && patchNamesRow(analysis.rows, codeRuntimeRow)
+      checks.push({
+        id: 'code-runtime',
+        status: 'fail',
+        summary: t('doctor.codeRuntime.fail'),
+        details: codeRuntimeRow === undefined
+          ? []
+          : declared
+            ? [t('doctor.detail.declaredNoService', { id: codeRuntimeRow.id })]
+            : [t('doctor.detail.missingRow', { id: codeRuntimeRow.id })],
+        fixable: !declared,
+      })
+    }
 
-  // 4. The subagent settings row has no runtime service to probe, so the patch
-  //    text is the only evidence.
-  if (!analysis.parseable) {
-    checks.push({ id: 'subagent-settings', status: 'warn', summary: t('doctor.subagentSettings.unknown'), details: [] })
-  } else if (subagentRow === undefined || patchNamesRow(analysis.rows, subagentRow)) {
-    checks.push({ id: 'subagent-settings', status: 'ok', summary: t('doctor.subagentSettings.ok'), details: [] })
-  } else {
-    checks.push({
-      id: 'subagent-settings',
-      status: 'warn',
-      summary: t('doctor.subagentSettings.warn'),
-      details: [t('doctor.detail.missingRow', { id: subagentRow.id })],
-      fixable: true,
-    })
+    // 4. The subagent settings row has no runtime service to probe, so the patch
+    //    text is the only evidence. It is part of the 0.1.5 roster's host
+    //    services; on 0.1.7 the TUI's own `ssh-tui-subagent` row replaces it.
+    if (!analysis.parseable) {
+      checks.push({ id: 'subagent-settings', status: 'warn', summary: t('doctor.subagentSettings.unknown'), details: [] })
+    } else if (subagentRow === undefined || patchNamesRow(analysis.rows, subagentRow)) {
+      checks.push({ id: 'subagent-settings', status: 'ok', summary: t('doctor.subagentSettings.ok'), details: [] })
+    } else {
+      checks.push({
+        id: 'subagent-settings',
+        status: 'warn',
+        summary: t('doctor.subagentSettings.warn'),
+        details: [t('doctor.detail.missingRow', { id: subagentRow.id })],
+        fixable: true,
+      })
+    }
   }
 
   // 5. Duplicate inserts fail at load time with "service has been registered".
@@ -389,6 +420,7 @@ export async function collectDoctor(options: {
   services: DoctorFacts['services']
   anchors: ReadonlyArray<string | undefined>
   routing?: DoctorRouting
+  generation?: HostGeneration
 }): Promise<DoctorFacts> {
   const manifest = readManifest()
   const patchPath = rosterPatchPath(options.dshHome, options.profile)
@@ -421,12 +453,20 @@ export async function collectDoctor(options: {
         }),
     scopeCopies: findScopeCopies(options.anchors),
     ...(options.routing === undefined ? {} : { routing: options.routing }),
+    ...(options.generation === undefined ? {} : { generation: options.generation }),
   }
 }
 
 /** Rows `/doctor --fix` would mount, given the services the composition registered. */
 export function rowsToRepair(facts: DoctorFacts): RosterRow[] {
   if (!facts.patch.analysis.parseable) return []
+  const generation = facts.generation ?? 'legacy'
+  // 0.1.7 has no roster service to probe and no PTC runtime row to add: the
+  // base composes the agent process-wide, and the three rows a terminal profile
+  // owns are the ones the patch text either declares or does not.
+  if (generation === 'forms') {
+    return missingRosterRows(facts.patch.analysis.rows, rosterRows(generation))
+  }
   const missing = missingRosterRows(facts.patch.analysis.rows)
   return missing.filter(row => (row.id === ROSTER_ROWS[0]?.id && !facts.services.roster)
     || (row.id === ROSTER_ROWS[1]?.id && !facts.services.codeRuntime)

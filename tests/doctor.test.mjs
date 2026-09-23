@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   analyzePatch,
   duplicatePatchRows,
+  FORMS_PATCH_BLOCK,
   planDuplicateRepair,
   planRosterRepair,
   ROSTER_PATCH_BLOCK,
@@ -47,6 +48,35 @@ function facts(overrides = {}) {
 }
 
 const checkOf = (checks, id) => checks.find(check => check.id === id)
+
+test('a 0.1.7 host is judged on its own rows, not the deleted roster', () => {
+  // 0.1.7 has no `agentPresets` service to probe and no code-runtime row to
+  // mount: the base composes the agent process-wide, and a terminal profile
+  // adds the three agent-plane rows the shipped standard preset owns.
+  const bare = facts({
+    generation: 'forms',
+    services: { roster: false, codeRuntime: false },
+    patchText: WEB_ROW,
+  })
+  const checks = doctorChecks(bare)
+  assert.equal(checkOf(checks, 'roster'), undefined, 'the deleted roster is not reported')
+  assert.equal(checkOf(checks, 'code-runtime'), undefined)
+  assert.equal(checkOf(checks, 'subagent-settings'), undefined)
+  const agentPlane = checkOf(checks, 'agent-plane')
+  assert.equal(agentPlane.status, 'warn')
+  assert.equal(agentPlane.fixable, true)
+  assert.deepEqual(agentPlane.details, ['persona', 'tool-ask-user', 'present'].map(id => `缺少行：${id}`))
+
+  const mounted = facts({ generation: 'forms', services: { roster: false, codeRuntime: false }, patchText: FORMS_PATCH_BLOCK })
+  assert.equal(checkOf(doctorChecks(mounted), 'agent-plane').status, 'ok')
+  assert.deepEqual(rowsToRepair(mounted), [])
+  assert.deepEqual(rowsToRepair(bare).map(row => row.id), ['persona', 'tool-ask-user', 'present'])
+  // Repairs on that line never write rows 0.1.7 cannot resolve.
+  const repaired = planRosterRepair(WEB_ROW, rowsToRepair(bare), 'forms')
+  assert.ok(repaired !== undefined)
+  assert.equal(repaired.text.includes('dsh-agent-presets'), false)
+  assert.equal(repaired.text.includes('code-runtime-worker-thread'), false)
+})
 
 test('a missing roster is named row by row', () => {
   // Bad case 1: the profile composes nothing (0.6.3's regression).

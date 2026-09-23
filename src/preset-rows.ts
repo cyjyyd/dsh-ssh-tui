@@ -23,6 +23,10 @@
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import yaml from 'js-yaml'
+import type { SettingsGeneration } from './dsh-compat.js'
+
+/** Which host line the profile being repaired boots on. */
+export type HostGeneration = SettingsGeneration
 
 /** One host row the roster block mounts. */
 export interface RosterRow {
@@ -33,15 +37,49 @@ export interface RosterRow {
 }
 
 /**
- * The rows the terminal profile has to mount itself: the roster `/mode` lists,
- * the TypeScript runtime the PTC preset needs, and the host-owned subagent
- * delegation setting.
+ * The rows a 0.1.5 terminal profile has to mount itself: the roster `/mode`
+ * lists, the TypeScript runtime the PTC preset needs, and the host-owned
+ * subagent delegation setting.
  */
 export const ROSTER_ROWS: readonly RosterRow[] = [
   { id: 'agent-presets', name: '@deepseek-ai/dsh-agent-presets', config: ['default: standard'] },
   { id: 'code-runtime', name: '@deepseek-ai/dsh-code-runtime-worker-thread' },
   { id: 'subagent-model-selection-settings', name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings' },
 ]
+
+/**
+ * The rows a 0.1.7 terminal profile mounts for itself.
+ *
+ * 0.1.7 deleted the roster this plugin used to list and switch: presets became
+ * per-session declarations a surface mounts (`@deepseek-ai/dsh-agent-preset`
+ * rows over the `agent-preset-registry` service), and `dsh-base` keeps the
+ * agent-plane rows enabled for the TUI, which is single-session and composes
+ * its agent process-wide. What the base does *not* mount are the three rows the
+ * shipped standard preset owns beyond it — the persona prompt, and the
+ * `ask_user_question` / `present` tools — so those are what a TUI profile adds.
+ * Written verbatim as upstream's own `dsh-web-app/presets/standard.patch.yml`
+ * declares them, minus the rows the base already carries.
+ */
+export const FORMS_ROWS: readonly RosterRow[] = [
+  {
+    id: 'persona',
+    name: '@deepseek-ai/dsh-persona',
+    config: [
+      'suffix: Your working directory is {{cwd}}.',
+      'prefix: You are a coding agent powered by the {{model}} model.',
+    ],
+  },
+  { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
+  { id: 'present', name: '@deepseek-ai/dsh-tool-present' },
+]
+
+/** The rows one host line's profile has to mount. */
+export function rosterRows(generation: HostGeneration): readonly RosterRow[] {
+  return generation === 'forms' ? FORMS_ROWS : ROSTER_ROWS
+}
+
+/** Every row either line knows about, for name-to-row lookups. */
+export const ALL_ROSTER_ROWS: readonly RosterRow[] = [...ROSTER_ROWS, ...FORMS_ROWS]
 
 /** The comment header the block introduces itself with, in both writers. */
 export const ROSTER_PATCH_HEADER = `# dsh-ssh-tui /mode: the agent-preset roster (standard / minimal / PTC /
@@ -50,6 +88,19 @@ export const ROSTER_PATCH_HEADER = `# dsh-ssh-tui /mode: the agent-preset roster
 # profile, and a third-party bundle patch may not mount an @deepseek-ai row, so
 # the profile's user layer owns them.
 `
+
+/** The same header on a host that composes its agent process-wide. */
+export const FORMS_PATCH_HEADER = `# dsh-ssh-tui: the agent-plane rows a 0.1.7 terminal profile mounts for itself.
+# That line composes the agent process-wide (presets are a per-session Web
+# feature now), and dsh-base already carries every row the standard preset
+# needs except these three: the persona prompt and the ask_user_question /
+# present tools. The profile's user layer owns them.
+`
+
+/** The header for one host line. */
+export function rosterPatchHeader(generation: HostGeneration): string {
+  return generation === 'forms' ? FORMS_PATCH_HEADER : ROSTER_PATCH_HEADER
+}
 
 /** One item of an `insert:` list, indented as the block writes it. */
 function rosterItemText(row: RosterRow): string {
@@ -72,6 +123,14 @@ export function rosterInsertEntry(rows: readonly RosterRow[]): string {
  * the same text; a test compares the two so they cannot drift.
  */
 export const ROSTER_PATCH_BLOCK = `${ROSTER_PATCH_HEADER}${rosterInsertEntry(ROSTER_ROWS)}`
+
+/** The 0.1.7 block, the same way. */
+export const FORMS_PATCH_BLOCK = `${FORMS_PATCH_HEADER}${rosterInsertEntry(FORMS_ROWS)}`
+
+/** The block for one host line. */
+export function rosterPatchBlock(generation: HostGeneration): string {
+  return generation === 'forms' ? FORMS_PATCH_BLOCK : ROSTER_PATCH_BLOCK
+}
 
 /** The profile patch file the roster block belongs in. */
 export function rosterPatchPath(home: string, profile: string): string {
@@ -197,8 +256,11 @@ export function patchNamesRow(rows: readonly PatchRowRef[], row: RosterRow): boo
 }
 
 /** The roster rows a patch does not declare yet. */
-export function missingRosterRows(rows: readonly PatchRowRef[]): RosterRow[] {
-  return ROSTER_ROWS.filter(row => !patchNamesRow(rows, row))
+export function missingRosterRows(
+  rows: readonly PatchRowRef[],
+  candidates: readonly RosterRow[] = ROSTER_ROWS,
+): RosterRow[] {
+  return candidates.filter(row => !patchNamesRow(rows, row))
 }
 
 /** The template a missing profile patch starts from. */
@@ -231,19 +293,21 @@ function normalizeEnd(text: string): string {
  * (the profile template) is replaced; anything else keeps its content and gains
  * a new `- insert:` entry after a blank line.
  * @param existing - the patch file's current text.
- * @param missing - the roster rows to mount; defaults to all of them.
+ * @param missing - the roster rows to mount; defaults to the 0.1.5 set.
+ * @param generation - which host line the profile boots on.
  * @returns the new text, or `undefined` when nothing has to change.
  */
 export function planRosterRepair(
   existing: string,
   missing: readonly RosterRow[] = ROSTER_ROWS,
+  generation: HostGeneration = 'legacy',
 ): PatchRepair | undefined {
   const analysis = analyzePatch(existing)
   const toAdd = analysis.parseable
     ? missing.filter(row => !patchNamesRow(analysis.rows, row))
     : [...missing]
   if (toAdd.length === 0) return undefined
-  const entry = `${ROSTER_PATCH_HEADER}${rosterInsertEntry(toAdd)}`
+  const entry = `${rosterPatchHeader(generation)}${rosterInsertEntry(toAdd)}`
   if (/^\s*\[\s*\]\s*$/m.test(existing)) {
     return { text: existing.replace(/^\s*\[\s*\]\s*$/m, entry.trimEnd() + '\n'), added: toAdd.map(row => row.id), removed: [] }
   }
@@ -346,13 +410,15 @@ export function planDuplicateRepair(existing: string): PatchRepair | undefined {
  * half-written patch would only be seen by the next launch.
  * @param home - the harness home carrying `profiles/`.
  * @param profile - the profile to patch.
- * @param missing - the rows to mount; defaults to the whole roster.
+ * @param missing - the rows to mount; defaults to the 0.1.5 set.
+ * @param generation - which host line the profile boots on.
  * @returns `present` when the row already exists, else `written`.
  */
 export async function ensureRosterRows(
   home: string,
   profile: string,
   missing: readonly RosterRow[] = ROSTER_ROWS,
+  generation: HostGeneration = 'legacy',
 ): Promise<'present' | 'written'> {
   const path = rosterPatchPath(home, profile)
   let existing = PATCH_TEMPLATE
@@ -361,7 +427,7 @@ export async function ensureRosterRows(
   } catch {
     // Missing file: start from the template the launcher would have written.
   }
-  const repair = planRosterRepair(existing, missing)
+  const repair = planRosterRepair(existing, missing, generation)
   if (repair === undefined) return 'present'
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, repair.text, 'utf8')
@@ -396,6 +462,6 @@ export async function writePatchWithBackup(
 }
 
 /** The patch text the roster block would produce on its own, for callers that report it. */
-export function rosterPatchText(existing: string): string | undefined {
-  return planRosterRepair(existing)?.text
+export function rosterPatchText(existing: string, generation: HostGeneration = 'legacy'): string | undefined {
+  return planRosterRepair(existing, rosterRows(generation), generation)?.text
 }

@@ -61,6 +61,37 @@ export const ROSTER_BLOCK = `# dsh-ssh-tui /mode: the agent-preset roster (stand
       name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 `
 
+/**
+ * The 0.1.7 counterpart: that line composes the agent process-wide (presets are
+ * a per-session Web feature), and `dsh-base` carries every row the standard
+ * preset needs except these three. Mirrors `FORMS_PATCH_BLOCK` in
+ * `src/preset-rows.ts`; the same test pins them together.
+ */
+export const FORMS_BLOCK = `# dsh-ssh-tui: the agent-plane rows a 0.1.7 terminal profile mounts for itself.
+# That line composes the agent process-wide (presets are a per-session Web
+# feature now), and dsh-base already carries every row the standard preset
+# needs except these three: the persona prompt and the ask_user_question /
+# present tools. The profile's user layer owns them.
+- insert:
+    - id: persona
+      name: '@deepseek-ai/dsh-persona'
+      config:
+        suffix: Your working directory is {{cwd}}.
+        prefix: You are a coding agent powered by the {{model}} model.
+
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
+
+    - id: present
+      name: '@deepseek-ai/dsh-tool-present'
+`
+
+/** The row whose presence means this host line's rows are already mounted. */
+const MARKER = { legacy: ROSTER_MODULE, forms: '@deepseek-ai/dsh-persona' }
+
+/** The modules whose presence in the composition means "nothing to mount". */
+const COMPOSED = { legacy: ROSTER_MODULE, forms: '@deepseek-ai/dsh-agent-preset-registry' }
+
 /** The patch file a profile starts from when it has none. */
 const PATCH_HEADER = `# Your patch layer for this dsh profile, applied after every bundle layer:
 # a top-level YAML array of loader patch entries (id-targeted config
@@ -77,24 +108,52 @@ export function profilePatchPath(profile, home) {
   return join(home, 'profiles', profile, 'cordis.patch.yml')
 }
 
-/**
- * Whether the profile in `home` already composes the roster.
- *
- * The check is the composition, not the patch text: a profile bundling the web
- * app has the roster already, and adding this block there would mount the row
- * twice. A profile that cannot even dump its config is treated as "not yet".
- */
-export function profileComposesRoster({ profile, home, cli, run = spawnSync }) {
+/** The composed profile tree, or `undefined` when it cannot be dumped yet. */
+function dumpConfig({ profile, home, cli, run = spawnSync }) {
   const result = run(process.execPath, [cli, '--profile', profile, '--dump-config'], {
     env: { ...process.env, DSH_HOME: home },
     encoding: 'utf8',
     windowsHide: true,
   })
-  return String(result.stdout ?? '').includes(ROSTER_MODULE)
+  if (result.error !== undefined && result.error !== null) return undefined
+  const text = String(result.stdout ?? '')
+  return text.trim() === '' ? undefined : text
 }
 
 /**
- * Materialize the roster rows in `home`'s profile patch. Returns what it did so
+ * Which rows this host line's profile has to mount.
+ *
+ * Read from the composition, not from a version string: the 0.1.7 base is the
+ * one that carries a `config-editor` row (its settings document is the profile
+ * patch). A profile that cannot be dumped yet falls back to the launcher's own
+ * package version, so a half-built home still gets the right block.
+ */
+export function profileGeneration({ profile, home, cli, run = spawnSync }) {
+  const dump = dumpConfig({ profile, home, cli, ...(run === undefined ? {} : { run }) })
+  if (dump !== undefined) return dump.includes('- id: config-editor') ? 'forms' : 'legacy'
+  try {
+    const version = JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8')).version
+    return String(version).startsWith('0.1.7') || /^0\.1\.(?:[89]|\d{2,})/u.test(String(version)) ? 'forms' : 'legacy'
+  } catch {
+    return 'legacy'
+  }
+}
+
+/**
+ * Whether the profile in `home` already composes this generation's rows.
+ *
+ * The check is the composition, not the patch text: a profile bundling the web
+ * app has a preset roster already, and adding this block there would mount rows
+ * twice. A profile that cannot even dump its config is treated as "not yet".
+ */
+export function profileComposesRoster({ profile, home, cli, run = spawnSync, generation }) {
+  const dump = dumpConfig({ profile, home, cli, ...(run === undefined ? {} : { run }) })
+  const line = generation ?? (dump !== undefined && dump.includes('- id: config-editor') ? 'forms' : 'legacy')
+  return dump !== undefined && dump.includes(COMPOSED[line])
+}
+
+/**
+ * Materialize the rows in `home`'s profile patch. Returns what it did so
  * callers can log it; never throws on an already-mounted profile.
  */
 export function mountProfileRows({
@@ -103,9 +162,11 @@ export function mountProfileRows({
   cli = require.resolve('@deepseek-ai/dsh/lib/bin.js'),
   log = console.log,
   run,
+  generation,
 }) {
-  if (profileComposesRoster({ profile, home, cli, ...(run === undefined ? {} : { run }) })) {
-    log(`==> profile '${profile}' already composes the agent-preset roster`)
+  const line = generation ?? profileGeneration({ profile, home, cli, ...(run === undefined ? {} : { run }) })
+  if (profileComposesRoster({ profile, home, cli, ...(run === undefined ? {} : { run }), generation: line })) {
+    log(`==> profile '${profile}' already composes the ${line === 'forms' ? 'preset plane' : 'agent-preset roster'}`)
     return 'already-mounted'
   }
   const patchFile = profilePatchPath(profile, home)
@@ -115,14 +176,17 @@ export function mountProfileRows({
     writeFileSync(patchFile, PATCH_HEADER)
   }
   const text = readFileSync(patchFile, 'utf8')
-  if (new RegExp(`name:\\s*'${ROSTER_MODULE.replaceAll('/', '\\/')}'`).test(text)) {
-    log('    patch already names the roster row; leaving it as it is')
+  if (new RegExp(`name:\\s*'${MARKER[line].replaceAll('/', '\\/')}'`).test(text)) {
+    log('    patch already names the row; leaving it as it is')
     return 'already-named'
   }
-  log(`==> mounting the agent-preset roster in profile '${profile}'`)
+  const block = line === 'forms' ? FORMS_BLOCK : ROSTER_BLOCK
+  log(line === 'forms'
+    ? `==> mounting the agent-plane rows in profile '${profile}'`
+    : `==> mounting the agent-preset roster in profile '${profile}'`)
   const next = /^\s*\[\s*\]\s*$/mu.test(text)
-    ? text.replace(/^\s*\[\s*\]\s*$/mu, `${ROSTER_BLOCK.trimEnd()}\n`)
-    : `${text.endsWith('\n') ? text : `${text}\n`}\n${ROSTER_BLOCK}`
+    ? text.replace(/^\s*\[\s*\]\s*$/mu, `${block.trimEnd()}\n`)
+    : `${text.endsWith('\n') ? text : `${text}\n`}\n${block}`
   writeFileSync(patchFile, next)
   return 'mounted'
 }
@@ -131,7 +195,7 @@ function main(argv = process.argv.slice(2)) {
   const profile = argv[0] ?? process.env.DSH_TUI_PROFILE ?? 'tui'
   mountProfileRows({ profile, home: resolveDshHome() })
   console.log(`==> done`)
-  console.log(`restart the TUI for /mode to pick up the roster: dsh --profile ${profile}`)
+  console.log(`restart the TUI so the settings rows are picked up: dsh --profile ${profile}`)
 }
 
 if (process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url) {

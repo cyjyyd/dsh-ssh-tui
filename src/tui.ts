@@ -35,6 +35,7 @@ import {
   commandAcceptsAttachments,
   forEachSessionEvent,
   forEachSessionEventAsync,
+  hostSettingsGeneration,
   isAssistantStreamEvent,
   isTokenDeltaChunk,
   listenHostEvent,
@@ -87,7 +88,7 @@ import {
   planRosterRepair,
   rosterPatchPath,
   writePatchWithBackup,
-  ROSTER_ROWS,
+  ALL_ROSTER_ROWS,
   type RosterRow,
 } from './preset-rows.js'
 import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
@@ -2416,6 +2417,7 @@ export class SshTui {
         roster: this.ctx.get('agentPresets') !== undefined,
         codeRuntime: this.hasHostService('codeRuntime'),
       },
+      generation: hostSettingsGeneration(this.ctx),
       anchors: [process.argv[1], (this.ctx as { baseUrl?: string }).baseUrl],
       ...(routing === undefined ? {} : { routing }),
     })
@@ -2437,11 +2439,11 @@ export class SshTui {
   /** `/fix <row>`: repair one named roster row of the profile patch. */
   private async runFixCommand(arg: string): Promise<void> {
     const name = arg.trim().toLowerCase()
-    const row = ROSTER_ROWS.find(candidate => candidate.id === name || candidate.name.toLowerCase() === name)
+    const row = ALL_ROSTER_ROWS.find(candidate => candidate.id === name || candidate.name.toLowerCase() === name)
     if (row === undefined) {
       this.pushRow({
         kind: 'error',
-        text: t('doctor.fix.unknownRow', { row: arg.trim(), rows: ROSTER_ROWS.map(candidate => candidate.id).join(', ') }),
+        text: t('doctor.fix.unknownRow', { row: arg.trim(), rows: ALL_ROSTER_ROWS.map(candidate => candidate.id).join(', ') }),
       })
       this.markDirty()
       return
@@ -2460,7 +2462,7 @@ export class SshTui {
     let text = facts.patch.text
     const duplicates = facts.patch.readable ? planDuplicateRepair(text) : undefined
     if (duplicates !== undefined) text = duplicates.text
-    const roster = planRosterRepair(text, rows)
+    const roster = planRosterRepair(text, rows, facts.generation ?? 'legacy')
     if (roster !== undefined) text = roster.text
     const added = roster?.added ?? []
     const removed = duplicates?.removed ?? []

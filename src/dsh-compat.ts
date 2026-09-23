@@ -93,6 +93,24 @@ function settingsService(ctx: Context): SettingsServiceLike | undefined {
   return ctx.get('settings') as unknown as SettingsServiceLike | undefined
 }
 
+/** Which settings protocol the running host speaks. */
+export type SettingsGeneration = 'legacy' | 'forms'
+
+/**
+ * The host's settings generation, as feature detection rather than a version.
+ *
+ * `legacy` (0.1.5) resolves a namespace through `settings.get`; `forms` (0.1.7)
+ * has no `get` and projects a form per loader entry. Callers that differ by
+ * generation — which profile rows a terminal profile must mount, for one — read
+ * it here instead of sniffing package versions.
+ */
+export function hostSettingsGeneration(ctx: Context): SettingsGeneration {
+  const service = settingsService(ctx)
+  // No service yet (early apply) is the legacy shape: `installSettingsSection`
+  // defers either way, and the repair paths only run after boot.
+  return service !== undefined && typeof service.get !== 'function' ? 'forms' : 'legacy'
+}
+
 /** `describe()` re-projects every entry's schema, so one frame shares a walk. */
 const DESCRIPTORS_TTL_MS = 250
 const descriptorCache = new WeakMap<object, { at: number; rows: readonly SettingsDescriptorLike[] }>()
