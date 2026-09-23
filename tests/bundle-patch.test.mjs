@@ -23,7 +23,11 @@ test('bundle patch is additive and does not impersonate @deepseek-ai', async () 
 
   const ids = [...new Set([...patch.matchAll(/(?:^|\n)\s*- id:\s*['"]?([A-Za-z0-9][A-Za-z0-9._-]{0,95})['"]?\s*(?:\n|$)/g)]
     .map(match => match[1]))]
-  assert.deepEqual(ids.sort(), ['ssh-tui', 'ssh-tui-startup'])
+  // `ssh-tui-routes` and `ssh-tui-subagent` exist because 0.1.7 projects a
+  // settings form out of a loader entry's own Config schema, so a namespace a
+  // plugin owns needs a row of its own; their ids are the namespaces, which is
+  // also what the host imports a pre-0.1.7 `settings.yaml` section into.
+  assert.deepEqual(ids.sort(), ['ssh-tui', 'ssh-tui-routes', 'ssh-tui-startup', 'ssh-tui-subagent'])
   assert.equal(ids.some(id => PROTECTED_ENTRY_IDS.has(id)), false)
   assert.equal(ids.some(id => id.startsWith('llm-') || id.startsWith('tool-') || id === 'hmr' || id === 'system-prompt' || id === 'agent-presets'), false)
 })
@@ -65,17 +69,22 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // 2026-09-22, minutes before a CI run, and every leg went red on `npm install`.
   // Bumping these is deliberate and comes with bumping the dsh family pin.
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-  const versionOf = name => manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]
   for (const [name, pinned] of [
     ['@deepseek-ai/cordis', '4.0.2'],
     ['@deepseek-ai/cordis-plugin-hmr', '1.0.17'],
     ['@deepseek-ai/cordis-plugin-include', '1.0.7'],
     ['@deepseek-ai/cordis-plugin-loader', '1.0.3'],
     ['@deepseek-ai/cordis-plugin-timer', '1.1.4'],
-    ['@deepseek-ai/schemastery', '3.18.2'],
   ]) {
-    assert.equal(versionOf(name), pinned, `${name} must stay pinned to what the family pins`)
+    assert.equal(manifest.devDependencies?.[name] ?? manifest.dependencies?.[name], pinned, `${name} must stay pinned to what the family pins`)
   }
+  // schemastery is the one root the plugin also *ships* (`dependencies`), so its
+  // spec has to admit the copy the host resolved instead of nesting a second
+  // one — a schema built by another copy is a different class. It admits exactly
+  // the two versions the family lines pin (0.1.5 → 3.18.2, 0.1.7 → ~3.18.4) and
+  // nothing else; a floating range would let a fresh tree pick a version no host
+  // ever resolved.
+  assert.equal(manifest.dependencies?.['@deepseek-ai/schemastery'], '3.18.2 || ~3.18.4')
   // The four cordis plugins are here for the same reason and are not imported:
   // cordis peers them optionally, so without a root pin npm takes the newest
   // (`include@1.0.9` on the 0.1.2-rc.1 leg) and that one demands `cordis ~4.0.4`,

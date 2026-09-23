@@ -76,7 +76,13 @@ import {
   sessionRouteInput,
   type SessionRoute,
 } from './session-route.js'
-import { settingsNamespace } from './dsh-compat.js'
+import {
+  liveField,
+  readSettingsSection,
+  settingsDocument,
+  settingsNamespace,
+} from './dsh-compat.js'
+import z from '@deepseek-ai/schemastery'
 import { installUiLocale, t } from './i18n/index.js'
 
 
@@ -107,7 +113,70 @@ export interface Config {
   model?: string
   /** Minimum milliseconds between paints; see DSH_TUI_PAINT_MS. */
   paintIntervalMs?: number
+  /**
+   * The fields below are the TUI's live settings, i.e. the `ssh-tui` section.
+   * They ride on this entry's schema so 0.1.7 can project a form for it — and so
+   * a pre-0.1.7 `$DSH_HOME/settings.yaml` `ssh-tui:` section is imported into
+   * this entry rather than left behind.
+   */
+  /** UI language (`/language`); zh unless the environment says otherwise. */
+  language?: string
+  /** Newest plugin version whose update notice was dismissed. */
+  skipUpdate?: string
+  /** Workspace pane layout (`/view`). */
+  view?: string
+  /** What a dropped display does (`/disconnect`). */
+  disconnect?: string
+  /** Auto-approval mode (`/autoapproval`). */
+  autoApproval?: string
+  /** Milliseconds a leftover finished Host waits before exiting; 0 = never. */
+  idleExit?: number
 }
+
+/** Every field above, as schemastery resolves them (all optional). */
+interface ConfigFields {
+  sessionId?: string
+  showReasoning?: boolean
+  maxToolOutputLines?: number
+  color?: boolean
+  welcome?: string
+  resume?: boolean
+  resumePicker?: boolean
+  provider?: string
+  model?: string
+  paintIntervalMs?: number
+  language?: string
+  skipUpdate?: string
+  view?: string
+  disconnect?: string
+  autoApproval?: string
+  idleExit?: number
+}
+
+/**
+ * The entry's schema. Everything a launch supplies (`config:` in
+ * `cordis.patch.yml`, including its `!!js` expressions) stays ordinary,
+ * non-live configuration; the TUI's own settings are the live fields, which is
+ * what makes them visible to, and writable through, the 0.1.7 settings service.
+ */
+export const Config: z<ConfigFields> = z.object({
+  sessionId: z.string(),
+  showReasoning: z.boolean(),
+  maxToolOutputLines: z.number(),
+  color: z.boolean(),
+  welcome: z.string(),
+  resume: z.boolean(),
+  resumePicker: z.boolean(),
+  provider: z.string(),
+  model: z.string(),
+  paintIntervalMs: z.number(),
+  language: liveField(z.string()),
+  skipUpdate: liveField(z.string()),
+  view: liveField(z.string()),
+  disconnect: liveField(z.string()),
+  autoApproval: liveField(z.string()),
+  idleExit: liveField(z.number()),
+})
 
 /**
  * Mount the SSH TUI. The `main` agent is created here after the loader
@@ -240,13 +309,11 @@ export function apply(ctx: Context, config: Config): void {
       // default that must survive a restart. The agentDefaultModel service
       // (or a duplicate settings instance) can report a stale in-memory
       // selection, so prefer the file when it carries a user section.
-      const settingsSvc = ctx.get('settings') as
-        | { document?: unknown }
-        | undefined
-      const doc = settingsSvc?.document
-      const docSection = doc !== null && typeof doc === 'object' && !Array.isArray(doc)
-        ? (doc as Record<string, unknown>)['agent-default-model']
-        : undefined
+      // `settingsDocument` reads the user layer on both lines: 0.1.7 removed
+      // the service's `document` property, and the descriptor's `user` layer is
+      // the same view.
+      const doc = settingsDocument(ctx)
+      const docSection = doc?.['agent-default-model']
       const fileSection = readAgentDefaultFromFile()
       const authoritative = (fileSection ?? docSection) as
         | { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
@@ -265,16 +332,14 @@ export function apply(ctx: Context, config: Config): void {
           : serviceSaved
       const hasUserDefaultSection = fileSection !== undefined || docSection !== undefined
       const rememberedFallback = !hasUserDefaultSection
-        ? latestRememberedRoute(parseRouteMemory(
-            (settingsSvc as { document?: Record<string, unknown> } | undefined)?.document?.['ssh-tui-routes'],
-          ))
+        ? latestRememberedRoute(parseRouteMemory(doc?.['ssh-tui-routes']))
         : undefined
 
       // Which providers this install can still route to. Permissive on purpose:
       // see `providerIsRoutable` — wrongly keeping a record costs the error the
       // harness already reports, wrongly dropping one loses the session's route.
       const listedProviders = (ctx.get('llm')?.listProviders() ?? []).map(entry => entry.id)
-      const piAiSection = ctx.get('settings')?.get(settingsNamespace('llm-pi-ai')) as { providers?: unknown } | null | undefined
+      const piAiSection = readSettingsSection(ctx, settingsNamespace('llm-pi-ai')) as { providers?: unknown } | null | undefined
       const configuredProviders = piAiSection?.providers !== null && typeof piAiSection?.providers === 'object'
         ? Object.keys(piAiSection.providers as Record<string, unknown>)
         : []
@@ -290,7 +355,7 @@ export function apply(ctx: Context, config: Config): void {
       // into this one; only a readable section may replace it.
       releaseSessionSubagentSelection(
         subagentSelection,
-        ctx.get('settings')?.get(SUBAGENT_SETTINGS_NAMESPACE),
+        readSettingsSection(ctx, SUBAGENT_SETTINGS_NAMESPACE),
       )
       const sessionPlan = await restoreSessionRoute({
         sessionId: String(sessionId),

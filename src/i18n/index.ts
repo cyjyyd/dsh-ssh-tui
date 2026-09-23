@@ -8,7 +8,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from '../dsh-compat.js'
+import { installSettingsSection, liveField, settingsNamespace } from '../dsh-compat.js'
 import { en } from './en.js'
 import { zh } from './zh.js'
 
@@ -20,14 +20,20 @@ const TABLES: Record<Locale, Record<string, string>> = { zh, en }
 
 export const UI_LOCALE_NAMESPACE = settingsNamespace('ssh-tui')
 
+/**
+ * Fields `/language`, `/view`, `/disconnect` and `/autoapproval` persist.
+ *
+ * Every field is live: on 0.1.7 the section *is* this form, and only volatile
+ * paths may be written (see {@link liveField}).
+ */
 export const UI_LOCALE_SCHEMA = z.object({
-  language: z.string(),
-  skipUpdate: z.string(),
-  view: z.string(),
-  disconnect: z.string(),
-  autoApproval: z.string(),
+  language: liveField(z.string()),
+  skipUpdate: liveField(z.string()),
+  view: liveField(z.string()),
+  disconnect: liveField(z.string()),
+  autoApproval: liveField(z.string()),
   /** Milliseconds a leftover, finished Host waits before exiting; 0 = never. */
-  idleExit: z.number(),
+  idleExit: liveField(z.number()),
 })
 
 let current: Locale = resolveLocale()

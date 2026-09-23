@@ -12,7 +12,7 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId, type ReasoningEffortId as ReasoningEffort } from '@deepseek-ai/dsh-llm'
-import { installSettingsSection, settingsNamespace } from './dsh-compat.js'
+import { installSettingsSection, liveField, settingsNamespace } from './dsh-compat.js'
 import { t } from './i18n/index.js'
 
 /** Settings namespace carrying the TUI's subagent model selection. */
@@ -292,11 +292,11 @@ export function releaseSessionSubagentSelection(
   ref.current = normalizeSubagentSelection(settingsValue)
 }
 
-/** Settings schema for `$DSH_HOME/settings.yaml`. */
+/** Settings schema for the subagent selection; every field is form-writable. */
 export const SUBAGENT_SETTINGS_SCHEMA = z.object({
-  provider: z.string(),
-  model: z.string().default(DEFAULT_SUBAGENT_MODEL),
-  reasoningEffort: z.string(),
+  provider: liveField(z.string()),
+  model: liveField(z.string().default(DEFAULT_SUBAGENT_MODEL)),
+  reasoningEffort: liveField(z.string()),
 })
 
 /** Normalize a raw settings section into a live typed selection. */

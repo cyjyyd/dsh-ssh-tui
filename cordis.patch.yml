@@ -25,3 +25,18 @@
         color: !!js ctx.sshTuiStartup.noColor !== true
         # Jump-host SSH: coalesce token ticks into one stdout write per frame.
         paintIntervalMs: !!js Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '160', 10) || 160
+
+    # The TUI's two auxiliary settings namespaces.
+    #
+    # From 0.1.7 a settings form is projected out of a loader entry's own Config
+    # schema, and a write may only address an entry id — so each namespace needs
+    # a row. The row ids ARE the namespaces, and they match the sections the
+    # 0.1.5 line registered and the host imports a pre-0.1.7 `settings.yaml`
+    # section into, so `/model` routes and a `/submodel` pin survive an upgrade.
+    # On 0.1.5 these rows only carry their schema: the plugin registers both
+    # sections itself.
+    - id: ssh-tui-routes
+      name: 'dsh-ssh-tui/settings-routes'
+
+    - id: ssh-tui-subagent
+      name: 'dsh-ssh-tui/settings-subagent'

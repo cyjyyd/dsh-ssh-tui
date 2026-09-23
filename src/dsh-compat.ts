@@ -11,10 +11,26 @@
  * runs on either host.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SettingsNamespace, SettingsSectionHooks } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import * as dshSettings from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
+
+declare module '@deepseek-ai/dsh-llm' {
+  /**
+   * The TUI's own notice/steering messages, which it commits to the durable log
+   * with `source.kind === 'plugin'`.
+   *
+   * 0.1.5 shipped this member; 0.1.7 removed the catch-all and documents the
+   * intended pattern instead — "each producer declares its own `kind` in its
+   * own module". This is that declaration, and it keeps the committed log shape
+   * identical on both lines.
+   */
+  interface MessageSourceMap {
+    plugin: { kind: 'plugin'; plugin: string } & ContextFormed
+  }
+}
 
 /**
  * 0.1.1-rc.2 wraps namespaces via `settingsNamespace()`; 0.1.2+ brands them at
@@ -25,11 +41,145 @@ export function settingsNamespace(value: string): SettingsNamespace {
 }
 
 /**
- * Register a settings section: 0.1.2-rc.1 moved the free function onto the
- * `settings` service as `installSection`, callable only once that service is
- * injected (plugins apply before it, so `ctx.inject` must defer — same
- * pattern the harness's own packages use); 0.1.1-rc.2 keeps the free
- * function, which defers internally and is safe at apply time.
+ * Hooks a settings consumer hands to {@link installSettingsSection}.
+ *
+ * Spelled out locally instead of imported: 0.1.7 deleted the
+ * `SettingsSectionHooks` export, and this shape is the whole contract the three
+ * call sites use.
+ */
+export interface SettingsSectionHooks<T> {
+  /**
+   * Receive the active configuration source: the resolved settings value while
+   * a section is attached. Called at attach and again after every change.
+   * @param current - thunk returning the currently authoritative value.
+   */
+  setSource(current: () => T): void
+  /**
+   * Re-judge anything derived from the source — registration-level facts,
+   * memoized resolutions — after an attach or a committed change.
+   */
+  onChange(): void
+  /** Reject a resolved section this consumer could not act on. */
+  validate?(value: T): void
+}
+
+/** One `describe()` row: a profile entry's id and its live form values. */
+interface SettingsDescriptorLike {
+  ns: SettingsNamespace
+  value: unknown
+  /** The user's own layer for this entry; absent when nothing was overridden. */
+  user?: unknown
+}
+
+/**
+ * The settings service as the lines we support expose it.
+ *
+ * 0.1.5 publishes `get` plus `installSection`, so a consumer reads a namespace
+ * and registers its own section. 0.1.7 removed both: a form is projected out of
+ * the loader entry's own `Config` schema (`describe()`), and a write addresses
+ * that entry id. Feature detection, not a version check, picks the paths.
+ */
+interface SettingsServiceLike {
+  get?: (ns: SettingsNamespace) => unknown
+  describe?: (options?: { redactSecrets?: boolean }) => readonly SettingsDescriptorLike[]
+  installSection?: (...args: unknown[]) => void
+  /** The raw user document, published by 0.1.5 providers. */
+  document?: unknown
+  /** Context the service emits `settings/document-updated` on. */
+  ctx?: Context
+}
+
+function settingsService(ctx: Context): SettingsServiceLike | undefined {
+  return ctx.get('settings') as unknown as SettingsServiceLike | undefined
+}
+
+/** `describe()` re-projects every entry's schema, so one frame shares a walk. */
+const DESCRIPTORS_TTL_MS = 250
+const descriptorCache = new WeakMap<object, { at: number; rows: readonly SettingsDescriptorLike[] }>()
+
+function descriptorsOf(service: SettingsServiceLike & object): readonly SettingsDescriptorLike[] | undefined {
+  if (typeof service.describe !== 'function') return undefined
+  const now = Date.now()
+  const cached = descriptorCache.get(service)
+  if (cached !== undefined && now - cached.at < DESCRIPTORS_TTL_MS) return cached.rows
+  const rows = service.describe()
+  descriptorCache.set(service, { at: now, rows })
+  return rows
+}
+
+/** Forget the memoized descriptors so the next read re-walks the forms. */
+export function invalidateSettingsCache(ctx: Context): void {
+  const service = settingsService(ctx)
+  if (service !== undefined) descriptorCache.delete(service)
+}
+
+/**
+ * Read one settings section.
+ *
+ * 0.1.5 resolves it through `get(ns)`. 0.1.7 has no `get`, so the value comes
+ * from the entry's descriptor, which projects the live config — volatile fields
+ * only, i.e. exactly the fields its form exposes — and returns `undefined` when
+ * no entry carries that id.
+ */
+export function readSettingsSection(ctx: Context, ns: SettingsNamespace): unknown {
+  const service = settingsService(ctx)
+  if (service === undefined) return undefined
+  if (typeof service.get === 'function') return service.get(ns)
+  return descriptorsOf(service)?.find(row => row.ns === ns)?.value
+}
+
+/**
+ * The user's own settings document, keyed by namespace, on either line.
+ *
+ * 0.1.5 publishes it as `settings.document`. 0.1.7 dropped the property — the
+ * document is the profile patch now — but each descriptor still carries the
+ * user layer it was built from, so the same view is reconstructible. Callers
+ * that ask "did the user configure this?" must use this, not
+ * {@link readSettingsSection}: a resolved read also carries the composition
+ * base and schema defaults, which is exactly what such a caller must not
+ * mistake for a user choice.
+ */
+export function settingsDocument(ctx: Context): Record<string, unknown> | undefined {
+  const service = settingsService(ctx)
+  if (service === undefined) return undefined
+  const raw = service.document
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>
+  }
+  const rows = descriptorsOf(service)
+  if (rows === undefined) return undefined
+  return Object.fromEntries(
+    rows.filter(row => row.user !== undefined).map(row => [row.ns, row.user]),
+  )
+}
+
+/**
+ * Mark one schema field as form-writable on the 0.1.7 line.
+ *
+ * 0.1.7 projects only fields whose schema node carries the `volatile` meta, and
+ * refuses a settings write to any other path. The 0.1.5 schemastery (3.18.2)
+ * has no such builder, so the call is feature-detected rather than typed: on
+ * that line the marker means nothing and the schema is returned untouched.
+ */
+export function liveField<T>(schema: z<T>): z<T> {
+  const builder = schema as unknown as { volatile?: () => z<T> }
+  return typeof builder.volatile === 'function' ? builder.volatile() : schema
+}
+
+/**
+ * Register a settings section.
+ *
+ * 0.1.2-rc.1 moved the free function onto the `settings` service as
+ * `installSection`, callable only once that service is injected (plugins apply
+ * before it, so `ctx.inject` must defer — same pattern the harness's own
+ * packages use); 0.1.1-rc.2 keeps the free function, which defers internally
+ * and is safe at apply time.
+ *
+ * 0.1.7 removed both. The section is now the loader entry's own `Config`
+ * schema — this plugin's is `ssh-tui`, and the two auxiliary namespaces are
+ * carried by the `dsh-ssh-tui/settings-*` rows in `cordis.patch.yml` — so the
+ * only thing left for a consumer to wire is the live read (`setSource`) and the
+ * change notification (`onChange`).
  */
 export function installSettingsSection<T>(
   ctx: Context,
@@ -58,15 +208,47 @@ export function installSettingsSection<T>(
     throw new Error('dsh-settings: no legacy installSettingsSection and ctx.inject is unavailable')
   }
   host.inject(['settings'], (injected) => {
-    const holder = injected as { settings?: { installSection?: (...args: unknown[]) => void } }
-    const provider = (holder.settings ?? injected) as {
-      installSection?: (...args: unknown[]) => void
+    const holder = injected as { settings?: unknown }
+    const service = (holder.settings ?? injected) as unknown as SettingsServiceLike
+    if (typeof service.installSection === 'function') {
+      service.installSection(ctx, ns, schema, entry, hooks)
+      return
     }
-    if (typeof provider?.installSection !== 'function') {
+    if (typeof service.describe !== 'function') {
       throw new Error('dsh-settings: settings service has no installSection')
     }
-    provider.installSection(ctx, ns, schema, entry, hooks)
+    hooks.setSource(() => readSettingsSection(ctx, ns) as T)
+    // 0.1.7 emits `settings/document-updated` on the service's own context,
+    // which is where a consumer outside the root fiber has to listen. A host
+    // that does not expose it still gets the attach read below.
+    const owner = service.ctx as unknown as {
+      on?: (name: string, listener: (changed: unknown) => void) => (() => void) | undefined
+    } | undefined
+    if (typeof owner?.on === 'function') {
+      const off = owner.on('settings/document-updated', (changed) => {
+        if (changed !== ns) return
+        invalidateSettingsCache(ctx)
+        hooks.onChange()
+      })
+      if (typeof off === 'function') ctx.effect(() => off)
+    }
+    hooks.onChange()
   })
+}
+
+/**
+ * Whether a tool result reports failure.
+ *
+ * 0.1.5 carries `isError` on the `tool-result` content block; 0.1.7 removed
+ * that block from `ContentBlockMap` and moved the flag onto the message
+ * itself. Both are read, so one build understands either host.
+ */
+export function toolResultFailed(message: unknown): boolean {
+  if (message === null || typeof message !== 'object') return false
+  if ((message as { isError?: unknown }).isError === true) return true
+  const first = (message as { content?: readonly unknown[] }).content?.[0]
+  return first !== null && typeof first === 'object'
+    && (first as { isError?: unknown }).isError === true
 }
 
 /**

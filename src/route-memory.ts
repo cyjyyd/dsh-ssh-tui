@@ -4,7 +4,7 @@
  */
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection, settingsNamespace } from './dsh-compat.js'
+import { installSettingsSection, liveField, settingsNamespace } from './dsh-compat.js'
 
 export const ROUTE_MEMORY_NAMESPACE = settingsNamespace('ssh-tui-routes')
 
@@ -22,11 +22,11 @@ export interface RouteMemorySettings {
  * with TS2742 on any layout that does not match this machine's.
  */
 export const ROUTE_MEMORY_SCHEMA: z<RouteMemorySettings> = z.object({
-  providers: z.dict(z.object({
+  providers: liveField(z.dict(z.object({
     model: z.string(),
     reasoningEffort: z.string().default(''),
     updatedAt: z.number(),
-  })).default({}),
+  })).default({})),
 })
 
 export interface RememberedRoute {

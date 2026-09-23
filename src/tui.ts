@@ -38,6 +38,7 @@ import {
   isAssistantStreamEvent,
   isTokenDeltaChunk,
   listenHostEvent,
+  readSettingsSection,
   REPLAY_YIELD_EVERY,
   sessionEventType,
   sessionEvents,
@@ -46,6 +47,7 @@ import {
   streamFirstTokenTime,
   streamFrameAttemptId,
   streamFrameOwner,
+  toolResultFailed,
   type StreamChunkLike,
 } from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
@@ -170,7 +172,6 @@ import {
   upsertRememberedRoute,
   type RememberedRoute,
 } from './route-memory.js'
-import { AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-agent-default-model'
 import {
   DEFAULT_SUBAGENT_MODEL,
   SUBAGENT_SETTINGS_NAMESPACE,
@@ -701,6 +702,17 @@ function installUserQuestionAnswerer(
 }
 
 const ROUTE_MEMORY_NS = ROUTE_MEMORY_NAMESPACE
+
+/**
+ * The `agent-default-model` settings entry `/model` falls back to writing.
+ *
+ * 0.1.5 exports this id as `AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE`; 0.1.7
+ * removed the export and let the profile own entry ids, which keeps the name the
+ * legacy `settings.yaml` section is imported under. Inlined so one build runs
+ * against either host — the primary path, `agentDefaultModel.saveSelection`,
+ * is the same call on both.
+ */
+const AGENT_DEFAULT_MODEL_NS = settingsNamespace('agent-default-model')
 
 /**
  * The window llm-pi-ai falls back to when neither a model entry nor the
@@ -1776,7 +1788,7 @@ export class SshTui {
   }
 
   private readSkippedUpdate(): string | undefined {
-    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
     const skip = (raw as { skipUpdate?: unknown }).skipUpdate
     return typeof skip === 'string' && skip.trim() !== '' ? skip.trim() : undefined
@@ -1795,7 +1807,7 @@ export class SshTui {
   }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
-    const raw = settings.get(UI_LOCALE_NAMESPACE)
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     const previous = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
       ? raw as { language?: string; skipUpdate?: string; view?: string; disconnect?: string; autoApproval?: string }
       : {}
@@ -1803,7 +1815,7 @@ export class SshTui {
   }
 
   private readWorkspaceView(): WorkspaceView {
-    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'detailed'
     return parseWorkspaceView(String((raw as { view?: unknown }).view ?? '')) ?? 'detailed'
   }
@@ -1811,7 +1823,7 @@ export class SshTui {
   private readDisconnectPolicy(): DisconnectPolicyName {
     const env = parseDisconnectPolicy(process.env.DSH_TUI_DISCONNECT ?? '')
     if (env !== undefined) return env
-    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'pause'
     return parseDisconnectPolicy(String((raw as { disconnect?: unknown }).disconnect ?? '')) ?? 'pause'
   }
@@ -1819,7 +1831,7 @@ export class SshTui {
   private readAutoApprovalMode(): AutoApprovalMode {
     const env = parseAutoApprovalMode(process.env.DSH_TUI_AUTO_APPROVAL ?? '')
     if (env !== undefined) return env
-    const raw = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return 'off'
     return parseAutoApprovalMode(String((raw as { autoApproval?: unknown }).autoApproval ?? '')) ?? 'off'
   }
@@ -1857,7 +1869,7 @@ export class SshTui {
   private idleExitMs(): number {
     const raw = Number.parseInt(process.env.DSH_TUI_IDLE_EXIT_MS ?? '', 10)
     if (Number.isFinite(raw) && raw >= 0) return raw
-    const saved = this.ctx.get('settings')?.get(UI_LOCALE_NAMESPACE)
+    const saved = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     if (saved !== null && typeof saved === 'object' && !Array.isArray(saved)) {
       const value = (saved as { idleExit?: unknown }).idleExit
       if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
@@ -2377,9 +2389,7 @@ export class SshTui {
 
   /** Routing facts for the doctor's self-consistency check. */
   private doctorRouting(): DoctorRouting | undefined {
-    const settings = this.ctx.get('settings')
-    if (settings === undefined) return undefined
-    const section = settings.get(settingsNamespace('llm-pi-ai')) as LlmPiAiSection | undefined
+    const section = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai')) as LlmPiAiSection | undefined
     const providers = section?.providers ?? {}
     const provider = this.currentProvider()
     const models = Array.isArray(providers[provider]?.models) ? providers[provider]?.models ?? [] : []
@@ -5480,7 +5490,7 @@ export class SshTui {
             this.markDirty()
             break
           }
-          const failed = event.data.error !== undefined || event.data.message.content[0]?.isError === true
+          const failed = event.data.error !== undefined || toolResultFailed(event.data.message)
           spawnCard.status = failed ? 'error' : 'ok'
           spawnCard.endedAt = typeof event.time === 'number' ? event.time : Date.now()
           if (output !== '') {
@@ -5508,7 +5518,7 @@ export class SshTui {
             row.output = output
           }
           const failed = event.data.error !== undefined
-            || event.data.message.content[0]?.isError === true
+            || toolResultFailed(event.data.message)
             || (isShell && ((row.exitCode !== undefined && row.exitCode !== 0) || row.signal !== undefined))
           row.status = failed ? 'error' : 'ok'
           if (READ_TOOL_NAMES.has(row.name)) {
@@ -6218,7 +6228,7 @@ export class SshTui {
         break
       }
       case 'tool/result': {
-        const ok = event.data.error === undefined && event.data.message.content[0]?.isError !== true
+        const ok = event.data.error === undefined && !toolResultFailed(event.data.message)
         const callId = String(event.data.message.source.callId)
         const sourceName = (event.data.message.source as { name?: unknown }).name
         const recorded = this.toolCallNames.get(callId)
@@ -7014,7 +7024,7 @@ export class SshTui {
   /** The stored llm-pi-ai profile for one provider route, when settings provide one. */
   private piAiProviderProfile(provider: string): LlmPiAiProviderProfile | undefined {
     if (provider === 'deepseek-official') return undefined
-    const section = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai')) as LlmPiAiSection | null | undefined
+    const section = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai')) as LlmPiAiSection | null | undefined
     return section?.providers?.[provider]
   }
 
@@ -7227,7 +7237,7 @@ export class SshTui {
     models: { id: string; label: string }[]
     endpoints: ReadonlyMap<string, readonly string[]> | undefined
   }> {
-    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const llmPiAi = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai'))
     const profile = this.piAiProviderProfile(provider)
     const source = openCodeSourceFor(provider, llmPiAi)
     const baseURL = typeof profile?.baseURL === 'string' && profile.baseURL.trim() !== ''
@@ -7615,7 +7625,7 @@ export class SshTui {
 
   /** Persist a provider/model/effort choice and keep the subagent on the same family. */
   private rememberedRoute(provider: string): RememberedRoute | undefined {
-    const section = this.ctx.get('settings')?.get(ROUTE_MEMORY_NS)
+    const section = readSettingsSection(this.ctx, ROUTE_MEMORY_NS)
     const memory = section !== null && typeof section === 'object' && !Array.isArray(section)
       ? parseRouteMemory((section as Record<string, unknown>).providers)
       : {}
@@ -7664,7 +7674,7 @@ export class SshTui {
     this.noteSessionRoute()
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
-    const section = settings.get(ROUTE_MEMORY_NS)
+    const section = readSettingsSection(this.ctx, ROUTE_MEMORY_NS)
     const memory = section !== null && typeof section === 'object' && !Array.isArray(section)
       ? parseRouteMemory((section as Record<string, unknown>).providers)
       : {}
@@ -7785,7 +7795,7 @@ export class SshTui {
     }
     if (settings !== undefined) {
       try {
-        await settings.replace(AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE, {
+        await settings.replace(AGENT_DEFAULT_MODEL_NS, {
           provider: next.provider,
           model: next.model,
           ...(next.reasoningEffort === undefined ? {} : { reasoningEffort: String(next.reasoningEffort) }),
@@ -8649,7 +8659,7 @@ export class SshTui {
         return
       }
       const provider = this.currentProviderId()
-      const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+      const llmPiAi = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai'))
       const source = openCodeSourceFor(provider, llmPiAi)
       if (source?.flavor === 'zen') {
         this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
@@ -8706,7 +8716,7 @@ export class SshTui {
    * neither gets nothing.
    */
   private hasQuotaSurface(provider: string): boolean {
-    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const llmPiAi = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai'))
     return providerHasQuotaSurface(provider, llmPiAi)
   }
 
@@ -8760,7 +8770,7 @@ export class SshTui {
     if (provider === 'deepseek-official' || provider === 'deepseek') {
       const apiKey = await this.resolveCredential('DEEPSEEK_API_KEY')
       if (apiKey === undefined) throw new Error(t('usage.noDeepseekKey'))
-      const section = this.ctx.get('settings')?.get(settingsNamespace('llm-deepseek')) as { baseURL?: unknown } | undefined
+      const section = readSettingsSection(this.ctx, settingsNamespace('llm-deepseek')) as { baseURL?: unknown } | undefined
       const baseURL = typeof section?.baseURL === 'string' && section.baseURL.trim() !== ''
         ? section.baseURL.trim()
         : (process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_PUBLIC_BASE_URL)
@@ -8822,7 +8832,7 @@ export class SshTui {
         return parseSuperGrokBilling(payload)
       }
     }
-    const llmPiAi = this.ctx.get('settings')?.get(settingsNamespace('llm-pi-ai'))
+    const llmPiAi = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai'))
     const commandCode = commandCodeSourceFor(provider, llmPiAi)
     if (commandCode !== null) return this.fetchCommandCodeQuota(commandCode)
     const source = openCodeSourceFor(provider, llmPiAi)
