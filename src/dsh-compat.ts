@@ -96,6 +96,20 @@ function settingsService(ctx: Context): SettingsServiceLike | undefined {
 /** Which settings protocol the running host speaks. */
 export type SettingsGeneration = 'legacy' | 'forms'
 
+/** Generations already seen for a context, so an early caller cannot misread. */
+const generationCache = new WeakMap<object, SettingsGeneration>()
+
+/** Whether the 0.1.5 preset-roster package is installed beside this plugin. */
+function presetRosterInstalled(): boolean {
+  try {
+    return typeof import.meta.resolve === 'function'
+      && import.meta.resolve('@deepseek-ai/dsh-agent-presets') !== undefined
+  } catch {
+    // Not installed (0.1.7 dropped it) or resolution unavailable.
+    return false
+  }
+}
+
 /**
  * The host's settings generation, as feature detection rather than a version.
  *
@@ -103,12 +117,22 @@ export type SettingsGeneration = 'legacy' | 'forms'
  * has no `get` and projects a form per loader entry. Callers that differ by
  * generation — which profile rows a terminal profile must mount, for one — read
  * it here instead of sniffing package versions.
+ *
+ * Before the service exists (a plugin applies before it is mounted) the same
+ * split shows up as the roster package's absence, and the answer is memoized as
+ * soon as the service is seen so a later call cannot disagree with an earlier
+ * one.
  */
 export function hostSettingsGeneration(ctx: Context): SettingsGeneration {
+  const cached = generationCache.get(ctx)
+  if (cached !== undefined) return cached
   const service = settingsService(ctx)
-  // No service yet (early apply) is the legacy shape: `installSettingsSection`
-  // defers either way, and the repair paths only run after boot.
-  return service !== undefined && typeof service.get !== 'function' ? 'forms' : 'legacy'
+  if (service !== undefined) {
+    const generation: SettingsGeneration = typeof service.get === 'function' ? 'legacy' : 'forms'
+    generationCache.set(ctx, generation)
+    return generation
+  }
+  return presetRosterInstalled() ? 'legacy' : 'forms'
 }
 
 /** `describe()` re-projects every entry's schema, so one frame shares a walk. */

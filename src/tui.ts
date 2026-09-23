@@ -49,6 +49,7 @@ import {
   streamFrameAttemptId,
   streamFrameOwner,
   toolResultFailed,
+  type SettingsGeneration,
   type StreamChunkLike,
 } from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
@@ -86,6 +87,7 @@ import {
   ensureRosterRows,
   planDuplicateRepair,
   planRosterRepair,
+  formsRowsDeclared,
   rosterPatchPath,
   writePatchWithBackup,
   ALL_ROSTER_ROWS,
@@ -4466,7 +4468,7 @@ export class SshTui {
     // the session counters go before the operational signals. Quota and context
     // pressure are deliberately not here — they are on the identity line.
     const strip: FooterChip[] = []
-    const health = footerHealthChip(this.rosterMissing, this.color)
+    const health = footerHealthChip(this.rosterMissing, this.color, this.settingsGeneration === 'forms' ? 'agent-plane' : 'roster')
     // Muted like the identity line, accent excepted: the pre-strip footer
     // painted the counters dim and only the ⚠'s own glyph yellow.
     if (health !== undefined) strip.push({ ...health, long: this.muteFooterLine(health.long) })
@@ -4736,13 +4738,7 @@ export class SshTui {
     if (service === undefined) {
       this.pushRow({
         kind: 'error',
-        text: [
-          t('preset.missingService'),
-          t('mode.missingServiceHint', {
-            profile: profileFromArgv(),
-            patch: rosterPatchPath(resolveDshHome(), profileFromArgv()),
-          }),
-        ].join('\n'),
+        text: this.missingPresetService(t('preset.missingService')),
       })
       this.markDirty()
       return
@@ -8440,13 +8436,7 @@ export class SshTui {
       const profile = profileFromArgv()
       this.pushRow({
         kind: 'error',
-        text: [
-          t('mode.missingService'),
-          t('mode.missingServiceHint', {
-            profile,
-            patch: rosterPatchPath(resolveDshHome(), profile),
-          }),
-        ].join('\n'),
+        text: this.missingPresetService(t('mode.missingService')),
       })
       this.markDirty()
       return
@@ -8534,7 +8524,31 @@ export class SshTui {
    */
   /** Re-read the roster fact this process was composed with (cheap, no IO). */
   private refreshRosterHealth(): void {
-    this.rosterMissing = this.ctx.get('agentPresets') === undefined
+    // 0.1.7 has no roster to be missing: what a terminal profile owns there is
+    // the agent-plane rows, so the chip reports those instead.
+    this.rosterMissing = this.settingsGeneration === 'forms'
+      ? !formsRowsDeclared(resolveDshHome(), profileFromArgv())
+      : this.ctx.get('agentPresets') === undefined
+  }
+
+  /** Which settings protocol this host speaks; decides what "missing" means. */
+  private get settingsGeneration(): SettingsGeneration {
+    return hostSettingsGeneration(this.ctx)
+  }
+
+  /**
+   * The two lines `/mode` and `/preset` print when the preset service is absent.
+   *
+   * The reason differs by host line: 0.1.5 lost a roster the profile can mount,
+   * while 0.1.7 composes the agent process-wide and has no terminal presets at
+   * all — the repair there is the agent-plane rows, not a roster.
+   */
+  private missingPresetService(first: string): string {
+    const profile = profileFromArgv()
+    const patch = rosterPatchPath(resolveDshHome(), profile)
+    return this.settingsGeneration === 'forms'
+      ? [first, t('mode.formsHost'), t('mode.formsHint', { profile, patch })].join('\n')
+      : [first, t('mode.missingServiceHint', { profile, patch })].join('\n')
   }
 
   private async repairRoster(): Promise<void> {

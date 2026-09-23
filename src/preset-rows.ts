@@ -21,6 +21,7 @@
  */
 
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import yaml from 'js-yaml'
 import type { SettingsGeneration } from './dsh-compat.js'
@@ -135,6 +136,25 @@ export function rosterPatchBlock(generation: HostGeneration): string {
 /** The profile patch file the roster block belongs in. */
 export function rosterPatchPath(home: string, profile: string): string {
   return join(home, 'profiles', profile, 'cordis.patch.yml')
+}
+
+/**
+ * Whether a profile patch already declares every 0.1.7 agent-plane row.
+ *
+ * Synchronous on purpose: the footer chip is rendered from the main loop and
+ * cannot await a read. The file is small and this runs at startup and after a
+ * repair, not per frame.
+ * @param home - the harness home carrying `profiles/`.
+ * @param profile - the profile to inspect.
+ * @returns whether all three rows are declared (or the row is unreachable).
+ */
+export function formsRowsDeclared(home: string, profile: string): boolean {
+  try {
+    const analysis = analyzePatch(readFileSync(rosterPatchPath(home, profile), 'utf8'))
+    return FORMS_ROWS.every(row => patchNamesRow(analysis.rows, row))
+  } catch {
+    return false
+  }
 }
 
 /** One row a patch file declares, with enough position to point at it. */

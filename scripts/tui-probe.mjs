@@ -27,6 +27,12 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+/**
+ * Whether this is a 0.1.7-or-later host, which composes its agent process-wide
+ * and has no terminal preset roster. Read from the launcher itself rather than
+ * sniffed from the UI: the probe's preset assertions differ by host line.
+ */
+const FORMS_HOST = /^0\.1\.(?:[7-9]|\d{2,})/u.test(require('@deepseek-ai/dsh/package.json').version)
 // `import()` needs a URL, not a path: on Windows `D:\…` is rejected with
 // ERR_UNSUPPORTED_ESM_URL_SCHEME, which is what the first Windows CI run hit.
 const { sessionLockLookupPaths } = await import(
@@ -312,25 +318,45 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     //    wizard (an interactive picker), so the probe drives the explicit
     //    subcommand: it never writes, which makes it safe on a real profile,
     //    and it proves the authoring surface sees the same presets /mode does.
+    //
+    //    0.1.7 has no roster for a terminal profile at all (presets became
+    //    per-session declarations a surface composes), so there the assertion
+    //    is the opposite one: /preset must say so, and must not send the user
+    //    after rows that host cannot resolve.
     const beforePreset = output.length
     term.write('/preset list\r')
-    await waitFor(text => {
-      const slice = text.slice(beforePreset)
-      return slice.includes('Agent presets') || slice.includes('preset authoring')
-    }, 30_000, 'the /preset list')
-    const preset = plain(output.slice(beforePreset))
-    check(/Agent presets/u.test(preset), '/preset must print the roster')
-    check(/standard/u.test(preset), '/preset must name the shipped presets')
-    check(/preset show|\/preset/u.test(preset), '/preset output must show its surface')
+    if (FORMS_HOST) {
+      await waitFor(text => {
+        const slice = plain(text.slice(beforePreset))
+        return slice.includes('进程级组合代理') || slice.includes('process-wide')
+      }, 30_000, 'the /preset missing-service notice')
+      const preset = plain(output.slice(beforePreset))
+      check(/进程级组合代理|process-wide/u.test(preset), '/preset must explain why this host has no roster')
+      check(!/dsh-agent-presets|code-runtime-worker-thread/u.test(preset),
+        '/preset must not point at rows 0.1.7 cannot resolve')
+    } else {
+      await waitFor(text => {
+        const slice = text.slice(beforePreset)
+        return slice.includes('Agent presets') || slice.includes('preset authoring')
+      }, 30_000, 'the /preset list')
+      const preset = plain(output.slice(beforePreset))
+      check(/Agent presets/u.test(preset), '/preset must print the roster')
+      check(/standard/u.test(preset), '/preset must name the shipped presets')
+      check(/preset show|\/preset/u.test(preset), '/preset output must show its surface')
+    }
 
     // 5b. /preset show reads one composition through the host's inventory.
-    const beforeShow = output.length
-    term.write('/preset show standard\r')
-    // The report is long enough that its title scrolls out of the painted
-    // viewport, so the rows themselves are the arrival signal.
-    await waitFor(text => /@deepseek-ai\//u.test(text.slice(beforeShow)), 30_000, 'the /preset show rows')
-    const shown = plain(output.slice(beforeShow))
-    check(/@deepseek-ai\//u.test(shown), '/preset show must list the composition rows')
+    //      There is no composition to read without a roster, which is 5's
+    //      branch on a 0.1.7 host.
+    if (!FORMS_HOST) {
+      const beforeShow = output.length
+      term.write('/preset show standard\r')
+      // The report is long enough that its title scrolls out of the painted
+      // viewport, so the rows themselves are the arrival signal.
+      await waitFor(text => /@deepseek-ai\//u.test(text.slice(beforeShow)), 30_000, 'the /preset show rows')
+      const shown = plain(output.slice(beforeShow))
+      check(/@deepseek-ai\//u.test(shown), '/preset show must list the composition rows')
+    }
 
     // 6. Typing still reaches the input line after all of that.
     const beforeTyping = output.length

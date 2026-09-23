@@ -292,12 +292,17 @@ export function fitFooterChips(chips: readonly FooterChip[], width: number, sepa
  * the preset-owned tools are missing. It leads the strip and keeps its glyph
  * longest, because it is the one group that reports a broken install.
  */
-export function footerHealthChip(missing: boolean, color = false): FooterChip | undefined {
+export function footerHealthChip(
+  missing: boolean,
+  color = false,
+  /** Which rows are missing: the 0.1.5 roster, or the 0.1.7 agent plane. */
+  kind: 'roster' | 'agent-plane' = 'roster',
+): FooterChip | undefined {
   if (!missing) return undefined
   const glyph = color ? `\x1b[33m⚠\x1b[0m` : '⚠'
   return {
     id: 'health',
-    long: `${glyph} ${t('footer.rosterMissing')}`,
+    long: `${glyph} ${t(kind === 'agent-plane' ? 'footer.agentPlaneMissing' : 'footer.rosterMissing')}`,
     short: glyph,
     priority: 0,
   }
