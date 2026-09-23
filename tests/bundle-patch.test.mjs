@@ -120,8 +120,25 @@ test('declared dsh range admits every release marked compatible', async () => {
   }
   // Every dsh peer shares that range, so a 0.1.5-rc.1 host satisfies the
   // declaration while a 0.1.2-rc.1 install keeps resolving.
+  // 0.1.7 renamed and split the presets package, so two peers only exist on
+  // that line (`dsh-agent-presets` plural stops at 0.1.6-alpha.2). Every other
+  // dsh peer keeps the shared range that covers every verified 0.1.5 host.
+  const NEW_LINE_ONLY = new Set([
+    '@deepseek-ai/dsh-agent-preset',
+    '@deepseek-ai/dsh-agent-preset-registry',
+  ])
   for (const [name, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
     if (!name.startsWith('@deepseek-ai/dsh-')) continue
+    if (NEW_LINE_ONLY.has(name)) {
+      assert.equal(peerRange, '>=0.1.7-rc.1 <0.1.8', `${name} only exists on the 0.1.7 line`)
+      continue
+    }
     assert.equal(peerRange, range, `${name} must accept both verified hosts`)
   }
+  // Those two are optional: a 0.1.5 host has no such package, and a required
+  // peer npm cannot satisfy is an install failure, not a fallback.
+  for (const name of NEW_LINE_ONLY) {
+    assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true, `${name} must be optional`)
+  }
+  assert.equal(manifest.peerDependenciesMeta?.['@deepseek-ai/dsh-agent-presets']?.optional, true)
 })

@@ -26,7 +26,7 @@ import { StringDecoder } from 'node:string_decoder'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
-import { METADATA_FILE, readPresetMetadata, type AgentPreset } from '@deepseek-ai/dsh-agent-presets'
+import { METADATA_FILE, readPresetMetadata, type AgentPreset } from './preset-compat.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -594,6 +594,7 @@ export {
 type PresetService = PresetAuthoringApi & {
   list(): Promise<AgentPreset[]>
   defaultId: string
+  recompose?(ctx: unknown, id: string): Promise<unknown>
   roots?: readonly { path: string; trust: string }[]
 }
 
@@ -4898,9 +4899,11 @@ export class SshTui {
     }
     const lines = [t('preset.showTitle', { id: preset.id, name: preset.name ?? preset.id })]
     lines.push(t('preset.showMeta', {
-      trust: preset.trust === 'user' ? t('preset.trustUser') : t('preset.trustSystem'),
+      trust: preset.trust === 'user'
+        ? t('preset.trustUser')
+        : preset.trust === undefined ? t('preset.trustManaged') : t('preset.trustSystem'),
       order: preset.order === undefined ? '—' : String(preset.order),
-      directory: presetDirectory(preset),
+      directory: presetDirectory(preset) ?? t('preset.directoryManaged'),
     }))
     if (preset.description !== undefined) lines.push(t('preset.showDescription', { description: preset.description }))
     if (preset.broken !== undefined) {
@@ -4965,7 +4968,7 @@ export class SshTui {
         from: plan.from,
         id: plan.id,
         name: plan.name === undefined ? '' : ` · ${plan.name}`,
-        directory: presetDirectory(presets.find(candidate => candidate.id === plan.id) ?? presets[0]!),
+        directory: presetDirectory(presets.find(candidate => candidate.id === plan.id) ?? presets[0]!) ?? '',
       })
     })
   }
@@ -4993,7 +4996,8 @@ export class SshTui {
     }
     // Merge with what the preset publishes now, so editing one field never
     // drops the other and `order` survives.
-    const current = await readPresetMetadata(presetDirectory(preset))
+    const directory = presetDirectory(preset)
+    const current = directory === undefined ? {} : await readPresetMetadata(directory)
     const plan = planMetadata({ preset, current, patch })
     if (isRefusal(plan)) {
       this.pushPresetRefusal(plan)
@@ -5039,7 +5043,7 @@ export class SshTui {
     const answer = await new Promise<'y' | 'n' | 'cancel'>(resolve => {
       this.openConfirm(
         t('preset.deleteConfirm', { id: plan.id }),
-        t('preset.deleteHint', { directory: presetDirectory(preset) }),
+        t('preset.deleteHint', { directory: presetDirectory(preset) ?? t('preset.directoryManaged') }),
         resolve,
       )
     })
@@ -8409,7 +8413,7 @@ export class SshTui {
 
   /** /mode: pick an agent preset (standard / minimal / ptc / cordis / routing-suite / ...). */
   private async runModeCommand(arg = ''): Promise<void> {
-    const agentPresets = this.ctx.get('agentPresets')
+    const agentPresets = this.presetService()
     const direct = arg.trim().toLowerCase()
     if (direct === 'fix' || direct === 'repair') {
       await this.repairRoster()
@@ -8488,6 +8492,13 @@ export class SshTui {
     const selectedName = option.label
     const hasWork = sessionEvents(this.agent.session).some(event => event.type === 'turn/start')
     if (!hasWork) {
+      // Feature-detected: a host whose registry predates `recompose` still
+      // lists presets, and switching then needs a restarted session.
+      if (typeof agentPresets.recompose !== 'function') {
+        this.pushRow({ kind: 'error', text: t('mode.noRecompose', { id: selected.id }) })
+        this.markDirty()
+        return
+      }
       await agentPresets.recompose(this.agent.ctx, selected.id)
       this.presetId = selected.id
       this.presetName = selectedName

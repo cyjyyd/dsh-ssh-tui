@@ -10,7 +10,7 @@
  * @module dsh-ssh-tui/preset-picker
  */
 
-import type { AgentPreset } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPreset, PresetTrust } from './preset-compat.js'
 
 import { t } from './i18n/index.js'
 import { presetLabel } from './preset-label.js'
@@ -88,7 +88,11 @@ export function groupPresets(
 ): PresetPickerGroup[] {
   const groups: PresetPickerGroup[] = []
   for (const trust of ['system', 'user'] as const) {
-    const members = presets.filter(preset => preset.trust === trust).sort(comparePresets)
+    // A host that lists declarative presets records no trust at all (0.1.7);
+    // those are the deployment's own, so they group with the shipped ones.
+    // Filtering on a missing field would drop every preset and leave `/mode`
+    // empty on that line.
+    const members = presets.filter(preset => (preset.trust ?? 'system') === trust).sort(comparePresets)
     if (members.length === 0) continue
     groups.push({
       trust,

@@ -6,7 +6,6 @@
  */
 
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'

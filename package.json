@@ -104,6 +104,8 @@
     "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
     "@deepseek-ai/dsh-agent-default-model": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
     "@deepseek-ai/dsh-agent-loop": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
+    "@deepseek-ai/dsh-agent-preset": ">=0.1.7-rc.1 <0.1.8",
+    "@deepseek-ai/dsh-agent-preset-registry": ">=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
     "@deepseek-ai/dsh-cmdline": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
     "@deepseek-ai/dsh-commands": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
@@ -117,16 +119,25 @@
     "@deepseek-ai/dsh-user-questions": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-user-approval": {
+    "@deepseek-ai/dsh-agent-preset": {
       "optional": true
     },
-    "@deepseek-ai/dsh-user-questions": {
+    "@deepseek-ai/dsh-agent-preset-registry": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent-presets": {
       "optional": true
     },
     "@deepseek-ai/dsh-credentials": {
       "optional": true
     },
     "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-approval": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
       "optional": true
     }
   },

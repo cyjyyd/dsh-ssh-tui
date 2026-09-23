@@ -21,12 +21,14 @@
  * @module dsh-ssh-tui/preset-authoring
  */
 
-import { dirname } from 'node:path'
 import {
+  presetDirectory,
   renderPresetMetadata,
   type AgentPreset,
   type PresetMetadata,
-} from '@deepseek-ai/dsh-agent-presets'
+} from './preset-compat.js'
+
+export { presetDirectory }
 
 /** The id shape discovery accepts; a directory that fails it is skipped. */
 export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u
@@ -36,24 +38,13 @@ export function validatePresetId(id: string): boolean {
   return PRESET_ID_PATTERN.test(id)
 }
 
-/**
- * The directory a preset owns.
- *
- * `AgentPreset.path` is the composition file the preset publishes, not the
- * directory, so anything that writes beside it (display metadata) starts here.
- * @param preset - a discovered preset.
- * @returns the absolute preset directory.
- */
-export function presetDirectory(preset: AgentPreset): string {
-  return dirname(preset.path)
-}
-
 export type PresetRefusalCode =
   | 'invalid-id'
   | 'exists'
   | 'not-found'
   | 'read-only'
   | 'system'
+  | 'managed'
   | 'running'
   | 'empty-metadata'
 
@@ -175,7 +166,11 @@ export function planMetadata(input: {
   // Upstream renders nothing when every field is empty: there is no document to
   // publish, and silently deleting the file is not this command's business.
   if (text === undefined) return { error: 'empty-metadata', id: input.preset.id }
-  return { kind: 'metadata', id: input.preset.id, directory: presetDirectory(input.preset), text }
+  // The directory can only be absent on a host that lists declarative presets,
+  // which the trust check above already refused; this keeps the type honest.
+  const directory = presetDirectory(input.preset)
+  if (directory === undefined) return { error: 'managed', id: input.preset.id }
+  return { kind: 'metadata', id: input.preset.id, directory, text }
 }
 
 /**
@@ -190,6 +185,7 @@ export function planDelete(input: {
   current: boolean
 }): PresetDeletePlan | PresetRefusal {
   if (!input.authorable) return { error: 'read-only' }
+  if (input.preset.trust === undefined) return { error: 'managed', id: input.preset.id }
   if (input.preset.trust !== 'user') return { error: 'system', id: input.preset.id }
   if (input.current) return { error: 'running', id: input.preset.id }
   return { kind: 'delete', id: input.preset.id }
