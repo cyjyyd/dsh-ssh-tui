@@ -115,7 +115,7 @@
     "@deepseek-ai/dsh-agent-loop": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-agent-preset": ">=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-agent-preset-registry": ">=0.1.7-rc.1 <0.1.8",
-    "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6",
+    "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-cmdline": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-commands": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8",
     "@deepseek-ai/dsh-credentials": ">=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8",

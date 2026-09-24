@@ -148,13 +148,12 @@ test('declared dsh range admits every release marked compatible', async () => {
   }
   // Every dsh peer shares that range, so a 0.1.5-rc.1 host satisfies the
   // declaration while a 0.1.2-rc.1 install keeps resolving.
-  // Two groups differ by line. `dsh-agent-presets` (plural) stops at
-  // 0.1.6-alpha.2, so its own window is the 0.1.5 declaration even though the
-  // host line moved on; 0.1.7 renamed and split it into the two packages below,
-  // which only exist on that line. Every other peer declares both verified
-  // lines. No CI step rewrites peers any more — a leg rewrites devDep pins, and
-  // the declaration itself is what ships — so the expectation is the committed
-  // manifest on either host.
+  // Every dsh peer declares every verified line. That includes the plural
+  // `dsh-agent-presets`, which has no release past 0.1.6-alpha.2 and is not
+  // installed on 0.1.7 at all: the launcher reads each declared peer range when
+  // it decides whether a plugin may load, so an optional peer that stops at the
+  // old line would veto the plugin on the new one. It is optional there, and the
+  // profile mounts the roster row itself on the lines that have it.
   const NEW_LINE = '>=0.1.7-rc.1 <0.1.8'
   const LEGACY_WINDOW = '>=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6'
   const sharedPeerRange = `${LEGACY_WINDOW} || ${NEW_LINE}`
@@ -162,15 +161,10 @@ test('declared dsh range admits every release marked compatible', async () => {
     '@deepseek-ai/dsh-agent-preset',
     '@deepseek-ai/dsh-agent-preset-registry',
   ])
-  const LEGACY_ONLY = new Set(['@deepseek-ai/dsh-agent-presets'])
   for (const [name, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
     if (!name.startsWith('@deepseek-ai/dsh-')) continue
     if (NEW_LINE_ONLY.has(name)) {
       assert.equal(peerRange, NEW_LINE, `${name} only exists on the 0.1.7 line`)
-      continue
-    }
-    if (LEGACY_ONLY.has(name)) {
-      assert.equal(peerRange, LEGACY_WINDOW, `${name} stops at 0.1.6-alpha.2 (host ${HOST_VERSION})`)
       continue
     }
     assert.equal(peerRange, sharedPeerRange, `${name} must accept both verified hosts (host ${HOST_VERSION})`)
