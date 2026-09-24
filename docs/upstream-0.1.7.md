@@ -98,7 +98,8 @@
       `PresetAuthoringApi` 的全可选成员与调用点探测（0.1.7 registry 确实没有
       `copy` / `remove` / `read` / `authorable`）。
 - [x] 验证：两棵树各 909 项、0 失败（0.1.5-rc.3 → 906 通过 / 3 skip；0.1.7-rc.1 → 905 通过 / 4 skip），
-      `tsc --noEmit` 两条线 0 错。
+      `tsc --noEmit` 两条线 0 错；CI 四条腿全绿（run **35947920556**：`test (0.1.5-rc.3)` /
+      `test (0.1.5-rc.1)` / `test (0.1.7-rc.1)` / `test-windows`）。
 - [x] 老线仍保：`0.1.5-rc.1` / `0.1.5-rc.3`（`latest`）/ `0.1.7-rc.1`（`next`）。
 
 **已知取舍（记录在案）**：0.1.2 时代的旧会话日志把 token 计时写成独立的 `assistant/chunk` 事件；
