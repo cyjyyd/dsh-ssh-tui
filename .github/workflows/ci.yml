@@ -89,6 +89,11 @@ jobs:
               '@deepseek-ai/cordis-plugin-include': '1.0.9',
               '@deepseek-ai/cordis-plugin-loader': '1.0.5',
               '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+              // `dsh-app-boot` peers on this one to compose the launcher tree,
+              // and `--legacy-peer-deps` skips peers: without it the CLI cannot
+              // even print its help (ERR_MODULE_NOT_FOUND), which is the first
+              // thing the PTY-probe bootstrap asks it to do.
+              '@deepseek-ai/cordis-plugin-group': '1.0.4',
             });
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
