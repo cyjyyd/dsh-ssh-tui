@@ -151,14 +151,13 @@ test('declared dsh range admits every release marked compatible', async () => {
   // Two groups differ by line. `dsh-agent-presets` (plural) stops at
   // 0.1.6-alpha.2, so its own window is the 0.1.5 declaration even though the
   // host line moved on; 0.1.7 renamed and split it into the two packages below,
-  // which only exist on that line. The committed manifest declares the verified
-  // 0.1.7 line itself, while a tree the older CI pin step rewrote carries that
-  // line's comparator appended to every peer — so the expectation follows the
-  // installed host, exactly like the pin table above.
+  // which only exist on that line. Every other peer declares both verified
+  // lines. No CI step rewrites peers any more — a leg rewrites devDep pins, and
+  // the declaration itself is what ships — so the expectation is the committed
+  // manifest on either host.
   const NEW_LINE = '>=0.1.7-rc.1 <0.1.8'
   const LEGACY_WINDOW = '>=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6'
-  const pinned = window => FORMS_HOST && !window.endsWith(NEW_LINE) ? `${window} || ${NEW_LINE}` : window
-  const sharedPeerRange = pinned(range)
+  const sharedPeerRange = `${LEGACY_WINDOW} || ${NEW_LINE}`
   const NEW_LINE_ONLY = new Set([
     '@deepseek-ai/dsh-agent-preset',
     '@deepseek-ai/dsh-agent-preset-registry',
@@ -171,7 +170,7 @@ test('declared dsh range admits every release marked compatible', async () => {
       continue
     }
     if (LEGACY_ONLY.has(name)) {
-      assert.equal(peerRange, pinned(LEGACY_WINDOW), `${name} stops at 0.1.6-alpha.2 (host ${HOST_VERSION})`)
+      assert.equal(peerRange, LEGACY_WINDOW, `${name} stops at 0.1.6-alpha.2 (host ${HOST_VERSION})`)
       continue
     }
     assert.equal(peerRange, sharedPeerRange, `${name} must accept both verified hosts (host ${HOST_VERSION})`)
