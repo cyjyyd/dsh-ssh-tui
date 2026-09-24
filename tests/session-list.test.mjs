@@ -58,6 +58,34 @@ function readableSession(id, createdAt, text = `task ${id}`) {
   }
 }
 
+/**
+ * A fake persistence with the shape both supported lines expose: a snapshot
+ * `list()` (`{ header, revision }`) and `open(id, 'read')` handles whose
+ * `read()` returns the stored events. A session value that is an `Error` is
+ * thrown on open, which is how a test fakes a corrupt log.
+ */
+function mockPersistence(sessions, headers, { locate, onOpen } = {}) {
+  return {
+    list: async () => headers.map(header => ({ header, revision: 'r1' })),
+    open: async (id, access) => {
+      assert.equal(access, 'read')
+      if (onOpen !== undefined) await onOpen(id)
+      const session = sessions.get(id)
+      if (session === undefined) throw new Error(`missing session: ${id}`)
+      if (session instanceof Error) throw session
+      return {
+        header: session.meta,
+        read: async () => ({
+          events: session.events,
+          ...(session.eventState === undefined ? {} : { eventState: session.eventState }),
+        }),
+        close: async () => {},
+      }
+    },
+    ...(locate === undefined ? {} : { locate }),
+  }
+}
+
 test('0.1.5 snapshot list() and open()/read() persistence still lists sessions', async () => {
   const sessions = new Map([
     ['snap-readable', readableSession('snap-readable', 200)],
@@ -82,24 +110,18 @@ test('0.1.5 snapshot list() and open()/read() persistence still lists sessions',
   assert.equal(listed[0].id, 'snap-readable')
 })
 
-test('sessions that fail inspect stay visible and are marked unreadable', async () => {
+test('sessions that fail to read stay visible and are marked unreadable', async () => {
   const sessions = new Map([
     ['old-readable', readableSession('old-readable', 300)],
     ['new-readable', readableSession('new-readable', 200)],
+    ['broken-recent', new Error('corrupt session log: seq gap')],
   ])
-  const persistence = {
-    list: async () => [
-      header('new-readable', 200),
-      header('broken-recent', 100),
-      header('old-readable', 300),
-      header('subagent', 50, { origin: 'subagent', delegationDepth: 1 }),
-    ],
-    inspect: async (id) => {
-      const session = sessions.get(id)
-      if (session === undefined) throw new Error('corrupt session log: seq gap')
-      return session
-    },
-  }
+  const persistence = mockPersistence(sessions, [
+    header('new-readable', 200),
+    header('broken-recent', 100),
+    header('old-readable', 300),
+    header('subagent', 50, { origin: 'subagent', delegationDepth: 1 }),
+  ])
 
   const listed = await listResumableSessions(persistence, '', async () => [])
   assert.equal(listed.length, 3)
@@ -130,11 +152,9 @@ test('blank sessions are deleted and never listed as resumable', async () => {
     ['blank-boot', blank],
     ['error-kept', errorReply],
   ])
-  const persistence = {
-    list: async () => [header('blank-boot', 500), header('error-kept', 400)],
-    inspect: async (id) => sessions.get(id),
+  const persistence = mockPersistence(sessions, [header('blank-boot', 500), header('error-kept', 400)], {
     locate: (meta) => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  })
 
   const listed = await listResumableSessions(persistence, '', async () => [])
   await new Promise(resolve => setTimeout(resolve, 60)) // 删除是 best-effort 异步
@@ -183,11 +203,9 @@ test('a session whose only input is a plugin notice is never blank', async () =>
     ['plugin-only', pluginOnly],
     ['turn-open', openTurn],
   ])
-  const persistence = {
-    list: async () => [header('plugin-only', 700), header('turn-open', 600)],
-    inspect: async (id) => sessions.get(id),
+  const persistence = mockPersistence(sessions, [header('plugin-only', 700), header('turn-open', 600)], {
     locate: (meta) => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  })
 
   const listed = await listResumableSessions(persistence, '', async () => [])
   await new Promise(resolve => setTimeout(resolve, 60))
@@ -222,11 +240,9 @@ test('a live Host mid-turn is not stopped, and its log is not pruned', async () 
     },
     { type: 'step/start', seq: 3, time: 400, data: { turn: 1, step: 1 } },
   ]
-  const persistence = {
-    list: async () => [header('live-midturn', 800)],
-    inspect: async () => session,
+  const persistence = mockPersistence(new Map([['live-midturn', session]]), [header('live-midturn', 800)], {
     locate: () => ({ kind: 'jsonl', path: join(dir, 'live-midturn', 'session.jsonl.zstd') }),
-  }
+  })
   const killed = []
   const listHosts = async () => [
     { sessionId: 'live-midturn', lock: { pid: 424242, startedAt: new Date().toISOString(), state: 'running-detached' }, sock: '/tmp/live-midturn.sock' },
@@ -250,11 +266,7 @@ test('blank attachable hosts are stopped and kept out of the picker', async () =
   const blank = readableSession('blank-live', 500)
   blank.events = blank.events.slice(0, 3)
   const sessions = new Map([['blank-live', blank]])
-  const persistence = {
-    list: async () => [header('blank-live', 500)],
-    inspect: async (id) => sessions.get(id),
-    locate: () => undefined,
-  }
+  const persistence = mockPersistence(sessions, [header('blank-live', 500)], { locate: () => undefined })
   const killed = []
   const listHosts = async () => [
     { sessionId: 'blank-live', lock: { pid: 999999, startedAt: new Date().toISOString(), state: 'idle' }, sock: '/tmp/nope.sock' },
@@ -278,11 +290,9 @@ test('a live host whose log cannot be read is kept, never killed or pruned', asy
   const id = 'live-unreadable'
   mkdirSync(join(dir, id), { recursive: true })
   writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
-  const persistence = {
-    list: async () => [],
-    inspect: async () => { throw new Error('corrupt session log: seq gap') },
+  const persistence = mockPersistence(new Map(), [], {
     locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  })
   const killed = []
   const originalKill = process.kill
   process.kill = (pid, signal) => { killed.push(pid); return true }
@@ -308,11 +318,11 @@ test('a detached read is unreadable, not blank: the log is not pruned', async ()
   const id = 'detached-live'
   mkdirSync(join(dir, id), { recursive: true })
   writeFileSync(join(dir, id, 'session.jsonl.zstd'), 'x')
-  const persistence = {
-    list: async () => [header(id, 500)],
-    inspect: async () => ({ events: [], eventState: 'detached', meta: header(id, 500) }),
-    locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  const persistence = mockPersistence(
+    new Map([[id, { meta: header(id, 500), events: [], eventState: 'detached' }]]),
+    [header(id, 500)],
+    { locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }) },
+  )
   const listed = await listResumableSessions(persistence, '', async () => [])
   await new Promise(resolve => setTimeout(resolve, 60)) // 删除是 best-effort 异步
   assert.deepEqual(listed.map(item => item.id), [id])
@@ -323,7 +333,7 @@ test('a detached read is unreadable, not blank: the log is not pruned', async ()
 test('a read handle without read() is unreadable, not blank', async () => {
   const id = 'no-read-api'
   const persistence = {
-    list: async () => [header(id, 500)],
+    list: async () => [{ header: header(id, 500), revision: 'r1' }],
     open: async () => ({ header: header(id, 500) }),
   }
   const listed = await listResumableSessions(persistence, '', async () => [])
@@ -331,11 +341,11 @@ test('a read handle without read() is unreadable, not blank', async () => {
   assert.equal(listed[0].unreadable, true)
 })
 
-test('an inspect() result without an events array is unreadable, not blank', async () => {
+test('a read() result without an events array is unreadable, not blank', async () => {
   const id = 'no-events-field'
   const persistence = {
-    list: async () => [header(id, 500)],
-    inspect: async () => ({ meta: header(id, 500) }),
+    list: async () => [{ header: header(id, 500), revision: 'r1' }],
+    open: async () => ({ header: header(id, 500), read: async () => ({ eventState: 'owned' }) }),
   }
   const listed = await listResumableSessions(persistence, '', async () => [])
   assert.deepEqual(listed.map(item => item.id), [id])
@@ -346,10 +356,7 @@ test('picker label prefers the persisted title so web and TUI agree', async () =
   const withTitle = readableSession('titled', 400)
   withTitle.events.splice(5, 0, { type: 'session/title', seq: 6, time: 400, data: { title: '生成标题：修复绘制残留' } })
   const sessions = new Map([['titled', withTitle]])
-  const persistence = {
-    list: async () => [header('titled', 400)],
-    inspect: async (id) => sessions.get(id),
-  }
+  const persistence = mockPersistence(sessions, [header('titled', 400)])
   const listed = await listResumableSessions(persistence, '', async () => [])
   assert.equal(listed.length, 1)
   // web 列表显示同一份 session/title 持久化标题——两端标签一致，切换模式可寻
@@ -359,21 +366,17 @@ test('picker label prefers the persisted title so web and TUI agree', async () =
 test('recent empty boot sessions do not hide older readable sessions beyond the first batch', async () => {
   const emptyIds = Array.from({ length: 35 }, (_, index) => `empty-${index}`)
   const realIds = Array.from({ length: 9 }, (_, index) => `real-${index}`)
-  const persistence = {
-    list: async () => [
-      ...emptyIds.map((id, index) => header(id, 5000 - index)),
-      ...realIds.map((id, index) => header(id, 1000 - index)),
-    ],
-    inspect: async (id) => {
-      if (id.startsWith('empty-')) {
-        return {
-          meta: header(id, 5000 - emptyIds.indexOf(id)),
-          events: [{ type: 'permission/preset', seq: 0, time: 100, data: {} }],
-        }
-      }
-      return readableSession(id, 1000 - realIds.indexOf(id), `task ${id}`)
-    },
-  }
+  const sessions = new Map([
+    ...emptyIds.map((id, index) => [id, {
+      meta: header(id, 5000 - index),
+      events: [{ type: 'permission/preset', seq: 0, time: 100, data: {} }],
+    }]),
+    ...realIds.map((id, index) => [id, readableSession(id, 1000 - index, `task ${id}`)]),
+  ])
+  const persistence = mockPersistence(sessions, [
+    ...emptyIds.map((id, index) => header(id, 5000 - index)),
+    ...realIds.map((id, index) => header(id, 1000 - index)),
+  ])
 
   const listed = await listResumableSessions(persistence, '', async () => [])
   assert.deepEqual(listed.map(item => item.id), realIds)
@@ -382,10 +385,10 @@ test('recent empty boot sessions do not hide older readable sessions beyond the 
 
 test('the current session is excluded and older sessions stay listed past nine', async () => {
   const ids = Array.from({ length: 12 }, (_, index) => `session-${index}`)
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 1000 - index)),
-    inspect: async (id) => readableSession(id, 1000 - ids.indexOf(id), `task ${id}`),
-  }
+  const persistence = mockPersistence(
+    new Map(ids.map((id, index) => [id, readableSession(id, 1000 - index, `task ${id}`)])),
+    ids.map((id, index) => header(id, 1000 - index)),
+  )
 
   const listed = await listResumableSessions(persistence, 'session-0', async () => [])
   assert.equal(listed.length, 11)
@@ -393,47 +396,41 @@ test('the current session is excluded and older sessions stay listed past nine',
   assert.deepEqual(listed.map(item => item.id), ids.slice(1))
 })
 
-test('session index cache skips inspect when the artifact fingerprint matches', async () => {
+test('session index cache skips reading when the artifact fingerprint matches', async () => {
   const { writeFileSync } = await import('node:fs')
   const dir = mkdtempSync(join(tmpdir(), 'dsh-index-log-'))
   const artifact = join(dir, 'session.jsonl.zstd')
   writeFileSync(artifact, 'x')
   const sessions = new Map([['cached', readableSession('cached', 400, 'cached task')]])
-  let inspects = 0
-  const persistence = {
-    list: async () => [header('cached', 400)],
-    inspect: async (id) => {
-      inspects += 1
-      return sessions.get(id)
-    },
+  let reads = 0
+  const persistence = mockPersistence(sessions, [header('cached', 400)], {
+    onOpen: () => { reads += 1 },
     locate: () => ({ kind: 'jsonl', path: artifact }),
-  }
+  })
   const indexPath = join(dir, 'index.json')
   const first = await listResumableSessionsProgressive(persistence, '', {
     listHosts: async () => [],
     indexPath,
   })
   assert.equal(first.complete[0].label, 'cached task')
-  assert.equal(inspects, 1)
+  assert.equal(reads, 1)
   const second = await listResumableSessionsProgressive(persistence, '', {
     listHosts: async () => [],
     indexPath,
   })
   assert.equal(second.complete[0].label, 'cached task')
-  assert.equal(inspects, 1)
+  assert.equal(reads, 1)
 })
 
-test('progressive listing paints the newest page before inspecting the rest', async () => {
+test('progressive listing paints the newest page before reading the rest', async () => {
   const ids = Array.from({ length: 20 }, (_, index) => `session-${index}`)
   const seen = []
   const updates = []
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 2000 - index)),
-    inspect: async (id) => {
-      seen.push(id)
-      return readableSession(id, 2000 - ids.indexOf(id), `task ${id}`)
-    },
-  }
+  const persistence = mockPersistence(
+    new Map(ids.map((id, index) => [id, readableSession(id, 2000 - index, `task ${id}`)])),
+    ids.map((id, index) => header(id, 2000 - index)),
+    { onOpen: id => { seen.push(id) } },
+  )
   const listed = await listResumableSessionsProgressive(persistence, '', {
     listHosts: async () => [],
     indexPath: join(testIndexDir, 'progressive.json'),
@@ -449,10 +446,10 @@ test('progressive listing paints the newest page before inspecting the rest', as
 })
 
 test('attachable hosts are injected at the front of the picker list', async () => {
-  const persistence = {
-    list: async () => [header('logged', 100)],
-    inspect: async (id) => readableSession(id, 100, 'logged task'),
-  }
+  const persistence = mockPersistence(
+    new Map([['logged', readableSession('logged', 100, 'logged task')]]),
+    [header('logged', 100)],
+  )
   const listed = await listResumableSessions(persistence, '', async () => [{
     sessionId: 'live-host',
     lock: { pid: 42, sessionId: 'live-host', startedAt: '2026-09-04T00:00:00.000Z', state: 'paused' },
@@ -528,11 +525,9 @@ test('the first listing marks entries whose label is still an id', async () => {
     ['cold-one', readableSession('cold-one', 900, '冷启动第一条')],
     ['cold-two', readableSession('cold-two', 800, '冷启动第二条')],
   ])
-  const persistence = {
-    list: async () => [header('cold-one', 900), header('cold-two', 800)],
-    inspect: async id => sessions.get(id),
+  const persistence = mockPersistence(sessions, [header('cold-one', 900), header('cold-two', 800)], {
     locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  })
   const frames = []
   await listResumableSessionsProgressive(persistence, '', {
     onUpdate: listing => frames.push(listing),
@@ -571,17 +566,15 @@ test('a title is cached and painted as soon as it resolves', async () => {
   }
   const sessions = new Map(ids.map((id, index) => [id, readableSession(id, 900 - index, `标题 ${id}`)]))
   const slowResolved = []
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 900 - index)),
-    inspect: async (id) => {
+  const persistence = mockPersistence(sessions, ids.map((id, index) => header(id, 900 - index)), {
+    onOpen: async (id) => {
       if (id === 'page-slow-a' || id === 'page-slow-b') {
         await new Promise(resolve => setTimeout(resolve, 150))
         slowResolved.push(id)
       }
-      return sessions.get(id)
     },
     locate: meta => ({ kind: 'jsonl', path: join(dir, meta.id, 'session.jsonl.zstd') }),
-  }
+  })
   const frames = []
   await listResumableSessionsProgressive(persistence, '', {
     onUpdate: listing => frames.push({
@@ -610,15 +603,13 @@ test('a title is cached and painted as soon as it resolves', async () => {
 // frame is what made a large history feel like a hang.
 
 function pagerFor(ids, { indexPath, labels = {}, hosts = async () => [] } = {}) {
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 2000 - index)),
-    inspect: async (id) => {
-      if (labels[id] === null) {
-        return { meta: header(id, 2000 - ids.indexOf(id)), events: [{ type: 'permission/preset', seq: 0, time: 100, data: {} }] }
-      }
-      return readableSession(id, 2000 - ids.indexOf(id), labels[id] ?? `标题 ${id}`)
-    },
-  }
+  const sessions = new Map(ids.map((id, index) => [
+    id,
+    labels[id] === null
+      ? { meta: header(id, 2000 - index), events: [{ type: 'permission/preset', seq: 0, time: 100, data: {} }] }
+      : readableSession(id, 2000 - index, labels[id] ?? `标题 ${id}`),
+  ]))
+  const persistence = mockPersistence(sessions, ids.map((id, index) => header(id, 2000 - index)))
   return openResumableSessionPager(persistence, '', { listHosts: hosts, indexPath })
 }
 
@@ -675,11 +666,11 @@ test('the index is flushed as soon as the first page is read', async () => {
   // point at a real file for the page to have something to cache.
   mkdirSync(join(dir, 'flushed-a'), { recursive: true })
   writeFileSync(join(dir, 'flushed-a', 'session.jsonl.zstd'), 'x')
-  const persistence = {
-    list: async () => [header('flushed-a', 500)],
-    inspect: async () => readableSession('flushed-a', 500, '缓存标题'),
-    locate: () => ({ kind: 'jsonl', path: join(dir, 'flushed-a', 'session.jsonl.zstd') }),
-  }
+  const persistence = mockPersistence(
+    new Map([['flushed-a', readableSession('flushed-a', 500, '缓存标题')]]),
+    [header('flushed-a', 500)],
+    { locate: () => ({ kind: 'jsonl', path: join(dir, 'flushed-a', 'session.jsonl.zstd') }) },
+  )
   const pager = await openResumableSessionPager(persistence, '', {
     listHosts: async () => [],
     indexPath,
@@ -698,10 +689,10 @@ test('complete() reads everything the eager listing would', async () => {
   const complete = await pager.complete()
   assert.equal(complete.length, ids.length)
 
-  const eager = await listResumableSessions({
-    list: async () => ids.map((id, index) => header(id, 2000 - index)),
-    inspect: async id => readableSession(id, 2000 - ids.indexOf(id), `标题 ${id}`),
-  }, '', async () => [])
+  const eager = await listResumableSessions(mockPersistence(
+    new Map(ids.map((id, index) => [id, readableSession(id, 2000 - index, `标题 ${id}`)])),
+    ids.map((id, index) => header(id, 2000 - index)),
+  ), '', async () => [])
   assert.deepEqual(complete.map(item => item.id), eager.map(item => item.id))
 })
 
@@ -743,11 +734,9 @@ test('a page counts only the rows it can show', async () => {
     ...replyOnly.map((id, index) => [id, replyOnlySession(id, 3000 - index)]),
     ...real.map((id, index) => [id, readableSession(id, 2000 - index, `标题 ${id}`)]),
   ])
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 3000 - index)),
-    inspect: async id => sessions.get(id),
+  const persistence = mockPersistence(sessions, ids.map((id, index) => header(id, 3000 - index)), {
     locate: meta => ({ kind: 'jsonl', path: join(dir, `${meta.id}.jsonl`) }),
-  }
+  })
   const pager = await openResumableSessionPager(persistence, '', {
     listHosts: async () => [],
     indexPath: join(dir, 'index.json'),
@@ -761,11 +750,9 @@ test('an empty page means the history is over, not that rows were filtered', asy
   const dir = mkdtempSync(join(tmpdir(), 'dsh-tui-pager-empty-'))
   const ids = Array.from({ length: 4 }, (_, index) => `replyonly-${index}`)
   const sessions = new Map(ids.map((id, index) => [id, replyOnlySession(id, 1000 - index)]))
-  const persistence = {
-    list: async () => ids.map((id, index) => header(id, 1000 - index)),
-    inspect: async id => sessions.get(id),
+  const persistence = mockPersistence(sessions, ids.map((id, index) => header(id, 1000 - index)), {
     locate: meta => ({ kind: 'jsonl', path: join(dir, `${meta.id}.jsonl`) }),
-  }
+  })
   const pager = await openResumableSessionPager(persistence, '', {
     listHosts: async () => [],
     indexPath: join(dir, 'index.json'),

@@ -13,7 +13,7 @@
    发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.1)`、`test (0.1.2-rc.1)`、
+   tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.1)`、
    `test (0.1.7-rc.1)`、`test-windows`）**全部 success**，再 `npm publish`。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
 
@@ -58,9 +58,9 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   `^4.0.1` 会解析到比钉版更高的版本，npm 就再也满足不了族里的精确 peer，安装直接 ERESOLVE——
   **2026-09-22 15:36–15:37 上游同时发了 cordis 4.0.3/4.0.4、loader 1.0.4/1.0.5、schemastery 3.18.3/
   3.18.4，几分钟后四条 CI 腿全部倒在 `npm install` 上**（在那之前 25 分钟还是绿的）。第一轮修完
-  cordis/loader/schemastery 之后，0.1.2-rc.1 那条腿又因为 **cordis-plugin-include 被 npm 拿到 1.0.9**
+  cordis/loader/schemastery 之后，当时最老的 0.1.2-rc.1 腿又因为 **cordis-plugin-include 被 npm 拿到 1.0.9**
   而挂——1.0.9 的 peer 是 `cordis ~4.0.4`，与钉住的 4.0.2 天然冲突（rc.3 族里它是被精确钉成 1.0.7 的，
-  老族里没人钉）。所以现在根部写死 **六个**：`cordis 4.0.2`、
+  老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：现在写死 **六个**——`cordis 4.0.2`、
   `cordis-plugin-{include 1.0.7, loader 1.0.3, hmr 1.0.17, timer 1.1.4}`、`schemastery 3.18.2`
   （后四个不是我们 import 的，纯粹是钉住 npm 的选择），`peerDependencies` 里保持区间（消费者那边由宿主提供）。
   `tests/bundle-patch.test.mjs` 会把这条钉住；要动它们就跟族一起动。
@@ -72,8 +72,12 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   才放行 prerelease。所以 `>=0.1.5-alpha.1 <0.1.6` 既排除 `0.1.6-alpha.x`，也排除 `0.1.7-alpha.x`；
   这条已被 `tests/bundle-patch.test.mjs` 钉住，别靠感觉改。
 - **CI 腿的取舍**：`matrix.dsh` 里每个"能启动宿主"的版本都跑全套单元测试 + 真 PTY 探针；
-  最老的两条（0.1.5-rc.1 的 peer 解析不了、0.1.2-rc.1 太旧）只跑 typecheck 与单元套件。
+  最老的一条（0.1.5-rc.1 的 peer 解析不了）只跑 typecheck 与单元套件。
   默认腿跟着 `package.json` 的 pin 走（= 当前要重点验的那一版），`latest` 单独留一条腿。
+- **摘除一条旧线要成套做**（0.1.2-rc 的先例）：范围里的 comparator、`dshReleases` 表态、CI 腿、
+  固定装置（`tests/` 里的合成 facts）、只服务该线的源码分支、文档里的腿列表，一次改完。
+  被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
+  "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
 ### 当前快照（2026-09-24）
 
@@ -82,7 +86,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 | `latest` | `0.1.5-rc.3` | `compatible`：进 CI 腿 |
 | `next` | **`0.1.7-rc.1`**（09-23 发布） | `compatible`：设置接缝、preset 改名、roster→agent-plane 全部适配完；真机核验＝同源 `tsc` 两行 0 错、mock 轮次探针 PASS（真跑一轮＋拖选复制＋`/find`）、`tui-probe` PASS、`settings.yaml` 四段迁移在 PTY 下全部落到我们的 entry；已进 CI 腿 |
 | 旧线 | `0.1.5-rc.1` | `compatible`：continue（非默认腿，legacy peers 安装） |
-| 最老 | `0.1.2-rc.1` | `compatible`：**待摘**（用户已决定 0.1.7 适配完成后取消） |
+| 已摘 | `0.1.2-rc.1` | `incompatible`：**支持已取消**（0.1.7 适配完成后按用户决定摘除；范围不再有它的 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
 

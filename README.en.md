@@ -82,7 +82,7 @@ pins the palette (truecolor / 256 / 8 / none).
 ## Requirements
 
 - Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (verified on `0.1.2-rc.1` and `0.1.5-rc.1`. `0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` share the same handle API + `agent/assistant-stream` shims. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (CI covers `0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.7-rc.1`: `0.1.5-rc.1` runs typecheck and the unit suite, the other two add the real-PTY probes. `0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` share the same handle API + `agent/assistant-stream` shims as the 0.1.5-rc line. **`0.1.2-rc` and older are no longer supported** — if the install is refused, upgrade to `0.1.5-rc` or `0.1.7-rc` first. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 
 ## Install

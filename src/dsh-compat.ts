@@ -1,20 +1,18 @@
 /**
- * Dual-stack shims for dsh 0.1.2-rc.1 and 0.1.5-rc.1 (and the 0.1.5-alpha
- * handle API that landed with it).
+ * Dual-stack shims for the dsh 0.1.5-rc and 0.1.7-rc lines (including the
+ * 0.1.5-alpha handle API that landed with the former).
  *
- * 0.1.2 turned settings free functions into `SettingsProvider` methods and
- * replaced `Session.events` with on-demand readers. 0.1.5 replaced
- * `SessionPersistence.list`/`inspect`/`locate` with snapshot `list` plus
- * per-session `open` handles, and moved live tokens from durable
- * `assistant/chunk` events to process-local `agent/assistant-stream`.
- * Every shim here picks the API that is actually present so one build
- * runs on either host.
+ * 0.1.5 resolves settings through `SettingsProvider.get`/`installSection` and
+ * exposes session persistence as snapshot `list` plus per-session `open`
+ * handles; live tokens arrive on the process-local `agent/assistant-stream`.
+ * 0.1.7 replaced the settings service with schema-projected forms. Every shim
+ * here picks the API that is actually present so one build runs on either
+ * host line.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
-import * as dshSettings from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -33,8 +31,8 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 /**
- * 0.1.1-rc.2 wraps namespaces via `settingsNamespace()`; 0.1.2+ brands them at
- * the type level and takes the plain string at runtime. A cast covers both.
+ * Settings namespaces are branded strings at the type level on both supported
+ * lines; this cast supplies the brand from a plain literal.
  */
 export function settingsNamespace(value: string): SettingsNamespace {
   return value as SettingsNamespace
@@ -211,13 +209,11 @@ export function liveField<T>(schema: z<T>): z<T> {
 /**
  * Register a settings section.
  *
- * 0.1.2-rc.1 moved the free function onto the `settings` service as
- * `installSection`, callable only once that service is injected (plugins apply
- * before it, so `ctx.inject` must defer — same pattern the harness's own
- * packages use); 0.1.1-rc.2 keeps the free function, which defers internally
- * and is safe at apply time.
+ * 0.1.5 publishes the `settings` service with `installSection`, callable only
+ * once that service is injected (plugins apply before it, so `ctx.inject` must
+ * defer — same pattern the harness's own packages use).
  *
- * 0.1.7 removed both. The section is now the loader entry's own `Config`
+ * 0.1.7 removed it. The section is now the loader entry's own `Config`
  * schema — this plugin's is `ssh-tui`, and the two auxiliary namespaces are
  * carried by the `dsh-ssh-tui/settings-*` rows in `cordis.patch.yml` — so the
  * only thing left for a consumer to wire is the live read (`setSource`) and the
@@ -230,24 +226,11 @@ export function installSettingsSection<T>(
   entry: T,
   hooks: SettingsSectionHooks<T>,
 ): void {
-  const legacy = (dshSettings as {
-    installSettingsSection?: (
-      ctx: Context,
-      ns: SettingsNamespace,
-      schema: z<T>,
-      entry: T,
-      hooks: SettingsSectionHooks<T>,
-    ) => void
-  }).installSettingsSection
-  if (typeof legacy === 'function') {
-    legacy(ctx, ns, schema, entry, hooks)
-    return
-  }
   const host = ctx as {
     inject?: (services: readonly string[], callback: (injected: unknown) => void) => void
   }
   if (typeof host.inject !== 'function') {
-    throw new Error('dsh-settings: no legacy installSettingsSection and ctx.inject is unavailable')
+    throw new Error('dsh-settings: ctx.inject is unavailable')
   }
   host.inject(['settings'], (injected) => {
     const holder = injected as { settings?: unknown }
@@ -294,16 +277,14 @@ export function toolResultFailed(message: unknown): boolean {
 }
 
 /**
- * Read the full durable event log: 0.1.2-rc.1 replaced the `Session.events`
- * property with on-demand readers; 0.1.1-rc.2 still exposes the property.
+ * Read the full durable event log. Both supported lines read it on demand
+ * through `snapshotEvents()`.
  */
 export function sessionEvents(session: object): readonly SessionEvent[] {
   const host = session as {
-    events?: readonly SessionEvent[]
     snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly SessionEvent[]
   }
-  if (typeof host.snapshotEvents === 'function') return host.snapshotEvents()
-  return host.events ?? []
+  return typeof host.snapshotEvents === 'function' ? host.snapshotEvents() : []
 }
 
 /**
@@ -317,7 +298,6 @@ export function forEachSessionEvent(
   const host = session as {
     seq?: number
     eventAt?: (seq: number) => SessionEvent | undefined
-    events?: readonly SessionEvent[]
     snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly SessionEvent[]
   }
   if (typeof host.eventAt === 'function' && typeof host.seq === 'number') {
@@ -356,7 +336,6 @@ export async function forEachSessionEventAsync(
   const host = session as {
     seq?: number
     eventAt?: (seq: number) => SessionEvent | undefined
-    events?: readonly SessionEvent[]
     snapshotEvents?: (fromSeq?: number, toSeqExclusive?: number) => readonly SessionEvent[]
   }
   if (typeof host.eventAt === 'function' && typeof host.seq === 'number') {
@@ -390,7 +369,6 @@ export interface SessionHeaderLike {
 /** Logical log plus the header it belongs to. */
 export interface SessionInspectionLike {
   events: readonly unknown[]
-  meta?: SessionHeaderLike
   header?: SessionHeaderLike
   /**
    * Backend state for the slice. `detached` means the backend never
@@ -401,20 +379,19 @@ export interface SessionInspectionLike {
   eventState?: string
 }
 
+/** The `header` of one `list()` snapshot, when it carries a plausible one. */
 function asHeader(value: unknown): SessionHeaderLike | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
-  if (typeof record.id === 'string' && typeof record.createdAt === 'number') {
-    return record as unknown as SessionHeaderLike
-  }
-  if (record.header !== undefined) return asHeader(record.header)
-  if (record.meta !== undefined) return asHeader(record.meta)
-  return undefined
+  const header = (value as { header?: unknown }).header
+  if (header === null || typeof header !== 'object' || Array.isArray(header)) return undefined
+  const record = header as Record<string, unknown>
+  if (typeof record.id !== 'string' || typeof record.createdAt !== 'number') return undefined
+  return record as unknown as SessionHeaderLike
 }
 
 /**
- * 0.1.2 `list()` returns headers; 0.1.5 returns `{ header, revision, … }`
- * snapshots. Normalize to headers so the picker does not care which host
+ * Both supported lines return `{ header, revision, … }` snapshots from
+ * `list()`; normalize to the header so the picker does not care which host
  * it is talking to.
  */
 export async function listPersistenceHeaders(persistence: object): Promise<SessionHeaderLike[]> {
@@ -431,37 +408,19 @@ export async function listPersistenceHeaders(persistence: object): Promise<Sessi
 }
 
 /**
- * 0.1.2 `inspect(id)` returns `{ meta, events }`. 0.1.5 dropped inspect in
- * favour of `open(id, 'read')` + `handle.read()`. Close the handle so a
- * listing pass does not pin write ownership.
+ * Read one session through `open(id, 'read')` + `handle.read()`, the access
+ * both supported lines expose. Close the handle so a listing pass does not pin
+ * write ownership.
  */
 export async function inspectPersistenceSession(
   persistence: object,
   id: unknown,
 ): Promise<SessionInspectionLike> {
   const host = persistence as {
-    inspect?: (id: unknown, signal?: AbortSignal) => Promise<unknown>
     open?: (id: unknown, access: string, options?: unknown) => Promise<unknown>
   }
-  if (typeof host.inspect === 'function') {
-    const inspection = await host.inspect(id)
-    const events = (inspection as { events?: readonly unknown[] } | undefined)?.events
-    if (!Array.isArray(events)) {
-      // Reporting an absent log as an empty one used to look like a blank
-      // session, and the picker deleted the session's artifacts on that
-      // verdict. An unreadable log stays visible instead.
-      throw new Error('dsh-session-persistence: inspect() returned no readable event log')
-    }
-    const state = (inspection as { eventState?: unknown } | undefined)?.eventState
-    return {
-      events,
-      meta: asHeader(inspection),
-      header: asHeader(inspection),
-      ...(typeof state === 'string' ? { eventState: state } : {}),
-    }
-  }
   if (typeof host.open !== 'function') {
-    throw new Error('dsh-session-persistence: neither inspect nor open is available')
+    throw new Error('dsh-session-persistence: open is not available')
   }
   const handle = await host.open(id, 'read') as {
     header?: SessionHeaderLike
@@ -470,8 +429,9 @@ export async function inspectPersistenceSession(
   }
   try {
     if (typeof handle.read !== 'function') {
-      // The old fallback answered `{ events: [] }` here: a compat gap turned
-      // into "this session is blank" and the picker pruned a live log.
+      // Reporting an absent log as an empty one used to look like a blank
+      // session, and the picker deleted the session's artifacts on that
+      // verdict. An unreadable log stays visible instead.
       throw new Error('dsh-session-persistence: read handle exposes no read(); refusing to report an empty log')
     }
     const slice = await handle.read()
@@ -481,7 +441,6 @@ export async function inspectPersistenceSession(
     return {
       events: slice.events,
       header: handle.header,
-      meta: handle.header,
       ...(typeof slice.eventState === 'string' ? { eventState: slice.eventState } : {}),
     }
   } finally {
@@ -495,7 +454,11 @@ export async function inspectPersistenceSession(
   }
 }
 
-/** 0.1.2 owns `locate(header)`; 0.1.5 hid it on the JSONL backend. */
+/**
+ * A session's artifact path from its header. Both supported lines still
+ * implement `locate()` on the JSONL backend, but their typings keep it
+ * private, so the call stays feature-detected.
+ */
 export function persistenceLocate(
   persistence: object,
   meta: object,
@@ -507,17 +470,13 @@ export function persistenceLocate(
   return locate(meta)
 }
 
-/**
- * 0.1.2 command input advertised `images`; 0.1.5 renamed the flag to
- * `attachments`. Either true means the slash command accepts composer files.
- */
+/** Whether a command's input admits the composer's attachments. */
 export function commandAcceptsAttachments(input: unknown): boolean {
   if (input === null || typeof input !== 'object') return false
-  const record = input as { images?: unknown; attachments?: unknown }
-  return record.images === true || record.attachments === true
+  return (input as { attachments?: unknown }).attachments === true
 }
 
-/** One model stream chunk, from either `assistant/chunk` or `agent/assistant-stream`. */
+/** One chunk from a live `agent/assistant-stream` frame. */
 export interface StreamChunkLike {
   type: string
   text?: string
@@ -617,36 +576,36 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
 }
 
 /**
- * Durable `assistant/chunk` payload, or a live stream frame's inner chunk.
+ * A live `agent/assistant-stream` chunk frame's inner chunk plus its framing.
  *
- * `fallback` supplies the turn/step for live chunk frames, which do not carry
- * them (see {@link streamFrameOwner}).
+ * `fallback` supplies the turn/step, which chunk frames do not carry (see
+ * {@link streamFrameOwner}).
  */
-export function streamChunkOf(eventOrFrame: unknown, fallback?: { turn: number; step: number }): {
+export function streamChunkOf(frame: unknown, fallback?: { turn: number; step: number }): {
   chunk: StreamChunkLike
   turn: number
   step: number
   time: number
   /**
-   * False when neither the source nor a fallback carried a real turn/step.
+   * False when neither the frame nor a fallback carried a real turn/step.
    * Usage folded under such a chunk would be filed under a bogus key (0:0)
    * that `step/end` never clears, inflating the session totals forever.
    */
   stepKnown: boolean
 } | undefined {
-  if (eventOrFrame === null || typeof eventOrFrame !== 'object') return undefined
-  const record = eventOrFrame as {
+  if (frame === null || typeof frame !== 'object') return undefined
+  const record = frame as {
     type?: unknown
     time?: unknown
-    data?: { chunk?: StreamChunkLike; turn?: unknown; step?: unknown }
     chunk?: StreamChunkLike
     turn?: unknown
     step?: unknown
   }
-  const chunk = record.data?.chunk ?? (record.type === 'chunk' ? record.chunk : undefined)
+  if (record.type !== 'chunk') return undefined
+  const chunk = record.chunk
   if (chunk === undefined || typeof chunk.type !== 'string') return undefined
-  const turn = record.data?.turn ?? record.turn
-  const step = record.data?.step ?? record.step
+  const turn = record.turn
+  const step = record.step
   const time = record.time
   const explicit = typeof turn === 'number' && typeof step === 'number'
   return {
@@ -658,23 +617,10 @@ export function streamChunkOf(eventOrFrame: unknown, fallback?: { turn: number; 
   }
 }
 
-/** Durable event type as a plain string so 0.1.5 hosts can omit `assistant/chunk`. */
-export function sessionEventType(event: unknown): string {
-  if (event === null || typeof event !== 'object') return ''
-  const type = (event as { type?: unknown }).type
-  return typeof type === 'string' ? type : ''
-}
-
-/** True when this event is a live-or-durable assistant token that replay should skip. */
-export function isAssistantStreamEvent(event: unknown): boolean {
-  const type = sessionEventType(event)
-  return type === 'assistant/chunk' || type === 'assistant/attempt'
-}
-
 /**
- * Subscribe to a host event that may not exist on the compile-time Events
- * map. 0.1.5 emits `agent/assistant-stream`; 0.1.2 never does. Cordis
- * still accepts the string; the listener is simply never called on 0.1.2.
+ * Subscribe to a host event whose scoped payload type does not match this
+ * build's `Events` map. Both supported lines emit `agent/assistant-stream`,
+ * and Cordis accepts the plain event name at runtime.
  */
 export function listenHostEvent(
   ctx: { on: (event: never, handler: never) => unknown },

@@ -457,8 +457,8 @@ export function apply(ctx: Context, config: Config): void {
       try {
         // The frontend always spawns the Host with `--resume=<id>` — including
         // for a brand-new session id it just generated. A missing session must
-        // therefore fall back to create (dsh 0.1.1-rc.2 and 0.1.2-rc.1 both
-        // throw `session … not found` instead of creating).
+        // therefore fall back to create (both supported host lines throw
+        // `session … not found` instead of creating).
         const missingSession = (error: unknown): boolean => {
           const chain: unknown[] = [error]
           let current = error

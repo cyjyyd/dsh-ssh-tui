@@ -1731,12 +1731,10 @@ test('replayHistory yields to the event loop while it loads history', async () =
   assert.equal(tui.replaying, false)
 })
 
-test('replayHistory skips assistant chunks and still paints the assembled reply', async () => {
+test('replayHistory paints the reply assembled in the settled message', async () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const events = [
     { type: 'user/message', data: { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } },
-    { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'skip-me' } } },
-    { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', text: 'think' } } },
     {
       type: 'assistant/message',
       data: {
@@ -1770,14 +1768,13 @@ test('replayHistory skips assistant chunks and still paints the assembled reply'
   assert.equal(kinds.includes('reasoning'), true)
   assert.equal(tui.streaming, undefined)
   assert.equal(tui.rows.some(row => row.kind === 'assistant' && row.text.includes('hello')), true)
-  assert.equal(tui.rows.some(row => row.kind === 'assistant' && row.text.includes('skip-me')), false)
 })
 
-test('listPersistenceHeaders unwraps 0.1.5 snapshots and inspectPersistenceSession uses open+read', async () => {
+test('listPersistenceHeaders unwraps list snapshots and inspectPersistenceSession uses open+read', async () => {
   const headers = await listPersistenceHeaders({
     list: async () => [
       { header: { id: 'a', createdAt: 1, cwd: '/tmp' }, revision: 'r1', sizeBytes: 12 },
-      { id: 'b', createdAt: 2, cwd: '/tmp' },
+      { header: { id: 'b', createdAt: 2, cwd: '/tmp' }, revision: 'r2' },
     ],
   })
   assert.deepEqual(headers.map(item => item.id), ['a', 'b'])
@@ -1798,14 +1795,7 @@ test('listPersistenceHeaders unwraps 0.1.5 snapshots and inspectPersistenceSessi
   assert.equal(inspection.events[0].type, 'user/message')
 })
 
-test('streamChunkOf reads assistant/chunk events and live stream frames', () => {
-  const fromEvent = streamChunkOf({
-    type: 'assistant/chunk',
-    time: 10,
-    data: { turn: 1, step: 2, chunk: { type: 'text-delta', text: 'hi' } },
-  })
-  assert.equal(fromEvent?.chunk.text, 'hi')
-  assert.equal(fromEvent?.turn, 1)
+test('streamChunkOf reads live stream frames', () => {
   const fromFrame = streamChunkOf({
     type: 'chunk',
     time: 11,
@@ -1815,7 +1805,6 @@ test('streamChunkOf reads assistant/chunk events and live stream frames', () => 
   })
   assert.equal(fromFrame?.chunk.type, 'reasoning-delta')
   assert.equal(fromFrame?.turn, 3)
-  assert.equal(commandAcceptsAttachments({ images: true }), true)
   assert.equal(commandAcceptsAttachments({ attachments: true }), true)
   assert.equal(commandAcceptsAttachments({ hint: 'x' }), false)
 })
@@ -1844,9 +1833,9 @@ test('live assistant-stream frames paint tokens that 0.1.5 no longer logs', () =
 })
 
 test('streamChunkOf takes the live attempt step from its owner', () => {
-  // Real 0.1.5 chunk frames carry no turn/step: without the fallback every
-  // chunk lands on step 0, so TTFT/decode never match the open step and the
-  // footer silently loses tok/s (and usage de-duplication keys collide).
+  // Real chunk frames carry no turn/step: without the fallback every chunk
+  // lands on step 0, so TTFT/decode never match the open step and the footer
+  // silently loses tok/s (and usage de-duplication keys collide).
   const frame = {
     type: 'chunk',
     attemptId: 'a1',
@@ -1863,10 +1852,6 @@ test('streamChunkOf takes the live attempt step from its owner', () => {
   assert.equal(streamed?.turn, 4)
   assert.equal(streamed?.step, 2)
   assert.equal(streamed?.time, 1_200)
-  // Durable assistant/chunk events keep their own turn/step, owner or not.
-  const durable = streamChunkOf({ type: 'assistant/chunk', time: 5, data: { turn: 9, step: 3, chunk: { type: 'text-delta', text: 'x' } } }, owner)
-  assert.equal(durable?.turn, 9)
-  assert.equal(durable?.step, 3)
   assert.equal(streamFrameOwner({ type: 'chunk', attemptId: 'a1' }), undefined)
   assert.equal(streamFrameAttemptId({ type: 'chunk', attemptId: 'a1' }), 'a1')
   assert.equal(streamFrameAttemptId({ type: 'end', attemptId: 'a1' }), 'a1')
@@ -1948,7 +1933,7 @@ test('live chunks stay on the open step so the footer keeps tok/s', () => {
   assert.equal(tui.stats.usage.inputTokens, 10)
 })
 
-test('resumed sessions rebuild tok/s from replayed chunks and packed streams', () => {
+test('resumed sessions rebuild tok/s from the packed settlement streams', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
@@ -1961,13 +1946,8 @@ test('resumed sessions rebuild tok/s from replayed chunks and packed streams', (
   const session = agent.session
   tui.replaying = true
   try {
-    // 0.1.2 log: durable chunks carry the first token time.
+    // Every step's packed `stream` carries the first token time a resume needs.
     tui.handleSessionEvent(session, { type: 'step/start', time: 2_000, data: { turn: 1, step: 1 } })
-    tui.handleSessionEvent(session, {
-      type: 'assistant/chunk',
-      time: 2_100,
-      data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hi' } },
-    })
     tui.handleSessionEvent(session, {
       type: 'assistant/message',
       time: 2_600,
@@ -1975,10 +1955,13 @@ test('resumed sessions rebuild tok/s from replayed chunks and packed streams', (
         turn: 1, step: 1,
         message: { content: [{ type: 'text', text: 'hi' }] },
         usage: { inputTokens: 5, outputTokens: 30 },
+        stream: [
+          { type: 'chunk', time: 2_100, chunk: { type: 'block-start', index: 0, blockType: 'text' } },
+          { type: 'text-chunks', time0: 2_100, index: 0, dt: [0], texts: ['hi'] },
+        ],
       },
     })
     assert.match(tui.statsText(), /60 tok\/s/, tui.statsText())
-    // 0.1.5 log: no durable chunks, the packed settlement stream is the record.
     tui.handleSessionEvent(session, { type: 'step/start', time: 3_000, data: { turn: 1, step: 2 } })
     tui.handleSessionEvent(session, {
       type: 'assistant/message',
@@ -4792,26 +4775,30 @@ test('a retried step reports the settled attempt, not the failed one', () => {
   assert.match(tui.statsText(), /500 tok\/s/, tui.statsText())
 })
 
-// A durable chunk that carries no turn/step must not file usage under a bogus
-// 0:0 key: step/end never clears that key, so the totals would stay inflated
-// for the rest of the session.
-test('replayed usage without turn/step cannot inflate the totals', () => {
+// A live usage chunk that arrives with no open step must not file usage under a
+// bogus 0:0 key: step/end never clears that key, so the totals would stay
+// inflated for the rest of the session.
+test('unowned live usage cannot inflate the totals', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
     options: {},
-    status: 'idle',
+    status: 'running',
     session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
     cancel() {},
   }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.replaying = true
-  tui.handleSessionEvent(agent.session, {
-    type: 'assistant/chunk',
-    time: 1_000,
-    data: { chunk: { type: 'usage', usage: { inputTokens: 4_000, outputTokens: 900 } } },
+  tui.handleAssistantStream({
+    agent,
+    frame: {
+      type: 'chunk',
+      attemptId: 'a1',
+      revision: 1,
+      index: 0,
+      time: 1_000,
+      chunk: { type: 'usage', usage: { inputTokens: 4_000, outputTokens: 900 } },
+    },
   })
-  tui.replaying = false
   assert.deepEqual(tui.stats.usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
 })
 
@@ -4822,8 +4809,6 @@ test('streamChunkOf marks an unowned chunk as step-unknown', () => {
   assert.equal(streamChunkOf(frame)?.stepKnown, false)
   assert.equal(streamChunkOf(frame, { turn: 2, step: 3 })?.stepKnown, true)
   assert.equal(streamChunkOf(frame, { turn: 2, step: 3 })?.turn, 2)
-  const durable = { type: 'assistant/chunk', time: 10, data: { turn: 2, step: 3, chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } } } }
-  assert.equal(streamChunkOf(durable)?.stepKnown, true)
 })
 
 // `formatTokensPerSecond` must not round a slow step down to a stalled "0".

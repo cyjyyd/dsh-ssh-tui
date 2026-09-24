@@ -101,9 +101,11 @@ export interface PresetCompositionView {
 
 /**
  * The authoring subset of the service, feature-detected rather than assumed:
- * the plugin still supports 0.1.2-rc.1, whose `agentPresets` may predate
- * `copy`, `remove`, `read`, and `compositionInventory`. A missing member turns
- * into a clear message instead of a crash.
+ * the two supported lines expose different preset services under the same
+ * `agentPresets` name. 0.1.5's `dsh-agent-presets` carries `copy`, `remove`,
+ * `read` and `compositionInventory`; the 0.1.7 registry
+ * (`dsh-agent-preset-registry`) does not. A missing member turns into a clear
+ * message instead of a crash.
  */
 export interface PresetAuthoringApi {
   readonly authorable?: boolean

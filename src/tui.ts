@@ -36,12 +36,10 @@ import {
   forEachSessionEvent,
   forEachSessionEventAsync,
   hostSettingsGeneration,
-  isAssistantStreamEvent,
   isTokenDeltaChunk,
   listenHostEvent,
   readSettingsSection,
   REPLAY_YIELD_EVERY,
-  sessionEventType,
   sessionEvents,
   settingsNamespace,
   streamChunkOf,
@@ -527,11 +525,9 @@ export {
 export {
   commandAcceptsAttachments,
   forEachSessionEvent,
-  isAssistantStreamEvent,
   isTokenDeltaChunk,
   listPersistenceHeaders,
   inspectPersistenceSession,
-  sessionEventType,
   sessionEvents,
   settingsNamespace,
   streamChunkOf,
@@ -593,8 +589,8 @@ export {
 
 /**
  * The preset service as `/preset` uses it: the members every supported host
- * has, plus the authoring ones 0.1.2-rc.1 may predate (feature-detected at
- * each call site, never assumed).
+ * has, plus the authoring members the 0.1.5 roster exposes and the 0.1.7
+ * registry does not (feature-detected at each call site, never assumed).
  */
 type PresetService = PresetAuthoringApi & {
   list(): Promise<AgentPreset[]>
@@ -606,9 +602,8 @@ type PresetService = PresetAuthoringApi & {
 /** One model an endpoint listing advertises, with whatever capacities it disclosed. */
 type DiscoveredModel = { id: string; name?: string; contextWindow?: number; maxTokens?: number }
 
-/** Discover models in a way that works on both 0.1.1-rc.2 and 0.1.2-rc.1.
- *  0.1.1 reads `request.signal`; 0.1.2 reads the third argument and dropped
- *  `signal` from the request type. Passing both keeps cancellation on either. */
+/** Discover models through the request type both supported lines read.
+ *  Cancellation is the third argument (`LlmModelDiscoveryOperation.signal`). */
 type ModelDiscoveryHost = {
   discoverModels(
     settingsNs: ReturnType<typeof settingsNamespace>,
@@ -617,7 +612,6 @@ type ModelDiscoveryHost = {
       api?: string
       apiKey?: string
       provider?: string
-      signal?: AbortSignal
     },
     signal?: AbortSignal,
   ): Promise<DiscoveredModel[]>
@@ -628,7 +622,7 @@ function discoverProviderModels(
   request: { provider?: string; baseURL?: string; api?: string; apiKey?: string },
   signal: AbortSignal,
 ): Promise<DiscoveredModel[]> {
-  return llm.discoverModels(settingsNamespace('llm-pi-ai'), { ...request, signal }, signal)
+  return llm.discoverModels(settingsNamespace('llm-pi-ai'), request, signal)
 }
 
 /**
@@ -666,15 +660,9 @@ async function fetchModelEndpoints(
   }
 }
 
-/** 0.1.1 registers a provider object; 0.1.2 answers through the waterfall. */
-type UserQuestionAnswerer = {
-  registerProvider?(provider: { ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer> }): () => void
-}
-
 /**
- * 0.1.2's `'user-questions/request'` is not in 0.1.1-rc.2's `Events`.
- * Name the listener here so `tsc` against either package can emit the runtime
- * fallback; the `registerProvider` branch still wins on 0.1.1.
+ * `'user-questions/request'` is not in the compile-time `Events` map this build
+ * sees, so name the listener here and let Cordis dispatch the plain string.
  */
 type UserQuestionWaterfallHost = {
   on(
@@ -688,13 +676,8 @@ type UserQuestionWaterfallHost = {
 
 function installUserQuestionAnswerer(
   ctx: Context,
-  questions: object,
   ask: (request: AskUserQuestionRequest) => Promise<AskUserQuestionAnswer>,
 ): () => void {
-  const provider = questions as UserQuestionAnswerer
-  if (typeof provider.registerProvider === 'function') {
-    return provider.registerProvider({ ask })
-  }
   return (ctx as UserQuestionWaterfallHost).on('user-questions/request', async (request, next) => {
     try {
       return await ask(request)
@@ -1724,7 +1707,7 @@ export class SshTui {
     )
     const questions = this.ctx.get('userQuestions')
     if (questions !== undefined) {
-      this.userQuestionDisposer = installUserQuestionAnswerer(this.ctx, questions, this.handleUserQuestions)
+      this.userQuestionDisposer = installUserQuestionAnswerer(this.ctx, this.handleUserQuestions)
     }
   }
 
@@ -5192,9 +5175,9 @@ export class SshTui {
   }
 
   /**
-   * Fold one live or durable stream chunk into the in-progress assistant
-   * row. 0.1.2 hosts append `assistant/chunk`; 0.1.5 emits the same chunk
-   * on `agent/assistant-stream` and never writes it to the log.
+   * Fold one live stream chunk into the in-progress assistant row. Hosts from
+   * 0.1.5 on emit the chunk on `agent/assistant-stream` and never write it to
+   * the log.
    */
   private applyStreamChunk(streamed: {
     chunk: StreamChunkLike
@@ -5202,7 +5185,7 @@ export class SshTui {
     step: number
     time: number
     stepKnown: boolean
-  }, statsOnly = false): void {
+  }): void {
     const { chunk } = streamed
     if (isTokenDeltaChunk(chunk)) {
       this.statsTracker.noteFirstToken(streamed.turn, streamed.step, streamed.time)
@@ -5210,7 +5193,6 @@ export class SshTui {
     if (chunk.type === 'usage' && chunk.usage !== undefined && streamed.stepKnown) {
       this.statsTracker.recordUsage(streamed.turn, streamed.step, chunk.usage as TokenUsage)
     }
-    if (statsOnly) return
     if (chunk.type === 'text-delta') {
       this.streaming ??= { text: '', reasoning: '' }
       this.streaming.text += chunk.text ?? ''
@@ -5227,9 +5209,9 @@ export class SshTui {
   }
 
   /**
-   * 0.1.5 live tokens arrive as process-local `agent/assistant-stream`
-   * frames (start / chunk / end). Chunk frames carry the same
-   * `StreamChunk` the 0.1.2 log used to store as `assistant/chunk`.
+   * 0.1.5 and 0.1.7 live tokens arrive as process-local
+   * `agent/assistant-stream` frames (start / chunk / end). Chunk frames carry
+   * the same `StreamChunk` the settled `assistant/message` embeds in `stream`.
    */
   readonly handleAssistantStream = (...args: unknown[]): void => {
     const payload = args[0] as { agent?: Agent; frame?: unknown } | undefined
@@ -5319,20 +5301,7 @@ export class SshTui {
       return
     }
     this.lastActivity = Date.now()
-    if (this.replaying && isAssistantStreamEvent(event)) {
-      // Replay skips the in-progress row, but durable chunks still carry the
-      // timing the footer needs: a resumed session must keep TTFT and tok/s.
-      const streamed = streamChunkOf(event)
-      if (streamed !== undefined) this.applyStreamChunk(streamed, true)
-      return
-    }
     if (!this.replaying) this.refreshContextPressure()
-    const eventType = sessionEventType(event)
-    if (eventType === 'assistant/chunk') {
-      const streamed = streamChunkOf(event)
-      if (streamed !== undefined) this.applyStreamChunk(streamed)
-      return
-    }
     switch (event.type) {
       case 'user/message': {
         const text = event.data.content
@@ -5382,8 +5351,7 @@ export class SshTui {
           .join('')
         // The settlement's own packed stream is authoritative: a retried step
         // keeps the failed attempt's first token in the live latch, and spanning
-        // both attempts reported a rate ~20x off. 0.1.2 has no `stream` and still
-        // relies on the replayed `assistant/chunk` events (or the live latch).
+        // both attempts reported a rate ~20x off.
         this.statsTracker.settleMessage({
           turn: event.data.turn,
           step: event.data.step,
@@ -6204,7 +6172,6 @@ export class SshTui {
   readonly handleSubagentSessionEvent = (sessionId: SessionId, event: SessionEvent): void => {
     const row = this.findSubagentRow(String(sessionId))
     if (row === undefined) return
-    if (sessionEventType(event) === 'assistant/chunk') return
     switch (event.type) {
       case 'user/message': {
         const text = collectText(event.data.content)

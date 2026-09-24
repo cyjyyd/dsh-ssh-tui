@@ -74,17 +74,33 @@
    headless 下 `ssh-tui` 不导入是插件自己的 TTY 守卫（fiber 非 ACTIVE）导致，不是导入缺陷。
 4. **真机新发现的 P1-4 缺陷**：`src/display-sock.ts:178-186` 不校验 AF_UNIX 路径总长 → 深 `DSH_HOME` 下
    `listen()` EINVAL，用户只看到 "host display socket did not appear"。已记进 `docs/platform.md`。
-5. **取消 0.1.2-rc**（用户决定）——见下一节。
+5. ~~**取消 0.1.2-rc**（用户决定）~~ **已完成**——见下一节。
 
-## 0.1.7 适配完成后：取消 0.1.2-rc 适配（用户决定，2026-09-23）
+## 取消 0.1.2-rc 适配（用户决定 2026-09-23；2026-09-24 完成）
 
-理由：兼容层包袱。0.1.2-rc.1 是最老的一条腿，靠它保住的用户与维护成本不成比例。清单：
+理由：兼容层包袱。0.1.2-rc.1 是最老的一条腿，靠它保住的用户与维护成本不成比例。
 
-- [ ] `package.json`：范围去掉 `>=0.1.2-rc.1 <0.1.6`；`dshReleases` 去掉 `0.1.2-rc.1` 条目
-      （`tests/bundle-patch.test.mjs` 里那条"必须存在且为 compatible"的断言一并删）。
-- [ ] `.github/workflows/ci.yml`：删 `0.1.2-rc.1` 腿；`docs/release.md` 的腿列表同步。
-- [ ] 源码里为 0.1.2-rc.1 写的特性探测与注释：`src/preset-authoring.ts` 的
-      "0.1.2-rc.1 may predate"/`PresetAuthoringApi` 全可选成员的措辞、`src/tui.ts` 里
-      "works on both 0.1.1-rc.2 and 0.1.2-rc.1" 的模型发现双写、`src/dsh-compat.ts` 的老分支——
-      逐个判断"新下线是 0.1.5-rc.1 还是 0.1.7-rc.1"，能删的删、该留的改注释。
-- [ ] 老线仍要保：`0.1.5-rc.1` / `0.1.5-rc.3`（`latest`）/ `0.1.7-rc.1`（`next`）。
+- [x] `package.json`：`dsh.compatibility.dsh` 与 14 条 peer 去掉 `>=0.1.2-rc.1 <0.1.6` comparator（共 15 处）；
+      `dshReleases` 的 `0.1.2-rc.1` **保留条目并改判 `incompatible`**（比删条目更有用：还在该线的用户
+      在 STORE 里看到的是明确拒绝，而不是"没有表态"）；`tests/bundle-patch.test.mjs` 改成断言
+      "`0.1.2-rc.1` 不在范围内且为 `incompatible`"，并要求 `maxSatisfying` 在两条存活线里挑最新。
+- [x] `.github/workflows/ci.yml`：删 `0.1.2-rc.1` 腿（五条 → 四条：`test (0.1.5-rc.3)` /
+      `test (0.1.5-rc.1)` / `test (0.1.7-rc.1)` / `test-windows`），相关 `if:` 条件与注释同步；
+      `docs/release.md` 的腿列表、快照表与 `README{,.en}.md` 的环境要求同步。
+- [x] 源码/测试：删掉只服务 0.1.2 及更早 API 代的代码——`dsh-compat.ts` 的自由函数
+      `installSettingsSection` 兜底、`session.events` 兜底、裸 header `list()`、`inspect()` 分支、
+      `images` 标志、`assistant/chunk` 持久化应用链（含 `isAssistantStreamEvent` / `sessionEventType`）、
+      `discoverModels` 请求体内 `signal` 双写、`registerProvider` 分支；注释统一改写成
+      "0.1.5-rc / 0.1.7-rc 两条存活线"的说法。`tests/` 里约 20 个 `inspect` ＋裸 header 的 fake
+      迁移成 snapshot `list()` + `open()`/`read()`，durable-chunk 用例迁移到 packed settlement stream。
+- [x] **保留**（有运行时证据证明两条存活线仍然活着，不是 0.1.2 遗留）：`persistenceLocate`
+      （0.1.5/0.1.7 的 JSONL 后端仍实现 `locate(meta)`，只是 `.d.ts` 把它标成 private）、
+      `PresetAuthoringApi` 的全可选成员与调用点探测（0.1.7 registry 确实没有
+      `copy` / `remove` / `read` / `authorable`）。
+- [x] 验证：两棵树各 909 项、0 失败（0.1.5-rc.3 → 906 通过 / 3 skip；0.1.7-rc.1 → 905 通过 / 4 skip），
+      `tsc --noEmit` 两条线 0 错。
+- [x] 老线仍保：`0.1.5-rc.1` / `0.1.5-rc.3`（`latest`）/ `0.1.7-rc.1`（`next`）。
+
+**已知取舍（记录在案）**：0.1.2 时代的旧会话日志把 token 计时写成独立的 `assistant/chunk` 事件；
+那部分**回放统计**（resume 后为旧会话重建 TTFT / tok/s）随该线一起删掉了。文本本身仍由
+`assistant/message` 的 `content` 回放，所以旧会话照常显示，只是底栏不再为它们重建速率数字。

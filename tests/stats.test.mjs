@@ -94,7 +94,7 @@ test('decode needs a finite, non-negative token count', () => {
 test('a settlement before the first token cannot report a negative decode span', () => {
   const stats = new SessionStatsTracker()
   stats.noteStepStart(1, 1, 2_000)
-  // 0.1.2 replays can hand a packed first-token time from before the step start.
+  // A packed first-token time can precede the step start; the span must clamp.
   stats.settleMessage({ turn: 1, step: 1, time: 2_500, firstTokenTime: 1_500, outputTokens: 10 })
   const after = stats.snapshot()
   assert.equal(after.ttftMs, 0, 'clamped at zero')

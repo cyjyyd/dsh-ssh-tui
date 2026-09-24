@@ -18,10 +18,12 @@ jobs:
         # rc.2), so npm nests a second @deepseek-ai/dsh-scope and the agent
         # runtime loads two module instances — `agent-presets` then refuses to
         # compose an unscoped context and the TUI never starts. One version for
-        # the whole family keeps a single copy. 0.1.2-rc.1 stays as the oldest
-        # supported stack; 0.1.5-rc.1 is still covered because every non-default
-        # leg rewrites the @deepseek-ai/dsh-* devDependencies and resolves from
-        # scratch.
+        # the whole family keeps a single copy. 0.1.5-rc.1 is now the oldest
+        # supported stack: 0.1.2-rc.1 was dropped once the 0.1.7 line was
+        # verified, because the shims its API generation needed cost more than
+        # the users it kept while 0.1.5-rc.1 covers that same generation. It is
+        # still covered here because every non-default leg rewrites the
+        # @deepseek-ai/dsh-* devDependencies and resolves from scratch.
         #
         # rc.2 (`latest`) has no leg, deliberately. Upstream published rc.3 with
         # exact sibling pins; rc.2's caret ranges therefore resolve to a mixed
@@ -38,17 +40,17 @@ jobs:
         # plural presets package into `dsh-agent-preset` +
         # `dsh-agent-preset-registry`, and replaced the terminal preset roster
         # with a process-wide agent composition. The leg rewrites the manifest
-        # itself — devDep pins, the presets substitution, the family's root pins
-        # and the plugin's own peer window — so the code is verified before the
-        # shipped `dsh.compatibility` declaration is widened.
-        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.2-rc.1", "0.1.7-rc.1"]
+        # itself — devDep pins, the presets substitution and the family's root
+        # pins — and the shipped `dsh.compatibility` declaration already admits
+        # 0.1.7, so the leg verifies the code against the declaration users get.
+        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.7-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
-        if: matrix.dsh != '0.1.5-rc.3' && matrix.dsh != '0.1.7-rc.1'
+        if: matrix.dsh == '0.1.5-rc.1'
         run: |
           node -e "
             const fs = require('node:fs');
@@ -101,14 +103,14 @@ jobs:
       - name: Install
         if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.7-rc.1'
         run: npm install --no-audit --no-fund
-      # 0.1.5-rc.1 is npm `latest` and stays declared as supported, but its own
-      # peer ranges do not resolve (that is why the family is pinned to rc.2
+      # 0.1.5-rc.1 is the oldest supported stack and stays declared, but its own
+      # peer ranges do not resolve (that is why the family is pinned to rc.3
       # above): npm fights over dsh-invariants and gives up with ERESOLVE. This
       # leg installs with legacy peers, which skips them and nests a second
       # @deepseek-ai/dsh-scope. It covers typecheck and the plugin suite; the
       # host-contract test skips itself there (no host can boot from a tree
       # missing peers), while that contract and the roster composition are
-      # covered on the rc.2 leg and by `scripts/tui-probe.mjs` on a real profile.
+      # covered on the rc.3 leg and by `scripts/tui-probe.mjs` on a real profile.
       #
       # 0.1.7-rc.1 needs the same flag for the other end of the family: several
       # `@deepseek-ai/dsh` dependencies still carry caret PRERELEASE ranges
@@ -130,14 +132,14 @@ jobs:
         run: node scripts/ci-annotate-failures.mjs test-output.txt
       # End to end on a real PTY, against a profile this repo builds for itself:
       # a headless runner has no ~/.dsh, which is why this never ran here before.
-      # The rc.1 legs skip it (their peer tree cannot boot a host).
+      # The rc.1 leg skips it (its peer tree cannot boot a host).
       - name: End-to-end PTY probe (throwaway profile)
-        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1'
         run: |
           npm install -g pnpm@10 --no-audit --no-fund
           node scripts/probe-home.mjs --probe
       - name: Terminal-capability probe
-        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1'
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
@@ -149,7 +151,7 @@ jobs:
       # real 0.1.7 host (see docs/upstream-0.1.7.md), only this leg's mock setup
       # does not. The other three probes run on that leg.
       - name: Busy-drop probe (window closed mid-turn)
-        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.2-rc.1' && matrix.dsh != '0.1.7-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.7-rc.1'
         run: node scripts/tui-mock-probe.mjs --busy
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup

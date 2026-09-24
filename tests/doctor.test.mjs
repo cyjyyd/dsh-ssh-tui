@@ -41,7 +41,10 @@ function facts(overrides = {}) {
     services: { roster: true, codeRuntime: true },
     patch: { readable: true, text: patchText, analysis: analyzePatch(patchText) },
     bundleRows: [],
-    compatibility: { range: '>=0.1.2-rc.1 <0.1.6', releases: { '0.1.5-rc.1': 'compatible' } },
+    compatibility: {
+      range: '>=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6 || >=0.1.7-rc.1 <0.1.8',
+      releases: { '0.1.5-rc.1': 'compatible' },
+    },
     scopeCopies: ['/usr/lib/node_modules/@deepseek-ai/dsh-scope'],
     ...overrides,
   }

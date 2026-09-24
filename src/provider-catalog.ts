@@ -2,10 +2,10 @@
  * Web-aligned provider presets, read from the host's own pi-ai catalog.
  *
  * The web Models settings page offers every provider the installed pi-ai
- * catalog ships (`llm.listConfigurableProviders()` on 0.1.2+), with endpoint
- * and model defaults served by that catalog when a profile omits them. The
- * TUI reads the same catalog so /setup can offer the same list without a
- * hand-pinned table that would drift between dsh releases.
+ * catalog ships (`llm.listConfigurableProviders()`, present on both supported
+ * lines), with endpoint and model defaults served by that catalog when a
+ * profile omits them. The TUI reads the same catalog so /setup can offer the
+ * same list without a hand-pinned table that would drift between dsh releases.
  *
  * The read runs in a short-lived child process: importing pi-ai inside the
  * live dsh process can hang on the host's module loader hooks, while a bare
