@@ -40,9 +40,10 @@ jobs:
         # plural presets package into `dsh-agent-preset` +
         # `dsh-agent-preset-registry`, and replaced the terminal preset roster
         # with a process-wide agent composition. The leg rewrites the manifest
-        # itself — devDep pins, the presets substitution and the family's root
-        # pins — and the shipped `dsh.compatibility` declaration already admits
-        # 0.1.7, so the leg verifies the code against the declaration users get.
+        # itself — devDep pins, the presets substitution, the family's root pins
+        # and an `overrides` map that keeps the transitive family on that line —
+        # and the shipped `dsh.compatibility` declaration already admits 0.1.7,
+        # so the leg verifies the code against the declaration users get.
         dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.7-rc.1"]
     steps:
       - uses: actions/checkout@v4
@@ -91,17 +92,34 @@ jobs:
               '@deepseek-ai/cordis-plugin-include': '1.0.9',
               '@deepseek-ai/cordis-plugin-loader': '1.0.5',
               '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-              // `dsh-app-boot` peers on this one to compose the launcher tree,
-              // and `--legacy-peer-deps` skips peers: without it the CLI cannot
+              // dsh-app-boot peers on this one to compose the launcher tree,
+              // and --legacy-peer-deps skips peers: without it the CLI cannot
               // even print its help (ERR_MODULE_NOT_FOUND), which is the first
               // thing the PTY-probe bootstrap asks it to do.
               '@deepseek-ai/cordis-plugin-group': '1.0.4',
             });
+            // Force the whole family onto this line, transitively. The published
+            // ranges still carry prerelease carets (^0.1.5-rc.3), which npm
+            // resolves through the latest tag rather than to the highest
+            // match, so without this a plain install drags 0.1.5 packages into a
+            // tree pinned to 0.1.7. Overrides do that AND leave peer resolution
+            // on: --legacy-peer-deps skips peers entirely, which left 37
+            // peer-only packages missing and 25 of the base's own rows
+            // (llm-deepseek, tool-fs, subagent, ...) unable to import, so
+            // no probe on this leg could reach a model.
+            // The plural dsh-agent-presets is peer-only (it has no 0.1.7
+            // release) and npm rejects an override for a root peer spec with
+            // EOVERRIDE, so it is deliberately not in this map.
+            const family = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
+            pkg.overrides = {};
+            for (const name of new Set([...Object.keys(pkg.devDependencies), ...Object.keys(pkg.dependencies ?? {})])) {
+              if (family(name)) pkg.overrides[name] = line;
+            }
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           rm -f package-lock.json
       - name: Install
-        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.7-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1'
         run: npm install --no-audit --no-fund
       # 0.1.5-rc.1 is the oldest supported stack and stays declared, but its own
       # peer ranges do not resolve (that is why the family is pinned to rc.3
@@ -112,16 +130,12 @@ jobs:
       # missing peers), while that contract and the roster composition are
       # covered on the rc.3 leg and by `scripts/tui-probe.mjs` on a real profile.
       #
-      # 0.1.7-rc.1 needs the same flag for the other end of the family: several
-      # `@deepseek-ai/dsh` dependencies still carry caret PRERELEASE ranges
-      # (`^0.1.5-rc.3`), which npm resolves through the `latest` tag rather than
-      # to the highest match — so a plain install pulls 0.1.5-rc.3 packages
-      # (plural presets included) into a tree the leg just pinned to 0.1.7.
-      # Skipping peer resolution keeps the devDep pins this leg set, which is
-      # what it is here to typecheck; the PTY probes build their own profile
-      # tree from the pinned family, so they are unaffected.
-      - name: Install (legacy peers for the rc.1 and 0.1.7 lines)
-        if: matrix.dsh == '0.1.5-rc.1' || matrix.dsh == '0.1.7-rc.1'
+      # The 0.1.7 leg does *not* use this flag: its rewrite step pins the whole
+      # family through `overrides` instead, which keeps peer resolution on. The
+      # flag used to be there too, and the tree it produced was missing 37
+      # peer-only packages — the probes on that leg could not reach a model.
+      - name: Install (legacy peers for the rc.1 line)
+        if: matrix.dsh == '0.1.5-rc.1'
         run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: npx tsc -p tsconfig.json --noEmit
       # The TAP stream is kept on disk so a red run can annotate *which* test
@@ -145,13 +159,12 @@ jobs:
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.
       #
-      # Not on the 0.1.7 leg yet: its synthesized profile reaches the turn with
-      # `no adapter registered for provider "deepseek-official"`, so the mock
-      # provider wiring there is unresolved — the scripted-turn probe passes on a
-      # real 0.1.7 host (see docs/upstream-0.1.7.md), only this leg's mock setup
-      # does not. The other three probes run on that leg.
+      # It runs on the 0.1.7 leg now that the install there is complete: a
+      # `--legacy-peer-deps` tree left the DeepSeek adapter fiberless
+      # (`no adapter registered for provider "deepseek-official"`), which was an
+      # install defect, not a probe one.
       - name: Busy-drop probe (window closed mid-turn)
-        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.7-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1'
         run: node scripts/tui-mock-probe.mjs --busy
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup

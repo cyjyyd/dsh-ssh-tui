@@ -6,7 +6,9 @@
  * and a named pipe at `\\.\pipe\dsh-tui-<home>-<id>` on Windows. Node requires
  * the `\\.\pipe\` form there — a plain file path cannot be listened on — and
  * `fs.access()` cannot see pipes, so channel liveness always goes through
- * `displaySockExists()` instead of a raw filesystem check.
+ * `displaySockExists()` instead of a raw filesystem check. The POSIX name is
+ * budgeted against `sun_path` (107 bytes on Linux, 103 on macOS): a deep
+ * `DSH_HOME` shortens the readable label, it never fails `listen()`.
  *
  * Frame: u32be length | u8 type | payload
  *   1 stdin   — relay → host (key bytes)
@@ -108,6 +110,32 @@ const HOST_BOOTSTRAP_TIMEOUT_MS = 15_000
 /** Windows rejects pipe names longer than 256 chars; leave generous headroom. */
 const WINDOWS_PIPE_MAX = 200
 
+/**
+ * `sockaddr_un.sun_path` counts its NUL terminator, so a POSIX socket address
+ * may occupy 107 bytes on Linux and 103 on macOS. Overrunning it fails
+ * `listen()` with EINVAL before the Host can print anything, which the launcher
+ * could only report as "the socket did not appear" — hence the budget below.
+ */
+function posixSocketPathMax(platform: NodeJS.Platform): number {
+  return platform === 'darwin' ? 103 : 107
+}
+
+/** Every socket name ends in this; it is never part of the head budget. */
+const SOCK_SUFFIX = '.sock'
+
+/**
+ * Longest readable head a socket name asks for. A home shallow enough to have
+ * room for it keeps exactly the name it had before the budget existed.
+ */
+const SOCK_LABEL_MAX = 80
+
+/**
+ * Shortest socket name worth emitting: a five-character head, the separator and
+ * the digest. Below this the head is noise and the address is refused with the
+ * real reason instead of being handed to `listen()` to fail on.
+ */
+const SOCK_LABEL_MIN = 14
+
 /** True for a Windows named-pipe address (`\\.\pipe\x`, `\\?\pipe\x`, `//./pipe/x`). */
 export function isPipePath(path: string): boolean {
   const normalized = path.replaceAll('/', '\\').toLowerCase()
@@ -142,6 +170,14 @@ export function safeSessionId(sessionId: string): string {
 }
 
 /**
+ * Digest that keeps two sessions with collapsing names apart. It is appended to
+ * every label, however much head a tight path budget has to cut.
+ */
+function sessionDigest(sessionId: string): string {
+  return createHash('sha1').update(sessionId).digest('hex').slice(0, 8)
+}
+
+/**
  * Readable, collision-free short label for one session: a sanitized head plus a
  * digest of the raw id. The digest is always appended because sanitizing alone
  * collapses distinct ids (`foo/bar` and `foo_bar`, `abc` and `abc.`) into one
@@ -150,12 +186,38 @@ export function safeSessionId(sessionId: string): string {
  * the wrong session.
  */
 export function sessionLabel(sessionId: string, maxLength: number): string {
-  const digest = createHash('sha1').update(sessionId).digest('hex').slice(0, 8)
+  const digest = sessionDigest(sessionId)
   const head = safeSessionId(sessionId)
     .replaceAll(/\.{2,}/gu, '_')
     .replace(/^[._-]+|[._-]+$/gu, '')
     .slice(0, Math.max(0, maxLength - digest.length - 1))
   return `${head === '' ? 'session' : head}-${digest}`
+}
+
+/**
+ * One POSIX socket *name* (the directory is prepended by the caller).
+ *
+ * The directory is measured in bytes, not characters: `sun_path` counts the
+ * encoded address, and a home with non-ASCII characters spends more than one
+ * byte per character. As the directory grows the readable head shrinks — a deep
+ * `DSH_HOME` loses the label, never the channel — while a home that used to fit
+ * keeps its old name byte for byte. A home too deep even for a short head is
+ * refused here, with the real reason, instead of by `listen()` EINVAL.
+ */
+function posixSocketName(sessionId: string, dir: string, platform: NodeJS.Platform): string {
+  const limit = posixSocketPathMax(platform)
+  // The separator and the suffix are not negotiable; only the head is.
+  const room = limit - Buffer.byteLength(dir) - 1 - SOCK_SUFFIX.length
+  if (room < SOCK_LABEL_MIN) {
+    throw new Error(
+      `dsh-ssh-tui: ${dir} is too deep for a Unix socket: only ${Math.max(0, room)} of the ${limit} bytes `
+      + `sun_path allows are left for the name, and a usable name needs ${SOCK_LABEL_MIN}. `
+      + 'Point DSH_HOME at a shorter path.',
+    )
+  }
+  // Safe session ids are ASCII by construction (`safeSessionId`), so the label's
+  // length in characters is its length in bytes.
+  return `${sessionLabel(sessionId, Math.min(SOCK_LABEL_MAX, room))}${SOCK_SUFFIX}`
 }
 
 /**
@@ -165,9 +227,12 @@ export function sessionLabel(sessionId: string, maxLength: number): string {
  * into collisions.
  */
 function windowsPipePath(sessionId: string, dshHome: string): string {
-  const homeTag = createHash('sha1').update(resolve(dshHome).toLowerCase()).digest('hex').slice(0, 8)
-  const room = WINDOWS_PIPE_MAX - WINDOWS_PIPE_PREFIX.length - 'dsh-tui-'.length - homeTag.length - 1
-  return `${WINDOWS_PIPE_PREFIX}dsh-tui-${homeTag}-${sessionLabel(sessionId, room)}`
+  const homeTag = sessionDigest(resolve(dshHome).toLowerCase())
+  // `\\.\pipe\` is a flat, machine-wide namespace with a 256-character name
+  // limit; WINDOWS_PIPE_MAX keeps the whole address well inside it, and the
+  // label's digest keeps two long ids apart however much head gets cut.
+  const head = `${WINDOWS_PIPE_PREFIX}dsh-tui-${homeTag}-`
+  return `${head}${sessionLabel(sessionId, WINDOWS_PIPE_MAX - head.length)}`
 }
 
 /**
@@ -181,8 +246,8 @@ export function sessionSockPath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (platform === 'win32') return windowsPipePath(sessionId, dshHome)
-  // UNIX_PATH_MAX is 108 on Linux; leave headroom for the directory prefix.
-  return join(sessionSockDir(dshHome), `${sessionLabel(sessionId, 80)}.sock`)
+  const dir = sessionSockDir(dshHome)
+  return join(dir, posixSocketName(sessionId, dir, platform))
 }
 
 /**

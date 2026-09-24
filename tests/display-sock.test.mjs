@@ -102,7 +102,91 @@ test('sessionSockPath sanitizes ids next to the lock dir', () => {
   const path = sessionSockPath('main-session/../evil id', '/tmp/dsh-home', 'linux')
   assert.equal(path.startsWith(join('/tmp/dsh-home', 'tui-socks')), true, path)
   assert.match(path, /main-session___evil_id-[0-9a-f]{8}\.sock$/u)
-  assert.equal(path, join('/tmp/dsh-home', 'tui-socks', `${sessionLabel('main-session/../evil id', 80)}.sock`))
+  // A home with room for the full label keeps the historical name byte for byte.
+  assert.equal(
+    sessionSockPath('main-session/../evil id', '/root/.dsh', 'linux'),
+    join('/root/.dsh', 'tui-socks', `${sessionLabel('main-session/../evil id', 80)}.sock`),
+  )
+  // A home without it stays inside `sun_path` instead of failing `listen()`.
+  assert.ok(Buffer.byteLength(path) <= 107, `${Buffer.byteLength(path)} bytes: ${path}`)
+})
+
+test('a deep DSH_HOME keeps the socket address inside sun_path', () => {
+  const id = 'main-session-deep'
+  // Byte budget, not taste: 39 characters of home plus an 80-character label
+  // already overflowed the 107-byte address before this existed (see
+  // docs/platform.md). The digest has to survive every one of these.
+  for (const home of [
+    '/root/.dsh',
+    '/root/verify017/home/with/a/rather/deep/state',
+    `/${'d'.repeat(60)}`,
+    `/${'d'.repeat(76)}`,
+  ]) {
+    const path = sessionSockPath(id, home, 'linux')
+    const bytes = Buffer.byteLength(path)
+    assert.ok(bytes <= 107, `${home}: ${bytes} bytes`)
+    assert.match(path, /[0-9a-f]{8}\.sock$/u, 'the digest is what keeps sessions apart')
+    assert.equal(path, sessionSockPath(id, home, 'linux'), 'the name is deterministic')
+    assert.notEqual(path, sessionSockPath('other-session', home, 'linux'))
+    // macOS spends four fewer bytes on `sun_path`: whatever it returns there
+    // must fit, and a home too deep for even that refuses loudly, not via EINVAL.
+    try {
+      const mac = sessionSockPath(id, home, 'darwin')
+      assert.ok(Buffer.byteLength(mac) <= 103, `${home}: ${Buffer.byteLength(mac)} macOS bytes`)
+    } catch (error) {
+      assert.match(String(error.message), /sun_path allows/u)
+    }
+  }
+})
+
+test('a home too deep for a long name keeps a shortened but unique socket', () => {
+  const home = `/${'d'.repeat(76)}`
+  const path = sessionSockPath('main-session-compact', home, 'linux')
+  // Fourteen bytes of room: a five-character head plus the digest, no more.
+  assert.match(path, /\/main-+[0-9a-f]{8}\.sock$/u)
+  assert.match(path.split('/').pop(), /^main/u, 'the head is what got shortened')
+  assert.ok(Buffer.byteLength(path) <= 107, `${Buffer.byteLength(path)} bytes`)
+  assert.equal(path, sessionSockPath('main-session-compact', home, 'linux'))
+  assert.notEqual(path, sessionSockPath('other-session', home, 'linux'))
+})
+
+test('a deep DSH_HOME can actually be listened on', { skip: process.platform === 'win32' }, async () => {
+  // The assertions above only measure strings; this is the kernel verdict that
+  // used to be EINVAL: `tui-socks` under a 75-byte home plus an 80-character
+  // label was a 161-byte address (docs/platform.md has the field report).
+  const root = await mkdtemp(join(tmpdir(), 'dsh-sock-budget-'))
+  try {
+    const home = join(root, 'a'.repeat(19), 'b'.repeat(19))
+    await mkdir(join(home, 'tui-socks'), { recursive: true })
+    const path = sessionSockPath('main-session-deep', home, process.platform)
+    assert.ok(Buffer.byteLength(path) <= 107, `${Buffer.byteLength(path)} bytes: ${path}`)
+    const server = createServer()
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(path, resolve)
+    })
+    await new Promise(resolve => server.close(resolve))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a home with no room even for a digest says so instead of EINVAL', () => {
+  const home = `/${'d'.repeat(120)}`
+  assert.throws(
+    () => sessionSockPath('main-session', home, 'linux'),
+    /sun_path allows[\s\S]*DSH_HOME/u,
+  )
+})
+
+test('a non-ASCII DSH_HOME is budgeted in bytes, not characters', () => {
+  // Twenty CJK characters are sixty UTF-8 bytes. Counting characters would ask
+  // for a label the kernel then refuses, which is the bug this asserts against.
+  const home = `/${'家'.repeat(20)}`
+  const path = sessionSockPath('main-session-unicode', home, 'linux')
+  assert.ok(Buffer.byteLength(path) <= 107, `${Buffer.byteLength(path)} bytes: ${path}`)
+  assert.equal(path, sessionSockPath('main-session-unicode', home, 'linux'))
+  assert.notEqual(path, sessionSockPath('other-session', home, 'linux'))
 })
 
 test('sessionSockLookupPaths still names the 0.7.1 socket', () => {
@@ -155,6 +239,11 @@ test('sessionSockPath keeps long ids in-limit and distinct on win32', () => {
   assert.ok(a.length <= 200, `pipe name too long: ${a.length}`)
   assert.ok(b.length <= 200, `pipe name too long: ${b.length}`)
   assert.notEqual(a, b, 'truncation must not collapse distinct sessions')
+  // The limit counts UTF-16 characters there, and the digest still has to fit.
+  const wide = sessionSockPath(`${'会'.repeat(300)}-a`, 'C:\\home\\.dsh', 'win32')
+  assert.ok(wide.length <= 200, `pipe name too long: ${wide.length}`)
+  assert.ok(!wide.includes('/'), 'pipe names are backslash-only')
+  assert.match(wide, /-[0-9a-f]{8}$/u, 'the digest survives the clamp')
 })
 
 test('isPipePath recognizes Windows pipe spellings only', () => {

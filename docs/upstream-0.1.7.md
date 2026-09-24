@@ -64,16 +64,23 @@
 ## 剩余
 
 1. ~~**CI 腿 ＋ 放宽范围**~~ **已完成**：矩阵加 `0.1.7-rc.1`（该腿自行改写 devDeps、把复数 presets 换成新的两个包、
-   换四个根钉版；安装用 `--legacy-peer-deps`，因为家族里仍有 `^0.1.5-rc.3` 这类预发布 caret 范围会走 `latest`
-   标签把旧线拖进来）；声明同步放宽（14 个 dsh peer ＋ `dsh.compatibility.dsh`），`dshReleases` 加
-   `0.1.7-rc.1: compatible`，快照进 `docs/release.md`。**复数 presets 的 peer 保持旧窗口**（新线不存在该包，
-   它是 optional；继任的两个包各自带 `>=0.1.7-rc.1 <0.1.8`）。
+   换四个根钉版，并用 `overrides` 把整棵依赖树钉在该线——见下）；声明同步放宽（14 个 dsh peer ＋
+   `dsh.compatibility.dsh`），`dshReleases` 加 `0.1.7-rc.1: compatible`，快照进 `docs/release.md`。
+   **复数 presets 的 peer 保持旧窗口**（新线不存在该包，它是 optional；继任的两个包各自带 `>=0.1.7-rc.1 <0.1.8`）。
    注意：不给 exemption 时 0.1.7 的 launcher 会直接跳过我们的 bundle，所以这次放宽是升级路径的硬前提。
+   **安装策略修正（2026-09-24）**：这条腿原来用 `--legacy-peer-deps` 绕开"家族里 `^0.1.5-rc.3` 这类预发布
+   caret 会走 `latest` 标签"的问题，但那个标志连 peer 一起跳过，装出来的树**缺 37 个 peer-only 包**，
+   base 里 25 行（`llm-deepseek`、`tool-fs`、`subagent` …）导入失败且被 loader 静默吞掉 → 这条腿上
+   根本没有可用的模型适配器（`no adapter registered for provider "deepseek-official"`）。现在改成
+   **`overrides` 把每个直接 `@deepseek-ai/dsh*` 依赖钉在 0.1.7-rc.1（peer-only 的复数 presets 除外，
+   覆盖根 peer 会 EOVERRIDE）＋ 普通 `npm install`**：树完整、peer 保留，busy-drop 探针因此能在该腿跑。
+   本地实测：`tsc` 0 错、套件 916/913/0/3、`probe-home`、`tui-term-probe`、`tui-mock-probe --busy` 全 PASS。
 2. ~~`tui-mock-probe`~~ **已完成**：真机 PASS（真跑一轮 ＋ 拖选复制 ＋ `/find` 高亮）。
 3. ~~真实迁移演练~~ **已完成**：PTY 下四段全部导入并被 `describe()` 认到，`!!js` 启动表达式保留；
    headless 下 `ssh-tui` 不导入是插件自己的 TTY 守卫（fiber 非 ACTIVE）导致，不是导入缺陷。
-4. **真机新发现的 P1-4 缺陷**：`src/display-sock.ts:178-186` 不校验 AF_UNIX 路径总长 → 深 `DSH_HOME` 下
-   `listen()` EINVAL，用户只看到 "host display socket did not appear"。已记进 `docs/platform.md`。
+4. ~~**真机新发现的 P1-4 缺陷**~~ **已修复**：`sessionSockPath` 过去不校验 AF_UNIX 地址总长 → 深 `DSH_HOME` 下
+   `listen()` EINVAL，用户只看到 "host display socket did not appear"。现在按 `sun_path` 字节预算截断标签、
+   深到不可用时抛出点明原因的错误，复现配置（39 字符 home）的 mock 探针已 PASS。细节与测试见 `docs/platform.md`。
 5. ~~**取消 0.1.2-rc**（用户决定）~~ **已完成**——见下一节。
 
 ## 取消 0.1.2-rc 适配（用户决定 2026-09-23；2026-09-24 完成）

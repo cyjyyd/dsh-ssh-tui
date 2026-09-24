@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   bootstrapEnv,
+  displayHomePath,
   encodePowerShellCommand,
   hiddenConsoleHostScript,
   hostBootstrapCommand,
@@ -96,6 +97,37 @@ test('the encoded command is base64 of UTF-16LE, so no shell re-parses the scrip
   const encoded = encodePowerShellCommand(script)
   assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), script)
   assert.match(encoded, /^[A-Za-z0-9+/]+=*$/u)
+})
+
+test('a non-ASCII, spaced DSH_HOME survives quoting and the encoded command', () => {
+  const home = 'C:\\Users\\我 的\\dsh home'
+  assert.equal(windowsCommandLine([home]), `"${home}"`)
+  const script = hiddenConsoleHostScript({
+    execPath: 'C:\\Program Files\\nodejs\\node.exe',
+    argv: [`${home}\\bin.js`, '--resume=会话-1'],
+    pidFile: 'C:\\pids\\会话.pid',
+  })
+  assert.ok(script.includes(`"${home}\\bin.js" --resume=会话-1`), script)
+  // The encoded form is UTF-16LE, so none of this depends on the ANSI code page
+  // the console happens to run under.
+  const encoded = encodePowerShellCommand(script)
+  assert.equal(Buffer.from(encoded, 'base64').toString('utf16le'), script)
+})
+
+test('displayHomePath uses each platform shorthand only where it applies', () => {
+  const file = 'env.sh'
+  const windows = (home, USERPROFILE) => displayHomePath(home, file, { platform: 'win32', env: { USERPROFILE } })
+  assert.equal(windows('C:\\Users\\me\\.dsh', 'C:\\Users\\me'), '%USERPROFILE%\\.dsh\\env.sh')
+  // A home outside the profile stays spelled out: a %USERPROFILE% spelling for
+  // it would name a path that does not exist.
+  assert.equal(windows('D:\\dsh-state', 'C:\\Users\\me'), 'D:\\dsh-state\\env.sh')
+  assert.equal(windows('C:\\dsh', undefined), 'C:\\dsh\\env.sh')
+  // The comparison is case-insensitive and survives non-ASCII profile names.
+  assert.equal(windows('c:\\users\\我\\.dsh', 'C:\\Users\\我'), '%USERPROFILE%\\.dsh\\env.sh')
+  const posix = (home, userHome = '/home/me') => displayHomePath(home, file, { platform: 'linux', userHome })
+  assert.equal(posix('/home/me/.dsh'), '~/.dsh/env.sh')
+  assert.equal(posix('/home/me'), '~/env.sh', 'DSH_HOME=$HOME is shown as it is')
+  assert.equal(posix('/srv/dsh'), join('/srv/dsh', file))
 })
 
 test('the OS PowerShell is found from SystemRoot, and only when it exists', () => {

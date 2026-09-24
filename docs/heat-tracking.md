@@ -128,39 +128,40 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
 
 > 日期是用户确认的窗口；版本号、tag 与 npm 仍按 [release.md](release.md) 的规则执行。
 
-## 0.7.3 计划（2026-09-22 起）
+## 0.7.3 内容（2026-09-22 计划，2026-09-24 落地）
 
-**先合 PR #2**（分支 `windows-ci-foundation`，四条腿已全绿）：Windows 真 ConPTY 端到端进 CI +
-`src/platform.ts` 收口平台决策。它是后面所有 Windows 修法的地基——没有它，Windows 的问题仍然只能靠用户实测发现。
+**上游兼容放在第一位。** 0.1.7-rc.1（`next`）的三处结构性变化全部适配：设置表单由 loader entry 自己的
+`Config` 投影（只有 `.volatile()` 字段可写、命名空间 = entry id）、复数 `dsh-agent-presets` 拆成
+`dsh-agent-preset` + `dsh-agent-preset-registry`、终端不再有 roster（preset 变会话级、base 在进程级组合代理）。
+`dsh.compatibility.dsh` 与 14 条 peer 纳入 `>=0.1.7-rc.1 <0.1.8`——**launcher 会逐条读 peer 范围（optional
+也算），所以放宽是升级路径的硬前提**——CI 加 `test (0.1.7-rc.1)` 腿，真机核验＝同源 `tsc` 两条线 0 错、
+mock 轮次探针 PASS、`settings.yaml` 四段迁移演练通过。同批按用户决定**摘除 0.1.2-rc**：范围去掉
+comparator、CI 删腿、只服务该 API 代的兼容分支与测试固定装置删除，`dshReleases` 把 `0.1.2-rc.1` 改判
+`incompatible`（让旧用户看到明确结论而不是沉默）。
 
-**再按 `docs/platform.md` 的欠债清单做 P1**（有风险、优先）：
+**Windows 地基与 P1（全部落地）：**
 
-1. ~~**Windows 文件权限不是空操作**~~ **已完成（P1-2）**：`restrictPathToUser()` 把 `0o600/0o700` 的意图
-   在 Windows 上变成 `icacls /inheritance:r /grant:r <user>:F`（目录带 `(OI)(CI)`），接入 env 文件、
-   `.credentials.yaml`、SuperGrok token、锁/套接字目录与宿主 stderr 日志；真实 ACL 由 Windows 腿上的用例断言。
-   （顺带修掉：宿主 stderr 日志过去没有任何 mode，POSIX 下是 0644。）
-2. **生命周期规范 + 断言**：SSH 断连 / 关掉终端窗口 / TUI 崩溃 / Host 崩溃四种情况的期望行为；
-   "关掉终端后 Host 还活着"目前**只有手工验证过**（P0 的 drop 探针只覆盖了杀窗口这一种）。
-3. **路径与编码**：空格/非 ASCII/长路径的 `DSH_HOME`、`\\.\\pipe\\` 名字约束、CRLF、`%USERPROFILE%` 与 `$HOME` 不一致。
+1. ~~文件权限在 Windows 上是空操作~~ **P1-2**：`restrictPathToUser()` 在 Windows 走
+   `icacls /inheritance:r /grant:r`，接入 env 文件、`.credentials.yaml`、SuperGrok token、锁/套接字目录、
+   宿主 stderr 日志（顺带修掉 POSIX 下 stderr 日志 0644）。
+2. ~~生命周期规范 + 断言~~ **P1-3**：四种死法（SSH 断连 / 关窗 / TUI 崩溃 / 宿主崩溃）的期望写进
+   `docs/platform.md`，`tui-mock-probe.mjs --busy` 进 `test-windows` 腿。
+3. ~~宿主活过"关掉终端窗口"~~ **P1-4**：经系统 PowerShell `Start-Process -WindowStyle Hidden -PassThru`
+   起宿主（自己的隐形控制台、不在启动器的 job 里），pid 通过文件回传。
+4. ~~路径与编码~~ **P1-4-4**：`sessionSockPath` 改为按 `sun_path` **字节预算**截断（39 字符 home 的 113 字节
+   地址过去 `listen()` EINVAL，现在同配置给出 107 字节且内核接受；深到放不下时抛出点明"DSH_HOME 太深"的错误），
+   `\\.\pipe\` 名字按 256 字符上限收口，非 ASCII/空格路径的引号与 `-EncodedCommand` 往返进测试，
+   `displayHomePath` 在 `DSH_HOME == $HOME` 时不再误显示 `~/.dsh/…`。证据与验收见 `docs/platform.md`。
 
-**P2 视 Windows 用户量决定**：终端能力矩阵（Windows Terminal vs conhost）、分发去 bash 化、用户可见的 Windows 文档。
+**P2 仍未做（视 Windows 用户量定）**：非 UTF-8 conhost/locale 的 ASCII 回退渲染；脚本去 bash 化
+（`scripts/*.sh` 在 Windows 上等于不存在）；用户向 Windows 文档。
+**真实 Windows 上仍只能人工确认的两条**：宿主那个控制台窗口确实是隐藏的；`%USERPROFILE%` 与 `$HOME`
+不一致的账户行为。
 
-**发版窗口**：仍按热度曲线选（见上文「发版窗口怎么定」），P0 合并后建议先跑一周采样再定日期。
+**发版窗口**：兼容驱动的发版不必等热度窗口——0.1.7 宿主的 launcher 闸门会拒绝 0.7.2，所以 0.7.3 越早越好；
+版本号、tag 与 npm publish 仍按 [release.md](release.md) 的规则由用户拍板。
 
-**遗留动作（非代码）**：dshfind 卡片仍挂 **0.6.3**。2026-09-21 查清了卡点，结论如下（不必再猜）：
-
-- dshfind 的 `sync-plugins.yml`（每日 02:17 UTC）分两步：`sync:db` 拉 GitHub 指标（**每日**），
-  `probe:install --deadline 8` 才写安装方式与版本（`plugins.pkg_version`，取自
-  `raw.githubusercontent.com/<repo>/HEAD/package.json`）；卡片的「版本」属于后者，徽章的 ★ 属于前者
-  ——所以 ★ 是新的、版本是旧的。
-- `probe:install` 只重探 **`install_probed_at` 超过 7 天**的行（`DEFAULT_STALE_DAYS = 7`），
-  按 **stars DESC** 排序、8 分钟上限，探不完就留给下一轮（脚本刻意容忍"这轮没问全"）。
-- 该仓库 09-08→09-14 的每日同步**连续 cancelled**（35 分钟 job 超时，其 workflow 注释自己记录了这类事故）；
-  我们 package.json 等于 `0.6.3` 的窗口只有 **09-15 05:34–09:10 UTC**，说明我们这行就是那次（09-15 07:47 被
-  cancelled 的运行在中途）被读到的。
-- 因此**下一次自然重探在 09-22 08:0x UTC 之后**，最近几轮的待探集合都能跑完（09-20：1315/1315），
-  预期 09-22 10:17 CST 那轮卡片变成 0.7.2。
-- 若 09-23 之后仍是 0.6.3：说明我们这行的抓取在其环境里失败（失败会沿用旧事实且**不刷新** `probed_at`，
-  于是每天重试每天失败）。两条输入我们这边实测都正常（`HEAD/package.json` → 0.7.2、npm `latest` → 0.7.2），
-  届时向 dshfind 维护者要一次点名重探：`gh workflow run sync-plugins.yml -f only=cyjyyd/dsh-ssh-tui`
-  （该 workflow 注明 `--only` 无视新鲜度）。
+**dshfind 卡片（已解决）**：曾长期挂 0.6.3。机制：`probe:install` 只重探 `install_probed_at` 超过 7 天、
+按 stars DESC 排序的行（8 分钟上限），那段时间又撞上连续 cancelled 的每日同步，于是旧版本被留在卡片上。
+2026-09-24 复查，页面已显示 **版本 0.7.2**，说明自然重探追上了。下次发版后同样先观察一两天；若超过一周
+仍不动，再用 `gh workflow run sync-plugins.yml -f only=cyjyyd/dsh-ssh-tui` 点名重探。

@@ -174,13 +174,23 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
 4. **路径与编码。** 带空格/非 ASCII/长路径的 `DSH_HOME`；`\.\pipe\` 名字长度与字符约束；CRLF 对转录与补丁文件的影响；
    `%USERPROFILE%` 与 `$HOME` 不一致时的行为（`displayHomePath` 已有分支，但没在真机上断言过）。
 
-   **已复现的第一笔（2026-09-24，真机 0.1.7-rc.1）：**`src/display-sock.ts:178-186` 的 `sessionSockPath`
-   只把会话标签截到 80 字符，**从不校验整条路径**。AF_UNIX 的 `sun_path` 上限是 107 字节（macOS 104），
-   所以 `$DSH_HOME` 一深就 `listen()` EINVAL，而用户只看到一句
-   `dsh-ssh-tui: host display socket did not appear: <path>`——最容易被误判成"宿主没起来"。
-   复现证据：`/root/verify017/evidence/socket-path-length.txt`（39 字符的 home → 113 字节失败；默认 `/tmp` 下正常）。
-   修法：起 sock 前按**剩余预算**截断标签，超限时回退到短哈希，并在错误里点明"路径超长"。
-   Windows 侧同一处还牵着 `\.\pipe\` 的名字约束（`\\.\pipe\` 之后 ≤256 字符），一并处理。
+   **已修（2026-09-24，真机 0.1.7-rc.1 复现的那一笔）：AF_UNIX 地址超长。**
+   起因：`src/display-sock.ts` 的 `sessionSockPath` 只把会话标签截到 80 字符，**从不校验整条路径**；AF_UNIX 的
+   `sun_path` 含结尾 NUL 只有 108 字节（Linux 可用 107、macOS 103），于是 `$DSH_HOME` 一深就 `listen()` EINVAL，
+   而用户只看到一句 `dsh-ssh-tui: host display socket did not appear: <path>`——最容易被误判成"宿主没起来"。
+   修法：按**字节预算**给标签留空间（`posixSocketName()`，`Buffer.byteLength` 而不是字符数，因为非 ASCII 的 home
+   一个字符占多个字节）——目录越长标签越短；短到放不下"5 字符头＋摘要"时直接抛错并点明"DSH_HOME 太深"，
+   不再让内核报 EINVAL；**曾经能用的浅目录逐字节保持原名**，所以升级不会让在跑的宿主换地址。摘要永远保留，
+   两个会话不会因为截断而共用 socket。Windows 侧的 `\.\pipe\` 名字按 256 字符上限收口
+   （`WINDOWS_PIPE_MAX = 200`，非 ASCII 会话 id 也一样）。
+   复现证据：`/root/verify017/evidence/socket-path-length.txt`（39 字符 home → 113 字节 EINVAL）；修复后同一个
+   home 给出 107 字节、内核接受。
+   测试：`tests/display-sock.test.mjs` 除字符串断言外，有一条**真的 `listen()`** 的用例（深目录能绑定，旧代码在这里
+   必红）；`tests/host-bootstrap.test.mjs` 补了非 ASCII/空格路径的引号与 `-EncodedCommand` 往返、`displayHomePath`
+   的 `%USERPROFILE%` / `~` 分支。
+   *顺带修掉的*：`displayHomePath` 在 `DSH_HOME == $HOME` 时显示成 `~/.dsh/<file>`（那里并没有 `.dsh` 目录），
+   现为 `~/<file>`。
+   *仍然只能真机确认的*：`%USERPROFILE%` 与 `$HOME` 不一致的真实 Windows 账户；以及 P2 的代码页回退渲染。
 
 ### P2：体验与分发
 

@@ -288,7 +288,10 @@ export function displayHomePath(
     return `${home}\\${file}`.replaceAll('/', '\\')
   }
   const userHome = options.userHome ?? homedir()
-  if (home === userHome) return `~/.dsh/${file}`
+  // `home` is the DSH home, so equality means DSH_HOME *is* the user's home (a
+  // real, if unusual, configuration): the file sits directly in `~`, not in a
+  // `.dsh` directory that is not there.
+  if (home === userHome) return `~/${file}`
   if (home.startsWith(`${userHome}/`)) return `~/${home.slice(userHome.length + 1)}/${file}`
   return join(home, file)
 }
