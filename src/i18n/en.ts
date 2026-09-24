@@ -737,6 +737,7 @@ export const en: Record<string, string> = {
   'mode.formsHost': 'this host composes its agent process-wide: presets are a per-session Web mechanism, a terminal profile mounts no roster, so there is no preset to switch to.',
   'mode.formsHint': 'If the persona / ask_user_question / present tools are missing, run /mode fix to add those rows to {patch}, then restart the TUI; a checkout can also run bash scripts/ensure-profile-rows.sh {profile}.',
   'mode.bootMissing': 'No agent-preset roster is composed: /mode cannot switch, and preset-owned tools (ask_user_question, present) are missing. Run /mode for the fix (/mode fix writes it for you).',
+  'mode.bootFormsMissing': 'This host composes its agent process-wide: /mode has no preset to switch to. If persona, ask_user_question or present is missing, run /mode fix and restart.',
   'mode.fixWritten': 'Wrote {patch}; restart the TUI (/exit, then start it again) to switch modes with /mode.',
   'mode.fixPresent': '{patch} already carries the agent-presets row; restart the TUI if /mode still reports it missing.',
   'mode.fixFailed': 'Could not write {patch}: {error}',

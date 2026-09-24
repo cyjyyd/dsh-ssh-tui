@@ -33,14 +33,22 @@ jobs:
         # (all 31 packages diffed: 0 .d.ts changes, 0 member-level changes), so the
         # leg would assert nothing the rc.3 leg does not. `dshReleases` still
         # carries rc.2 as compatible: 0.7.2 shipped against it with CI green.
-        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.2-rc.1"]
+        # `next` is 0.1.7-rc.1 and gets its own leg: that line rewrote the
+        # settings seam (no `settings.get`, no `installSection`), split the
+        # plural presets package into `dsh-agent-preset` +
+        # `dsh-agent-preset-registry`, and replaced the terminal preset roster
+        # with a process-wide agent composition. The leg rewrites the manifest
+        # itself — devDep pins, the presets substitution, the family's root pins
+        # and the plugin's own peer window — so the code is verified before the
+        # shipped `dsh.compatibility` declaration is widened.
+        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.2-rc.1", "0.1.7-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
-        if: matrix.dsh != '0.1.5-rc.3'
+        if: matrix.dsh != '0.1.5-rc.3' && matrix.dsh != '0.1.7-rc.1'
         run: |
           node -e "
             const fs = require('node:fs');
@@ -56,8 +64,37 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           rm -f package-lock.json
+      # 0.1.7 needs more than a version substitution. The plural
+      # `dsh-agent-presets` has no release on that line at all (npm fails with
+      # ETARGET) and the family's own root pins moved, so this leg rewrites the
+      # devDeps, swaps the presets package for its two successors and pins the
+      # roots. The plugin's peer window is part of the committed manifest now
+      # (0.1.7 is a declared, verified line), so nothing here rewrites it.
+      - name: Pin the whole tree to the 0.1.7 line
+        if: matrix.dsh == '0.1.7-rc.1'
+        run: |
+          node -e "
+            const fs = require('node:fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const line = '0.1.7-rc.1';
+            delete pkg.devDependencies['@deepseek-ai/dsh-agent-presets'];
+            const hostPackage = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
+            for (const name of Object.keys(pkg.devDependencies)) {
+              if (hostPackage(name)) pkg.devDependencies[name] = line;
+            }
+            Object.assign(pkg.devDependencies, {
+              '@deepseek-ai/dsh-agent-preset': line,
+              '@deepseek-ai/dsh-agent-preset-registry': line,
+              '@deepseek-ai/cordis': '4.0.4',
+              '@deepseek-ai/cordis-plugin-include': '1.0.9',
+              '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+              '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+            });
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          rm -f package-lock.json
       - name: Install
-        if: matrix.dsh != '0.1.5-rc.1'
+        if: matrix.dsh != '0.1.5-rc.1' && matrix.dsh != '0.1.7-rc.1'
         run: npm install --no-audit --no-fund
       # 0.1.5-rc.1 is npm `latest` and stays declared as supported, but its own
       # peer ranges do not resolve (that is why the family is pinned to rc.2
@@ -67,8 +104,17 @@ jobs:
       # host-contract test skips itself there (no host can boot from a tree
       # missing peers), while that contract and the roster composition are
       # covered on the rc.2 leg and by `scripts/tui-probe.mjs` on a real profile.
-      - name: Install (legacy peers for the rc.1 line)
-        if: matrix.dsh == '0.1.5-rc.1'
+      #
+      # 0.1.7-rc.1 needs the same flag for the other end of the family: several
+      # `@deepseek-ai/dsh` dependencies still carry caret PRERELEASE ranges
+      # (`^0.1.5-rc.3`), which npm resolves through the `latest` tag rather than
+      # to the highest match — so a plain install pulls 0.1.5-rc.3 packages
+      # (plural presets included) into a tree the leg just pinned to 0.1.7.
+      # Skipping peer resolution keeps the devDep pins this leg set, which is
+      # what it is here to typecheck; the PTY probes build their own profile
+      # tree from the pinned family, so they are unaffected.
+      - name: Install (legacy peers for the rc.1 and 0.1.7 lines)
+        if: matrix.dsh == '0.1.5-rc.1' || matrix.dsh == '0.1.7-rc.1'
         run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: npx tsc -p tsconfig.json --noEmit
       # The TAP stream is kept on disk so a red run can annotate *which* test

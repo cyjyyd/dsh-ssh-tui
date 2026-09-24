@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
 import {
@@ -7,6 +10,8 @@ import {
   providerHasQuotaSurface,
 } from '../lib/footer.js'
 import { formatLinkQualityChip } from '../lib/paint.js'
+import { profileFromArgv } from '../lib/preset-label.js'
+import { FORMS_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
 import { formatQuotaBar } from '../lib/tui.js'
@@ -54,11 +59,18 @@ test('an extremely narrow terminal keeps the two signals that matter', () => {
 
 test('a healthy install has no health chip at all', () => {
   assert.equal(footerHealthChip(false), undefined)
+  assert.equal(footerHealthChip(false, false, 'agent-plane'), undefined)
   const health = footerHealthChip(true, false)
   assert.equal(health?.priority, 0, 'health outranks everything')
   assert.ok(health?.long.includes('⚠') && health?.short === '⚠', 'both forms carry the glyph')
   // Colour only decorates the glyph; the glyph itself is the signal.
   assert.match(footerHealthChip(true, true)?.short ?? '', /\x1b\[33m⚠\x1b\[0m/u)
+  // The kind names the rows the profile still has to mount: the 0.1.5 roster, or
+  // the 0.1.7 agent plane. It defaults to the roster, and the long form says
+  // which line's repair the click leads to.
+  assert.equal(footerHealthChip(true, false, 'roster')?.long, health?.long)
+  assert.match(footerHealthChip(true, false, 'agent-plane')?.long ?? '', /代理平面行缺失/u)
+  assert.notEqual(footerHealthChip(true, false, 'agent-plane')?.long, health?.long)
 })
 
 test('a glyph wider than the terminal is clipped, not allowed to overflow', () => {
@@ -116,13 +128,46 @@ test('a missing roster puts the health chip on the strip, and clicking it opens 
   )
 })
 
+/**
+ * Both lines have a way for "the profile already mounts its rows" to be true:
+ * 0.1.5 injects the `agentPresets` service, 0.1.7 declares the three
+ * agent-plane rows in the profile patch. Pin each generation through the
+ * settings service the TUI feature-detects, instead of letting the installed
+ * host decide which warning the strip is expected to show.
+ */
 test('a mounted roster leaves the strip clean', async () => {
-  const tui = await footerTui({ presets: { list: async () => [] } })
+  const tui = await footerTui({
+    presets: { list: async () => [] },
+    settings: { get: () => undefined },
+  })
   const frame = tui.captureFrame(40, 24).map(stripAnsi)
   assert.equal(
     frame.some(line => line.includes('⚠')),
     false,
     `no warning when the roster is mounted:\n${frame.join('\n')}`,
+  )
+})
+
+test('a mounted agent plane leaves the strip clean', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-footer-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(async () => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  })
+  const dir = join(home, 'profiles', profileFromArgv())
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'cordis.patch.yml'), FORMS_PATCH_BLOCK)
+  // A settings service with no `get` is the 0.1.7 generation; the profile patch
+  // above is where that line reads whether its rows are mounted.
+  const tui = await footerTui({ settings: { describe: () => [] } })
+  const frame = tui.captureFrame(40, 24).map(stripAnsi)
+  assert.equal(
+    frame.some(line => line.includes('⚠')),
+    false,
+    `no warning when the agent plane is mounted:\n${frame.join('\n')}`,
   )
 })
 
@@ -364,8 +409,13 @@ test('the strip is muted like the identity line, accents excepted', async () => 
   // muted SGR downgrades to nothing and there is no style to assert.
   const previousDepth = process.env.DSH_TUI_COLOR_DEPTH
   process.env.DSH_TUI_COLOR_DEPTH = 'truecolor'
-  // A mounted roster, so the link chip really is the first group on the row.
-  const tui = await footerTui({ color: true, provider: 'xai', model: 'grok-4.6', presets: { list: async () => [] } })
+  // A mounted roster, so the link chip really is the first group on the row:
+  // the 0.1.5 generation is pinned explicitly, because on 0.1.7 the same strip
+  // would lead with the agent-plane health chip this test is not about.
+  const tui = await footerTui({
+    color: true, provider: 'xai', model: 'grok-4.6',
+    presets: { list: async () => [] }, settings: { get: () => undefined },
+  })
   process.env.DSH_TUI_COLOR_DEPTH = previousDepth ?? ''
   if (previousDepth === undefined) delete process.env.DSH_TUI_COLOR_DEPTH
   tui.paintLink = 'ssh'

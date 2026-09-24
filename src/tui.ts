@@ -89,6 +89,7 @@ import {
   planRosterRepair,
   formsRowsDeclared,
   rosterPatchPath,
+  rosterRows,
   writePatchWithBackup,
   ALL_ROSTER_ROWS,
   type RosterRow,
@@ -1619,7 +1620,13 @@ export class SshTui {
     }
     this.refreshRosterHealth()
     if (this.rosterMissing) {
-      this.pushRow({ kind: 'system', text: t('mode.bootMissing') })
+      // The missing thing differs by host line: a roster the profile can mount,
+      // or the agent-plane rows a 0.1.7 terminal profile owns. The advice has to
+      // match what `/mode fix` will actually write.
+      this.pushRow({
+        kind: 'system',
+        text: t(this.settingsGeneration === 'forms' ? 'mode.bootFormsMissing' : 'mode.bootMissing'),
+      })
     }
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
       this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
@@ -8555,7 +8562,12 @@ export class SshTui {
     const profile = profileFromArgv()
     const patch = rosterPatchPath(resolveDshHome(), profile)
     try {
-      const result = await ensureRosterRows(resolveDshHome(), profile)
+      // Which rows are "the rows" is a host-line fact: 0.1.7 composes the agent
+      // process-wide and owns the agent-plane rows instead of the roster. Both
+      // the list and the header come from the same generation `/doctor` uses,
+      // or this writes rows the running host cannot resolve.
+      const generation = this.settingsGeneration
+      const result = await ensureRosterRows(resolveDshHome(), profile, rosterRows(generation), generation)
       this.refreshRosterHealth()
       this.pushRow({
         kind: 'system',

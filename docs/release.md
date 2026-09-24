@@ -14,7 +14,7 @@
 
 3. **CI 全部腿全绿，才允许碰 npm。**
    tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.1)`、`test (0.1.2-rc.1)`、
-   `test-windows`）**全部 success**，再 `npm publish`。
+   `test (0.1.7-rc.1)`、`test-windows`）**全部 success**，再 `npm publish`。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
 
 ## 允许 / 不允许
@@ -75,14 +75,31 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   最老的两条（0.1.5-rc.1 的 peer 解析不了、0.1.2-rc.1 太旧）只跑 typecheck 与单元套件。
   默认腿跟着 `package.json` 的 pin 走（= 当前要重点验的那一版），`latest` 单独留一条腿。
 
-### 当前快照（2026-09-22）
+### 当前快照（2026-09-24）
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
-| `latest` | `0.1.5-rc.2` | `compatible`（0.7.2 就是对着它发的，CI 绿）；rc.3 发布后这条腿**取消了**：rc.2 自己的 caret 兄弟范围会解析成混版族，npm 直接 ERESOLVE，而它与 rc.3 的 API 逐字节相同（见下） |
-| `next` | `0.1.5-rc.3`（09-22 发布） | `compatible`：本地全套 888 项（885 通过 / 0 失败）+ 三个探针全绿后声明，并进了 CI 腿 |
-| `alpha` | `0.1.7-alpha.1`（09-22） | 范围外，不声明 |
-| — | `0.1.6-alpha.1`（09-15）、`0.1.6-alpha.2`（09-17） | 范围外，不声明；**0.1.6 还没有 rc**。alpha.2 已证实会破 `agent/created` 的编译，修法已在代码里 |
+| `latest` | `0.1.5-rc.3` | `compatible`：进 CI 腿 |
+| `next` | **`0.1.7-rc.1`**（09-23 发布） | `compatible`：设置接缝、preset 改名、roster→agent-plane 全部适配完；真机核验＝同源 `tsc` 两行 0 错、mock 轮次探针 PASS（真跑一轮＋拖选复制＋`/find`）、`tui-probe` PASS、`settings.yaml` 四段迁移在 PTY 下全部落到我们的 entry；已进 CI 腿 |
+| 旧线 | `0.1.5-rc.1` | `compatible`：continue（非默认腿，legacy peers 安装） |
+| 最老 | `0.1.2-rc.1` | `compatible`：**待摘**（用户已决定 0.1.7 适配完成后取消） |
+| `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
+| — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
+
+**0.1.7 与旧线的三处结构性差异（适配期踩过的）：**
+
+1. **设置接缝**：`settings.get` / `installSection` / `SettingsSectionHooks` / `settings.document` 全部删除。
+   表单由 loader entry 自己的 `Config` schema 投影，**只有 `.volatile()` 字段可读可写**，
+   命名空间 = profile 里的 entry id。插件因此把自己的三段落成三条 entry（`ssh-tui` 就是插件本体的 row）。
+2. **presets 改名**：复数包没有 0.1.7 版本，拆成 `dsh-agent-preset`（组合行）＋ `dsh-agent-preset-registry`（服务）。
+   `devDeps` 里要**替换**而不是改版本号（否则 ETARGET）。
+3. **终端不再有 roster**：preset 变成会话级、由 surface 组合；终端 profile 由 base 在进程级组合代理。
+   `/mode fix` 在 0.1.7 上写的是 `persona` / `tool-ask-user` / `present` 三行，不再是名单那三行。
+
+**还有一个 launcher 门槛**：声明范围没放宽之前，0.1.7 宿主会**直接跳过**我们的 bundle
+（`Plugin dsh-ssh-tui@x is incompatible with dsh 0.1.7-rc.1 … grant the exact-version exemption`）。
+验证期用 `dsh plugin --profile <p> allow-version dsh-ssh-tui@<v> --dsh-version 0.1.7-rc.1 --accept-risk` 绕过；
+对用户来说，这意味着**升级路径依赖这次放宽**，不是可选项。
 
 **结论：0.1.6 目前只有 alpha，没有 rc。** 但 alpha 已经把 0.1.6 会带什么说清楚了，所以"规划兼容"有实事可做：
 

@@ -174,6 +174,14 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
 4. **路径与编码。** 带空格/非 ASCII/长路径的 `DSH_HOME`；`\.\pipe\` 名字长度与字符约束；CRLF 对转录与补丁文件的影响；
    `%USERPROFILE%` 与 `$HOME` 不一致时的行为（`displayHomePath` 已有分支，但没在真机上断言过）。
 
+   **已复现的第一笔（2026-09-24，真机 0.1.7-rc.1）：**`src/display-sock.ts:178-186` 的 `sessionSockPath`
+   只把会话标签截到 80 字符，**从不校验整条路径**。AF_UNIX 的 `sun_path` 上限是 107 字节（macOS 104），
+   所以 `$DSH_HOME` 一深就 `listen()` EINVAL，而用户只看到一句
+   `dsh-ssh-tui: host display socket did not appear: <path>`——最容易被误判成"宿主没起来"。
+   复现证据：`/root/verify017/evidence/socket-path-length.txt`（39 字符的 home → 113 字节失败；默认 `/tmp` 下正常）。
+   修法：起 sock 前按**剩余预算**截断标签，超限时回退到短哈希，并在错误里点明"路径超长"。
+   Windows 侧同一处还牵着 `\.\pipe\` 的名字约束（`\\.\pipe\` 之后 ≤256 字符），一并处理。
+
 ### P2：体验与分发
 
 5. ~~**终端能力矩阵。**~~ **已完成（P1-1）**：`src/terminal-caps.ts` 一处判定、`docs/terminals.md` 一张表

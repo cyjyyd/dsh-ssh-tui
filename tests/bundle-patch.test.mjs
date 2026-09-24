@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { FORMS_HOST, HOST_VERSION } from './host-line.mjs'
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PROTECTED_ENTRY_IDS = new Set(['ui-settings-plugin-inventory', 'dsh-safe-plugin-manager'])
 
@@ -69,14 +71,31 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // 2026-09-22, minutes before a CI run, and every leg went red on `npm install`.
   // Bumping these is deliberate and comes with bumping the dsh family pin.
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-  for (const [name, pinned] of [
-    ['@deepseek-ai/cordis', '4.0.2'],
-    ['@deepseek-ai/cordis-plugin-hmr', '1.0.17'],
-    ['@deepseek-ai/cordis-plugin-include', '1.0.7'],
-    ['@deepseek-ai/cordis-plugin-loader', '1.0.3'],
-    ['@deepseek-ai/cordis-plugin-timer', '1.1.4'],
-  ]) {
-    assert.equal(manifest.devDependencies?.[name] ?? manifest.dependencies?.[name], pinned, `${name} must stay pinned to what the family pins`)
+  // Which line this tree is pinned to is a CI matrix decision: every non-default
+  // leg rewrites the devDep pins before installing, so the expectation follows
+  // the host that actually landed in node_modules rather than the committed
+  // default. The schemastery spec below is line-independent on purpose.
+  const PINS = FORMS_HOST
+    ? {
+        '@deepseek-ai/cordis': '4.0.4',
+        '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+        '@deepseek-ai/cordis-plugin-include': '1.0.9',
+        '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+        '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      }
+    : {
+        '@deepseek-ai/cordis': '4.0.2',
+        '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+        '@deepseek-ai/cordis-plugin-include': '1.0.7',
+        '@deepseek-ai/cordis-plugin-loader': '1.0.3',
+        '@deepseek-ai/cordis-plugin-timer': '1.1.4',
+      }
+  for (const [name, pinned] of Object.entries(PINS)) {
+    assert.equal(
+      manifest.devDependencies?.[name] ?? manifest.dependencies?.[name],
+      pinned,
+      `${name} must stay pinned to what the family pins (host ${HOST_VERSION})`,
+    )
   }
   // schemastery is the one root the plugin also *ships* (`dependencies`), so its
   // spec has to admit the copy the host resolved instead of nesting a second
@@ -129,20 +148,33 @@ test('declared dsh range admits every release marked compatible', async () => {
   }
   // Every dsh peer shares that range, so a 0.1.5-rc.1 host satisfies the
   // declaration while a 0.1.2-rc.1 install keeps resolving.
-  // 0.1.7 renamed and split the presets package, so two peers only exist on
-  // that line (`dsh-agent-presets` plural stops at 0.1.6-alpha.2). Every other
-  // dsh peer keeps the shared range that covers every verified 0.1.5 host.
+  // Two groups differ by line. `dsh-agent-presets` (plural) stops at
+  // 0.1.6-alpha.2, so its own window is the 0.1.5 declaration even though the
+  // host line moved on; 0.1.7 renamed and split it into the two packages below,
+  // which only exist on that line. The committed manifest declares the verified
+  // 0.1.7 line itself, while a tree the older CI pin step rewrote carries that
+  // line's comparator appended to every peer — so the expectation follows the
+  // installed host, exactly like the pin table above.
+  const NEW_LINE = '>=0.1.7-rc.1 <0.1.8'
+  const LEGACY_WINDOW = '>=0.1.2-rc.1 <0.1.6 || >=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6'
+  const pinned = window => FORMS_HOST && !window.endsWith(NEW_LINE) ? `${window} || ${NEW_LINE}` : window
+  const sharedPeerRange = pinned(range)
   const NEW_LINE_ONLY = new Set([
     '@deepseek-ai/dsh-agent-preset',
     '@deepseek-ai/dsh-agent-preset-registry',
   ])
+  const LEGACY_ONLY = new Set(['@deepseek-ai/dsh-agent-presets'])
   for (const [name, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
     if (!name.startsWith('@deepseek-ai/dsh-')) continue
     if (NEW_LINE_ONLY.has(name)) {
-      assert.equal(peerRange, '>=0.1.7-rc.1 <0.1.8', `${name} only exists on the 0.1.7 line`)
+      assert.equal(peerRange, NEW_LINE, `${name} only exists on the 0.1.7 line`)
       continue
     }
-    assert.equal(peerRange, range, `${name} must accept both verified hosts`)
+    if (LEGACY_ONLY.has(name)) {
+      assert.equal(peerRange, pinned(LEGACY_WINDOW), `${name} stops at 0.1.6-alpha.2 (host ${HOST_VERSION})`)
+      continue
+    }
+    assert.equal(peerRange, sharedPeerRange, `${name} must accept both verified hosts (host ${HOST_VERSION})`)
   }
   // Those two are optional: a 0.1.5 host has no such package, and a required
   // peer npm cannot satisfy is an install failure, not a fallback.

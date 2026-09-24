@@ -737,6 +737,7 @@ export const zh: Record<string, string> = {
   'mode.formsHost': '这台宿主在进程级组合代理：preset 是 Web 会话级的机制，终端 profile 不挂名单，因此没有可切换的 preset。',
   'mode.formsHint': '若 persona / ask_user_question / present 工具缺失，运行 /mode fix 写入 {patch}，然后重启 TUI；仓库安装也可用 bash scripts/ensure-profile-rows.sh {profile} 写入。',
   'mode.bootMissing': '未挂载 agent-presets 名单：/mode 无法切换模式，ask_user_question、present 等 preset 工具也不可用。输入 /mode 查看修复（/mode fix 一键写入并重启）。',
+  'mode.bootFormsMissing': '本宿主进程级组合代理：/mode 无 preset 可切换；persona、ask_user_question、present 缺失时用 /mode fix 写入并重启。',
   'mode.fixWritten': '已写入 {patch}；重启 TUI（/exit 后重新启动）即可用 /mode 切换模式。',
   'mode.fixPresent': '{patch} 已经有 agent-presets 行；若 /mode 仍报服务不可用，请重启 TUI。',
   'mode.fixFailed': '写入 {patch} 失败：{error}',

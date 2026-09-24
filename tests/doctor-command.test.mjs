@@ -8,10 +8,36 @@ import { setLocale } from '../lib/i18n/index.js'
 import {
   allText, diagText, errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForText,
 } from './wait.mjs'
-import { ROSTER_PATCH_BLOCK } from '../lib/preset-rows.js'
+import { FORMS_PATCH_BLOCK, ROSTER_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { SshTui } from '../lib/tui.js'
+import { FORMS_HOST } from './host-line.mjs'
 
 const WEB_ROW = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-host-webserver'\n"
+
+/**
+ * The line's own report wording and the rows a repair writes.
+ *
+ * 0.1.5 reports the missing agent-preset *roster* and the two host services the
+ * shipped presets need; 0.1.7 deleted that service, so `/doctor` judges the
+ * agent-plane rows the profile mounts itself instead. The tests below are about
+ * the repair and backup behaviour, not the wording, so only what the report
+ * calls the loss and which rows the fix writes change with the line.
+ */
+const MISSING_SUMMARY = FORMS_HOST ? '0.1.7 在进程级组合代理' : '名单未组合'
+const MISSING_ROW_IDS = FORMS_HOST ? ['persona', 'tool-ask-user', 'present'] : ['agent-presets']
+const REPAIRED_NAMES = FORMS_HOST
+  ? ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  : ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
+/** Modules the other line's repair writes, and this one must never add. */
+const OTHER_LINE_NAMES = FORMS_HOST
+  ? ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
+  : ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+/** A row the first repair lands, so the poll cannot read a half-written file. */
+const REPAIRED_MARKER = FORMS_HOST ? /dsh-persona/u : /subagent-model-selection-settings/u
+/** The merged file: the user row, one copy of the block, and this line's rows. */
+const MERGED_PATCH = FORMS_HOST
+  ? `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}\n${FORMS_PATCH_BLOCK}`
+  : `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`
 
 function fixture(ctxOverrides = {}) {
   const ctx = { get: () => undefined, on() { return () => {} }, ...ctxOverrides }
@@ -76,12 +102,13 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await waitForText(tui, '名单未组合')
+  await waitForText(tui, MISSING_SUMMARY)
   const report = diagText(tui)
   assert.ok(report.includes('/doctor'), report)
-  assert.ok(report.includes('名单未组合'), report)
-  assert.ok(report.includes('缺少行：agent-presets'), report)
-  assert.ok(report.includes('code-runtime 未注册'), report)
+  assert.ok(report.includes(MISSING_SUMMARY), report)
+  // Every row this line's profile is missing is named, one detail each.
+  for (const id of MISSING_ROW_IDS) assert.ok(report.includes(`缺少行：${id}`), report)
+  if (!FORMS_HOST) assert.ok(report.includes('code-runtime 未注册'), report)
   assert.ok(report.includes('/doctor --fix'), report)
 
   tui.runCommand('/doctor --fix')
@@ -89,10 +116,13 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   tui.handleChar('y')
   await tick()
 
-  const written = await writtenPatch(patch, /subagent-model-selection-settings/u, tui)
+  const written = await writtenPatch(patch, REPAIRED_MARKER, tui)
   assert.ok(written.startsWith(WEB_ROW), 'the user row stays first')
-  assert.ok(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), written)
-  assert.ok(written.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"), written)
+  for (const name of REPAIRED_NAMES) assert.ok(written.includes(`name: '${name}'`), written)
+  // The repair never writes a row the running line cannot resolve.
+  for (const name of OTHER_LINE_NAMES) {
+    assert.equal(written.includes(`name: '${name}'`), false, `${name} must not be written on this line:\n${written}`)
+  }
   const backups = (await readdir(dir)).filter(name => name.includes('.bak-'))
   assert.equal(backups.length, 1)
   // The fix notice is a system row; the report above it is a diag row. Wait for
@@ -120,7 +150,7 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await waitForText(tui, '名单未组合')
+  await waitForText(tui, MISSING_SUMMARY)
   const report = diagText(tui)
   assert.ok(report.includes('3 行被挂载两次'), report)
   // The second copy starts after the first block; the detail carries its line.
@@ -133,7 +163,7 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   await waitForDialog(tui, 'confirm')
   tui.handleChar('y')
   await tick()
-  assert.equal(await writtenPatch(patch, `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`, tui), `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}`)
+  assert.equal(await writtenPatch(patch, MERGED_PATCH, tui), MERGED_PATCH)
 })
 
 test('/fix <row> writes one requested row', async t => {
@@ -154,6 +184,29 @@ test('/fix <row> writes one requested row', async t => {
   assert.equal(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), false, 'only the requested row is written')
 })
 
+test('/mode fix writes the rows this host line owns, never the other line\'s', async t => {
+  // Regression: `/mode fix` used to call `ensureRosterRows` with no rows and no
+  // generation, so on a 0.1.7 host it wrote the 0.1.5 roster — including a
+  // package that has no release on that line at all. The advice `/mode` prints
+  // and the rows it writes have to come from the same host-line fact.
+  setLocale('zh')
+  const home = await withHome(t)
+  const dir = join(home, 'profiles', 'tui')
+  const patch = join(dir, 'cordis.patch.yml')
+  await mkdir(dir, { recursive: true })
+  await writeFile(patch, WEB_ROW)
+  const tui = fixture()
+
+  tui.runCommand('/mode fix')
+  const written = await writtenPatch(patch, REPAIRED_MARKER, tui)
+  for (const name of REPAIRED_NAMES) {
+    assert.ok(written.includes(name), `${name} must be written on this line\n${written}`)
+  }
+  for (const name of OTHER_LINE_NAMES) {
+    assert.equal(written.includes(name), false, `${name} belongs to the other line\n${written}`)
+  }
+})
+
 test('/doctor lists two dsh-scope installs from its anchors', async t => {
   setLocale('zh')
   const home = await withHome(t)
@@ -163,7 +216,7 @@ test('/doctor lists two dsh-scope installs from its anchors', async t => {
   const tui = fixture({ baseUrl: anchor })
 
   tui.runCommand('/doctor')
-  await waitForText(tui, '名单未组合')
+  await waitForText(tui, MISSING_SUMMARY)
   const report = diagText(tui)
   assert.ok(report.includes(join(anchor, 'node_modules', '@deepseek-ai', 'dsh-scope')), report)
   // The test runner's own anchor may add the repository's copy; either way the

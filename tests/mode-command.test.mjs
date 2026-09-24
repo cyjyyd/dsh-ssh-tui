@@ -7,6 +7,17 @@ import { join } from 'node:path'
 import { setLocale } from '../lib/i18n/index.js'
 import { errorText, systemText, tick, waitForDialog, waitForError, waitForText } from './wait.mjs'
 import { SshTui } from '../lib/tui.js'
+import { FORMS_HOST } from './host-line.mjs'
+
+/** The rows `/mode fix` writes on this host line, and the ones it must not. */
+const ROSTER_MODULES = FORMS_HOST
+  ? ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  : ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
+const OTHER_LINE_MODULES = FORMS_HOST
+  ? ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
+  : ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+/** A row the repair lands, so the poll cannot read a half-written file. */
+const ROSTER_MARKER = FORMS_HOST ? /dsh-persona/u : /agent-presets/u
 
 const ROSTER = [
   { id: 'standard', trust: 'system', path: '/p/standard', name: '标准模式', isDefault: true },
@@ -68,8 +79,10 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
   try {
     const { tui, composed } = fixture({ get: () => undefined })
     // The boot notice makes the degraded state visible before /mode is typed.
+    // Which rows are missing is a host-line fact, so the wording and the repair
+    // both follow `FORMS_HOST` (0.1.7 has no terminal roster at all).
     const boot = tui.captureFrame(140, 20).join('\n')
-    assert.ok(boot.includes('未挂载 agent-presets 名单'), boot)
+    assert.ok(boot.includes(FORMS_HOST ? '进程级组合代理' : '未挂载 agent-presets 名单'), boot)
     assert.ok(boot.includes('ask_user_question'), boot)
     assert.equal(composed.length, 0)
 
@@ -83,9 +96,13 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
 
     tui.runCommand('/mode fix')
     const patch = join(home, 'profiles', 'tui', 'cordis.patch.yml')
-    const written = await waitForPatch(patch, /agent-presets/u, tui)
-    assert.ok(written.includes("name: '@deepseek-ai/dsh-agent-presets'"), written)
-    assert.ok(written.includes('id: code-runtime'), written)
+    const written = await waitForPatch(patch, ROSTER_MARKER, tui)
+    for (const name of ROSTER_MODULES) {
+      assert.ok(written.includes(`name: '${name}'`), `${name} must be written\n${written}`)
+    }
+    for (const name of OTHER_LINE_MODULES) {
+      assert.equal(written.includes(name), false, `${name} belongs to the other line\n${written}`)
+    }
     assert.ok(systemText(tui).includes(patch), systemText(tui))
 
     // A second repair is a no-op, not a duplicate row.

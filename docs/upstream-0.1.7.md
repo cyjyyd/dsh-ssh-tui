@@ -63,16 +63,18 @@
 
 ## 剩余
 
-1. **CI 腿 ＋ 放宽范围**：矩阵加 `0.1.7-rc.1`；pin 步骤要把复数 presets 换成新的两个包，并按腿改写根上
-   五个钉版（rc.3 一套 / 0.1.7 一套；hmr 两线都留，它的 peer `cordis ^4.0.2` 兼容 4.0.4）。
-   绿了才把 `|| >=0.1.7-rc.1 <0.1.8` 加进 `dsh.compatibility.dsh`、`dshReleases` 加
-   `0.1.7-rc.1: compatible`、`docs/release.md` 更新快照。
-   **注意**：不给 exemption 时 0.1.7 的 launcher 会直接跳过我们的 bundle（"incompatible with dsh
-   0.1.7-rc.1 … grant the exact-version exemption"），所以放宽范围是升级路径的硬前提。
-2. `tui-mock-probe.mjs`（真跑一轮）在 0.1.7 上复验。
-3. 真实迁移演练：用一份真 `settings.yaml` 在 0.1.7 上确认 `ssh-tui` / `ssh-tui-routes` / `ssh-tui-subagent`
-   三段都被导入（findings 只验到"没有 entry 时被丢弃"这一半）。
-4. Windows 腿跑新代码（P1-4 的路径/编码项仍是 P1 的最后一笔）。
+1. ~~**CI 腿 ＋ 放宽范围**~~ **已完成**：矩阵加 `0.1.7-rc.1`（该腿自行改写 devDeps、把复数 presets 换成新的两个包、
+   换四个根钉版；安装用 `--legacy-peer-deps`，因为家族里仍有 `^0.1.5-rc.3` 这类预发布 caret 范围会走 `latest`
+   标签把旧线拖进来）；声明同步放宽（14 个 dsh peer ＋ `dsh.compatibility.dsh`），`dshReleases` 加
+   `0.1.7-rc.1: compatible`，快照进 `docs/release.md`。**复数 presets 的 peer 保持旧窗口**（新线不存在该包，
+   它是 optional；继任的两个包各自带 `>=0.1.7-rc.1 <0.1.8`）。
+   注意：不给 exemption 时 0.1.7 的 launcher 会直接跳过我们的 bundle，所以这次放宽是升级路径的硬前提。
+2. ~~`tui-mock-probe`~~ **已完成**：真机 PASS（真跑一轮 ＋ 拖选复制 ＋ `/find` 高亮）。
+3. ~~真实迁移演练~~ **已完成**：PTY 下四段全部导入并被 `describe()` 认到，`!!js` 启动表达式保留；
+   headless 下 `ssh-tui` 不导入是插件自己的 TTY 守卫（fiber 非 ACTIVE）导致，不是导入缺陷。
+4. **真机新发现的 P1-4 缺陷**：`src/display-sock.ts:178-186` 不校验 AF_UNIX 路径总长 → 深 `DSH_HOME` 下
+   `listen()` EINVAL，用户只看到 "host display socket did not appear"。已记进 `docs/platform.md`。
+5. **取消 0.1.2-rc**（用户决定）——见下一节。
 
 ## 0.1.7 适配完成后：取消 0.1.2-rc 适配（用户决定，2026-09-23）
 
