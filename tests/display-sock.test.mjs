@@ -142,9 +142,12 @@ test('a deep DSH_HOME keeps the socket address inside sun_path', () => {
 test('a home too deep for a long name keeps a shortened but unique socket', () => {
   const home = `/${'d'.repeat(76)}`
   const path = sessionSockPath('main-session-compact', home, 'linux')
+  // `join` uses the separator of the platform the test runs on, so compare the
+  // name, not the whole path.
+  const name = path.split(/[\\/]/u).pop()
   // Fourteen bytes of room: a five-character head plus the digest, no more.
-  assert.match(path, /\/main-+[0-9a-f]{8}\.sock$/u)
-  assert.match(path.split('/').pop(), /^main/u, 'the head is what got shortened')
+  assert.match(name, /^main-+[0-9a-f]{8}\.sock$/u)
+  assert.ok(name.startsWith('main'), 'the head is what got shortened')
   assert.ok(Buffer.byteLength(path) <= 107, `${Buffer.byteLength(path)} bytes`)
   assert.equal(path, sessionSockPath('main-session-compact', home, 'linux'))
   assert.notEqual(path, sessionSockPath('other-session', home, 'linux'))
