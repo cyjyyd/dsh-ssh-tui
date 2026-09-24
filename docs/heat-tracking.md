@@ -128,7 +128,13 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
 
 > 日期是用户确认的窗口；版本号、tag 与 npm 仍按 [release.md](release.md) 的规则执行。
 
-## 0.7.3 内容（2026-09-22 计划，2026-09-24 落地）
+## 0.7.3 已发布（2026-09-24）
+
+> 发版完成：`e505768`（Release 0.7.3）→ tag `v0.7.3` → npm `latest`/`next` = `0.7.3` →
+> GitHub Release <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.7.3>（正文含当日基线）。
+> 发版前 CI 四条腿全绿：run **35983017141**（`test (0.1.5-rc.3)` / `(0.1.5-rc.1)` / `(0.1.7-rc.1)` / `test-windows`）。
+> 下一条主线（0.7.4 候选）：P2 三项——非 UTF-8 控制台/locale 的 ASCII 回退渲染、脚本去 bash 化、
+> 面向用户的 Windows 文档；外加两条只能真机确认的 Windows 项。
 
 **上游兼容放在第一位。** 0.1.7-rc.1（`next`）的三处结构性变化全部适配：设置表单由 loader entry 自己的
 `Config` 投影（只有 `.volatile()` 字段可写、命名空间 = entry id）、复数 `dsh-agent-presets` 拆成
@@ -159,7 +165,7 @@ comparator、CI 删腿、只服务该 API 代的兼容分支与测试固定装�
 不一致的账户行为。
 
 **发版窗口**：兼容驱动的发版不必等热度窗口——0.1.7 宿主的 launcher 闸门会拒绝 0.7.2，所以 0.7.3 越早越好；
-版本号、tag 与 npm publish 仍按 [release.md](release.md) 的规则由用户拍板。
+这一版按此执行：CI 全绿当天（2026-09-24）即发。
 
 **dshfind 卡片（已解决）**：曾长期挂 0.6.3。机制：`probe:install` 只重探 `install_probed_at` 超过 7 天、
 按 stars DESC 排序的行（8 分钟上限），那段时间又撞上连续 cancelled 的每日同步，于是旧版本被留在卡片上。

@@ -74,7 +74,8 @@
    根本没有可用的模型适配器（`no adapter registered for provider "deepseek-official"`）。现在改成
    **`overrides` 把每个直接 `@deepseek-ai/dsh*` 依赖钉在 0.1.7-rc.1（peer-only 的复数 presets 除外，
    覆盖根 peer 会 EOVERRIDE）＋ 普通 `npm install`**：树完整、peer 保留，busy-drop 探针因此能在该腿跑。
-   本地实测：`tsc` 0 错、套件 916/913/0/3、`probe-home`、`tui-term-probe`、`tui-mock-probe --busy` 全 PASS。
+   本地实测：`tsc` 0 错、套件 916/913/0/3、`probe-home`、`tui-term-probe`、`tui-mock-probe --busy` 全 PASS；
+   CI 四条腿全绿（run **35962992401**），其中 0.1.7 腿的 `Busy-drop probe` 步骤为 OK。
 2. ~~`tui-mock-probe`~~ **已完成**：真机 PASS（真跑一轮 ＋ 拖选复制 ＋ `/find` 高亮）。
 3. ~~真实迁移演练~~ **已完成**：PTY 下四段全部导入并被 `describe()` 认到，`!!js` 启动表达式保留；
    headless 下 `ssh-tui` 不导入是插件自己的 TTY 守卫（fiber 非 ACTIVE）导致，不是导入缺陷。
