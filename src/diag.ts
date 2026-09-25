@@ -18,6 +18,7 @@ import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { colorDepth } from './color-depth.js'
 import { terminalCapabilities } from './terminal-caps.js'
+import { asciiFallbackEnabled } from './platform.js'
 import { t } from './i18n/index.js'
 import {
   displaySockExists,
@@ -73,6 +74,8 @@ export interface DiagSnapshot {
     title: boolean
     /** `DSH_TUI_TERM_CAPS` tokens that were rejected (typos), for the row. */
     ignoredOverrides: readonly string[]
+    /** Chrome is being drawn in ASCII because the console cannot decode UTF-8. */
+    ascii: boolean
   }
   /**
    * What the palette resolved to and which hints decided it. A "no colour on
@@ -199,6 +202,7 @@ function describeTerminal(): NonNullable<DiagSnapshot['terminal']> {
     osc8: caps.osc8,
     title: caps.title,
     ignoredOverrides: caps.ignoredOverrides,
+    ascii: asciiFallbackEnabled(),
   }
 }
 
@@ -235,6 +239,7 @@ export function formatDiag(snapshot: DiagSnapshot): string[] {
       osc52: snapshot.terminal.osc52 ? yes : no,
       osc8: snapshot.terminal.osc8 ? yes : no,
       title: snapshot.terminal.title ? yes : no,
+      ascii: snapshot.terminal.ascii === true ? t('diag.asciiOn') : '',
       ignored: snapshot.terminal.ignoredOverrides.length === 0
         ? ''
         : t('diag.terminalIgnored', { tokens: snapshot.terminal.ignoredOverrides.join(' ') }),

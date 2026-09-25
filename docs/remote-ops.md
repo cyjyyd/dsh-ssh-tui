@@ -41,6 +41,31 @@
 - **摘要是增量**：只统计这次离开期间发生的事，不重复会话的总量。
 - 只有真发生过的部分才会出现；链路只是抖一下，就只有第一行。
 - 断线期间到达的**未识别审批会被拒绝**并把理由写进转录（模型据此调整）。这是有意的：挂起的轮次会撞上 idle-exit 兜底，最后既没跑完也没人确认。
+- 有提问还在等时，摘要会多一句「这个问题等了你 Xm」，从它开始等算起，而不是从断线算起。
+
+## 3.1 提问在等、而你不在
+
+模型问了一个问题、当时没有人看着屏幕时，回合会停在那里。过去这只在**你重连之后**才看得出，所以一次等了很久的提问要到回来才发现。现在有两层，都不需要新依赖。
+
+**标记文件，不用配置。** 等待一开始就在 `$DSH_HOME/tui-socks/` 写一个 `<会话>.waiting`，内容是会话 id、在等的提问数、开始时间和提问原文，权限 `0600`。回到跳板机、还没开 TUI 时 `ls` 就能看见。提问被回答、取消，或 Host 退出时删掉，所以留下的文件一定对应一个还活着的等待。
+
+等待中的提问也算「忙」：Host 不会被 60 秒的空闲退出杀掉，否则提问会跟着进程一起消失。
+
+**一条命令，可选。** `ssh-tui.notify`（或 `DSH_TUI_NOTIFY`，环境变量优先）放一条命令，提问开始等待时跑一次。消息从标准输入进去，细节在环境变量里：`DSH_TUI_NOTIFY_SESSION`、`DSH_TUI_NOTIFY_COUNT`、`DSH_TUI_NOTIFY_QUESTION`、`DSH_TUI_NOTIFY_WAITED_MS`、`DSH_TUI_NOTIFY_RESUME`（接回这条会话的命令）。10 秒不返回就杀掉，失败不进转录、不拖回合。只在**开始等待时**发一次，不是每分钟一次。
+
+不用手写 settings。`/notify` 直接配，三种走邮件的方式：
+
+```text
+/notify                              查看当前配置
+/notify off                          关闭
+/notify mail you@example.com         本机 mail / mailx
+/notify smtp smtp.example.com from@a.c you@b.c alice 密码
+/notify local from@a.c you@b.c       本机邮局，127.0.0.1:25
+```
+
+`smtp` 的端口默认 587，写在主机后面就换（`smtp.example.com:465`）；账号和密码省略时按不登录发送。`local` 的端口默认 25，要换就放第一个（`/notify local 2525 from to`）。密码存在 `ssh-tui.notifySmtpPassword`，不进命令字符串，也不出现在转录里；发送时经 `DSH_TUI_NOTIFY_SMTP_PASSWORD` 交给命令。SMTP 和本机邮局都用 python3 标准库的 `smtplib`，跳板机有 Node 就有它。
+
+`DSH_TUI_NOTIFY` 仍可用，适合一条自己写的命令。企业微信等待下一轮。
 
 ## 4. 配方
 

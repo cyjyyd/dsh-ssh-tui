@@ -145,6 +145,27 @@ export type Row =
       plugin?: string
       expanded: boolean
     }
+  | {
+      /**
+       * Files one turn changed, from the Host's `workspaceChanges` service.
+       * Display only: the summary is not in the session log, and a restarted
+       * Host cannot reopen it, so the card is never rebuilt from history.
+       */
+      kind: 'changes'
+      /** The turn the summary describes. A later event for it replaces this card. */
+      turn: number
+      /** Sequence of the `workspace/changes` event the summary was read from. */
+      seq: number
+      /** Session the summary belongs to; `diff` is served per session. */
+      sessionId: string
+      /** Header text, rendered once so the card does not recompute it per frame. */
+      header: string
+      /** One line per listed file, in the service's own order. */
+      files: string[]
+      /** Files the service's cap left off the list, appended after `files`. */
+      more?: string
+      expanded: boolean
+    }
   | { kind: 'system'; text: string }
   /** A diagnostic report (`/diag`, `/doctor`): long, copyable whole. */
   | { kind: 'diag'; text: string }
@@ -152,7 +173,7 @@ export type Row =
 
 /** A reasoning/tool/subagent/plan row or the live streaming-reasoning block. */
 export type CollapsibleBlock =
-  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }>
+  | Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' } | { kind: 'changes' }>
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
 export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'todo-failed' | 'todo-skipped' | 'plan-dock' | 'subagent-header'

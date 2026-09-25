@@ -93,8 +93,15 @@ test('the clipboard caveat is said once per session, not after every copy', () =
   // terminal. Once per session is what keeps that honest without becoming noise,
   // and rows are the only place that can be asserted: the painted byte stream
   // repeats the transcript on every repaint.
+  //
+  // It stays quiet over SSH, where the write reaches the local terminal rather
+  // than the remote one the table describes. This case is about a local session,
+  // so the SSH markers are cleared — the suite also runs on a jump host.
   const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  const sshKeys = ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']
+  const previousSsh = sshKeys.map(key => [key, process.env[key]])
   process.env.DSH_TUI_TERM_CAPS = 'no-osc52'
+  for (const key of sshKeys) delete process.env[key]
   try {
     const ctx = { get: () => undefined, on() { return () => {} } }
     const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
@@ -111,6 +118,39 @@ test('the clipboard caveat is said once per session, not after every copy', () =
     tui.runCommand('/copy')
     assert.equal(caveats(), 1, 'and the second copy does not repeat it')
   } finally {
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
+    for (const [key, value] of previousSsh) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('an SSH session does not warn about a clipboard write that reached the local terminal', () => {
+  // The capability table describes the remote tty, which over SSH is usually a
+  // bare console that has never heard of OSC 52. The bytes are written to the
+  // local terminal, though, and that is the one the user pastes from — so the
+  // copy works and the warning is the part that is wrong. A session whose link
+  // was probed as SSH must not say it.
+  const previousSsh = process.env.SSH_CONNECTION
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  process.env.SSH_CONNECTION = '203.0.113.4 53210 203.0.113.9 22'
+  process.env.DSH_TUI_TERM_CAPS = 'no-osc52'
+  try {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.write = () => {}
+    tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
+    tui.focusedRow = tui.rows[0]
+    tui.runCommand('/copy')
+    const caveats = tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('OSC 52'))
+    assert.equal(caveats.length, 0, 'the copy landed on the local terminal, so there is nothing to warn about')
+    assert.equal(tui.lastCopiedText.includes('可复制的回复'), true, 'and the copy itself still happens')
+  } finally {
+    if (previousSsh === undefined) delete process.env.SSH_CONNECTION
+    else process.env.SSH_CONNECTION = previousSsh
     if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
     else process.env.DSH_TUI_TERM_CAPS = previousCaps
   }

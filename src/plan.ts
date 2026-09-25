@@ -142,6 +142,8 @@ function rowSearchHaystack(row: Row): string {
       return `${row.summary ?? ''} ${row.error ?? ''}`
     case 'prompt':
       return `${row.sources.join(' ')} ${row.text}`
+    case 'changes':
+      return `${row.header} ${row.files.join('\n')}`
     default:
       return ''
   }

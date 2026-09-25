@@ -133,8 +133,10 @@ Release 正文建议按这批的四个用户可见变化分块（本批比原来
 > 发版完成：`e505768`（Release 0.7.3）→ tag `v0.7.3` → npm `latest`/`next` = `0.7.3` →
 > GitHub Release <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.7.3>（正文含当日基线）。
 > 发版前 CI 四条腿全绿：run **35983017141**（`test (0.1.5-rc.3)` / `(0.1.5-rc.1)` / `(0.1.7-rc.1)` / `test-windows`）。
-> 下一条主线（0.7.4 候选）：P2 三项——非 UTF-8 控制台/locale 的 ASCII 回退渲染、脚本去 bash 化、
-> 面向用户的 Windows 文档；外加两条只能真机确认的 Windows 项。
+> 下一条主线（0.7.4 候选，三项均已在工作区落地、尚未发版）：P2 三项——非 UTF-8 控制台/locale 的
+> ASCII 回退渲染（`asciiFallbackEnabled` + `mapAsciiChrome`，宽度在替换前算）、脚本去 bash 化
+> （`scripts/*.sh` 变成薄封装，逻辑在同名 `.mjs`，`npm run` 四条改调 Node）、面向用户的 Windows 文档
+> （[windows.md](windows.md)，含「装不上先看什么」与 `/doctor` 读法）。仍有两条只能真机确认的 Windows 项。
 
 **上游兼容放在第一位。** 0.1.7-rc.1（`next`）的三处结构性变化全部适配：设置表单由 loader entry 自己的
 `Config` 投影（只有 `.volatile()` 字段可写、命名空间 = entry id）、复数 `dsh-agent-presets` 拆成
@@ -159,8 +161,16 @@ comparator、CI 删腿、只服务该 API 代的兼容分支与测试固定装�
    `\\.\pipe\` 名字按 256 字符上限收口，非 ASCII/空格路径的引号与 `-EncodedCommand` 往返进测试，
    `displayHomePath` 在 `DSH_HOME == $HOME` 时不再误显示 `~/.dsh/…`。证据与验收见 `docs/platform.md`。
 
-**P2 仍未做（视 Windows 用户量定）**：非 UTF-8 conhost/locale 的 ASCII 回退渲染；脚本去 bash 化
-（`scripts/*.sh` 在 Windows 上等于不存在）；用户向 Windows 文档。
+**P2 已落地（0.7.4，工作区，未发版）**：
+
+1. **ASCII 回退渲染**：非 UTF-8 的 locale（`LC_ALL` / `LC_CTYPE` / `LANG` 写明了别的字符集，或裸
+   `C` / `POSIX`）与记录到的非 65001 代码页（`DSH_TUI_CODEPAGE`、`PYTHONIOENCODING=cp936`）自动把
+   界面骨架换成 ASCII，两格宽的符号换成「标记加空格」所以列不错位；`DSH_TUI_ASCII` 可强制开关，
+   `/diag` 会注明。未记录代码页不触发——Windows Terminal 和 `chcp 65001` 看起来就是这样。
+2. **脚本去 bash 化**：install / verify / uninstall / smoke / routing-suite 的逻辑迁到 `.mjs`，
+   `.sh` 只剩 `exec node`；`npm run install:dsh` 等改调 Node，Windows 上 `npm run` 不再找 bash。
+3. **用户向 Windows 文档**：[windows.md](windows.md) 随 npm 包发布。
+
 **真实 Windows 上仍只能人工确认的两条**：宿主那个控制台窗口确实是隐藏的；`%USERPROFILE%` 与 `$HOME`
 不一致的账户行为。
 

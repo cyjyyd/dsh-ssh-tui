@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
+import { waitingMarkerPath } from '../lib/question-wait.js'
 import { SshTui } from '../lib/tui.js'
 import { allText, waitForDialog, waitForText } from './wait.mjs'
 
@@ -39,6 +43,106 @@ function detachedTui() {
   }
   return new SshTui(ctx, agent, { sessionId: 'main-session-away', color: false, headlessDisplay: true })
 }
+
+test('a question with nobody attached leaves a marker the jump host can see', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-question-wait-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const tui = detachedTui()
+  try {
+    const pending = tui.handleUserQuestions({
+      questions: [{ id: 'q1', question: '要部署到哪个环境？', options: [{ label: '预发' }] }],
+    })
+    const marker = waitingMarkerPath('main-session-away', home)
+    await waitForMarker(marker)
+    const text = readFileSync(marker, 'utf8')
+    assert.match(text, /question=要部署到哪个环境？/u, 'the marker names the question')
+    assert.match(text, /waiting=1/u)
+
+    const aborter = new AbortController()
+    const aborted = tui.handleUserQuestions({
+      questions: [{ id: 'q2', question: '取消我' }],
+      signal: aborter.signal,
+    })
+    aborter.abort()
+    await assert.rejects(() => aborted)
+    assert.equal(statSync(marker).isFile(), true, 'one question aborting leaves the other waiting')
+
+    tui.displayHost = { attached: true, sendStdout() {}, sendGoodbye() {}, close: async () => {} }
+    await waitForDialog(tui, 'questions', { timeoutMs: 3_000 })
+    tui.handleChar('\r')
+    await pending
+    await waitForMarkerGone(marker)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+    await tui.dispose()
+  }
+})
+
+/** The marker is written asynchronously; poll until it shows up. */
+async function waitForMarker(path) {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    try {
+      statSync(path)
+      return
+    } catch { /* not yet */ }
+    await delay(20)
+  }
+  assert.fail(`the waiting marker never appeared at ${path}`)
+}
+
+/** And removed once the question is answered. */
+async function waitForMarkerGone(path) {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    try {
+      statSync(path)
+    } catch {
+      return
+    }
+    await delay(20)
+  }
+  assert.fail(`the waiting marker was left behind at ${path}`)
+}
+
+test('/notify smtp stores the command without the password', async () => {
+  const saved = []
+  const ctx = {
+    get(name) {
+      if (name !== 'settings') return undefined
+      return { replace: async (_namespace, value) => { saved.push(value) } }
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session-away', options: {}, status: 'idle',
+    session: { id: 'main-session-away', events: [] }, cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session-away', color: false, headlessDisplay: true })
+  try {
+    tui.runCommand('/notify smtp mail.example.com from@a.c to@b.c alice s3cret')
+    await delay(50)
+    assert.equal(saved.length, 1, 'the command persists through settings')
+    assert.match(saved[0].notify, /^python3 -c /u)
+    assert.equal(saved[0].notify.includes('s3cret'), false, 'the password is not part of the command')
+    assert.equal(saved[0].notifySmtpUser, 'alice')
+    assert.equal(saved[0].notifySmtpPassword, 's3cret', 'it is stored beside the command instead')
+    assert.ok(
+      tui.rows.some(row => row.kind === 'system' && String(row.text).includes('mail.example.com:587')),
+      'the confirmation names the server',
+    )
+    assert.equal(
+      tui.rows.some(row => String(row.text ?? '').includes('s3cret')),
+      false,
+      'and the transcript never shows the password',
+    )
+  } finally {
+    await tui.dispose()
+  }
+})
 
 test('a question with nobody attached waits instead of resolving or half-drawing', async () => {
   const tui = detachedTui()

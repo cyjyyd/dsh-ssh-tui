@@ -190,18 +190,33 @@ Node + 真宿主链路成本高且脆弱。**性价比最高的是把 Windows �
    的 `%USERPROFILE%` / `~` 分支。
    *顺带修掉的*：`displayHomePath` 在 `DSH_HOME == $HOME` 时显示成 `~/.dsh/<file>`（那里并没有 `.dsh` 目录），
    现为 `~/<file>`。
-   *仍然只能真机确认的*：`%USERPROFILE%` 与 `$HOME` 不一致的真实 Windows 账户；以及 P2 的代码页回退渲染。
+   *仍然只能真机确认的*：`%USERPROFILE%` 与 `$HOME` 不一致的真实 Windows 账户。代码页回退渲染已落地（见下面 P2），真机上只需确认「乱码消失、列没有错位」。
 
 ### P2：体验与分发
 
 5. ~~**终端能力矩阵。**~~ **已完成（P1-1）**：`src/terminal-caps.ts` 一处判定、`docs/terminals.md` 一张表
    （Windows Terminal / conhost / VTE 系 / Konsole / xterm / tmux / screen / Linux 控制台 / dumb），
    `tests/terminal-caps.test.mjs` 一终端一 fixture，`scripts/tui-term-probe.mjs` 每种终端真起一次 TUI
-   断言实际发出的序列（Windows 两个 profile 只在 `test-windows` 腿上跑）。剩余：不支持的终端上的
-   **ASCII 回退渲染**（代码页非 UTF-8 的 conhost、非 UTF-8 locale）。
-6. **分发与脚本去 bash 化。** `scripts/*.sh`（install / verify / uninstall / smoke）在 Windows 上等于不存在。
-   照 `probe-home.mjs` 的样子给 Node 或 PowerShell 等价物，README 补 Windows 快速上手（含"装不上先看什么"）。
-7. **用户可见的 Windows 文档。** 本文件是维护者视角；普通用户需要的是已知限制清单与 `/doctor` 的读法。
+   断言实际发出的序列（Windows 两个 profile 只在 `test-windows` 腿上跑）。
+6. ~~**不支持的终端上的 ASCII 回退渲染。**~~ **已完成（P2-5）**：`asciiFallbackEnabled()`
+   （`src/platform.ts`）从环境判定「这块终端解不了解得了 UTF-8」——`DSH_TUI_ASCII` 强制开关优先，
+   其次是 `LC_ALL` / `LC_CTYPE` / `LANG` 里写明的非 UTF-8 字符集（裸 `C` / `POSIX` 也算），
+   再次是 Windows 上记录到的输出代码页（`DSH_TUI_CODEPAGE`，或 `PYTHONIOENCODING=cp936` 这类；
+   65001 与「什么都没记录」都不触发，因为 Windows Terminal 和 `chcp 65001` 的会话看起来就是这样）。
+   触发后 `mapAsciiChrome()`（`src/term-text.ts`）在**测量宽度之前**把骨架符号换成 ASCII：
+   横线 `-`、竖线 `|`、状态点 `*`、额度条 `#`/`.`，而 `▶` / `⚠` / `✖` 这类按两格预算的符号换成
+   「标记加一个空格」，所以回退前后一行占用的格数不变。中文翻译不动——没有 ASCII 可以换成它们，
+   那种控制台需要同时 `/language en`。`/diag` 的「终端」一行会写明正在回退。
+   *不改代码页本身*：那是全局状态，改了会影响用户的其他程序。
+7. ~~**分发与脚本去 bash 化。**~~ **已完成（P2-6）**：`scripts/*.sh`（install / verify / uninstall /
+   smoke / routing-suite）变成薄封装，逻辑在同名的 `.mjs` 里，照 `probe-home.mjs` 的样子用
+   `spawnSync` 调 `dsh` 的入口脚本而不是裸名字（裸 `dsh` 在 Windows 上是 `dsh.cmd` 垫片，
+   `CreateProcess` 不吃 `PATHEXT`）。所以 `bash scripts/install.sh` 与 `node scripts/install.mjs`
+   做同一件事，而 `npm run install:dsh` 等四条改成直接调 Node，Windows 上也能跑。
+   README 两侧都补了 Windows 快速上手。
+8. ~~**用户可见的 Windows 文档。**~~ **已完成（P2-7）**：[docs/windows.md](windows.md) 是使用者视角：
+   30 秒安装、「装不上先看什么」的对照表、`/doctor` 报告里 `●` / `⚠` / `✖` 的读法与 `--fix` 做什么，
+   以及已知限制。本文件继续只记录维护者需要的决策。`docs/windows.md` 进了 npm `files`，随包发布。
 
 ### 这一批已经做完的（P0）
 

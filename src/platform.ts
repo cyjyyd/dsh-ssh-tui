@@ -405,6 +405,82 @@ export function restrictPathToUserSync(
   }
 }
 
+/**
+ * Whether the terminal in front of us can paint UTF-8 at all.
+ *
+ * The chrome this TUI draws — rules, status dots, the warning glyph — is
+ * Unicode. A console whose output code page is not UTF-8 (a legacy Windows
+ * console left on CP936 or CP437) and a POSIX locale that is not UTF-8 both
+ * render those bytes as mojibake, which is worse than plain ASCII: the frame
+ * still has to line up. This answers only "can it decode UTF-8", never "which
+ * terminal", so the capability table stays where it is.
+ *
+ * The decision is read from the environment, which is all a portable test can
+ * assert: `DSH_TUI_ASCII=1` forces the fallback and `=0` forbids it; otherwise
+ * a locale naming a non-UTF-8 charset (or the bare `C` / `POSIX`) opts in,
+ * and so does a Windows console whose output code page is recorded as anything
+ * but 65001. An unset locale is left alone — a UTF-8 SSH session often exports
+ * nothing, and guessing "ASCII" there would strip the chrome from the audience
+ * this TUI is built for.
+ * @param env - the environment to read (tests pass their own).
+ * @param platform - the platform the decision is for.
+ * @returns true when chrome must be drawn in ASCII.
+ */
+export function asciiFallbackEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const forced = (env.DSH_TUI_ASCII ?? '').trim().toLowerCase()
+  if (['1', 'true', 'on', 'yes', 'ascii'].includes(forced)) return true
+  if (['0', 'false', 'off', 'no', 'utf8', 'utf-8'].includes(forced)) return false
+  if (localeCharsetIsUtf8(env) === false) return true
+  if (platform === 'win32' && windowsOutputIsUtf8(env) === false) return true
+  return false
+}
+
+/**
+ * `true` when a locale variable names UTF-8, `false` when it names something
+ * else, and `undefined` when none of them says — so the caller can tell "the
+ * user told us" apart from "nobody said".
+ *
+ * `LC_ALL` wins over `LC_CTYPE` over `LANG`, matching the order a libc consults
+ * them in. `LC_MESSAGES` is deliberately absent: it picks the translation, not
+ * the encoding the terminal decodes bytes with.
+ */
+function localeCharsetIsUtf8(env: NodeJS.ProcessEnv): boolean | undefined {
+  for (const key of ['LC_ALL', 'LC_CTYPE', 'LANG'] as const) {
+    const raw = (env[key] ?? '').trim()
+    if (raw === '') continue
+    const value = raw.toLowerCase().replace(/-/gu, '')
+    if (value === 'c' || value === 'posix') return false
+    const charset = value.split('.')[1] ?? ''
+    if (charset === '') return undefined
+    return charset === 'utf8'
+  }
+  return undefined
+}
+
+/**
+ * `true` when a Windows console says its output code page is UTF-8 (65001),
+ * `false` for any other recorded page, `undefined` when nothing was recorded.
+ *
+ * Node does not expose `GetConsoleOutputCP`, and spawning `chcp` on every paint
+ * is not an option, so the decision reads the variables a launcher can set:
+ * `DSH_TUI_CODEPAGE` (our own, for a wrapper that already asked) and
+ * `PYTHONIOENCODING` (a `cp936`-style tag is the one portable signal the wider
+ * ecosystem agrees on). An unset value is not evidence of a legacy page.
+ */
+function windowsOutputIsUtf8(env: NodeJS.ProcessEnv): boolean | undefined {
+  const own = (env.DSH_TUI_CODEPAGE ?? '').trim().toLowerCase()
+  if (own !== '') return own === '65001' || own === 'utf8' || own === 'utf-8'
+  const python = (env.PYTHONIOENCODING ?? '').trim().toLowerCase()
+  const charset = python.split(':')[0] ?? ''
+  if (charset === '') return undefined
+  if (charset === 'utf8' || charset === 'utf-8' || charset === 'cp65001') return true
+  if (/^(cp|oem)\d+$/u.test(charset) || charset === 'mbcs' || charset === 'ascii') return false
+  return undefined
+}
+
 /** `icacls`, synchronously, with a hidden window and a short leash. */
 function runIcaclsSync(command: string, args: string[]): boolean {
   const result = spawnSync(command, args, { stdio: 'ignore', windowsHide: true, timeout: 5_000 })

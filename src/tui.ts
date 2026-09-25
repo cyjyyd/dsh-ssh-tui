@@ -187,6 +187,25 @@ import {
 import { resolveFreshSuperGrokToken } from './supergrok-token.js'
 import { copyTextFromRow, copyTextFromTranscript } from './copy-text.js'
 import { displayToolName, subagentCourtesyName } from './job-label.js'
+import {
+  clearWaitingMarker,
+  notifyCommand,
+  notifyTargetCommand,
+  notifyTargetLabel,
+  parseNotifyTarget,
+  runNotify,
+  writeWaitingMarker,
+  type NotifyContext,
+} from './question-wait.js'
+import {
+  changesFileLine,
+  changesHeader,
+  changesRemainderLine,
+  changesSummaryVisible,
+  renderChangesDiff,
+  workspaceChangesOf,
+  type ChangesSummary,
+} from './workspace-changes.js'
 
 import {
   UserQuestionError,
@@ -1520,6 +1539,8 @@ export class SshTui {
   private detachedDeniedCount = 0
   /** Questions waiting for a display right now — their cards do not exist yet. */
   private queuedQuestions = 0
+  /** When the current detached wait began, so the reconnect can say how long. */
+  private questionWaitSince: number | undefined
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
   private paintProbed = false
@@ -1764,7 +1785,7 @@ export class SshTui {
       if (picked !== t('update.now')) return
       this.pushRow({ kind: 'system', text: t('update.installing', { latest: info.latest }) })
       this.markDirty()
-      const result = await installPluginLatest(info.profile)
+      const result = await installPluginLatest(info.profile, info.latest)
       if (this.disposed) return
       if (result.ok) {
         this.pushRow({ kind: 'system', text: t('update.installed', { latest: info.latest, profile: info.profile }) })
@@ -1797,12 +1818,24 @@ export class SshTui {
     view?: string
     disconnect?: DisconnectPolicyName
     autoApproval?: AutoApprovalMode
+    notify?: string
+    notifySmtpUser?: string
+    notifySmtpPassword?: string
   }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
     const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
     const previous = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-      ? raw as { language?: string; skipUpdate?: string; view?: string; disconnect?: string; autoApproval?: string }
+      ? raw as {
+        language?: string
+        skipUpdate?: string
+        view?: string
+        disconnect?: string
+        autoApproval?: string
+        notify?: string
+        notifySmtpUser?: string
+        notifySmtpPassword?: string
+      }
       : {}
     await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
   }
@@ -2533,6 +2566,10 @@ export class SshTui {
     if (this.openToolCalls.size > 0) return true
     if (this.llmRetry !== undefined) return true
     if (this.compactionRunning()) return true
+    // A question queued for an answer that has not come. The turn itself has
+    // settled, so nothing else here counts it, and the idle exit would otherwise
+    // kill the Host while it is the only thing still holding that question.
+    if (this.queuedQuestions > 0) return true
     return false
   }
 
@@ -2593,6 +2630,11 @@ export class SshTui {
       return
     }
     const keepHost = this.displayHost !== undefined && busy
+    if (!keepHost) {
+      // The Host is about to exit, and a marker left behind would keep saying a
+      // question is waiting after the process that held it is gone.
+      void clearWaitingMarker(String(this.agent.id))
+    }
     if (keepHost) {
       this.hangingUp = false
       // A relay that arrived while this hangup was unwinding set
@@ -2780,6 +2822,9 @@ export class SshTui {
     }
     if (detached > 0) parts.push(t('attach.awayDetached', { count: detached }))
     if (waiting > 0) parts.push(t('attach.awayWaiting', { count: waiting }))
+    if (waiting > 0 && this.questionWaitSince !== undefined) {
+      parts.push(t('attach.questionWaited', { waited: formatShortDuration(Date.now() - this.questionWaitSince) }))
+    }
     if (parts.length === 0) return
     this.pushRow({
       kind: 'system',
@@ -2940,12 +2985,13 @@ export class SshTui {
     const compact = this.isCompactView()
     if (compact) {
       const rows: CollapsibleBlock[] = this.rows.filter(
-        (row): row is Extract<Row, { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' }> =>
+        (row): row is Extract<Row, { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'changes' }> =>
           row.kind === 'subagent'
           || row.kind === 'plan'
           || row.kind === 'question'
           || row.kind === 'goal'
-          || row.kind === 'compaction')
+          || row.kind === 'compaction'
+          || row.kind === 'changes')
       for (const burst of compactToolBursts(this.rows)) {
         const callAnchor = burst.groups.calls.at(-1)
         const editAnchor = burst.groups.edits.at(-1)
@@ -2955,7 +3001,7 @@ export class SshTui {
       return rows
     }
     const rows: CollapsibleBlock[] = this.rows.filter(
-      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' }> =>
+      (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' } | { kind: 'changes' }> =>
         row.kind === 'reasoning'
         || row.kind === 'tool'
         || row.kind === 'subagent'
@@ -2963,7 +3009,8 @@ export class SshTui {
         || row.kind === 'question'
         || row.kind === 'goal'
         || row.kind === 'compaction'
-        || row.kind === 'prompt')
+        || row.kind === 'prompt'
+        || row.kind === 'changes')
     if (this.streaming !== undefined && this.streaming.reasoning !== '') {
       this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
       rows.push(this.streamingReasoning)
@@ -3473,6 +3520,23 @@ export class SshTui {
     }
   }
 
+  /**
+   * Which file line of an expanded changes card the screen cursor is on.
+   *
+   * The card paints its header, then one row per file, and `selectableLines`
+   * holds exactly the viewport. The cursor sits on the input row unless the
+   * reader scrolled, so the file is how many painted rows above the cursor the
+   * card's header is. A cursor on the header, the remainder line, or the prompt
+   * falls back to the first file, which is the only defensible guess.
+   */
+  private changesFileIndex(row: Extract<Row, { kind: 'changes' }>): number {
+    const painted = this.selectableLines.findIndex(line => line.ref === row)
+    if (painted < 0) return 0
+    const index = this.lastPaintCursorRow - 1 - (this.lastTranscriptStart + painted)
+    if (index < 1 || index > row.files.length) return 0
+    return index - 1
+  }
+
   /** Move the expand/collapse focus among reasoning and tool rows. */
   private moveCollapsibleFocus(delta: number): void {
     const rows = this.collapsibleRows()
@@ -3519,6 +3583,14 @@ export class SshTui {
   }
 
   toggleCard(target: CollapsibleBlock): void {
+    // A changes card opens its file list first; the next Enter reads the file
+    // the cursor is on. With one file there is nothing to choose, so that Enter
+    // opens it directly.
+    if (target.kind === 'changes' && target.expanded && target.files.length > 0) {
+      this.focusedRow = target
+      this.openChangesInspect(target, target.files.length === 1 ? 0 : this.changesFileIndex(target))
+      return
+    }
     if (target.kind === 'subagent') {
       this.focusedRow = target
       this.openSubagentInspect(target)
@@ -3947,6 +4019,17 @@ export class SshTui {
               addDisplay(this.styleLine('error', `  ${wrapped}`), row)
             }
           }
+        }
+        continue
+      }
+      if (row.kind === 'changes') {
+        const header = `${row.header}${row.expanded ? '' : t('card.expand')}`
+        this.paintCollapsibleHeader(addDisplay, row, 'tool', header, width)
+        if (row.expanded) {
+          for (const file of row.files) {
+            addDisplay(this.styleLine('tool-result', `    ${file}`), row)
+          }
+          if (row.more !== undefined) addDisplay(this.styleLine('system', `    ${row.more}`), row)
         }
         continue
       }
@@ -5302,6 +5385,13 @@ export class SshTui {
     }
     this.lastActivity = Date.now()
     if (!this.replaying) this.refreshContextPressure()
+    // Before the switch, and by string: `workspace/changes` is not a key of the
+    // 0.1.5 `SessionEventMap`, so a `case` for it fails strict compilation on
+    // that tree. A Host without the service records nothing and this returns.
+    if (String(event.type) === 'workspace/changes') {
+      this.noteWorkspaceChanges(session.id, event.seq)
+      return
+    }
     switch (event.type) {
       case 'user/message': {
         const text = event.data.content
@@ -5671,6 +5761,96 @@ export class SshTui {
     this.pushRow({ kind: 'error', text: t('agent.disposed') })
     this.status = 'disposed'
     this.markDirty()
+  }
+
+  /**
+   * One `workspace/changes` event: the files a turn changed.
+   *
+   * The event carries only the turn number; the summary stays on the Host and
+   * is served by `workspaceChanges` for this event's own sequence, and only
+   * while the Session lives. A missing service (every 0.1.5 Host) or a summary
+   * that can no longer be opened (a log replayed after a restart) shows
+   * nothing — upstream's rule, so a card that cannot be read is never drawn.
+   * A later event for the same turn replaces the earlier summary in place.
+   */
+  private noteWorkspaceChanges(sessionId: SessionId, seq: number | undefined): void {
+    if (typeof seq !== 'number') return
+    const service = workspaceChangesOf(this.ctx as unknown as { get?(name: string): unknown })
+    if (service === undefined) return
+    const summary = service.summary(String(sessionId), seq)
+    if (summary === undefined || !changesSummaryVisible(summary)) return
+    const existing = this.rows.findLast((row): row is Extract<Row, { kind: 'changes' }> =>
+      row.kind === 'changes' && row.turn === summary.turn && row.sessionId === String(sessionId))
+    if (existing !== undefined) {
+      this.fillChangesCard(existing, summary, seq)
+    } else {
+      const row: Extract<Row, { kind: 'changes' }> = {
+        kind: 'changes',
+        turn: summary.turn,
+        seq,
+        sessionId: String(sessionId),
+        header: '',
+        files: [],
+        expanded: false,
+      }
+      this.fillChangesCard(row, summary, seq)
+      this.pushRow(row)
+    }
+    this.markDirty()
+  }
+
+  /** Copy one summary onto its card. Shared by the first event and its replacements. */
+  private fillChangesCard(
+    row: Extract<Row, { kind: 'changes' }>,
+    summary: ChangesSummary,
+    seq: number,
+  ): void {
+    row.seq = seq
+    row.header = changesHeader(summary)
+    row.files = summary.files.map(changesFileLine)
+    const more = changesRemainderLine(summary)
+    if (more === undefined) delete row.more
+    else row.more = more
+  }
+
+  /**
+   * Full view of one file on a changes card: its comparison, as the service
+   * computed it. Binary and oversized files have no lines, so the overlay
+   * carries the one-line explanation instead of an empty body.
+   */
+  private openChangesInspect(row: Extract<Row, { kind: 'changes' }>, index: number): void {
+    const service = workspaceChangesOf(this.ctx as unknown as { get?(name: string): unknown })
+    const label = row.files[index] ?? row.header
+    const title = t('changes.inspectTitle', { file: label })
+    if (service === undefined) {
+      this.openChangesInspectLines(title, [{ kind: 'tool-result', text: t('changes.unavailable') }])
+      return
+    }
+    const controller = new AbortController()
+    void service.diff(row.sessionId, row.seq, index, controller.signal)
+      .then(diff => {
+        const lines = renderChangesDiff(diff)
+        this.openChangesInspectLines(title, lines.length > 0
+          ? lines
+          : [{ kind: 'tool-result', text: t('changes.unavailable') }])
+      })
+      .catch(() => {
+        this.openChangesInspectLines(title, [{ kind: 'tool-result', text: t('changes.unavailable') }])
+      })
+  }
+
+  /** Open (or replace) the changes overlay, or echo it to the log in line mode. */
+  private openChangesInspectLines(title: string, lines: DiffDisplayLine[]): void {
+    if (this.echoInspectToLog(title, lines)) return
+    const dialog = this.dialog
+    if (dialog?.kind === 'inspect') {
+      dialog.title = title
+      dialog.lines = lines
+      dialog.offset = 0
+      this.markDirty()
+      return
+    }
+    this.openDialog({ kind: 'inspect', title, lines, offset: 0 })
   }
 
   /** Plan-mode / command / team events that plugins merge into SessionEventMap. */
@@ -6395,6 +6575,65 @@ export class SshTui {
     return true
   }
 
+  /**
+   * Tell the absent user that a question is waiting.
+   *
+   * The marker file is the part that needs no configuration: it sits next to the
+   * session's stderr log, so logging back into the jump host shows it before the
+   * TUI is open. The command is whatever the user pointed `ssh-tui.notify` at,
+   * run once; it never blocks the wait and never reports its own failure.
+   */
+  private announceWaitingQuestion(request: AskUserQuestionRequest): void {
+    const sessionId = String(this.agent.id)
+    const question = request.questions
+      .map(item => item.question.trim())
+      .filter(text => text !== '')
+      .join(' / ')
+      .slice(0, 200)
+    const since = this.questionWaitSince ?? Date.now()
+    void writeWaitingMarker({
+      sessionId,
+      count: this.queuedQuestions,
+      question,
+      since,
+    })
+    const command = this.readNotifyCommand()
+    if (command === undefined) return
+    const smtp = this.readNotifySmtp()
+    const context: NotifyContext = {
+      sessionId,
+      count: this.queuedQuestions,
+      question,
+      waitedMs: Date.now() - since,
+      resumeCommand: `dsh --profile ${profileFromArgv()} --resume ${sessionId}`,
+      ...(smtp.user === undefined ? {} : { smtpUser: smtp.user }),
+      ...(smtp.password === undefined ? {} : { smtpPassword: smtp.password }),
+    }
+    void runNotify(command, context)
+  }
+
+  /** The SMTP account `/notify smtp` saved, when the target is authenticated. */
+  private readNotifySmtp(): { user?: string; password?: string } {
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const saved = raw as { notifySmtpUser?: unknown; notifySmtpPassword?: unknown }
+    const user = typeof saved.notifySmtpUser === 'string' ? saved.notifySmtpUser : undefined
+    const password = typeof saved.notifySmtpPassword === 'string' ? saved.notifySmtpPassword : undefined
+    return {
+      ...(user === undefined || user === '' ? {} : { user }),
+      ...(password === undefined || password === '' ? {} : { password }),
+    }
+  }
+
+  /** `DSH_TUI_NOTIFY`, else the saved `ssh-tui.notify`. Empty means off. */
+  private readNotifyCommand(): string | undefined {
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
+    const saved = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as { notify?: unknown }).notify
+      : undefined
+    return notifyCommand(process.env, typeof saved === 'string' ? saved : undefined)
+  }
+
   private waitForLiveDisplay(signal?: AbortSignal): Promise<void> {
     if (this.hasLiveDisplay()) return Promise.resolve()
     return new Promise((resolve, reject) => {
@@ -6756,10 +6995,19 @@ export class SshTui {
       // Counted here, not read off the rows: the card is built only after the
       // wait resolves, so at reattach time a queued question has no row yet.
       this.queuedQuestions += 1
+      this.questionWaitSince ??= Date.now()
+      // The user learns about the wait from a marker file and, when they
+      // configured one, a command. Both run after the counter moves, so a
+      // reconnect during either still sees the question as queued.
+      this.announceWaitingQuestion(request)
       try {
         await this.waitForLiveDisplay(request.signal)
       } finally {
         this.queuedQuestions -= 1
+        if (this.queuedQuestions === 0) {
+          this.questionWaitSince = undefined
+          void clearWaitingMarker(String(this.agent.id))
+        }
       }
     }
     const answers: AskUserQuestionAnswer['answers'] = []
@@ -8361,6 +8609,45 @@ export class SshTui {
     this.markDirty()
   }
 
+  /**
+   * /notify: where a question waiting on an absent user is announced.
+   *
+   * No argument shows what is configured. `off` clears it. `mail`, `smtp` and
+   * `local` store the command that target needs; the SMTP password is kept
+   * beside it and handed to the command through the environment, so it is never
+   * part of the command string.
+   */
+  private async runNotifyCommand(arg: string): Promise<void> {
+    const target = parseNotifyTarget(arg)
+    if (target === undefined) {
+      this.pushRow({ kind: 'error', text: t('notify.usage') })
+      this.markDirty()
+      return
+    }
+    if (target.kind === 'off' && arg.trim() === '') {
+      const current = this.readNotifyCommand()
+      this.pushRow({
+        kind: 'system',
+        text: current === undefined ? t('notify.statusOff') : t('notify.statusOn', { command: current }),
+      })
+      this.markDirty()
+      return
+    }
+    if (target.kind === 'off') {
+      await this.mergeUiSettings({ notify: '', notifySmtpUser: '', notifySmtpPassword: '' })
+      this.pushRow({ kind: 'system', text: t('notify.cleared') })
+      this.markDirty()
+      return
+    }
+    await this.mergeUiSettings({
+      notify: notifyTargetCommand(target),
+      notifySmtpUser: target.kind === 'smtp' ? target.user ?? '' : '',
+      notifySmtpPassword: target.kind === 'smtp' ? target.password ?? '' : '',
+    })
+    this.pushRow({ kind: 'system', text: t('notify.saved', { target: notifyTargetLabel(target) }) })
+    this.markDirty()
+  }
+
   /** /disconnect: pause (default) or continue the turn after SSH drop. */
   private async runDisconnectCommand(arg: string): Promise<void> {
     const direct = parseDisconnectPolicy(arg)
@@ -8955,19 +9242,23 @@ export class SshTui {
           this.scrollInspectOrTranscript(-3)
           return
         }
-        // 32 is "motion with the left button held": a drag over a reply.
-        if (button === 32) {
+        // 32 is "motion with the left button held": a drag over a reply. Shift
+        // adds 4 to every button code, and a terminal that still forwards the
+        // report while Shift is down (instead of keeping it for its own
+        // selection) must drag exactly like an unshifted one — otherwise the
+        // gesture the user was told to fall back on does nothing here.
+        if (button === 32 || button === 36) {
           this.extendMouseSelection(y, x)
           return
         }
-        if (button === 0) {
+        if (button === 0 || button === 4) {
           this.beginMouseSelection(y, x)
           return
         }
         return
       }
       // A release ends either a drag (copy what it covered) or a plain click.
-      if (button === 0) this.endMouseSelection(y, x)
+      if (button === 0 || button === 4) this.endMouseSelection(y, x)
       return
     }
     if (combined === '\x1b[5~') {
@@ -10395,7 +10686,16 @@ export class SshTui {
     // how the terminals that *do* honour it work — but where the table does not
     // promise it the user is told once per session rather than at every copy, or
     // not at all until they paste into an empty clipboard.
-    if (!this.terminalCaps.osc52 && !this.osc52HintShown) {
+    //
+    // An SSH session is the exception the table cannot see. The classifier reads
+    // the *remote* terminal (the tty on the far side of the connection, which is
+    // usually a bare Linux console or an unnamed pty), while the bytes are
+    // written to the *local* terminal — the one the user is actually copying
+    // into. That local terminal is what accepted the write, which is why a copy
+    // over SSH works and then warns that it did not. Warning there is a lie, so
+    // the caveat stays quiet whenever the link was recognised as SSH, at boot or
+    // on a later reattach.
+    if (!this.terminalCaps.osc52 && this.paintLink !== 'ssh' && !this.osc52HintShown) {
       this.osc52HintShown = true
       this.pushRow({ kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) })
     }
@@ -10640,6 +10940,12 @@ export class SshTui {
           } else {
             this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'view', error: errorChain(error) }) })
           }
+          this.markDirty()
+        })
+        break
+      case 'notify':
+        void this.runNotifyCommand(arg).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'notify', error: errorChain(error) }) })
           this.markDirty()
         })
         break

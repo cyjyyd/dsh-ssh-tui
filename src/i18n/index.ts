@@ -34,6 +34,11 @@ export const UI_LOCALE_SCHEMA = z.object({
   autoApproval: liveField(z.string()),
   /** Milliseconds a leftover, finished Host waits before exiting; 0 = never. */
   idleExit: liveField(z.number()),
+  /**
+   * Command run once when a question starts waiting and nobody is attached.
+   * Empty means off. See `question-wait.ts` for the environment it receives.
+   */
+  notify: liveField(z.string()),
 })
 
 let current: Locale = resolveLocale()

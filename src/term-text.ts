@@ -7,6 +7,7 @@
 
 import { t } from './i18n/index.js'
 import { downgradeSgr, type ColorDepth } from './color-depth.js'
+import { asciiFallbackEnabled } from './platform.js'
 
 /**
  * Codex-style compact elapsed: `0s`, `1m 05s`, `1h 01m 01s`.
@@ -218,6 +219,75 @@ const EMOJI_PRESENTATION_SYMBOLS: ReadonlySet<number> = new Set(
 )
 
 /**
+ * The chrome this TUI draws, and the ASCII it falls back to where UTF-8 cannot
+ * be decoded.
+ *
+ * Each substitute is one cell, same as the glyph it replaces, except the marks
+ * whose colour form is budgeted two cells (`▶`, `⚠`, `✖`): those become a
+ * marker plus a space, so a row measured before the fallback still lines up
+ * after it. Box drawing becomes `+`/`|`/`-` rather than nothing, because a rule
+ * that vanishes also removes the boundary the eye uses to find the input.
+ */
+const ASCII_CHROME: ReadonlyMap<string, string> = new Map([
+  ['─', '-'], ['│', '|'], ['┌', '+'], ['┐', '+'], ['└', '+'], ['┘', '+'],
+  ['├', '+'], ['┤', '+'], ['┬', '+'], ['┴', '+'], ['┼', '+'],
+  ['╭', '+'], ['╮', '+'], ['╯', '+'], ['╰', '+'],
+  ['▶', '> '], ['◀', '<'], ['▸', '>'], ['▹', '>'], ['►', '>'], ['◄', '<'], ['▾', 'v'],
+  ['●', '*'], ['○', 'o'], ['◉', '*'], ['◐', '*'], ['◆', '*'], ['◇', '+'],
+  ['■', '#'], ['□', '#'], ['▪', '#'], ['▫', '#'], ['▌', '|'],
+  ['█', '#'], ['▓', '#'], ['▒', '#'], ['░', '.'],
+  ['⚠', '! '], ['✖', 'x '], ['✓', 'v'], ['✔', 'v'], ['✗', 'x'], ['✘', 'x'],
+  ['ℹ', 'i'], ['★', '*'], ['☆', '*'],
+  ['·', '.'], ['•', '*'], ['❯', '>'], ['›', '>'], ['«', '<'], ['»', '>'],
+  ['→', '>'], ['←', '<'], ['↑', '^'], ['↓', 'v'], ['↕', '|'],
+  ['…', '~'], ['⋯', '~'], ['—', '-'], ['–', '-'],
+  ['‘', "'"], ['’', "'"], ['“', '"'], ['”', '"'], ['「', '"'], ['」', '"'], ['『', '"'], ['』', '"'],
+  ['⣀', '.'], ['⠉', '.'], ['⠋', '.'], ['⠙', '.'], ['⠹', '.'], ['⠸', '.'],
+  ['⠼', '.'], ['⠴', '.'], ['⠦', '.'], ['⠧', '.'], ['⠇', '.'], ['⠏', '.'],
+  ['⠛', ':'], ['⠞', ':'], ['⠟', ':'], ['⠿', ':'], ['⡿', ':'], ['⣿', '#'],
+  ['×', 'x'], ['⚡', '!'], ['⊘', '-'],
+])
+
+/**
+ * Whether chrome is being drawn in ASCII right now.
+ *
+ * Read once, the moment the first row asks: the answer comes from the
+ * environment, which does not change while a frame is painting, and reading it
+ * per glyph would re-parse the locale on every cell of every row. Tests that
+ * flip the flag call {@link resetAsciiChrome} so the next read sees it.
+ */
+let asciiChromeCache: boolean | undefined
+
+/** Forget the cached decision, so the next read re-consults the environment. */
+export function resetAsciiChrome(): void {
+  asciiChromeCache = undefined
+}
+
+/** The cached decision, computed on first use. */
+function asciiChromeActive(): boolean {
+  asciiChromeCache ??= asciiFallbackEnabled()
+  return asciiChromeCache
+}
+
+/**
+ * Rewrite one string's chrome into ASCII when the terminal cannot decode UTF-8.
+ *
+ * Only the glyphs in {@link ASCII_CHROME} move; CJK text is left byte for byte,
+ * because there is no ASCII for it and a Chinese locale on a non-UTF-8 console
+ * needs `/language en`, not a mangled translation. Widths are preserved for the
+ * two-cell marks, so a row measured either side of this call occupies the same
+ * number of cells.
+ * @param text - one row, possibly with ANSI sequences in it.
+ * @returns the row unchanged when UTF-8 chrome is safe.
+ */
+export function mapAsciiChrome(text: string): string {
+  if (!asciiChromeActive() || text === '') return text
+  let out = ''
+  for (const char of text) out += ASCII_CHROME.get(char) ?? char
+  return out
+}
+
+/**
  * Terminal cell width for one string.
  *
  * Match glibc wcwidth / typical UTF-8 SSH terminals: CJK ideographs and
@@ -239,7 +309,7 @@ const EMOJI_PRESENTATION_SYMBOLS: ReadonlySet<number> = new Set(
  */
 export function displayWidth(text: string): number {
   let width = 0
-  for (const char of text) {
+  for (const char of mapAsciiChrome(text)) {
     if (char === '\t') {
       // Tabs are expanded to spaces before rendering; keep the width
       // calculation consistent with `sanitizeTerminalText()`.
@@ -302,6 +372,8 @@ export function displayWidth(text: string): number {
  * @returns the row with the text request and the second cell filled in.
  */
 export function pinEmojiCells(text: string): string {
+  const mapped = mapAsciiChrome(text)
+  if (mapped !== text) return mapped
   let out = ''
   let index = 0
   while (index < text.length) {
@@ -400,15 +472,16 @@ export function skipAnsiSequence(text: string, index: number): number {
 /** Repeat a glyph until it occupies exactly `width` cells. */
 export function repeatToWidth(glyph: string, width: number): string {
   if (width <= 0) return ''
-  const unit = displayWidth(glyph)
+  const mapped = mapAsciiChrome(glyph)
+  const unit = displayWidth(mapped)
   if (unit <= 0) return ' '.repeat(width)
   const count = Math.max(1, Math.floor(width / unit))
-  return padToWidth(glyph.repeat(count), width)
+  return padToWidth(mapped.repeat(count), width)
 }
 
 /** Strip terminal control sequences and expand tabs for display output. */
 export function sanitizeTerminalText(text: string): string {
-  return text
+  return mapAsciiChrome(text)
     .replace(/[\x1b\u009b]/gu, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
     .replaceAll('\t', '    ')
@@ -1002,7 +1075,7 @@ export function truncateToWidth(text: string, width: number): string {
   const safe = sanitizeTerminalText(text)
   if (width <= 0) return ''
   if (displayWidth(safe) <= width) return safe
-  if (width === 1) return '…'
+  if (width === 1) return mapAsciiChrome('…')
   const limit = width - 1
   let cut = 0
   let used = 0
@@ -1013,7 +1086,7 @@ export function truncateToWidth(text: string, width: number): string {
     cut += char.length
   }
   if (cut === 0) cut = firstCodePointLength(safe)
-  return `${safe.slice(0, cut)}…`
+  return `${safe.slice(0, cut)}${mapAsciiChrome('…')}`
 }
 
 /**
@@ -1058,7 +1131,7 @@ export function clipAnsiToWidth(text: string, width: number): string {
 export function truncateAnsiToWidth(text: string, width: number): string {
   if (width <= 0) return ''
   if (visibleWidth(text) <= width) return text
-  if (width === 1) return '…'
+  if (width === 1) return mapAsciiChrome('…')
   const limit = width - 1
   let out = ''
   let used = 0
@@ -1080,7 +1153,7 @@ export function truncateAnsiToWidth(text: string, width: number): string {
     index += char.length
   }
   // The tail that was dropped may have carried the reset, so close explicitly.
-  return `${out}…\x1b[0m`
+  return `${out}${mapAsciiChrome('…')}\x1b[0m`
 }
 
 /** One renderable view of the input line: text plus the cursor's visual offset. */

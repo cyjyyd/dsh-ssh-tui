@@ -19,6 +19,7 @@ export const LOCAL_COMMANDS = [
   { name: 'status', key: 'cmd.status' },
   { name: 'diag', key: 'cmd.diag' },
   { name: 'disconnect', key: 'cmd.disconnect' },
+  { name: 'notify', key: 'cmd.notify' },
   { name: 'approval', key: 'cmd.approval' },
   { name: 'view', key: 'cmd.view' },
   { name: 'usage', key: 'cmd.usage' },

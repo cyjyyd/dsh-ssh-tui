@@ -6,12 +6,20 @@
 [![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
 
 给跳板机、无桌面服务器、高延迟 SSH 用的 DeepSeek Harness 终端。纯 ANSI、增量重绘，
-不需要浏览器。
+不需要浏览器。**SSH 掉线时，正在跑的回合留在 Host 里，重连用同一条命令接回，会话不丢。**
 
 English: [README.en.md](README.en.md)
 
 如果你主要在 SSH 里写代码——公司跳板、测试机、只有键盘的会话——可以从这里开始。
 本机桌面终端若更在意主题和布局，也可以继续用你已经习惯的界面。
+
+和现成的东西不重叠：
+
+- **官方 headless**：同一条任务只把最后一条回复打到 stdout，过程全在日志里。
+- **官方 `dsh-ssh`（0.1.6 起）**：本机跑 Harness、远端跑文件和进程，要预装 helper。人已经 SSH 在那台机器上时用本插件；两者可以叠用，不是替代。
+- **其它终端皮肤**（`dsh-TUI` 等）：本机漂亮终端，比主题和布局。本插件比的是弱网下的增量重绘、掉线后 Host 留下、纯文本行模式。
+
+掉线之后怎么接回来，见下面的[「SSH 断了之后」](#ssh-断了之后)。
 
 已经在付 SuperGrok / X Premium 的话，用独立插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth) 把订阅接进 dsh（headless / web / 本 TUI 都能用），复用本机 grok-bridge token，不需要 xAI API Key。
 
@@ -88,7 +96,8 @@ dsh --profile tui
   标题（还没出现就保持「处理中」），运行中的工具摘要在 `└` 下自动折行（最多 3 行，末行
   加省略号），带计时和 Esc 中断；回复开始流式输出时自动让位。
 
-- 0.7 起：模型回复可**拖选自由复制**（按住拖过一段，走 OSC 52 写回本机剪贴板；工具卡仍是点击展开）；
+- 0.7 起：模型回复可**拖选自由复制**（按住鼠标拖过一段，走 OSC 52 写回本机剪贴板；按住 Shift 拖选
+  结果相同；工具卡仍是点击展开）。SSH 会话里复制落到本机终端，不再误报「本终端不接收 OSC 52」；
   底栏收敛成一条带优先级的芯片带（先丢文字后丢组，`⚠` 可点击打开 `/doctor`）；**额度条常驻**并标注窗口
   （`5Hr`/`1Wk`/`1Mo`，默认显示最小窗口，未取到时显示 `?%` 并每 15 秒重试）；`/mode` 分组显示并可用 `/` 过滤；
   极简视图逐文件列 `+/-`；工具 diff 为**行级**、只高亮变化字符、≥100 列时并排显示；
@@ -101,7 +110,7 @@ dsh --profile tui
 - DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（CI 覆盖 `0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.7-rc.1`：`0.1.5-rc.1` 跑 typecheck 与单元套件，另两条连真 PTY 探针一起跑。`0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` 与 0.1.5-rc 线共用同一套 handle API + `agent/assistant-stream` 兼容层。**`0.1.2-rc` 及更早的线不再支持**，装不上请先升到 `0.1.5-rc` 或 `0.1.7-rc`。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
-- Windows：Host 与显示端之间的本地通道使用命名管道
+- Windows：安装、排障与 `/doctor` 的读法见 [docs/windows.md](docs/windows.md)。Host 与显示端之间的本地通道使用命名管道
   `\\.\pipe\dsh-tui-<DSH_HOME 摘要 8 位>-<会话名>-<会话摘要 8 位>`（Windows 只能监听命名管道，
   不能监听 `.sock` 文件；名字里同时带 DSH_HOME 与会话 id 的摘要，所以不同 home、不同会话都不会撞名，
   结束进程即自动回收）。Host 的 stderr 记录在 `%USERPROFILE%\.dsh\tui-socks\<会话名>-<摘要>.err`，
@@ -182,22 +191,25 @@ Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线
 完全没有显示器且一直空闲的兜底仍由 `DSH_TUI_DETACHED_IDLE_MS`（默认 6 小时）负责。可选：用 tmux 包一层。
 常驻与接管的可复制配方（tmux / screen / systemd --user / 长任务）见 [`docs/remote-ops.md`](docs/remote-ops.md)；重连后转录里的「已重连 N 次 · 断开 Xs」与「离开 …」两行的语义也在那里。
 
-启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」会运行 `dsh plugin --profile tui add dsh-ssh-tui@latest`，完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
+启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」安装的是刚才查到的那个版本号（`dsh plugin --profile tui add dsh-ssh-tui@<版本>`），不写 `@latest`：pnpm 对 `@latest` 会再解析一次，刚发布、还在 `minimumReleaseAge` 窗口里的版本会被静默跳过、装成旧的还显示成功。完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
 
-仓库内也可：`bash scripts/smoke-headless.sh`（记录出口摘要，不打印 token）。
+仓库内也可：`node scripts/smoke-headless.mjs`（`bash scripts/smoke-headless.sh` 等价；记录出口摘要，不打印 token）。
 
 ### 方式一：从 git clone 安装
 
 ```bash
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
 cd dsh-ssh-tui
-bash scripts/install.sh            # 默认安装到 tui profile
+node scripts/install.mjs           # 默认安装到 tui profile（bash scripts/install.sh 等价）
 ```
+
+Windows 没有 bash，用同一条 `node scripts/install.mjs`；完整的 Windows 步骤、
+「装不上先看什么」和 `/doctor` 的读法见 [docs/windows.md](docs/windows.md)。
 
 安装到其它 profile（例如自定义 `work` profile）：
 
 ```bash
-bash scripts/install.sh work
+node scripts/install.mjs work
 ```
 
 脚本会依次：安装依赖 → 构建 `lib/` → 通过 `dsh plugin --profile <name> add link:<repo>`
@@ -216,7 +228,8 @@ bash scripts/install.sh work
 
 1. **运行中的应用内修复**：`/mode fix` 写入下面这段并提示重启。npm 安装和
    「现在更新」走的是 `dsh plugin add`，不会执行仓库脚本，所以这是最通用的一条。
-2. 仓库安装：`bash scripts/ensure-profile-rows.sh [profile]`（默认 `tui`）。
+2. 仓库安装：`node scripts/profile-rows.mjs [profile]`（默认 `tui`；
+   `bash scripts/ensure-profile-rows.sh` 是它的薄封装，两者等价）。
 3. 手动在该 profile 的 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里加入：
 
 ```yaml
@@ -234,7 +247,7 @@ profile（例如同时装了 `@deepseek-ai/dsh-web-app` 的 profile）。改完�
 会以 `service "agentPresets" has been registered` 失败），先把 profile 补丁里的这段删掉。
 
 名单缺席时，TUI 启动会打一行提示（中文界面：「未挂载 agent-presets 名单…」），
-`/mode` 会打印补丁路径和 `/mode fix` 修复入口，`scripts/verify.sh` 也会给出提示。
+`/mode` 会打印补丁路径和 `/mode fix` 修复入口，`node scripts/verify.mjs`（`scripts/verify.sh` 等价）也会给出提示。
 另外，preset 的 scope 身份按模块实例判定：一个 dsh 安装树里若存在两份
 `@deepseek-ai/dsh-scope`（npm 嵌套安装的 checkout 可能如此），名单挂载会以
 `refusing to compose an unscoped context` 失败；全局安装（`npm i -g`）不受影响。
@@ -248,7 +261,15 @@ npm run build
 dsh plugin --profile tui add "link:$(pwd)"
 ```
 
-Windows（PowerShell）等价写法；仓库里的 `scripts/*.sh` 是 POSIX 脚本，Windows 直接用下面三条命令：
+Windows（PowerShell）不用 bash，直接跑 Node 脚本（`scripts/*.sh` 只是转去调用它们的薄封装）：
+
+```powershell
+cd dsh-ssh-tui
+node scripts/install.mjs            # 装依赖、构建、链接进 tui profile、挂上 /mode 需要的行
+node scripts/verify.mjs             # 检查组合是否生效
+```
+
+不想用脚本时，三条命令等价：
 
 ```powershell
 cd dsh-ssh-tui
@@ -261,8 +282,8 @@ dsh plugin --profile tui add "link:$((Get-Location).Path)"
 
 ```bash
 dsh plugin --profile work add dsh-ssh-tui
-# 或仓库脚本
-bash scripts/install-npm.sh work
+# 或仓库脚本（bash scripts/install-npm.sh 等价）
+node scripts/install-npm.mjs work
 ```
 
 ### 智能路由模式（dsh-routing-suite）
@@ -270,8 +291,8 @@ bash scripts/install-npm.sh work
 需要“智能路由模式”时，安装 `dsh-routing-suite` 并注册其 preset：
 
 ```bash
-bash scripts/install-routing-suite.sh          # 默认 tui profile
-bash scripts/install-routing-suite.sh work     # 其它 profile
+node scripts/install-routing-suite.mjs          # 默认 tui profile
+node scripts/install-routing-suite.mjs work     # 其它 profile（bash scripts/install-routing-suite.sh 等价）
 ```
 
 脚本会执行 `dsh plugin --profile <name> add dsh-routing-suite`，并把包内的
@@ -471,7 +492,7 @@ DeepSeek 上、B 会话跑在 xAI 上；只记软件级默认值的话，resume 
 ## 验证
 
 ```bash
-bash scripts/verify.sh              # 检查 profile 组合与 CLI 语法
+node scripts/verify.mjs             # 检查 profile 组合与 CLI 语法（bash scripts/verify.sh 等价）
 npm test                            # 单元 + 集成（含屏幕网格护栏、重连接管、选择器首帧）
 python3 scripts/pty-acceptance.py   # 真 PTY：模拟 40ms SSH 链路 + 滞留的光标回复
 node scripts/tui-probe.mjs          # 真 PTY：真 dsh --profile tui 走一遍启动/缩放//diag/打字//exit
@@ -509,8 +530,8 @@ PROBE_HOME=$H node scripts/tui-probe.mjs --session <id>   # 只读式驱动已�
 ## 卸载
 
 ```bash
-bash scripts/uninstall.sh           # 默认 tui profile
-bash scripts/uninstall.sh work      # 指定 profile
+node scripts/uninstall.mjs          # 默认 tui profile（bash scripts/uninstall.sh 等价）
+node scripts/uninstall.mjs work     # 指定 profile
 ```
 
 卸载只移除 profile 中的插件依赖与 bundle 层，不会删除会话数据。
@@ -568,10 +589,12 @@ npm run build
 ### 启动与安装
 
 - **`dsh-ssh-tui: both stdin and stdout must be TTYs`**：必须在真实终端 / SSH 会话里启动；管道、CI、`&` 后台都不行。
+- **Windows 安装、脚本与 `/doctor` 的读法**：[docs/windows.md](docs/windows.md) 有 30 秒安装、
+  「装不上先看什么」的对照表，以及 `/doctor` 报告里 `●` / `⚠` / `✖` 各代表什么。
 - **Windows 报 `host display socket did not appear`**：升级到最新版：
   `dsh plugin --profile tui add dsh-ssh-tui@latest`。仍失败请附 `/diag` 输出提 issue。
 - **Windows 上应用内更新报 `spawn dsh ENOENT`**：旧的更新器直接 `spawn dsh`，而 Windows 上装的是 `dsh.cmd` 垫片；
-  在命令行跑一次同样的升级即可（`dsh plugin --profile tui add dsh-ssh-tui@latest`），之后应用内更新正常。
+  在命令行跑一次 `dsh plugin --profile tui add dsh-ssh-tui@latest`，之后应用内更新正常（它装的是查到的版本号，不再写 `@latest`）。
 - **pnpm 拒绝 git 依赖的构建脚本**：把 pnpm 打印的 key 加进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`，再重装。
 - **升级后 `/mode` 报「服务不可用」、preset 工具消失**：敲 `/doctor`。它逐项判定部署组合（补丁能否解析、
   名单与 code-runtime 是否组合、有没有行被挂载两次、dsh 版本是否在兼容表内、是否装着两份 `@deepseek-ai/dsh-scope`），
@@ -602,6 +625,9 @@ npm run build
 - **标题栏 / 铃声不生效**：终端需支持 OSC 0 与 BEL；`DSH_TUI_NO_BELL=1` 可关闭铃声。
 - **深色终端下整行底色太抢眼**：`DSH_TUI_COLOR_DEPTH=none` 去掉底色，diff 仍用 `+`/`-` 区分。
 
+- **框线、圆点显示成乱码**：控制台代码页不是 UTF-8。界面会自动改画 ASCII（横线 `-`、状态点 `*`、
+  警告 `!`），`/diag` 的「终端」一行会注明；想要原字形就 `chcp 65001` 或改用 Windows Terminal。
+  `DSH_TUI_ASCII=1` 强制 ASCII，`=0` 强制 Unicode。详见 [docs/windows.md](docs/windows.md)。
 - **终端兼容性**：每个终端允许发什么、承诺什么（Windows Terminal / conhost / GNOME / XFCE / Konsole /
   xterm / tmux / screen / Linux 控制台）见 [docs/terminals.md](docs/terminals.md)；
   判定依据写在 `/diag` 的「终端」一行，判定错了用 `DSH_TUI_TERM_CAPS` 覆盖。

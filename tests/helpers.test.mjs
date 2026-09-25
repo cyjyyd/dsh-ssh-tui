@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { setLocale, t } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
 import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
-import { pinEmojiCells, stripAnsi } from '../lib/term-text.js'
+import { mapAsciiChrome, pinEmojiCells, resetAsciiChrome, stripAnsi } from '../lib/term-text.js'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
 
 /** A terminal with every capability, so a test asserts the full sequence set
@@ -212,6 +212,48 @@ test('displayWidth budgets BMP emoji symbols two cells', () => {
   assert.equal(displayWidth('·'), 1)
   assert.equal(displayWidth('#️⃣'), 2)
   assert.equal(displayWidth('✔ 计划'), 7)
+})
+
+test('ASCII fallback redraws the chrome without moving the columns', () => {
+  // The decision is cached on first read, so a test that flips the environment
+  // has to drop the cache — and put both back, or the suites after this one
+  // measure the ASCII widths.
+  const previous = process.env.DSH_TUI_ASCII
+  const restore = () => {
+    if (previous === undefined) delete process.env.DSH_TUI_ASCII
+    else process.env.DSH_TUI_ASCII = previous
+    resetAsciiChrome()
+  }
+  process.env.DSH_TUI_ASCII = '1'
+  resetAsciiChrome()
+  try {
+    // Rules, pips and the gutter become printable ASCII, one cell each.
+    assert.equal(mapAsciiChrome('──●○│'), '--*o|')
+    assert.equal(repeatToWidth('─', 8), '--------')
+    assert.equal(displayWidth(repeatToWidth('─', 80)), 80)
+    // The two-cell marks keep their cell, so a row measured either way lines up.
+    assert.equal(mapAsciiChrome('▶ 计划'), '>  计划')
+    assert.equal(displayWidth('▶ '), displayWidth(mapAsciiChrome('▶ ')))
+    assert.equal(mapAsciiChrome('⚠'), '! ')
+    assert.equal(displayWidth('⚠'), displayWidth(mapAsciiChrome('⚠')))
+    // A bar of eight pips is still eight cells after the fallback.
+    assert.equal(mapAsciiChrome('███████░'), '#######.')
+    assert.equal(displayWidth('███████░'), displayWidth(mapAsciiChrome('███████░')))
+    // CJK has no ASCII, so a translation is left byte for byte.
+    assert.equal(mapAsciiChrome('计划模式'), '计划模式')
+    // The pin is where a painted row spends its width, so the fallback has to
+    // win there too — otherwise the frame would put the variation selector back.
+    assert.equal(pinEmojiCells('⚠ 名单'), '!  名单')
+    // The ellipsis stays one cell, so a clipped row still fits the budget.
+    const clipped = truncateToWidth('计划模式说明', 6)
+    assert.equal(displayWidth(clipped) <= 6, true, `clipped to ${JSON.stringify(clipped)}`)
+    assert.equal(clipped.endsWith('~'), true)
+  } finally {
+    restore()
+  }
+  // And with the flag gone the Unicode chrome is exactly what it was.
+  assert.equal(repeatToWidth('─', 4), '────')
+  assert.equal(mapAsciiChrome('⚠'), '⚠')
 })
 
 test('pinEmojiCells gives every emoji symbol its second cell', () => {

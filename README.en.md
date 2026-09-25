@@ -6,13 +6,29 @@
 [![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/en/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
 
 A DeepSeek Harness terminal for jump hosts, headless servers, and high-latency
-SSH. Plain ANSI and incremental redraws. No browser required.
+SSH. Plain ANSI and incremental redraws. No browser required. **When the SSH
+session drops mid-turn, the Host keeps the turn; reconnecting with the same
+command attaches back to it, so the session is not lost.**
 
 中文部署指南：[README.md](README.md)
 
 If you mostly work over SSH — a jump host, a test box, a keyboard-only
 session — start here. A local desktop terminal with themes and layout
 you already like can stay as it is.
+
+How this differs from what already exists:
+
+- **Official headless**: the same task prints only its last reply to stdout; the
+  rest stays in the session log.
+- **Official `dsh-ssh` (from 0.1.6)**: the Harness runs locally and files and
+  processes run remotely, which needs a helper installed ahead of time. Use this
+  plugin when you are already SSH'd onto the machine. The two stack; neither
+  replaces the other.
+- **Other terminal skins** (`dsh-TUI` and the like): a good-looking local
+  terminal, competing on themes and layout. This plugin competes on incremental
+  redraws over a slow link, a Host that survives the drop, and a plain line mode.
+
+How to get back in after a drop is under [After an SSH drop](#after-an-ssh-drop).
 
 A SuperGrok / X Premium subscription goes through the standalone plugin
 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth) (headless, web, or this TUI). It reuses a local grok-bridge token; no xAI API key.
@@ -69,8 +85,9 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 `docs/screenshots/slow-link.json`. This capture is 14 paints, about
 **18.0 KB**, **8.8 s** at 2 kB/s. Byte ledger for this event sequence.
 
-0.7 highlights: drag-select any part of a model reply to copy it (OSC 52 into your local
-clipboard; a tool card still expands on click) · the footer is one priority-ordered chip
+0.7 highlights: drag-select any part of a model reply to copy it (hold the button, or Shift;
+OSC 52 into your local clipboard; a tool card still expands on click; an SSH session copies
+into the local terminal and no longer warns that it cannot) · the footer is one priority-ordered chip
 strip, and `⚠` opens `/doctor` · the quota bar is on screen from the first frame and names
 its window (`5Hr`/`1Wk`/`1Mo`, smallest window by default, `?%` with a 15-second retry until
 a reading arrives) · `/mode` groups presets and filters with `/` · the compact view names
@@ -84,6 +101,8 @@ pins the palette (truecolor / 256 / 8 / none).
 - Node.js >= 22.19
 - `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (CI covers `0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.7-rc.1`: `0.1.5-rc.1` runs typecheck and the unit suite, the other two add the real-PTY probes. `0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` share the same handle API + `agent/assistant-stream` shims as the 0.1.5-rc line. **`0.1.2-rc` and older are no longer supported** — if the install is refused, upgrade to `0.1.5-rc` or `0.1.7-rc` first. `0.1.3-alpha.1` exists only as a GitHub tag and was never published to npm)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
+- an ANSI terminal (SSH directly, or PowerShell / Windows Terminal on Windows)
+- **Windows**: install, troubleshooting and how to read `/doctor` are in [docs/windows.md](docs/windows.md)
 
 ## Install
 
@@ -114,7 +133,7 @@ dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
 dsh --profile tui
 ```
 
-From a checkout: `bash scripts/smoke-headless.sh` (prints an outcome summary, never a token).
+From a checkout: `node scripts/smoke-headless.mjs` (or `bash scripts/smoke-headless.sh`; prints an outcome summary, never a token).
 
 ### After an SSH drop
 
@@ -155,8 +174,11 @@ New sessions inherit the directory you launched from. Resuming a session
 `目录:srv` (last path segment); click it to print the full path.
 
 On start, if npm has a newer `dsh-ssh-tui`, a first-launch picker offers
-**Update now / Later / Skip this version**. Update now runs
-`dsh plugin --profile tui add dsh-ssh-tui@latest` and asks you to restart.
+**Update now / Later / Skip this version**. Update now installs the exact
+version just looked up (`dsh plugin --profile tui add dsh-ssh-tui@<version>`),
+not `@latest`: pnpm resolves `@latest` a second time, and a release still inside
+its `minimumReleaseAge` window is then skipped silently — the install succeeds
+and you are left on the old one. It asks you to restart afterwards.
 Set `DSH_TUI_NO_UPDATE_CHECK=1` to skip. `/status` also shows the plugin version, the link chip, the quota window, and whether the subagent model is in the same family as the parent route.
 
 From git:
@@ -164,8 +186,11 @@ From git:
 ```sh
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
 cd dsh-ssh-tui
-bash scripts/install.sh          # installs into the `tui` profile
+node scripts/install.mjs          # installs into the `tui` profile
 ```
+
+`bash scripts/install.sh` is a thin wrapper around that script, so it does the
+same thing where bash exists. On Windows run the Node form — there is no bash.
 
 Or manually:
 
@@ -173,6 +198,14 @@ Or manually:
 npm install --no-audit --no-fund
 npm run build
 dsh plugin --profile tui add "link:$(pwd)"
+```
+
+The PowerShell equivalent, since `$(pwd)` is a POSIX substitution:
+
+```powershell
+npm install --no-audit --no-fund
+npm run build
+dsh plugin --profile tui add "link:$((Get-Location).Path)"
 ```
 
 ### The preset roster `/mode` needs
@@ -191,8 +224,8 @@ Three ways to repair it (idempotent, pick one):
 1. **In-app**: `/mode fix` writes the block below and tells you to restart.
    This is the generic path — an npm install and the in-app "Update now" both go
    through `dsh plugin add` and never run the repository scripts.
-2. From a checkout: `bash scripts/ensure-profile-rows.sh [profile]`
-   (default `tui`).
+2. From a checkout: `node scripts/profile-rows.mjs [profile]`
+   (default `tui`; `bash scripts/ensure-profile-rows.sh` is the same command).
 3. By hand, in `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
 
 ```yaml
@@ -213,7 +246,7 @@ this block lists the roster row twice, and the second mount fails with
 
 Without the row, the TUI prints a boot line ("No agent-preset roster is
 composed…"), `/mode` reports the patch path plus the `/mode fix` entry point,
-and `scripts/verify.sh` says the same. Preset identity is per module instance,
+and `node scripts/verify.mjs` (`scripts/verify.sh`) says the same. Preset identity is per module instance,
 so a dsh install tree carrying two copies of `@deepseek-ai/dsh-scope` (an
 npm-nested checkout can) fails the mount with `refusing to compose an unscoped
 context`; a global `npm i -g` install is not affected.
@@ -221,7 +254,7 @@ context`; a global `npm i -g` install is not affected.
 For the optional **智能路由模式 (routing-suite)** mode, also run:
 
 ```sh
-bash scripts/install-routing-suite.sh
+node scripts/install-routing-suite.mjs
 ```
 
 The script adds `dsh-routing-suite`, registers its preset for the `/mode`
@@ -238,8 +271,8 @@ dsh --profile tui
 Verify and uninstall:
 
 ```sh
-bash scripts/verify.sh
-bash scripts/uninstall.sh
+node scripts/verify.mjs
+node scripts/uninstall.mjs
 ```
 
 ## First-launch setup
@@ -639,13 +672,16 @@ Find your symptom; each answer is what to do, not a change log.
 
 - **`dsh-ssh-tui: both stdin and stdout must be TTYs`** — start it from a real terminal or
   SSH session; a pipe, CI, or `&` background job will not do.
+- **Windows install, the scripts, and how to read `/doctor`** — [docs/windows.md](docs/windows.md)
+  has a 30-second install, a "what to check first when it will not start" table, and what the
+  `●` / `⚠` / `✖` marks in a `/doctor` report mean.
 - **Windows: `host display socket did not appear`** — upgrade
   (`dsh plugin --profile tui add dsh-ssh-tui@latest`); older builds waited 15 seconds and
   timed out on the named pipe. If it still fails, attach `/diag` to an issue.
 - **Windows: the in-app update reports `spawn dsh ENOENT`** — an older updater spawned a
-  bare `dsh`, which on Windows is a `dsh.cmd` shim. Run the same upgrade once from the
-  command line (`dsh plugin --profile tui add dsh-ssh-tui@latest`); the in-app update works
-  from then on.
+  bare `dsh`, which on Windows is a `dsh.cmd` shim. Run
+  `dsh plugin --profile tui add dsh-ssh-tui@latest` once from the command line; the in-app
+  update works from then on, and it installs the version it looked up rather than `@latest`.
 - **pnpm refuses to run the build script of a git dependency** — add the key pnpm prints to
   `allowBuilds` in the profile's `pnpm-workspace.yaml`, then reinstall.
 - **After an upgrade `/mode` reports a missing service, or the preset tools vanish** — run
@@ -695,6 +731,10 @@ Find your symptom; each answer is what to do, not a change log.
 - **Whole-row backgrounds are too loud on a dark terminal** — `DSH_TUI_COLOR_DEPTH=none`
   drops them; diffs still read through `+`/`-`.
 
+- **Box drawing and dots render as garbage** — the console code page is not UTF-8. The UI
+  redraws its chrome in ASCII automatically (rules as `-`, status dots as `*`, the warning as
+  `!`) and `/diag` says so on its terminal line; `chcp 65001` or Windows Terminal restores the
+  glyphs. `DSH_TUI_ASCII=1` forces ASCII, `=0` forces Unicode. See [docs/windows.md](docs/windows.md).
 - **Terminal compatibility** — what each terminal is allowed and promised (Windows Terminal,
   conhost, GNOME, XFCE, Konsole, xterm, tmux, screen, the Linux console) is tabulated in
   [docs/terminals.md](docs/terminals.md); `/diag` prints the verdict it used, and

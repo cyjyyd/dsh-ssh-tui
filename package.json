@@ -59,7 +59,8 @@
     "docs/screenshots/workspace.png",
     "docs/screenshots/slow-link.gif",
     "LICENSE",
-    "docs/terminals.md"
+    "docs/terminals.md",
+    "docs/windows.md"
   ],
   "license": "MIT",
   "dsh": {
@@ -92,10 +93,10 @@
     "prepare": "npm run build",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck",
-    "install:dsh": "bash scripts/install.sh",
-    "install:npm": "bash scripts/install-npm.sh",
-    "uninstall:dsh": "bash scripts/uninstall.sh",
-    "verify:dsh": "bash scripts/verify.sh",
+    "install:dsh": "node scripts/install.mjs",
+    "install:npm": "node scripts/install-npm.mjs",
+    "uninstall:dsh": "node scripts/uninstall.mjs",
+    "verify:dsh": "node scripts/verify.mjs",
     "probe:home": "node scripts/probe-home.mjs --probe",
     "probe:home:drop": "node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs",
     "screenshots": "npm run build && node scripts/capture-readme-frames.mjs",

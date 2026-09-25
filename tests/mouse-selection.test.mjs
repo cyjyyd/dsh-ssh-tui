@@ -100,6 +100,26 @@ test('a drag on a reply spans its wrapped lines, and stops at the reply', () => 
   assert.equal(tui.copyYank.includes('NOT-COPYABLE'), false, 'but never reaches a non-reply row')
 })
 
+test('holding Shift while dragging still copies, it does not fall through', () => {
+  // SGR adds 4 to the button code while Shift is held: 4 is the press, 36 the
+  // motion. A terminal that forwards those instead of keeping them for its own
+  // selection used to have the gesture ignored entirely, so the fallback the
+  // copy hint recommends did nothing. It has to select exactly like button 0.
+  const tui = fixture()
+  tui.rows.push({ kind: 'assistant', text: '先跑 npm test 再提交' })
+  const start = locate(tui, 'npm test')
+  const end = locate(tui, '提交')
+
+  tui.handleData(Buffer.from(press(4, start.startColumn, start.row)))
+  tui.handleData(Buffer.from(press(36, end.endColumn, end.row)))
+  assert.ok(
+    tui.captureFrame(100, 30).join('\n').includes('\x1b[7m'),
+    'the shifted drag is highlighted while it is being made',
+  )
+  tui.handleData(Buffer.from(release(4, end.endColumn, end.row)))
+  assert.equal(tui.copyYank, 'npm test 再提交', 'Shift+drag copies the same text as a plain drag')
+})
+
 test('a press that never moves is still a click', () => {
   const tui = fixture()
   tui.rows.push({

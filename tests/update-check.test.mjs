@@ -24,16 +24,22 @@ test('compareSemver orders dotted versions', () => {
   assert.equal(compareSemver('0.4.0', '0.3.9') > 0, true)
 })
 
-test('pluginUpgradeCommand pins @latest so pnpm does not keep a lockfile version', () => {
+test('pluginUpgradeCommand pins the resolved version, not the dist-tag', () => {
+  // The number the registry just returned, so pnpm installs that release instead
+  // of resolving `latest` again — a second resolution is what minimumReleaseAge
+  // quietly turns into yesterday's version.
+  assert.equal(pluginUpgradeCommand('tui', '0.7.3'), 'dsh plugin --profile tui add dsh-ssh-tui@0.7.3')
   assert.equal(pluginUpgradeCommand('tui'), 'dsh plugin --profile tui add dsh-ssh-tui@latest')
+  assert.equal(pluginUpgradeCommand('tui', '  '), 'dsh plugin --profile tui add dsh-ssh-tui@latest')
   assert.equal(resolvePluginProfileName({ DSH_TUI_PROFILE: 'jump' }), 'jump')
 })
 
-test('formatUpdateNotice includes the @latest upgrade command', () => {
+test('formatUpdateNotice names the exact version in the command', () => {
   const text = formatUpdateNotice('0.3.7', '0.3.10', 'tui')
   assert.match(text, /0\.3\.10/)
   assert.match(text, /当前 0\.3\.7/)
-  assert.match(text, /dsh plugin --profile tui add dsh-ssh-tui@latest/)
+  assert.match(text, /dsh plugin --profile tui add dsh-ssh-tui@0\.3\.10/)
+  assert.doesNotMatch(text, /@latest/)
 })
 
 test('fetchLatestNpmVersion returns undefined on HTTP failure', async () => {
@@ -94,7 +100,7 @@ test('installPluginLatest spawns the resolved command and reports its exit', asy
     })
     return child
   }
-  const result = await installPluginLatest('tui', {
+  const result = await installPluginLatest('tui', '0.7.3', {
     invocation: { command: '/usr/bin/node', prefix: ['/dsh/bin.js'], shell: false },
     spawnFn,
   })
@@ -102,7 +108,7 @@ test('installPluginLatest spawns the resolved command and reports its exit', asy
   assert.match(result.output, /0\.7\.0/)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].command, '/usr/bin/node')
-  assert.deepEqual(calls[0].args, ['/dsh/bin.js', 'plugin', '--profile', 'tui', 'add', 'dsh-ssh-tui@latest'])
+  assert.deepEqual(calls[0].args, ['/dsh/bin.js', 'plugin', '--profile', 'tui', 'add', 'dsh-ssh-tui@0.7.3'])
   assert.equal(calls[0].options.shell, false)
   assert.equal(calls[0].options.windowsHide, true)
 
@@ -110,7 +116,7 @@ test('installPluginLatest spawns the resolved command and reports its exit', asy
   const broken = new EventEmitter()
   broken.stdout = new EventEmitter()
   broken.stderr = new EventEmitter()
-  const failed = await installPluginLatest('tui', {
+  const failed = await installPluginLatest('tui', '0.7.3', {
     invocation: { command: 'dsh', prefix: [], shell: true },
     spawnFn: () => {
       queueMicrotask(() => {
@@ -144,15 +150,15 @@ test('a profile with whitespace survives the shell fallback', async () => {
     queueMicrotask(() => child.emit('close', 0))
     return child
   }
-  await installPluginLatest('work space', {
+  await installPluginLatest('work space', '0.7.3', {
     invocation: { command: 'dsh', prefix: [], shell: true },
     spawnFn,
   })
-  assert.deepEqual(calls[0].args, ['plugin', '--profile', '"work space"', 'add', 'dsh-ssh-tui@latest'])
+  assert.deepEqual(calls[0].args, ['plugin', '--profile', '"work space"', 'add', 'dsh-ssh-tui@0.7.3'])
 
-  await installPluginLatest('work space', {
+  await installPluginLatest('work space', '0.7.3', {
     invocation: { command: '/usr/bin/node', prefix: ['/dsh/bin.js'], shell: false },
     spawnFn,
   })
-  assert.deepEqual(calls[1].args, ['/dsh/bin.js', 'plugin', '--profile', 'work space', 'add', 'dsh-ssh-tui@latest'])
+  assert.deepEqual(calls[1].args, ['/dsh/bin.js', 'plugin', '--profile', 'work space', 'add', 'dsh-ssh-tui@0.7.3'])
 })

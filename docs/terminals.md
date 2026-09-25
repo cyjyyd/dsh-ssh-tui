@@ -100,14 +100,20 @@ Windows 与 Linux 的差异只在**改键**文件里：`/keys` 写出的键名�
 - **旧版 Windows 控制台（无 VT 处理）**：Windows 10 之前的 conhost 不认这些转义序列，
   用 `DSH_TUI_NO_ALT_SCREEN=1` 或 `DSH_TUI_TERM_CAPS=no-alternateScreen,no-mouse` 退到最朴素模式。
 - **代码页不是 UTF-8 的 Windows 控制台**：框线与 emoji 会花。TUI 不改你的控制台代码页
-  （那是全局状态），请用 `chcp 65001` 或改用 Windows Terminal。
+  （那是全局状态），而是把界面骨架改画成 ASCII（横线 `-`、状态点 `*`、警告 `!`，判定见
+  `src/platform.ts` 的 `asciiFallbackEnabled`）。`/diag` 的「终端」一行会注明；
+  想要原字形用 `chcp 65001` 或改用 Windows Terminal。`DSH_TUI_ASCII=1` 强制 ASCII，`=0` 强制 Unicode。
 - **`/copy` 与拖选都依赖 OSC 52**：VTE 系（GNOME / XFCE / MATE / Tilix / Terminator）、conhost、screen、
-  Linux 控制台都不接收；Konsole 要 24.12+；xterm / tmux 需要自身配置。这些终端上 TUI 每会话提示一次，
-  并建议用 **Shift+拖选**——鼠标被 TUI 捕获时，Shift 是各家终端保留原生选择的方式。
+  Linux 控制台都不接收；Konsole 要 24.12+；xterm / tmux 需要自身配置。这些终端上 TUI 每会话提示一次。
+  **SSH 会话不提示**：能力表读的是远端 tty，而 OSC 52 写到的是你本机的终端，复制实际落到本机剪贴板，
+  再警告就是误报。提示里说的退路是终端自己的选择：按住 Shift 时多数终端不转发鼠标、留给原生选择；
+  少数终端照样转发，那种情况下 Shift+拖选 与直接拖选做同一件事（SGR 的按钮码带上 Shift 的 +4）。
 - **旧版 Windows 控制台的括号粘贴**：`?2004` 到 2022-11（Windows 11 22H2）才进 conhost，
   更早的 PowerShell/cmd 没有；粘贴仍然可用（多行 burst 会被当成一次粘贴），只是没有括号标记。
 - **tmux / screen 里的鼠标**：需要 tmux `set -g mouse on`、screen 亦然；TUI 会照发，转发与否由它们决定。
-- **不是 UTF-8 的 locale**：不做自动降级（本仓库没有 ASCII 回退渲染），见 `docs/platform.md` 的欠债清单。
+- **不是 UTF-8 的 locale**：自动改画 ASCII 骨架。`LC_ALL` / `LC_CTYPE` / `LANG` 写明了非 UTF-8
+  字符集（或裸 `C` / `POSIX`）即触发，与 Windows 代码页走同一条回退；没写字符集的 locale 不动，
+  因为一条 UTF-8 的 SSH 会话经常什么都不导出。中文翻译不会被替换成 ASCII——那种控制台请同时 `/language en`。
 - **`/diag` 的终端行来自 Host 的环境**：重新接入（reattach）后它描述的是 Host 启动时所处的终端。
   退出时的「离开备用屏」序列因此**无条件发出**——它落在没进过备用屏的终端上会被忽略，
   而漏发会把用户留在无法滚动的屏幕里。

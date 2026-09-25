@@ -44,6 +44,8 @@ export function copyTextFromRow(row: Row | CollapsibleBlock | undefined): string
       return clipCopy(row.logs.map(entry => entry.text).filter(text => text.trim() !== '').join('\n'))
     case 'compaction':
       return clipCopy([row.summary, row.error].filter(part => part !== undefined && part.trim() !== '').join('\n'))
+    case 'changes':
+      return clipCopy([row.header, ...row.files, row.more ?? ''].filter(part => part.trim() !== '').join('\n'))
     case 'streaming-reasoning':
       return ''
     default:

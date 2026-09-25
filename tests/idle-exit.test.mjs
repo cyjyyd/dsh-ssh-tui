@@ -238,6 +238,25 @@ test('every drop after a reattach is honored', async () => {
   }
 })
 
+test('a question still waiting keeps the leftover Host', async () => {
+  const restore = setEnv('DSH_TUI_IDLE_EXIT_MS', '5')
+  const host = makeTui()
+  try {
+    await host.tui.handleHangup()
+    host.agent.status = 'idle'
+    // The turn settled, but a question it asked is unanswered. The Host is the
+    // only thing holding that question, so the idle exit must not take it.
+    host.tui.queuedQuestions = 1
+    host.tui.handleStatus({ agent: host.agent, status: 'idle' })
+    await settle(80)
+    assert.deepEqual(host.exits, [], 'the Host stays while the question waits')
+    assert.equal(host.tui.exiting, false)
+  } finally {
+    restore()
+    await host.tui.dispose()
+  }
+})
+
 test('DSH_TUI_IDLE_EXIT_MS=0 keeps a leftover Host for the legacy six hours', async () => {
   const restore = setEnv('DSH_TUI_IDLE_EXIT_MS', '0')
   const host = makeTui()

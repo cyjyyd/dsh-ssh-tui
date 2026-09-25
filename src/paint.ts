@@ -8,6 +8,7 @@
 import { t } from './i18n/index.js'
 import { lineModeEnabled } from './line-mode.js'
 import { terminalCapabilities } from './terminal-caps.js'
+import { mapAsciiChrome } from './term-text.js'
 import { padAnsiToWidth, pinEmojiCells, truncateToWidth } from './term-text.js'
 import { detectSshSession, RTT_SAMPLE_TIMEOUT_MS, TerminalInputPump } from './terminal-input.js'
 
@@ -479,7 +480,8 @@ export function writeBootSplash(message: string, color = true): void {
   // the user navigates with.
   const useAlt = terminalCapabilities().alternateScreen
   try {
-    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${'─'.repeat(width)}\n${pinEmojiCells(detail)}\n`)
+    const rule = mapAsciiChrome('─').repeat(width)
+    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${rule}\n${pinEmojiCells(detail)}\n`)
   } catch {
     // TTY may already be gone.
   }

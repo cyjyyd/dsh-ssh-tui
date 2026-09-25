@@ -1,7 +1,10 @@
 /**
  * Best-effort npm latest check. Failures stay quiet. The TUI may offer to
- * run `dsh plugin --profile <name> add dsh-ssh-tui@latest` — pnpm otherwise
- * keeps the lockfile pin (e.g. 0.3.7) when the spec is a bare package name.
+ * install the version it just read, by number: `dsh plugin --profile <name>
+ * add dsh-ssh-tui@<version>`. A bare package name lets pnpm keep the lockfile
+ * pin (e.g. 0.3.7), and `@latest` is resolved a second time at install — under
+ * pnpm's `minimumReleaseAge` that second lookup can quietly land on yesterday's
+ * release while still exiting 0.
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -33,12 +36,25 @@ export function resolvePluginProfileName(env: NodeJS.ProcessEnv = process.env): 
   return 'tui'
 }
 
-export function pluginUpgradeCommand(profile = resolvePluginProfileName()): string {
-  return `dsh plugin --profile ${profile} add ${PLUGIN_PACKAGE}@latest`
+/**
+ * The install command for one already-resolved version.
+ *
+ * The version is the number `checkForPluginUpdate` read from the registry, not
+ * the `latest` dist-tag: handing pnpm the tag makes it resolve the release a
+ * second time, and a release younger than `minimumReleaseAge` is then skipped
+ * without an error. A caller with no resolved version passes `@latest`, which
+ * is still better than a bare name.
+ * @param profile - the profile the plugin is installed into.
+ * @param version - the exact version to install.
+ * @returns the command, safe to show the user and to run.
+ */
+export function pluginUpgradeCommand(profile = resolvePluginProfileName(), version = 'latest'): string {
+  const spec = version.trim() === '' ? 'latest' : version.trim()
+  return `dsh plugin --profile ${profile} add ${PLUGIN_PACKAGE}@${spec}`
 }
 
 export function formatUpdateNotice(current: string, latest: string, profile = resolvePluginProfileName()): string {
-  return t('update.notice', { latest, current, command: pluginUpgradeCommand(profile) })
+  return t('update.notice', { latest, current, command: pluginUpgradeCommand(profile, latest) })
 }
 
 export async function fetchLatestNpmVersion(
@@ -77,7 +93,7 @@ export async function checkForPluginUpdate(current: string): Promise<PluginUpdat
     current,
     latest,
     profile,
-    command: pluginUpgradeCommand(profile),
+    command: pluginUpgradeCommand(profile, latest),
     notice: formatUpdateNotice(current, latest, profile),
   }
 }
@@ -131,6 +147,7 @@ export function shellSafeProfile(profile: string): string {
 
 export async function installPluginLatest(
   profile = resolvePluginProfileName(),
+  version = 'latest',
   deps: { invocation?: DshInvocation; spawnFn?: typeof spawn } = {},
 ): Promise<{
   ok: boolean
@@ -139,10 +156,11 @@ export async function installPluginLatest(
   const invocation = deps.invocation ?? resolveDshInvocation()
   const spawnFn = deps.spawnFn ?? spawn
   const profileArg = invocation.shell ? shellSafeProfile(profile) : profile
+  const spec = version.trim() === '' ? 'latest' : version.trim()
   return await new Promise(resolve => {
     const child = spawnFn(
       invocation.command,
-      [...invocation.prefix, 'plugin', '--profile', profileArg, 'add', `${PLUGIN_PACKAGE}@latest`],
+      [...invocation.prefix, 'plugin', '--profile', profileArg, 'add', `${PLUGIN_PACKAGE}@${spec}`],
       {
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],

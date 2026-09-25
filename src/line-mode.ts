@@ -68,6 +68,10 @@ export function lineModeLines(row: Row): string[] {
       return split([row.summary, row.error ?? ''].filter(part => part !== '').join('\n'))
     case 'goal':
       return [row.objective, ...(row.blockedReason === undefined ? [] : [row.blockedReason])]
+    case 'changes':
+      // One line, like every other card here: the header already carries the
+      // counts, and the per-file lines would bury the next event.
+      return [row.header]
     default:
       return split(row.text)
   }

@@ -7,8 +7,8 @@
  * STORE accepts additive rows with plugin-owned ids and no `@deepseek-ai/*`
  * module names. The profile's user layer is the supported home for the row, so
  * both the install script and the running TUI write the same block here — the
- * TUI needs it because `dsh plugin add dsh-ssh-tui@latest` (the in-app update
- * path) never runs `scripts/`, which npm installs do not ship.
+ * TUI needs it because the in-app update (`dsh plugin add`, at whatever version)
+ * never runs `scripts/`, which npm installs do not ship.
  *
  * The roster is not cosmetic: without it `/mode` cannot switch, and the tools
  * the shipped presets own (`ask_user_question`, `present`, PTC's presentation)

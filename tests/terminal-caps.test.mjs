@@ -5,6 +5,7 @@ import {
   bracketedPasteSequence, detectTerminalFamily, mouseDisableSequence, mouseEnableSequence,
   parseCapsOverride, parseCapsOverrideReport, terminalCapabilities,
 } from '../lib/terminal-caps.js'
+import { asciiFallbackEnabled } from '../lib/platform.js'
 
 /**
  * One fixture per terminal a user actually has in front of them.
@@ -270,6 +271,42 @@ test('the clipboard caveat follows the capability, and an override silences it',
     const platform = env === WINDOWS_TERMINAL ? 'win32' : 'linux'
     assert.equal(caps(env, platform).osc52, true, 'the flag can be turned on deliberately')
   }
+})
+
+test('ASCII chrome is the fallback for a console that cannot decode UTF-8', () => {
+  // A UTF-8 SSH session is the audience, and it often exports no locale at all,
+  // so "unset" must stay on the Unicode chrome.
+  assert.equal(asciiFallbackEnabled({}, 'linux'), false)
+  assert.equal(asciiFallbackEnabled({ LANG: 'zh_CN.UTF-8' }, 'linux'), false)
+  assert.equal(asciiFallbackEnabled({ LANG: 'C.UTF-8' }, 'linux'), false)
+  // A locale that names another charset, and the bare C/POSIX locales, cannot
+  // decode the box drawing, so the chrome has to be ASCII there.
+  assert.equal(asciiFallbackEnabled({ LANG: 'zh_CN.GBK' }, 'linux'), true)
+  assert.equal(asciiFallbackEnabled({ LANG: 'en_US.ISO8859-1' }, 'linux'), true)
+  assert.equal(asciiFallbackEnabled({ LC_ALL: 'C' }, 'linux'), true)
+  assert.equal(asciiFallbackEnabled({ LC_ALL: 'POSIX' }, 'linux'), true)
+  // LC_ALL outranks the others, the way a libc reads them; LC_MESSAGES picks the
+  // translation, not the encoding, so it never decides this.
+  assert.equal(asciiFallbackEnabled({ LC_ALL: 'C', LANG: 'zh_CN.UTF-8' }, 'linux'), true)
+  assert.equal(asciiFallbackEnabled({ LC_MESSAGES: 'zh_CN.GBK', LANG: 'zh_CN.UTF-8' }, 'linux'), false)
+  // The user's own switch wins over every guess.
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_ASCII: '1', LANG: 'zh_CN.UTF-8' }, 'linux'), true)
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_ASCII: '0', LANG: 'C' }, 'linux'), false)
+})
+
+test('a legacy Windows code page opts into the ASCII fallback, 65001 does not', () => {
+  // Node exposes no GetConsoleOutputCP, so the decision reads the code page a
+  // launcher recorded. 65001 is UTF-8; CP936 is what a Chinese conhost ships on.
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_CODEPAGE: '936' }, 'win32'), true)
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_CODEPAGE: '437' }, 'win32'), true)
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_CODEPAGE: '65001' }, 'win32'), false)
+  assert.equal(asciiFallbackEnabled({ PYTHONIOENCODING: 'cp936' }, 'win32'), true)
+  assert.equal(asciiFallbackEnabled({ PYTHONIOENCODING: 'utf-8' }, 'win32'), false)
+  // The same variables mean nothing off Windows: a POSIX box has no code page.
+  assert.equal(asciiFallbackEnabled({ DSH_TUI_CODEPAGE: '936' }, 'linux'), false)
+  // And a Windows console that recorded nothing is left on Unicode chrome,
+  // because Windows Terminal and a `chcp 65001` session both look like that.
+  assert.equal(asciiFallbackEnabled({}, 'win32'), false)
 })
 
 test('a mouse without SGR is no mouse, because the parser reads SGR only', () => {
