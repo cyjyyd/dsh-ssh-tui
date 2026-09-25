@@ -84,8 +84,30 @@ test('a glyph wider than the terminal is clipped, not allowed to overflow', () =
   assert.notEqual(fitFooterChips([chip('h', '⚠ 名单缺席（/doctor）', '⚠', 0)], 1), '')
 })
 
+/**
+ * A throwaway home whose profile patch declares none of this line's rows, so the
+ * strip's health warning is a fact of the fixture rather than of the machine the
+ * test runs on.
+ */
+async function missingRowsHome(t) {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-footer-missing-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(async () => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  })
+  const dir = join(home, 'profiles', profileFromArgv())
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'cordis.patch.yml'), WEB_ROW_ONLY)
+  return home
+}
+
 /** A TUI whose roster service is missing (the default) or present. */
-async function footerTui({ presets, color = false, provider = '', model = '', settings } = {}) {
+async function footerTui({ presets, color = false, provider = '', model = '', settings, home } = {}) {
+  const previous = home === undefined ? undefined : process.env.DSH_HOME
+  if (home !== undefined) process.env.DSH_HOME = home
   const { SshTui } = await import('../lib/tui.js')
   const ctx = {
     get: name => (name === 'agentPresets' ? presets : name === 'settings' ? settings : undefined),
@@ -98,8 +120,14 @@ async function footerTui({ presets, color = false, provider = '', model = '', se
     session: { id: 'main-session', events: [] },
     cancel() {},
   }
-  return new SshTui(ctx, agent, { sessionId: 'main-session', color, headlessDisplay: true })
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color, headlessDisplay: true })
+  if (home !== undefined && previous === undefined) delete process.env.DSH_HOME
+  else if (home !== undefined) process.env.DSH_HOME = previous
+  return tui
 }
+
+/** A profile patch that mounts a host row but none of this line's agent rows. */
+const WEB_ROW_ONLY = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-host-webserver'\n"
 
 /**
  * The strip row carrying the health warning.
@@ -110,8 +138,13 @@ async function footerTui({ presets, color = false, provider = '', model = '', se
  */
 const warningRowOf = (tui, width = 40) => tui.captureFrame(width, 24).map(stripAnsi).find(line => line.includes('⚠'))
 
-test('a missing roster puts the health chip on the strip, and clicking it opens /doctor', async () => {
-  const tui = await footerTui()
+test('a missing roster puts the health chip on the strip, and clicking it opens /doctor', async t => {
+  // Pinned to an empty home: without one the ambient `$DSH_HOME` decides whether
+  // rows are missing, so this passed on a runner with no profile and failed on a
+  // developer's machine whose profile is healthy — the chip is *supposed* to be
+  // absent there. `missingRowsHome` writes a patch that declares nothing.
+  const home = await missingRowsHome(t)
+  const tui = await footerTui({ home })
   const frame = tui.captureFrame(40, 24)
   const rowIndex = frame.findIndex(line => stripAnsi(line).includes('⚠')) + 1
   assert.ok(rowIndex > 0, `the strip carries the warning:\n${frame.map(stripAnsi).join('\n')}`)
@@ -447,8 +480,8 @@ test('the strip is muted like the identity line, accents excepted', async () => 
   assert.ok(identity.includes('\x1b[90m'), 'the identity line is muted too')
 })
 
-test('narrowing keeps the warning and drops the counter text', async () => {
-  const tui = await footerTui()
+test('narrowing keeps the warning and drops the counter text', async t => {
+  const tui = await footerTui({ home: await missingRowsHome(t) })
   // Give the strip a counter group to lose.
   tui.rows.push({ kind: 'assistant', text: 'x' })
   const wide = warningRowOf(tui, 80) ?? ''

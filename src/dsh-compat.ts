@@ -15,19 +15,58 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
 
+/**
+ * The source kind this plugin declares for the messages it commits itself: the
+ * plan-close nudge and the approval-denied steering notice.
+ *
+ * These used to ride the released catch-all wrapper —
+ * `<kind: 'plugin', plugin: 'dsh-ssh-tui'>` — which 0.1.5 shipped as a member and
+ * 0.1.7 deleted ("each producer declares its own `kind` in its own module; there
+ * is no shared catch-all `plugin` kind"). Worse than missing on 0.1.7: its V4
+ * native admission *refuses* the wrapper outright, so an append under that
+ * spelling throws "format v4 message requires a producer-owned source kind" and
+ * takes the whole turn down with it — which is what the plan nudge and the
+ * approval-denied notice did to any turn they fired in on a V4 session.
+ *
+ * The producer-owned spelling is the one shape both supported lines admit: the
+ * wrapper was only ever mandatory for `system/message` (`SystemMessage['source']`
+ * is the `plugin` member on 0.1.5), while user-role messages have always carried
+ * a producer's own kind — the 0.1.5 line's own `goal`, `webhook`, and
+ * `agent-instructions` producers all commit `kind: '<their name>'`.
+ */
+export const TUI_SOURCE_KIND = 'dsh-ssh-tui'
+
 declare module '@deepseek-ai/dsh-llm' {
-  /**
-   * The TUI's own notice/steering messages, which it commits to the durable log
-   * with `source.kind === 'plugin'`.
-   *
-   * 0.1.5 shipped this member; 0.1.7 removed the catch-all and documents the
-   * intended pattern instead — "each producer declares its own `kind` in its
-   * own module". This is that declaration, and it keeps the committed log shape
-   * identical on both lines.
-   */
   interface MessageSourceMap {
-    plugin: { kind: 'plugin'; plugin: string } & ContextFormed
+    'dsh-ssh-tui': { kind: 'dsh-ssh-tui' } & ContextFormed
   }
+}
+
+/**
+ * The kind the V3-to-V4 lane gives the same messages in a converted log.
+ *
+ * The conversion lifts a released plugin wrapper to the producer's kind when it
+ * knows the plugin, and falls back to `plugin:<name>` when it does not — which is
+ * this plugin's case, so a resumed V3 session carries the prefixed spelling.
+ */
+export const TUI_CONVERTED_SOURCE_KIND = `plugin:${TUI_SOURCE_KIND}`
+
+/**
+ * Whether a durable message source came from this plugin.
+ *
+ * Three spellings reach a reader: the producer-owned kind written now, the
+ * `plugin:`-prefixed compatibility kind the V3-to-V4 conversion assigns, and the
+ * original wrapper (`kind: 'plugin'` + `plugin: 'dsh-ssh-tui'`) that a log
+ * committed before this change — or an unconverted V3 file read on the 0.1.5
+ * line — still carries.
+ *
+ * @param kind - the source's `kind`, when it has one.
+ * @param plugin - the source's legacy `plugin` field, when it carries the wrapper.
+ * @returns whether this plugin produced the message.
+ */
+export function isTuiMessageSource(kind: unknown, plugin?: unknown): boolean {
+  if (kind === TUI_SOURCE_KIND || kind === TUI_CONVERTED_SOURCE_KIND) return true
+  return kind === 'plugin' && plugin === TUI_SOURCE_KIND
 }
 
 /**

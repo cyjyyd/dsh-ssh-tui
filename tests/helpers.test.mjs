@@ -4033,7 +4033,11 @@ test('turn/end marks leftover todos as display-stale and asks once to close them
   assert.equal(followups.length, 1)
   assert.ok(String(followups[0].content[0].text).includes('todo_write'))
   assert.ok(String(followups[0].content[0].text).includes('pin the dock'))
-  assert.equal(followups[0].source.kind, 'plugin')
+  // Producer-owned, not the released catch-all: a V4 session refuses
+  // `kind: 'plugin'` with "format v4 message requires a producer-owned source
+  // kind", so the commit above would have failed the whole turn.
+  assert.equal(followups[0].source.kind, 'dsh-ssh-tui')
+  assert.equal(followups[0].source.plugin, undefined)
   assert.equal(followups[0].source.form, 'notice')
   assert.ok(String(followups[0].source.summary).includes('补一次待办'))
   assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('补一次待办')))
@@ -4321,6 +4325,14 @@ test('promptInjectionSources joins system preset and instruction files', () => {
   assert.equal(promptInjectionTitle(['系统预设', 'AGENTS.MD']), '提示词注入:系统预设 AGENTS.MD')
   assert.equal(isPromptInjectionMessage('plugin', 'hello', 'agent-instructions'), true)
   assert.equal(isPromptInjectionMessage('user', 'hello'), false)
+  // This plugin's own three spellings are injected content, never a human turn:
+  // the producer-owned kind it commits now, the compatibility kind the
+  // V3-to-V4 lane assigns, and the released wrapper an older log carries.
+  assert.equal(isPromptInjectionMessage('dsh-ssh-tui', 'hello'), true)
+  assert.equal(isPromptInjectionMessage('plugin:dsh-ssh-tui', 'hello'), true)
+  assert.equal(isPromptInjectionMessage('plugin', 'hello', 'dsh-ssh-tui'), true)
+  // …while another plugin's wrapper is not this plugin's own.
+  assert.equal(isPromptInjectionMessage('user', 'hello', 'dsh-ssh-tui'), false)
 })
 
 test('injected system reminders become a collapsed 提示词注入 card', () => {
@@ -4345,6 +4357,32 @@ test('injected system reminders become a collapsed 提示词注入 card', () => 
   assert.ok(frame.some(line => line.includes('提示词注入:系统预设 AGENTS.MD')))
   assert.equal(frame.some(line => line.includes('(context)')), false)
   assert.equal(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('powered by DeepSeek')), false)
+})
+
+/**
+ * `kind` is per-producer on 0.1.7 — there is no catch-all `plugin` kind left —
+ * so both content branches follow `form`, the ContextFormed discriminator every
+ * producer shares. Keyed on the released kind instead, another producer's
+ * snapshot fell to the raw-context row and lost its own rendering.
+ */
+test('a snapshot folds as a context row whichever kind produced it', () => {
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+  for (const kind of ['time-context', 'plugin']) {
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.handleSessionEvent(agent.session, {
+      type: 'user/message',
+      data: {
+        content: [{ type: 'text', text: 'Current time: 2026-09-25T15:33Z' }],
+        source: { kind, form: 'snapshot', sections: [] },
+      },
+    })
+    assert.equal(
+      tui.rows.some(row => row.kind === 'system' && row.text === 'Current time: 2026-09-25T15:33Z'),
+      true,
+      `${kind} snapshot renders as its own row`,
+    )
+  }
 })
 
 test('goal cards stay collapsed and report the current phase', () => {

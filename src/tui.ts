@@ -47,6 +47,7 @@ import {
   streamFrameAttemptId,
   streamFrameOwner,
   toolResultFailed,
+  TUI_SOURCE_KIND,
   type SettingsGeneration,
   type StreamChunkLike,
 } from './dsh-compat.js'
@@ -2478,7 +2479,8 @@ export class SshTui {
   /** `/fix <row>`: repair one named roster row of the profile patch. */
   private async runFixCommand(arg: string): Promise<void> {
     const name = arg.trim().toLowerCase()
-    const row = ALL_ROSTER_ROWS.find(candidate => candidate.id === name || candidate.name.toLowerCase() === name)
+    const row = ALL_ROSTER_ROWS.find(candidate =>
+      candidate.id === name || (candidate.name ?? '').toLowerCase() === name)
     if (row === undefined) {
       this.pushRow({
         kind: 'error',
@@ -3177,7 +3179,7 @@ export class SshTui {
     // instruction that used to paint as `❯ …`.
     const message = createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'dsh-ssh-tui', form: 'notice', summary: queued },
+      source: { kind: TUI_SOURCE_KIND, form: 'notice', summary: queued },
     })
     try {
       this.agent.followup(message)
@@ -5418,7 +5420,7 @@ export class SshTui {
           if (sourceKind === 'user') {
             this.pushRow({ kind: 'user', text: `❯ ${text}` })
             if (!this.replaying) this.beginWait()
-          } else if (sourceKind === 'plugin' && source.form === 'notice') {
+          } else if (source.form === 'notice') {
             const summary = source.summary?.trim() ?? ''
             // Body stays off the workspace (the model still received it).
             const last = this.rows.at(-1)
@@ -5431,10 +5433,15 @@ export class SshTui {
               if (resumed !== undefined) resumed.nudged = true
             }
             if (!this.replaying) this.beginWait()
+          } else if (source.form === 'snapshot') {
+            // `form` is the ContextFormed discriminator every producer shares,
+            // while `kind` is now per-producer (0.1.7 has no catch-all), so the
+            // two content branches above key on the form: keying them on the
+            // released `plugin` kind dropped a `time-context` snapshot — and
+            // this plugin's own notices — into the raw-context row below.
+            this.pushRow({ kind: 'system', text: text })
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
-          } else if (sourceKind === 'plugin' && source.form === 'snapshot') {
-            this.pushRow({ kind: 'system', text: text })
           } else {
             this.pushRow({ kind: 'system', text: t('prompt.contextPrefix', { text }) })
           }
@@ -6785,7 +6792,7 @@ export class SshTui {
           ...(request.reason === undefined || request.reason.trim() === '' ? {} : { reason: request.reason }),
           ...(this.hostSandboxMode === undefined || this.hostSandboxMode.trim() === '' ? {} : { sandboxMode: this.hostSandboxMode }),
         }) }],
-        source: { kind: 'plugin', plugin: 'dsh-ssh-tui' },
+        source: { kind: TUI_SOURCE_KIND },
       })],
       system: reviewSystemPrompt(getLocale()),
       maxTokens: 400,
@@ -6871,13 +6878,17 @@ export class SshTui {
    * `the user rejected tool "bash"`. Steer a plugin notice with the real
    * classifier/reviewer reason. Summary matches the workspace decision row
    * so the handler does not paint the body twice.
+   *
+   * This notice is committed to the session, so it is exactly the injection a
+   * V4 log refuses when it wears the released `plugin` wrapper — see
+   * {@link TUI_SOURCE_KIND}.
    */
   private tellModelApprovalDenied(command: string, reason: string, summary: string): void {
     if (this.replaying || this.agentGone) return
     const text = t('approval.modelDenied', { command, reason })
     const message = createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'dsh-ssh-tui', form: 'notice', summary },
+      source: { kind: TUI_SOURCE_KIND, form: 'notice', summary },
     })
     try {
       if (this.agent.status === 'running') this.agent.steer(message)

@@ -63,22 +63,20 @@ export const ROSTER_BLOCK = `# dsh-ssh-tui /mode: the agent-preset roster (stand
 
 /**
  * The 0.1.7 counterpart: that line composes the agent process-wide (presets are
- * a per-session Web feature), and `dsh-base` carries every row the standard
- * preset needs except these three. Mirrors `FORMS_PATCH_BLOCK` in
- * `src/preset-rows.ts`; the same test pins them together.
+ * a per-session Web feature), so a terminal profile mounts the two tools the
+ * standard preset declares. The persona is deliberately not mounted:
+ * `@deepseek-ai/dsh-persona` registers prompt sections `dsh-system-prompt`
+ * already owns at this layer, which the loader rejects, so such an entry would
+ * never activate. Mirrors `FORMS_PATCH_BLOCK` in `src/preset-rows.ts`; the same
+ * test pins them together.
  */
 export const FORMS_BLOCK = `# dsh-ssh-tui: the agent-plane rows a 0.1.7 terminal profile mounts for itself.
 # That line composes the agent process-wide (presets are a per-session Web
-# feature now), and dsh-base already carries every row the standard preset
-# needs except these three: the persona prompt and the ask_user_question /
-# present tools. The profile's user layer owns them.
+# feature now), and dsh-base already carries the rest of what the standard
+# preset declares: dsh-system-prompt owns the persona sections at this layer, so
+# only the two tools are left to mount. @deepseek-ai/dsh-persona is deliberately
+# absent — mounting it here collides with those sections and never activates.
 - insert:
-    - id: persona
-      name: '@deepseek-ai/dsh-persona'
-      config:
-        suffix: Your working directory is {{cwd}}.
-        prefix: You are a coding agent powered by the {{model}} model.
-
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'
 
@@ -87,7 +85,7 @@ export const FORMS_BLOCK = `# dsh-ssh-tui: the agent-plane rows a 0.1.7 terminal
 `
 
 /** The row whose presence means this host line's rows are already mounted. */
-const MARKER = { legacy: ROSTER_MODULE, forms: '@deepseek-ai/dsh-persona' }
+const MARKER = { legacy: ROSTER_MODULE, forms: '@deepseek-ai/dsh-tool-present' }
 
 /** The modules whose presence in the composition means "nothing to mount". */
 const COMPOSED = { legacy: ROSTER_MODULE, forms: '@deepseek-ai/dsh-agent-preset-registry' }

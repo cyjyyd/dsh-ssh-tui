@@ -3,6 +3,7 @@
  */
 
 import { t } from './i18n/index.js'
+import { isTuiMessageSource } from './dsh-compat.js'
 import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens, providerShortCode } from './footer.js'
 import { parseJsonArgs } from './json-args.js'
 import { subagentCourtesyName } from './job-label.js'
@@ -200,6 +201,10 @@ export function promptInjectionTitle(sources: readonly string[]): string {
 export function isPromptInjectionMessage(sourceKind: string, text: string, plugin?: string): boolean {
   if (sourceKind === 'user') return false
   if (sourceKind === 'plugin') return true
+  // This plugin's own notices carry a producer-owned kind now rather than the
+  // released wrapper (see `isTuiMessageSource`): injected content either way,
+  // never a human turn.
+  if (isTuiMessageSource(sourceKind, plugin)) return true
   return /<system-reminder\b/iu.test(text)
     || SYSTEM_PRESET_HINT.test(text)
     || promptInjectionSources(text, plugin).some(id => id !== SYSTEM_PRESET_LABEL())

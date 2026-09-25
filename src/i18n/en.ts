@@ -304,7 +304,7 @@ export const en: Record<string, string> = {
   'doctor.subagentSettings.ok': 'the subagent model-selection settings row is mounted',
   'doctor.subagentSettings.warn': 'the subagent model-selection settings row is missing: the subagent tool finds no host section',
   'doctor.subagentSettings.unknown': 'the patch does not parse, so the subagent settings row cannot be judged',
-  'doctor.forms.ok': 'the agent-plane rows are mounted: persona, ask_user_question and present are all there',
+  'doctor.forms.ok': 'the agent plane is ready: persona (the host default), ask_user_question and present are all there',
   'doctor.forms.warn': 'this host composes its agent process-wide, so the profile mounts these rows itself (/doctor --fix writes them)',
   'doctor.forms.unknown': 'the patch does not parse, so the agent-plane rows cannot be judged',
   'doctor.duplicates.ok': 'no row is mounted twice',

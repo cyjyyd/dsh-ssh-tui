@@ -11,13 +11,13 @@ import { FORMS_HOST } from './host-line.mjs'
 
 /** The rows `/mode fix` writes on this host line, and the ones it must not. */
 const ROSTER_MODULES = FORMS_HOST
-  ? ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  ? ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
   : ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
 const OTHER_LINE_MODULES = FORMS_HOST
   ? ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
-  : ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  : ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
 /** A row the repair lands, so the poll cannot read a half-written file. */
-const ROSTER_MARKER = FORMS_HOST ? /dsh-persona/u : /agent-presets/u
+const ROSTER_MARKER = FORMS_HOST ? /dsh-tool-present/u : /agent-presets/u
 
 const ROSTER = [
   { id: 'standard', trust: 'system', path: '/p/standard', name: '标准模式', isDefault: true },
@@ -100,6 +100,9 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     for (const name of ROSTER_MODULES) {
       assert.ok(written.includes(`name: '${name}'`), `${name} must be written\n${written}`)
     }
+    // The persona is never written on this line: the row the base mounts already
+    // owns those prompt sections, and mounting the plugin collides with them.
+    if (FORMS_HOST) assert.equal(/^\s*- id: persona$/mu.test(written), false, written)
     for (const name of OTHER_LINE_MODULES) {
       assert.equal(written.includes(name), false, `${name} belongs to the other line\n${written}`)
     }

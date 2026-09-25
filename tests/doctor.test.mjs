@@ -54,8 +54,8 @@ const checkOf = (checks, id) => checks.find(check => check.id === id)
 
 test('a 0.1.7 host is judged on its own rows, not the deleted roster', () => {
   // 0.1.7 has no `agentPresets` service to probe and no code-runtime row to
-  // mount: the base composes the agent process-wide, and a terminal profile
-  // adds the three agent-plane rows the shipped standard preset owns.
+  // mount: the base composes the agent process-wide, and a terminal profile adds
+  // the two agent-plane tools plus the persona text the standard preset owned.
   const bare = facts({
     generation: 'forms',
     services: { roster: false, codeRuntime: false },
@@ -68,17 +68,20 @@ test('a 0.1.7 host is judged on its own rows, not the deleted roster', () => {
   const agentPlane = checkOf(checks, 'agent-plane')
   assert.equal(agentPlane.status, 'warn')
   assert.equal(agentPlane.fixable, true)
-  assert.deepEqual(agentPlane.details, ['persona', 'tool-ask-user', 'present'].map(id => `缺少行：${id}`))
+  assert.deepEqual(agentPlane.details, ['tool-ask-user', 'present'].map(id => `缺少行：${id}`))
 
   const mounted = facts({ generation: 'forms', services: { roster: false, codeRuntime: false }, patchText: FORMS_PATCH_BLOCK })
   assert.equal(checkOf(doctorChecks(mounted), 'agent-plane').status, 'ok')
   assert.deepEqual(rowsToRepair(mounted), [])
-  assert.deepEqual(rowsToRepair(bare).map(row => row.id), ['persona', 'tool-ask-user', 'present'])
-  // Repairs on that line never write rows 0.1.7 cannot resolve.
+  assert.deepEqual(rowsToRepair(bare).map(row => row.id), ['tool-ask-user', 'present'])
+  // Repairs on that line never write rows 0.1.7 cannot resolve, and never mount
+  // the persona plugin the layer rejects.
   const repaired = planRosterRepair(WEB_ROW, rowsToRepair(bare), 'forms')
   assert.ok(repaired !== undefined)
   assert.equal(repaired.text.includes('dsh-agent-presets'), false)
   assert.equal(repaired.text.includes('code-runtime-worker-thread'), false)
+  assert.equal(repaired.text.includes("name: '@deepseek-ai/dsh-persona'"), false)
+  assert.equal(/^- id: system-prompt/mu.test(repaired.text), false, 'and never a persona override either')
 })
 
 test('a missing roster is named row by row', () => {
@@ -225,6 +228,50 @@ test('repairing a missing roster equals a hand-written patch', () => {
   assert.equal(repair.text, handWritten)
   assert.equal(planRosterRepair(repair.text, ROSTER_ROWS), undefined, 'idempotent')
   assert.deepEqual(analyzePatch(repair.text).rows.map(row => row.id), ROSTER_ROWS.map(row => row.id))
+})
+
+test('a patch carrying the loader’s !!js expressions still parses', () => {
+  // The launcher binds the session it was started with by writing this row into
+  // the profile patch, and the file's own header declares `!!js` allowed. Plain
+  // `js-yaml` rejects the tag, so such a profile read as "cannot be parsed" and
+  // the agent-plane rows were judged unreachable — a working install reported
+  // broken. The host parses the same file with a permissive tag of its own.
+  const withExpression = [
+    WEB_ROW.trimEnd(),
+    '',
+    '- id: ssh-tui',
+    '  name: dsh-ssh-tui',
+    '  config:',
+    '    sessionId: !!js ctx.sshTuiStartup.sessionId',
+    '    resume: !!js ctx.sshTuiStartup.resume',
+    '    resumePicker: !!js ctx.sshTuiStartup.resumePicker',
+    '',
+    FORMS_PATCH_BLOCK.trimEnd(),
+    '',
+  ].join('\n')
+  const analysis = analyzePatch(withExpression)
+  assert.equal(analysis.parseable, true, `a patch the loader accepts must parse here: ${analysis.error ?? ''}`)
+  assert.deepEqual(
+    analysis.rows.map(row => row.id),
+    ['webserver', 'ssh-tui', 'tool-ask-user', 'present'],
+    'the expression values do not hide the rows around them',
+  )
+  assert.equal(analysis.rows.find(row => row.id === 'ssh-tui')?.kind, 'override')
+
+  // And the doctor reads it as a healthy 0.1.7 profile rather than as unknown.
+  const report = doctorChecks({
+    ...facts({ patchText: withExpression }),
+    generation: 'forms',
+  })
+  const agentPlane = report.find(check => check.id === 'agent-plane')
+  assert.equal(agentPlane?.status, 'ok', JSON.stringify(report.map(c => [c.id, c.status])))
+})
+
+test('a genuinely broken patch is still reported as unparseable', () => {
+  // The tolerance above is for one known tag, not for YAML errors.
+  const broken = analyzePatch(`${WEB_ROW}  : : nope\n`)
+  assert.equal(broken.parseable, false)
+  assert.match(String(broken.error), /./u)
 })
 
 test('repairing a duplicate equals a hand-written single copy', () => {

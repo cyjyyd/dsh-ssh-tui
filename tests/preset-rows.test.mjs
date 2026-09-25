@@ -25,16 +25,20 @@ test('the roster block mounts the roster and the two preset host services', () =
   assert.equal(ROSTER_PATCH_BLOCK.endsWith('\n'), true)
 })
 
-test('the 0.1.7 block mounts the agent-plane rows the base does not', () => {
+test('the 0.1.7 block mounts the two agent-plane tools, and no persona row', () => {
   // 0.1.7 has no roster to mount: presets became per-session rows a surface
-  // composes, and dsh-base keeps the agent plane for the TUI. The three rows
-  // here are what upstream's own standard preset owns beyond the base.
-  assert.match(FORMS_PATCH_BLOCK, /- id: persona\n\s+name: '@deepseek-ai\/dsh-persona'\n\s+config:\n\s+suffix: /)
+  // composes, and dsh-base keeps the agent plane for the TUI. `dsh-system-prompt`
+  // owns the persona sections at this layer, so `@deepseek-ai/dsh-persona` is
+  // deliberately not mounted: the loader rejects the duplicate registration and
+  // the entry then never activates.
   assert.match(FORMS_PATCH_BLOCK, /- id: tool-ask-user\n\s+name: '@deepseek-ai\/dsh-tool-ask-user'/)
   assert.match(FORMS_PATCH_BLOCK, /- id: present\n\s+name: '@deepseek-ai\/dsh-tool-present'/)
+  assert.equal(/- id: persona\n/u.test(FORMS_PATCH_BLOCK), false, 'no persona row is mounted')
+  assert.equal(FORMS_PATCH_BLOCK.includes("name: '@deepseek-ai/dsh-persona'"), false, 'and no such module is named as a row')
+  assert.equal(/^- id: system-prompt/mu.test(FORMS_PATCH_BLOCK), false, 'nor an override entry for that row')
   assert.equal(FORMS_PATCH_BLOCK.includes('dsh-agent-presets'), false)
   assert.deepEqual(rosterRows('legacy').map(row => row.id), ['agent-presets', 'code-runtime', 'subagent-model-selection-settings'])
-  assert.deepEqual(rosterRows('forms').map(row => row.id), ['persona', 'tool-ask-user', 'present'])
+  assert.deepEqual(rosterRows('forms').map(row => row.id), ['tool-ask-user', 'present'])
 })
 
 test('the install path and the runtime write the same block, on both lines', async () => {
@@ -80,9 +84,12 @@ test('rosterPatchText is idempotent', () => {
 test('the 0.1.7 line repairs the agent-plane rows and never the dead ones', () => {
   const fromTemplate = rosterPatchText('[]', 'forms')
   assert.ok(fromTemplate !== undefined)
-  assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-persona'"))
   assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-tool-ask-user'"))
   assert.ok(fromTemplate.includes("name: '@deepseek-ai/dsh-tool-present'"))
+  // The persona is not written on this line: the row the base mounts owns those
+  // prompt sections already, and a second registration is rejected.
+  assert.equal(fromTemplate.includes("name: '@deepseek-ai/dsh-persona'"), false)
+  assert.equal(/^- id: system-prompt/mu.test(fromTemplate), false)
   // Neither row resolves on 0.1.7: the plural package has no release there, and
   // `code-runtime-worker-thread` was replaced by the base's `ptc-runtime`.
   assert.equal(fromTemplate.includes('dsh-agent-presets'), false)

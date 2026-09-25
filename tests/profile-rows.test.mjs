@@ -47,13 +47,15 @@ test('the agent-plane rows replace an empty patch array on the forms line', () =
   assert.equal(result, 'mounted')
   const text = readFileSync(file, 'utf8')
   for (const [id, name] of [
-    ['persona', '@deepseek-ai/dsh-persona'],
     ['tool-ask-user', '@deepseek-ai/dsh-tool-ask-user'],
     ['present', '@deepseek-ai/dsh-tool-present'],
   ]) {
     assert.match(text, new RegExp(`id: ${id}\\b`, 'u'), text)
     assert.match(text, new RegExp(`name: '${name}'`, 'u'), text)
   }
+  // The persona is deliberately absent: `dsh-system-prompt` owns those sections
+  // at this layer, so mounting the plugin would never activate.
+  assert.doesNotMatch(text, /^\s*- id: persona$/mu)
   // Nothing 0.1.7 cannot resolve is written on that line: the plural presets
   // package and the worker-thread runtime have no release past 0.1.6-alpha.2.
   assert.doesNotMatch(text, /dsh-agent-presets/u)
@@ -77,8 +79,8 @@ test('a patch that already names the row is not written twice', () => {
   assert.equal(readFileSync(file, 'utf8'), before)
 })
 
-test('the forms marker is the agent-plane row, not the dead plural one', () => {
-  const { home, file } = tempProfile(`# header\n- insert:\n    - id: persona\n      name: '@deepseek-ai/dsh-persona'\n`)
+test('the forms marker is the agent-plane tool row, not the dead plural one', () => {
+  const { home, file } = tempProfile(`# header\n- insert:\n    - id: present\n      name: '@deepseek-ai/dsh-tool-present'\n`)
   const before = readFileSync(file, 'utf8')
   const result = mountProfileRows({ profile: 'tui', home, log: silent, ...notComposed, generation: 'forms' })
   assert.equal(result, 'already-named')

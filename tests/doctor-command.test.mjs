@@ -24,16 +24,16 @@ const WEB_ROW = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-h
  * calls the loss and which rows the fix writes change with the line.
  */
 const MISSING_SUMMARY = FORMS_HOST ? '0.1.7 在进程级组合代理' : '名单未组合'
-const MISSING_ROW_IDS = FORMS_HOST ? ['persona', 'tool-ask-user', 'present'] : ['agent-presets']
+const MISSING_ROW_IDS = FORMS_HOST ? ['tool-ask-user', 'present'] : ['agent-presets']
 const REPAIRED_NAMES = FORMS_HOST
-  ? ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  ? ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
   : ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
 /** Modules the other line's repair writes, and this one must never add. */
 const OTHER_LINE_NAMES = FORMS_HOST
-  ? ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread']
-  : ['@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
+  ? ['@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-code-runtime-worker-thread', '@deepseek-ai/dsh-persona']
+  : ['@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present']
 /** A row the first repair lands, so the poll cannot read a half-written file. */
-const REPAIRED_MARKER = FORMS_HOST ? /dsh-persona/u : /subagent-model-selection-settings/u
+const REPAIRED_MARKER = FORMS_HOST ? /dsh-tool-present/u : /subagent-model-selection-settings/u
 /** The merged file: the user row, one copy of the block, and this line's rows. */
 const MERGED_PATCH = FORMS_HOST
   ? `${WEB_ROW}\n${ROSTER_PATCH_BLOCK}\n${FORMS_PATCH_BLOCK}`
@@ -203,7 +203,10 @@ test('/mode fix writes the rows this host line owns, never the other line\'s', a
     assert.ok(written.includes(name), `${name} must be written on this line\n${written}`)
   }
   for (const name of OTHER_LINE_NAMES) {
-    assert.equal(written.includes(name), false, `${name} belongs to the other line\n${written}`)
+    // The quoted form, not a bare substring: the block's own header *names* the
+    // persona plugin to explain why it is deliberately not mounted here, and a
+    // comment is not a row.
+    assert.equal(written.includes(`name: '${name}'`), false, `${name} belongs to the other line\n${written}`)
   }
 })
 

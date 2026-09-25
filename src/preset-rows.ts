@@ -55,21 +55,17 @@ export const ROSTER_ROWS: readonly RosterRow[] = [
  * per-session declarations a surface mounts (`@deepseek-ai/dsh-agent-preset`
  * rows over the `agent-preset-registry` service), and `dsh-base` keeps the
  * agent-plane rows enabled for the TUI, which is single-session and composes
- * its agent process-wide. What the base does *not* mount are the three rows the
- * shipped standard preset owns beyond it — the persona prompt, and the
- * `ask_user_question` / `present` tools — so those are what a TUI profile adds.
- * Written verbatim as upstream's own `dsh-web-app/presets/standard.patch.yml`
- * declares them, minus the rows the base already carries.
+ * its agent process-wide. Beyond the base, upstream's standard preset declares a
+ * persona and these two tools. Only the tools are mounted here: a *preset* is an
+ * agent scope, but a profile is not one, and `@deepseek-ai/dsh-persona`
+ * registers the two prompt sections `dsh-system-prompt` already owns at this
+ * layer — the loader rejects the row ("prompt section
+ * \"deployment:persona-prefix\" is already registered") and one entry then
+ * silently never activates. The deployment persona this line ships with is
+ * `dsh-system-prompt`'s own empty default, which is what a profile is meant to
+ * use unless it deliberately sets one.
  */
 export const FORMS_ROWS: readonly RosterRow[] = [
-  {
-    id: 'persona',
-    name: '@deepseek-ai/dsh-persona',
-    config: [
-      'suffix: Your working directory is {{cwd}}.',
-      'prefix: You are a coding agent powered by the {{model}} model.',
-    ],
-  },
   { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
   { id: 'present', name: '@deepseek-ai/dsh-tool-present' },
 ]
@@ -93,9 +89,10 @@ export const ROSTER_PATCH_HEADER = `# dsh-ssh-tui /mode: the agent-preset roster
 /** The same header on a host that composes its agent process-wide. */
 export const FORMS_PATCH_HEADER = `# dsh-ssh-tui: the agent-plane rows a 0.1.7 terminal profile mounts for itself.
 # That line composes the agent process-wide (presets are a per-session Web
-# feature now), and dsh-base already carries every row the standard preset
-# needs except these three: the persona prompt and the ask_user_question /
-# present tools. The profile's user layer owns them.
+# feature now), and dsh-base already carries the rest of what the standard
+# preset declares: dsh-system-prompt owns the persona sections at this layer, so
+# only the two tools are left to mount. @deepseek-ai/dsh-persona is deliberately
+# absent — mounting it here collides with those sections and never activates.
 `
 
 /** The header for one host line. */
@@ -113,8 +110,12 @@ function rosterItemText(row: RosterRow): string {
   return `${lines.join('\n')}\n`
 }
 
-/** One top-level `- insert:` entry mounting exactly these rows. */
-export function rosterInsertEntry(rows: readonly RosterRow[]): string {
+/**
+ * The entries one host line's rows need: a single `- insert:` list.
+ * @param rows - the rows to write.
+ * @returns the YAML text, ending in a newline.
+ */
+export function rosterEntriesText(rows: readonly RosterRow[]): string {
   return `- insert:\n${rows.map(rosterItemText).join('\n')}`
 }
 
@@ -123,10 +124,10 @@ export function rosterInsertEntry(rows: readonly RosterRow[]): string {
  * services the shipped presets need. `scripts/ensure-profile-rows.sh` carries
  * the same text; a test compares the two so they cannot drift.
  */
-export const ROSTER_PATCH_BLOCK = `${ROSTER_PATCH_HEADER}${rosterInsertEntry(ROSTER_ROWS)}`
+export const ROSTER_PATCH_BLOCK = `${ROSTER_PATCH_HEADER}${rosterEntriesText(ROSTER_ROWS)}`
 
 /** The 0.1.7 block, the same way. */
-export const FORMS_PATCH_BLOCK = `${FORMS_PATCH_HEADER}${rosterInsertEntry(FORMS_ROWS)}`
+export const FORMS_PATCH_BLOCK = `${FORMS_PATCH_HEADER}${rosterEntriesText(FORMS_ROWS)}`
 
 /** The block for one host line. */
 export function rosterPatchBlock(generation: HostGeneration): string {
@@ -191,6 +192,37 @@ function idLines(text: string): Array<{ id: string; line: number }> {
 }
 
 /**
+ * The `!!js` tag the loader registers, and a permissive stand-in for it.
+ *
+ * A patch is allowed to carry one — the file's own header says so, and the
+ * launcher writes exactly that into this plugin's row to bind the session id
+ * the process was started with:
+ *
+ * ```yaml
+ * - id: ssh-tui
+ *   name: dsh-ssh-tui
+ *   config:
+ *     sessionId: !!js ctx.sshTuiStartup.sessionId
+ * ```
+ *
+ * `js-yaml` refuses an unknown tag outright, so a profile that was working
+ * perfectly read as "the patch cannot be parsed" and `/doctor` could not judge
+ * the agent-plane rows at all. The host parses the same file with a permissive
+ * tag of its own (`dsh-plugin-manager`: `customTags` with a pass-through
+ * `resolve`), so this mirrors the loader rather than inventing a rule. The
+ * value is never used here: the analysis reads ids, module names and insert
+ * structure, and an expression is opaque to all three.
+ */
+const JS_EXPRESSION_TAG = 'tag:yaml.org,2002:js'
+
+/** One entry per kind, since js-yaml resolves the tag by node kind. */
+const PATCH_SCHEMA = yaml.DEFAULT_SCHEMA.extend([
+  new yaml.Type(JS_EXPRESSION_TAG, { kind: 'scalar', construct: (data: unknown) => data }),
+  new yaml.Type(JS_EXPRESSION_TAG, { kind: 'sequence', construct: (data: unknown) => data }),
+  new yaml.Type(JS_EXPRESSION_TAG, { kind: 'mapping', construct: (data: unknown) => data }),
+])
+
+/**
  * Read one patch file into the rows it declares.
  *
  * Unparseable YAML is reported instead of thrown: `/doctor` has to *describe*
@@ -201,7 +233,7 @@ function idLines(text: string): Array<{ id: string; line: number }> {
 export function analyzePatch(text: string): PatchAnalysis {
   let loaded: unknown
   try {
-    loaded = yaml.load(text)
+    loaded = yaml.load(text, { schema: PATCH_SCHEMA })
   } catch (error) {
     return { parseable: false, error: error instanceof Error ? error.message : String(error), rows: [] }
   }
@@ -327,7 +359,7 @@ export function planRosterRepair(
     ? missing.filter(row => !patchNamesRow(analysis.rows, row))
     : [...missing]
   if (toAdd.length === 0) return undefined
-  const entry = `${rosterPatchHeader(generation)}${rosterInsertEntry(toAdd)}`
+  const entry = `${rosterPatchHeader(generation)}${rosterEntriesText(toAdd)}`
   if (/^\s*\[\s*\]\s*$/m.test(existing)) {
     return { text: existing.replace(/^\s*\[\s*\]\s*$/m, entry.trimEnd() + '\n'), added: toAdd.map(row => row.id), removed: [] }
   }

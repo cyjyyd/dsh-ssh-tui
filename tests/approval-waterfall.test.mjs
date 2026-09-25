@@ -268,7 +268,10 @@ test('auto-deny feeds a plugin notice so the model sees the real reason', async 
   const body = steered[0].content.find(block => block.type === 'text')?.text ?? ''
   assert.match(body, /自动审批已拒绝/)
   assert.match(body, /rm -rf \/tmp\/x/)
-  assert.equal(steered[0].source?.kind, 'plugin')
+  // The producer-owned kind, not the released `plugin` wrapper: a V4 session
+  // refuses the wrapper, so this steer used to fail its commit and take the
+  // turn with it.
+  assert.equal(steered[0].source?.kind, 'dsh-ssh-tui')
   assert.equal(steered[0].source?.form, 'notice')
 })
 
