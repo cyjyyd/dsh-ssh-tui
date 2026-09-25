@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { sessionErrPath, sessionSockDir } from './display-sock.js'
 import { t } from './i18n/index.js'
 import { restrictPathToUser } from './platform.js'
@@ -51,10 +51,10 @@ export function waitingMarkerPath(sessionId: string, dshHome?: string): string {
   const dir = dshHome === undefined ? sessionSockDir() : sessionSockDir(dshHome)
   const err = dshHome === undefined ? sessionErrPath(sessionId) : sessionErrPath(sessionId, dshHome)
   // The stderr log's own stem, so the marker can never drift onto a name that
-  // log does not already occupy. Both separators: the log is a pipe-derived
-  // path on Windows and a socket path on POSIX.
-  const base = err.slice(Math.max(err.lastIndexOf('/'), err.lastIndexOf('\\')) + 1)
-  return `${dir}/${base.replace(/\.err$/u, '')}.waiting`
+  // log does not already occupy. `basename` and `join` carry the separators of
+  // the running platform, so the marker is a real sibling on Windows too rather
+  // than a mixed `\\dir/name` — which is what hand-splitting on `/` produced.
+  return join(dir, `${basename(err, '.err')}.waiting`)
 }
 
 /**

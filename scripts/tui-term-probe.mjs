@@ -128,6 +128,13 @@ async function probeProfile(pty, { env: extra, name, expect }) {
     DSH_TUI_NO_UPDATE_CHECK: '1',
     ...extra,
   }
+  // Every profile here simulates a *local* terminal (it sets that emulator's own
+  // markers), so the ambient SSH markers have to go: run from an SSH session —
+  // or from a jump host, which is the whole point of the plugin — the TUI
+  // otherwise reads itself as remote, where it deliberately keeps the clipboard
+  // caveat quiet, and every profile that expects the caveat fails. The unit test
+  // clears the same three for the same reason (tests/copy-text.test.mjs).
+  for (const key of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']) delete env[key]
   // An unset TERM is the Windows case; deleting it here reproduces that rather
   // than inheriting the runner's.
   if (expect.term === '') delete env.TERM

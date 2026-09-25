@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { setLocale } from '../lib/i18n/index.js'
@@ -44,14 +44,17 @@ test('the marker sits beside the session stderr log, under the same stem', () =>
   const home = '/tmp/dsh-home'
   const marker = waitingMarkerPath('main/session', home)
   const err = sessionErrPath('main/session', home)
-  assert.equal(marker.slice(0, marker.lastIndexOf('/')), err.slice(0, err.lastIndexOf('/')))
-  assert.equal(marker.endsWith('.waiting'), true)
+  // `dirname`/`basename` rather than splitting on `/`: the Windows leg runs this
+  // same test with backslash separators, where a hand-rolled split silently
+  // compares the wrong halves (it did, and this is the fix).
+  assert.equal(dirname(marker), dirname(err), 'the marker is a sibling of the stderr log')
+  assert.equal(basename(marker), `${basename(err, '.err')}.waiting`, 'named from the same stem')
   // The digest keeps two ids that sanitize to one stem apart, so the marker
   // must carry it too.
   assert.notEqual(waitingMarkerPath('main/session', home), waitingMarkerPath('main_session', home))
 })
 
-test('the marker records the question and is owner-only', async () => {
+test('the marker records the question', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-question-wait-'))
   try {
     const ok = await writeWaitingMarker(question, home)
@@ -62,10 +65,24 @@ test('the marker records the question and is owner-only', async () => {
     assert.match(text, /^waiting=1$/mu)
     assert.match(text, /^since=2026-09-26T08:00:00\.000Z$/mu)
     assert.match(text, /^question=部署到哪个环境？$/mu)
-    assert.equal(statSync(path).mode & 0o777, 0o600)
     await clearWaitingMarker(question.sessionId, home)
     assert.throws(() => statSync(path), 'answering removes the marker')
     await clearWaitingMarker(question.sessionId, home)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Windows cannot express 0o600 — `chmod` there only toggles the read-only bit
+// and `stat` reports 0o666/0o444 — and the intent is applied as an `icacls` ACL
+// instead, whose effect only the Windows leg can observe
+// (tests/platform-permissions.test.mjs asserts that half).
+test('the marker is owner-only', { skip: process.platform === 'win32' }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-question-wait-'))
+  try {
+    assert.equal(await writeWaitingMarker(question, home), true)
+    assert.equal(statSync(waitingMarkerPath(question.sessionId, home)).mode & 0o777, 0o600)
+    assert.equal(statSync(join(home, 'tui-socks')).mode & 0o777, 0o700, 'and so is its directory')
   } finally {
     rmSync(home, { recursive: true, force: true })
   }

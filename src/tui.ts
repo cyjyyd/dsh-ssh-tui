@@ -1543,6 +1543,14 @@ export class SshTui {
   private questionWaitSince: number | undefined
   private paintIntervalMs: number
   private paintLink: PaintLinkKind = 'local'
+  /**
+   * Whether this process runs inside an SSH session, from the sshd environment.
+   *
+   * Distinct from `paintLink`, which `applyProbedRtt` pins to `'ssh'` for any
+   * relayed frame — a local window included. Only this flag says the capability
+   * table described a remote tty rather than the terminal the bytes reach.
+   */
+  private sshSession = false
   private paintProbed = false
   private paintRttMs: number | undefined
   private sessionTitle = ''
@@ -1607,7 +1615,13 @@ export class SshTui {
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
     this.terminalCaps = config.terminalCaps ?? terminalCapabilities()
     this.useAlternateScreen = !this.lineMode && this.terminalCaps.alternateScreen
-    this.paintLink = detectSshSession() ? 'ssh' : 'local'
+    // Whether this process is inside an SSH session, kept apart from
+    // `paintLink`: that one also becomes `'ssh'` whenever the launcher relayed
+    // the frame (see `applyProbedRtt`), which is true for a purely local window
+    // too. This field answers the narrower question the clipboard caveat needs —
+    // "is the terminal the capability table described the one the bytes reach".
+    this.sshSession = detectSshSession()
+    this.paintLink = this.sshSession ? 'ssh' : 'local'
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
       ssh: this.paintLink === 'ssh',
     })
@@ -10693,9 +10707,14 @@ export class SshTui {
     // written to the *local* terminal — the one the user is actually copying
     // into. That local terminal is what accepted the write, which is why a copy
     // over SSH works and then warns that it did not. Warning there is a lie, so
-    // the caveat stays quiet whenever the link was recognised as SSH, at boot or
-    // on a later reattach.
-    if (!this.terminalCaps.osc52 && this.paintLink !== 'ssh' && !this.osc52HintShown) {
+    // the caveat stays quiet inside an SSH session.
+    //
+    // The test is the session itself and not `paintLink`, which is also `'ssh'`
+    // on a local window whenever the launcher relayed the frame: there the
+    // capability table *did* describe the terminal that receives the bytes, so
+    // the caveat is exactly what the user needs to read (the terminal probe
+    // asserts it does, for seven terminal profiles).
+    if (!this.terminalCaps.osc52 && !this.sshSession && !this.osc52HintShown) {
       this.osc52HintShown = true
       this.pushRow({ kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) })
     }

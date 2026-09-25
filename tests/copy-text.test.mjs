@@ -127,6 +127,39 @@ test('the clipboard caveat is said once per session, not after every copy', () =
   }
 })
 
+test('a relayed local window still warns, because the table described that terminal', () => {
+  // `applyProbedRtt` pins `paintLink` to `'ssh'` for every relayed frame, and the
+  // launcher relays a purely local window too. Gating the caveat on that field
+  // therefore silenced it locally as well — which the terminal probe caught on
+  // seven profiles (VTE, Konsole 23.08, tmux, screen, the Linux console, dumb).
+  // The gate is the SSH environment instead, so this case keeps its warning.
+  const previousSsh = ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY'].map(key => [key, process.env[key]])
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  for (const [key] of previousSsh) delete process.env[key]
+  process.env.DSH_TUI_TERM_CAPS = 'no-osc52'
+  try {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.write = () => {}
+    // What the launcher's RTT report does to a local window.
+    tui.applyProbedRtt(40)
+    assert.equal(tui.paintLink, 'ssh', 'the relayed frame reads as an ssh link')
+    tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
+    tui.focusedRow = tui.rows[0]
+    tui.runCommand('/copy')
+    const caveats = tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('OSC 52'))
+    assert.equal(caveats.length, 1, 'this terminal really cannot take the write, so the caveat is not a lie')
+  } finally {
+    for (const [key, value] of previousSsh) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
+  }
+})
+
 test('an SSH session does not warn about a clipboard write that reached the local terminal', () => {
   // The capability table describes the remote tty, which over SSH is usually a
   // bare console that has never heard of OSC 52. The bytes are written to the
