@@ -149,6 +149,12 @@ dsh --profile tui --resume                 # picker (live hosts first)
 dsh --profile tui --resume <session-id>    # attach if live, else resume the log
 ```
 
+If a window still has that session (the picker labels it `attached · pid N`),
+`--resume <session-id>` is refused rather than kicking that window: take it over
+from the **picker** instead — select the row and confirm with `y` / Enter, and
+the other window exits. A session left behind by a dropped link attaches with one
+keystroke, no confirmation.
+
 A second Host on the same `sessionId` is refused (it would steal the jsonl
 and approvals). Locks live under `$DSH_HOME/tui-locks/`; the display socket
 under `$DSH_HOME/tui-socks/`. A leftover lock from a crash is stolen if the

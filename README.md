@@ -159,6 +159,10 @@ dsh --profile tui --resume                 # 选择器（活进程优先接入�
 dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从日志恢复
 ```
 
+那个进程如果正被**另一个窗口**接入（选择器会标「已接入 · pid N」），`--resume <session-id>`
+会被拒绝而不是把对方踢掉——要接管就在**选择器里**选中它，再按 `y` / Enter 确认（那个窗口随即退出）。
+误标的情况同理：确认一次就能把会话接过来。
+
 同一 `sessionId` 不能同时开第二份 Host（会抢 jsonl 和审批）。锁在
 `$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在
 下次启动时核对 pid，已死则自动从日志接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
