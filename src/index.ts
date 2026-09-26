@@ -91,6 +91,9 @@ export const name = 'ssh-tui'
 /** Core services required before the terminal channel can drive an agent. */
 export const inject = ['agents', 'agentDefaultModel']
 
+/** How long the lock queue may hold up a process exit before it is abandoned. */
+const LOCK_DRAIN_TIMEOUT_MS = 1_000
+
 // Re-exported for the bundle's own API; the exit path (and its reasons) live in
 // `launcher-exit.ts` so the picker, `/exit`, the attach recovery and the error
 // paths all hand the terminal back the same way.
@@ -207,7 +210,17 @@ export function apply(ctx: Context, config: Config): void {
       // A write still queued must not resurrect the file we are about to drop:
       // the queue reads `sessionLockPathHeld` when it runs, so clearing it
       // first is what makes the queued patch a no-op.
-      await lockWrites
+      //
+      // It must not be able to hold the exit either. This runs from the effect's
+      // dispose — the path `/exit` takes — and the promise chain is one more
+      // thing that has to settle before the process may go, so it gets a
+      // deadline: the lock file is best-effort, the process exiting is not. (The
+      // probe that waits for the launcher on `/exit` is exactly the assertion
+      // that caught a lingering handle here before.)
+      await Promise.race([
+        lockWrites,
+        new Promise<void>(resolve => { setTimeout(resolve, LOCK_DRAIN_TIMEOUT_MS).unref?.() }),
+      ])
       if (path !== undefined) await releaseSessionLock(path)
     }
 

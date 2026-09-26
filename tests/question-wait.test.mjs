@@ -121,6 +121,11 @@ test('a reader in another process never sees a partial marker', async () => {
     }
   } finally {
     reader.kill()
+    // Windows refuses to delete a file another process still has open, and the
+    // reader is a real second process: wait for its handle to be gone before the
+    // directory goes, or the cleanup below fails on the one platform this case
+    // exists because of.
+    await samples.catch(() => {})
     rmSync(home, { recursive: true, force: true })
   }
 })
