@@ -89,7 +89,7 @@ test('the report carries the facts a bug report needs', () => {
     'session: main-session-abc',
     'display channel: /root/.dsh/tui-socks/main-session-abc.sock (unix socket)',
     'connectable yes',
-    'Host: alive and attachable · pid 4242',
+    'Host: alive (display channel answers) · pid 4242',
     'RTT 55ms',
     'seq 4557',
     'main-session-other',

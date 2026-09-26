@@ -983,6 +983,74 @@ test('pause hangup of a running turn still keeps the host after cancel settles',
   assert.equal(tui.disposed, false)
 })
 
+test('a hangup says "no display" before it cancels the turn, not after', async () => {
+  // The lock's `state` is what a resume — and the picker's list — reads to
+  // decide whether another window is on this session. It used to be patched only
+  // once the Host had decided to stay, i.e. after the cancel wait below, so for
+  // that whole window a dropped session still read `attached` and the reconnect
+  // was refused as "already attached to another window".
+  const order = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return () => {}
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() { order.push('cancel'); this.status = 'idle' },
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    disconnectPolicy: 'pause',
+    onDetach: () => { order.push('detach') },
+    onHangup: () => { order.push('hangup') },
+  })
+  tui.displayHost = fakeDisplayHost()
+  await tui.handleHangup()
+  assert.deepEqual(order, ['detach', 'cancel', 'hangup'])
+})
+
+test('an idle hangup reports the detach too, and still exits', async () => {
+  // The Host is about to exit and drop the lock entirely, but the patch is what
+  // makes the picker's list correct for the moment in between.
+  const order = []
+  const exits = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { flush: async () => {} }
+      if (name === 'appExit') return (code) => { exits.push(code) }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    onDetach: () => { order.push('detach') },
+    onHangup: () => { order.push('hangup') },
+  })
+  tui.displayHost = fakeDisplayHost()
+  await tui.handleHangup()
+  assert.deepEqual(order, ['detach'], 'the detach is reported, the keep-host hook is not')
+  assert.deepEqual(exits, [129])
+})
+
 test('hangup keeps the host when a display socket is listening', async () => {
   const flushed = []
   const hangups = []

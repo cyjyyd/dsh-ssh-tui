@@ -798,6 +798,15 @@ export interface TuiConfig {
   onHangup?: () => void | Promise<void>
   /** Called when a Display relay attaches after hangup. */
   onReattach?: () => void | Promise<void>
+  /**
+   * The display just went away, before the Host has decided whether to stay.
+   *
+   * The lock stops saying `attached` from here: that field is what a resume (and
+   * the launch picker's list) reads to decide whether another window is on the
+   * session, and leaving it set for the whole cancel-and-flush below turned a
+   * reconnect in that window into "already attached to another window".
+   */
+  onDetach?: () => void | Promise<void>
   /** Host process: no local TTY; paint only through the display socket. */
   headlessDisplay?: boolean
   /** Append events as plain lines instead of painting (see `line-mode`). */
@@ -1385,6 +1394,7 @@ export class SshTui {
   private relayRows: number | undefined
   private readonly onHangup: (() => void | Promise<void>) | undefined
   private readonly onReattach: (() => void | Promise<void>) | undefined
+  private readonly onDetach: (() => void | Promise<void>) | undefined
   private renderTimer: ReturnType<typeof setInterval> | undefined
   private readonly decoder = new StringDecoder('utf8')
   private readonly color: boolean
@@ -1605,6 +1615,7 @@ export class SshTui {
     this.onRouteSettled = config.onRouteSettled
     this.onHangup = config.onHangup
     this.onReattach = config.onReattach
+    this.onDetach = config.onDetach
     this.headlessDisplay = config.headlessDisplay === true
     // Line mode: no frames at all, one appended line per event. The alternate
     // screen is what makes a screen reader and a `tee` lose events, so it stays
@@ -2620,6 +2631,13 @@ export class SshTui {
     this.reattachedDuringHangup = false
     ignoreFurtherHangupSignals()
     this.detachDisplay()
+    // Say "no display" now rather than after the cancel/flush below. The lock's
+    // `attached` is what a resume reads to decide that another window is on this
+    // session, and for the whole cancel window it was still set while the window
+    // was already gone — so a reconnect inside that window was refused as
+    // "already attached". A reattach during this hangup patches it back (and the
+    // writes are serialized launcher-side, so the last one wins).
+    await this.onDetach?.()
     const busy = this.isBusyForHangupKeepalive()
     const pauseTurn = this.disconnectPolicy !== 'continue'
     if (pauseTurn && this.agent.status === 'running') {

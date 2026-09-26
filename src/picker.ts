@@ -57,6 +57,14 @@ export interface SessionPickerState {
   loading?: boolean
   /** Sessions in history that have not been read yet. */
   more?: number
+  /**
+   * A row whose session another window is attached to, waiting for the user to
+   * confirm. Submitting such a row does not attach on its own: the lock says a
+   * window is on that session, and attaching kicks that window. The note under
+   * the row cannot prove the window is still alive, so the picker asks once
+   * instead of either refusing forever or silently stealing the session.
+   */
+  confirmTakeover?: { id: string; sock: string; pid: number }
 }
 
 /** One key / control action against {@link SessionPickerState}. */
@@ -97,6 +105,19 @@ export function sessionMatchesQuery(session: ResumableSession, query: string): b
   return tokens.every(token => haystack.includes(token))
 }
 
+/**
+ * Whether a live Host is holding this session in a window *right now*.
+ *
+ * The lock's `state` is written by the Host: `attached` while a display relay is
+ * connected, `paused` / `running-detached` once the window is gone (a dropped
+ * link, a closed window) and the Host stayed behind. Only an explicit
+ * `attached` counts — a lock from before the field existed has no state, and
+ * treating "unknown" as "in use" would block a resume that used to work.
+ */
+export function sessionAttachedElsewhere(session: ResumableSession): boolean {
+  return session.attach?.state === 'attached'
+}
+
 /** Sessions still visible under the current filter, in list order. */
 export function filterResumableSessions(
   sessions: readonly ResumableSession[],
@@ -132,6 +153,7 @@ export function pickerStateUnchanged(previous: SessionPickerState, next: Session
     && previous.sessions === next.sessions
     && previous.loading === next.loading
     && previous.more === next.more
+    && previous.confirmTakeover === next.confirmTakeover
 }
 
 /**
@@ -188,6 +210,23 @@ function resultFor(session: ResumableSession): SessionPickerResult {
     : { kind: 'attach', id: session.id, sock: session.attach.sock }
 }
 
+/**
+ * What Enter / a digit shortcut does to one row.
+ *
+ * A session a window is attached to becomes a confirmation instead of a result:
+ * the picker used to label it "paused" and attach straight away, which took the
+ * session away from the window the user was still typing in. Everything else
+ * submits as before — a Host left behind by a dropped link is meant to be
+ * reattached with one keystroke.
+ */
+function submitSession(session: ResumableSession, state: SessionPickerState): SessionPickerStep {
+  const attach = session.attach
+  if (attach !== undefined && sessionAttachedElsewhere(session)) {
+    return continueWith({ ...state, confirmTakeover: { id: session.id, sock: attach.sock, pid: attach.pid } })
+  }
+  return { kind: 'done', result: resultFor(session) }
+}
+
 function continueWith(state: SessionPickerState): SessionPickerStep {
   return { kind: 'continue', state }
 }
@@ -217,6 +256,18 @@ export function stepPicker(
 ): SessionPickerStep {
   const filtered = filterResumableSessions(state.sessions, state.query)
   const focused = filtered[state.cursor]
+  const pending = state.confirmTakeover
+  if (pending !== undefined) {
+    // One keystroke decides. `y` and Enter take the session over; anything else
+    // drops the question and leaves the window that holds it alone — including
+    // a stray letter, which is the point: the confirmation must not be
+    // something the user can pass through by typing.
+    const confirmed = action.type === 'submit' || (action.type === 'type' && /^y$/iu.test(action.text))
+    if (confirmed) {
+      return { kind: 'done', result: { kind: 'attach', id: pending.id, sock: pending.sock } }
+    }
+    return continueWith({ ...state, confirmTakeover: undefined })
+  }
   switch (action.type) {
     case 'move': {
       const cursor = clampPickerCursor(state.cursor + action.delta, filtered.length)
@@ -283,12 +334,12 @@ export function stepPicker(
       const start = pickerWindowStart(state.cursor, filtered.length, windowSize)
       const session = filtered[start + index]
       if (session === undefined) return continueWith(state)
-      return { kind: 'done', result: resultFor(session) }
+      return submitSession(session, state)
     }
     case 'submit': {
       const session = filtered[state.cursor]
       if (session === undefined) return continueWith(state)
-      return { kind: 'done', result: resultFor(session) }
+      return submitSession(session, state)
     }
     case 'new':
       return { kind: 'done', result: { kind: 'new' } }
@@ -519,12 +570,18 @@ export async function showSessionPicker(
         lines.push(style(truncateToWidth(label, width), focused ? '1;7' : '1'))
         const attachNote = session.attach === undefined
           ? ''
-          : t('picker.attachable', {
-            pid: session.attach.pid,
-            status: session.attach.state === 'running-detached'
-              ? t('picker.attachRunning')
-              : t('picker.attachPaused'),
-          })
+          : sessionAttachedElsewhere(session)
+            // A window is on this session right now. Calling it "paused" — what
+            // this line said for anything that was not running in the
+            // background — invited the user to take a session they were already
+            // using, and the attach then kicked their own window.
+            ? t('picker.attachLive', { pid: session.attach.pid })
+            : t('picker.attachable', {
+              pid: session.attach.pid,
+              status: session.attach.state === 'running-detached'
+                ? t('picker.attachRunning')
+                : t('picker.attachPaused'),
+            })
         const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
         if (attachNote !== '') {
           lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), '32')}`)
@@ -539,7 +596,12 @@ export async function showSessionPicker(
         lines.push(style(truncateToWidth(t('picker.loadMore', { count: more }), width), '90'))
       }
     }
-    lines.push('')
+    lines.push(state.confirmTakeover === undefined
+      ? ''
+      // The blank separator's line is reused on purpose: the picker's capacity
+      // is computed from a fixed row count, and an extra line here would push
+      // the hints off a short terminal.
+      : style(truncateToWidth(t('picker.takeoverConfirm', { pid: state.confirmTakeover.pid }), width), '33'))
     lines.push(style(truncateToWidth(filtering ? t('picker.hintFilter') : t('picker.hint'), width), '36'))
     lines.push(filtering
       ? `${style('Esc', '36')}  ${t('picker.cancel')}`

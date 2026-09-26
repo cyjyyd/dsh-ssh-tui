@@ -99,6 +99,55 @@ test('empty-filter digits 1-9 pick the visible window; Enter picks the cursor', 
   assert.deepEqual(attach, { kind: 'done', result: { kind: 'attach', id: 'live', sock: '/tmp/live.sock' } })
 })
 
+test('a session a window is on asks once before the takeover', () => {
+  // `attached` is the lock's own word for "a display relay is connected right
+  // now". The picker used to render that as 已暂停 and attach on the spot, which
+  // took the session away from the window the user was still typing in.
+  const busy = session('live', { attach: { pid: 4242, sock: '/tmp/live.sock', state: 'attached' } })
+  const asked = stepPicker(state([busy]), { type: 'submit' })
+  assert.equal(asked.kind, 'continue', 'the first Enter asks instead of attaching')
+  assert.deepEqual(asked.state.confirmTakeover, { id: 'live', sock: '/tmp/live.sock', pid: 4242 })
+  assert.equal(asked.state.cursor, 0, 'the list itself does not move')
+
+  // `y` and Enter confirm; anything else drops the question and leaves that
+  // window alone — including a stray letter, so the guard cannot be typed past.
+  const confirmed = stepPicker(asked.state, { type: 'type', text: 'y' })
+  assert.deepEqual(confirmed, { kind: 'done', result: { kind: 'attach', id: 'live', sock: '/tmp/live.sock' } })
+  const entered = stepPicker(asked.state, { type: 'submit' })
+  assert.deepEqual(entered, { kind: 'done', result: { kind: 'attach', id: 'live', sock: '/tmp/live.sock' } })
+  for (const action of [{ type: 'type', text: 'n' }, { type: 'move', delta: 1 }, { type: 'escape' }, { type: 'quick', key: '1' }]) {
+    const cancelled = stepPicker(asked.state, action)
+    assert.equal(cancelled.kind, 'continue', `${action.type} must not attach`)
+    assert.equal(cancelled.state.confirmTakeover, undefined, `${action.type} drops the question`)
+  }
+  // Esc while confirming is a cancel, not a picker exit: the user gets the list
+  // back, and a second Esc still leaves.
+  assert.equal(stepPicker(asked.state, { type: 'escape' }).result, undefined)
+  assert.deepEqual(stepPicker(state([busy]), { type: 'escape' }), { kind: 'done', result: null })
+
+  // A digit shortcut goes through the same guard.
+  const quick = stepPicker(state([busy]), { type: 'quick', key: '1' })
+  assert.equal(quick.kind, 'continue')
+  assert.equal(quick.state.confirmTakeover?.id, 'live')
+})
+
+test('a Host left behind by a dropped link still attaches with one keystroke', () => {
+  // The whole point of the keep-alive host: the window is gone and the session
+  // is not. Only an explicit `attached` may ask; `paused`, `running-detached`
+  // and a lock from before the field existed all attach straight away.
+  for (const lockState of ['paused', 'running-detached', undefined]) {
+    const row = session('leftover', {
+      attach: { pid: 7, sock: '/tmp/leftover.sock', ...(lockState === undefined ? {} : { state: lockState }) },
+    })
+    const step = stepPicker(state([row]), { type: 'submit' })
+    assert.deepEqual(
+      step,
+      { kind: 'done', result: { kind: 'attach', id: 'leftover', sock: '/tmp/leftover.sock' } },
+      String(lockState),
+    )
+  }
+})
+
 test('typing filters; digits type once the filter is active; Esc leaves the filter first', () => {
   const sessions = [
     session('alpha', { label: '修复绘制残留', cwd: '/root/a' }),

@@ -65,6 +65,12 @@ export interface LiveHost {
   kind: 'attachable' | 'zombie'
   sock: string
   pid: number
+  /**
+   * The lock's own view of the session: `attached` while a display relay is
+   * connected, `paused` / `running-detached` once its window is gone. Absent on
+   * a lock written before the field existed, which must not read as "in use".
+   */
+  state?: string
   exitWatch?: { dispose(): void; exited: Promise<number | null> }
 }
 
@@ -108,6 +114,8 @@ export interface AttacherDeps {
     replaced(sessionId: string): string
     flapping(sessionId: string): string
     zombie(sessionId: string, pid: number): string
+    /** Refused: a window is on this session right now (see `attachOrSpawn`). */
+    attached(sessionId: string, pid: number): string
   }
   locksDisabled?(): boolean
   now?(): number
@@ -290,7 +298,20 @@ export function createAttacher(deps: AttacherDeps): Attacher {
 
   return {
     attachExisting,
-    attachOrSpawn: (sessionId, recover = true) => spawnHostAndRelay(sessionId, recover),
+    attachOrSpawn: async (sessionId, recover = true) => {
+      // A session another window is holding is not taken over by asking: this
+      // path is what a script or a `--resume=<id>` launch reaches, and there is
+      // nobody to confirm with. Attaching anyway silently kicked the window the
+      // user was typing in — the guard is here rather than in the picker so that
+      // every entry point obeys it. The picker asks first and attaches through
+      // `attachExisting`, which is also what a window that really is gone needs:
+      // it takes the session over.
+      const live = deps.locksDisabled?.() === true ? undefined : await deps.inspectLiveHost(sessionId)
+      if (live?.kind === 'attachable' && live.state === 'attached') {
+        throw new Error(deps.messages.attached(sessionId, live.pid))
+      }
+      await spawnHostAndRelay(sessionId, recover)
+    },
     get recoveries(): number {
       return recoveryWindow.length
     },

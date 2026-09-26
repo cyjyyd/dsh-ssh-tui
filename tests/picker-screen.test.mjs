@@ -109,6 +109,51 @@ test('a cancelled picker gives the alternate screen back with the transcript int
   assert.equal(io.writes.length, painted, 'a settled picker paints nothing')
 })
 
+test('a session a window holds is painted as attached, and Enter asks before taking it over', async () => {
+  const io = pickerStreams(72, 14)
+  const rows = [
+    { id: 'main-session-live', label: '窗口里的会话', updatedAt: 4, cwd: '/root/live', attach: { pid: 4242, sock: '/root/.dsh/tui-socks/live.sock', state: 'attached' } },
+    { id: 'main-session-left', label: '断线留下的会话', updatedAt: 3, cwd: '/root/left', attach: { pid: 7, sock: '/root/.dsh/tui-socks/left.sock', state: 'paused' } },
+  ]
+  const { ctx, openPager } = listingContext(rows)
+  const abort = new AbortController()
+  const settled = showSessionPicker(ctx, false, abort.signal, { ...io, openPager, terminalCaps: fullTerminal() })
+  await waitFor(() => io.writes.join('').includes('窗口里的会话'), 'the first listing')
+
+  // Replay everything the picker wrote onto a grid: this is what the user sees,
+  // and the whole bug was the *word* on that line.
+  const painted = async () => {
+    const term = screen(72, 14)
+    for (const write of io.writes) await term.write(write)
+    return term.grid().join('\n').replace(ANSI, '')
+  }
+  const first = await painted()
+  assert.match(first, /已接入 · pid 4242/u, 'a session with a live relay says so')
+  assert.match(first, /可接入 · pid 7 · 已暂停/u, 'a Host left by a dropped link keeps the drop wording')
+
+  // Enter on that row must not attach: it asks, on the same screen, and the
+  // picker stays open.
+  io.type('\r')
+  await waitFor(() => io.writes.length > 2, 'the confirmation frame')
+  const asking = await painted()
+  assert.match(asking, /已被 pid 4242 接入/u)
+  assert.match(asking, /按 y \/ Enter 接管/u)
+  assert.match(asking, /窗口里的会话/u, 'the list is still there')
+
+  // Any other key cancels and leaves that window alone.
+  io.type('n')
+  await waitFor(() => !io.writes.at(-1).includes('按 y'), 'the cancelled frame')
+  const cancelled = await painted()
+  assert.equal(/按 y \/ Enter 接管/u.test(cancelled), false, 'the question is cleared off the screen')
+  assert.match(cancelled, /已接入 · pid 4242/u, 'and the list is back')
+
+  // `y` confirms: the picker settles with the attach the takeover needs.
+  io.type('\r')
+  await waitFor(() => io.writes.at(-1).includes('按 y'), 'the question again')
+  io.type('y')
+  assert.deepEqual(await settled, { kind: 'attach', id: 'main-session-live', sock: '/root/.dsh/tui-socks/live.sock' })
+})
+
 test('a resize while the picker is live repaints one clean frame, not a stack', async () => {
   const io = pickerStreams(60, 12)
   const { ctx, openPager } = listingContext(SESSIONS)

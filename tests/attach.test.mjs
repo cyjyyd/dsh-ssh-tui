@@ -48,6 +48,7 @@ function harness(options = {}) {
       replaced: sessionId => `replaced ${sessionId}`,
       flapping: sessionId => `flapping ${sessionId}`,
       zombie: (sessionId, pid) => `zombie ${sessionId} ${pid}`,
+      attached: (sessionId, pid) => `attached ${sessionId} ${pid}`,
     },
     now: () => clock,
     burst: options.burst,
@@ -232,6 +233,45 @@ test('a zombie lock is reported instead of racing for the session', async () => 
   })
   await assert.rejects(() => h.attacher.attachOrSpawn('main-session'), /zombie main-session 99/)
   assert.deepEqual(h.spawned, [])
+})
+
+test('attachOrSpawn refuses a session a window is on, instead of kicking it', async () => {
+  // This is the path a `--resume=<id>` launch and any script reach. There is
+  // nobody here to confirm a takeover with, and attaching anyway silently
+  // replaced the display the user was typing into.
+  const h = harness({
+    relays: [{ reason: 'goodbye' }],
+    live: () => ({ kind: 'attachable', sock: 'live-sock', pid: 7, state: 'attached' }),
+  })
+  await assert.rejects(() => h.attacher.attachOrSpawn('main-session'), /attached main-session 7/)
+  assert.deepEqual(h.spawned, [], 'and it must not start a second Host either')
+  assert.equal(h.events.includes('relay:live-sock'), false, 'no relay was opened')
+  assert.deepEqual(h.exits, [], 'the refusal is an error, not a quiet exit')
+})
+
+test('attachOrSpawn still reattaches a Host whose window is gone', async () => {
+  for (const state of ['paused', 'running-detached', undefined]) {
+    const h = harness({
+      relays: [{ reason: 'goodbye' }],
+      live: () => ({ kind: 'attachable', sock: 'leftover-sock', pid: 7, ...(state === undefined ? {} : { state }) }),
+    })
+    await h.attacher.attachOrSpawn('main-session')
+    assert.equal(h.events.includes('relay:leftover-sock'), true, String(state))
+    assert.deepEqual(h.spawned, [], String(state))
+  }
+})
+
+test('the picker-confirmed takeover attaches without asking again', async () => {
+  // `attachExisting` is what the picker calls once the user confirmed, and what
+  // a recovery uses. The guard lives in `attachOrSpawn` alone, so a window that
+  // really is gone can still be taken over.
+  const h = harness({
+    relays: [{ reason: 'goodbye' }],
+    live: () => ({ kind: 'attachable', sock: 'live-sock', pid: 7, state: 'attached' }),
+  })
+  await h.attacher.attachExisting('main-session', 'live-sock')
+  assert.equal(h.events.includes('relay:live-sock'), true)
+  assert.deepEqual(h.exits, [0])
 })
 
 test('attachPeerVanished only accepts a vanished peer inside the window', () => {

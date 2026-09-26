@@ -204,6 +204,10 @@ export function apply(ctx: Context, config: Config): void {
       const path = sessionLockPathHeld
       sessionLockPathHeld = undefined
       sessionLockInfoHeld = undefined
+      // A write still queued must not resurrect the file we are about to drop:
+      // the queue reads `sessionLockPathHeld` when it runs, so clearing it
+      // first is what makes the queued patch a no-op.
+      await lockWrites
       if (path !== undefined) await releaseSessionLock(path)
     }
 
@@ -219,17 +223,35 @@ export function apply(ctx: Context, config: Config): void {
       sessionLockInfoHeld = info
     }
 
-    const patchLock = async (patch: Partial<SessionLockInfo>): Promise<void> => {
-      const path = sessionLockPathHeld
-      const current = sessionLockInfoHeld
-      if (path === undefined || current === undefined) return
-      const next = { ...current, ...patch }
-      sessionLockInfoHeld = next
-      try {
-        await writeSessionLock(path, next)
-      } catch {
-        // lock file is best-effort while detached
-      }
+    /**
+     * Lock writes run one after another, in call order.
+     *
+     * One drop patches the lock twice — `onDetach` when the display goes,
+     * `onHangup` once the Host knows whether it stays — and a reattach patches it
+     * back. Those used to be independent promises, so the file could end up
+     * holding a state older than the last event: a session with a window on it
+     * still reading `paused` (the picker then offers it as free and the takeover
+     * kicks the window), or a dropped session reading `attached` (the resume is
+     * refused as "already attached"). Merging inside the queue keeps each write
+     * layered on the previous one.
+     */
+    let lockWrites: Promise<void> = Promise.resolve()
+    const patchLock = (patch: Partial<SessionLockInfo>): Promise<void> => {
+      lockWrites = lockWrites
+        .catch(() => {})
+        .then(async () => {
+          const path = sessionLockPathHeld
+          const current = sessionLockInfoHeld
+          if (path === undefined || current === undefined) return
+          const next = { ...current, ...patch }
+          sessionLockInfoHeld = next
+          try {
+            await writeSessionLock(path, next)
+          } catch {
+            // lock file is best-effort while detached
+          }
+        })
+      return lockWrites
     }
 
     let inputCapture: { stop(): string } | undefined
@@ -254,7 +276,7 @@ export function apply(ctx: Context, config: Config): void {
         if (sessionLockDisabled()) return undefined
         const live = await inspectLiveHost(sessionId)
         if (live === undefined) return undefined
-        return { kind: live.kind, sock: live.sock, pid: live.lock.pid }
+        return { kind: live.kind, sock: live.sock, pid: live.lock.pid, state: live.lock.state }
       },
       spawnHost: sessionId => spawnDetachedHost(sessionId),
       waitForDisplaySock: async spawned => {
@@ -268,6 +290,7 @@ export function apply(ctx: Context, config: Config): void {
         replaced: sessionId => t('attach.replaced', { session: sessionId }),
         flapping: sessionId => t('attach.flapping', { session: sessionId }),
         zombie: (sessionId, pid) => t('attach.zombie', { session: sessionId, pid }),
+        attached: (sessionId, pid) => t('attach.attached', { session: sessionId, pid }),
       },
       debug: process.env.DSH_TUI_DEBUG === '1',
     })
@@ -542,6 +565,17 @@ export function apply(ctx: Context, config: Config): void {
         onRouteSettled: (settled) => { noteRoute(settled) },
         onSelectionChanged: (next) => {
           liveSelection = next
+        },
+        onDetach: async () => {
+          // The display is gone; the Host has not decided yet whether it stays.
+          // The lock stops claiming a window here, so a resume that arrives
+          // while the turn is being cancelled is not refused as "another window
+          // has it" — and the picker's list stops offering this session as
+          // in-use the moment its window dies, not ten seconds later.
+          await patchLock({
+            state: handle?.agent.status === 'running' ? 'running-detached' : 'paused',
+            tty: undefined,
+          })
         },
         onHangup: async () => {
           // Only reached when hangup keeps the Host (busy at drop). Idle hangup
