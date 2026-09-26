@@ -25,6 +25,9 @@ import {
   hostArgvForSession,
   isPipePath,
   probeDisplaySock,
+  queryDisplayAttachment,
+  encodeProbeReply,
+  FRAME_PROBE,
   sessionErrPath,
   sessionLabel,
   legacySessionErrPath,
@@ -612,4 +615,122 @@ test('captureTerminalInput keeps the last burst when the buffer is full', async 
   assert.equal(seed.endsWith('tail'), true, 'the newest typing survives')
   assert.ok(seed.length <= 8 * 1024, `captured ${seed.length} characters`)
   stdin.destroy()
+})
+
+// --- display liveness -------------------------------------------------------
+//
+// "The socket answers" is not "a window is there". A cut SSH link leaves the
+// launcher connected — it sees no hangup until sshd does, which can be hours —
+// so the Host has to round-trip the terminal through the relay before it may
+// call a session in use. These cases pin both halves of that exchange.
+
+test('a Host with no relay answers "detached" without asking anyone', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = sessionSockPath('query-idle', home)
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => {},
+    onAttach: () => {},
+  })
+  await host.listen()
+  assert.equal(await queryDisplayAttachment(path, 1_000), 'detached')
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+test('the Host asks its relay to round-trip the terminal, and reports the answer', async () => {
+  for (const [verdict, expected] of [['live', 'attached'], ['silent', 'detached']]) {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+    const path = sessionSockPath(`query-${verdict}`, home)
+    const probes = []
+    const host = new DisplayHost(path, {
+      onStdin: () => {},
+      onResize: () => {},
+      onDetach: () => {},
+      onAttach: () => {},
+    }, { probeTimeoutMs: 1_000 })
+    await host.listen()
+    const relay = createConnection(path)
+    await new Promise((resolve, reject) => {
+      relay.once('connect', resolve)
+      relay.once('error', reject)
+    })
+    const reader = new FrameReader()
+    relay.on('data', chunk => {
+      for (const frame of reader.push(chunk)) {
+        if (frame.type === FRAME_PROBE) {
+          probes.push(1)
+          relay.write(encodeProbeReply(verdict))
+        }
+      }
+    })
+    relay.write(encodeFrame(FRAME_HELLO))
+    await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(await queryDisplayAttachment(path, 2_000), expected, verdict)
+    assert.equal(probes.length, 1, 'the relay was asked exactly once')
+    relay.destroy()
+    await host.close()
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a relay that never answers leaves the question open, never "free"', async () => {
+  // An older relay does not know FRAME_PROBE. "Cannot tell" must not be read as
+  // "nobody is there": the cost of the doubt is one confirmation prompt, the
+  // cost of guessing wrong is taking the session from a window in use.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = sessionSockPath('query-silent-relay', home)
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => {},
+    onAttach: () => {},
+  }, { probeTimeoutMs: 150 })
+  await host.listen()
+  const relay = createConnection(path)
+  await new Promise((resolve, reject) => {
+    relay.once('connect', resolve)
+    relay.once('error', reject)
+  })
+  relay.write(encodeFrame(FRAME_HELLO))
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(await queryDisplayAttachment(path, 2_000), 'unknown')
+  relay.destroy()
+  await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+test('a query does not claim the display it is asking about', async () => {
+  // The prober is a second SSH window's picker. If its question counted as a
+  // hello, asking about a session would kick the window it asked about.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-sock-'))
+  const path = sessionSockPath('query-no-claim', home)
+  const attaches = []
+  const detaches = []
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: (info) => { detaches.push(info ?? {}) },
+    onAttach: () => { attaches.push(1) },
+  })
+  await host.listen()
+  const relay = createConnection(path)
+  await new Promise((resolve, reject) => {
+    relay.once('connect', resolve)
+    relay.once('error', reject)
+  })
+  relay.write(encodeFrame(FRAME_HELLO))
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(attaches.length, 1)
+  // No relay-side probe answer here: the claim check is what matters, and it
+  // has to hold whether or not the round trip succeeds.
+  await queryDisplayAttachment(path, 300)
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.deepEqual(attaches, [1], 'the prober did not become the display')
+  assert.deepEqual(detaches, [], 'and did not detach the one that is there')
+  assert.equal(host.attached, true)
+  relay.destroy()
+  await host.close()
+  await rm(home, { recursive: true, force: true })
 })

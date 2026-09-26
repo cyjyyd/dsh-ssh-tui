@@ -356,6 +356,20 @@ export class TerminalInputPump {
   }
 
   /**
+   * One request, one window: what a display-liveness check needs.
+   *
+   * `measure()` deliberately is not this. It waits out its whole budget between
+   * attempts so a late answer cannot be read as a fast one, and a check that
+   * costs seconds per question is a picker that hangs. Reading a late answer as
+   * this window's is the harmless direction here: it reports "the terminal is
+   * there", which is the conservative answer for every caller.
+   */
+  async measureOnce(timeoutMs = RTT_SAMPLE_TIMEOUT_MS): Promise<boolean> {
+    this.drain()
+    return (await this.ask(timeoutMs)) !== undefined
+  }
+
+  /**
    * Wait until the line has been quiet for a full window, measured from the
    * later of the last answer and the last request. An answer to a request we
    * already gave up on lands in here and is thrown away, so it cannot be

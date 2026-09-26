@@ -133,9 +133,10 @@ test('a session a window is on asks once before the takeover', () => {
 
 test('a Host left behind by a dropped link still attaches with one keystroke', () => {
   // The whole point of the keep-alive host: the window is gone and the session
-  // is not. Only an explicit `attached` may ask; `paused`, `running-detached`
-  // and a lock from before the field existed all attach straight away.
-  for (const lockState of ['paused', 'running-detached', undefined]) {
+  // is not. Only an explicit `attached` may ask; `paused`, `running-detached`,
+  // `stale` (the terminal itself said that window is gone) and a lock from
+  // before the field existed all attach straight away.
+  for (const lockState of ['paused', 'running-detached', 'stale', undefined]) {
     const row = session('leftover', {
       attach: { pid: 7, sock: '/tmp/leftover.sock', ...(lockState === undefined ? {} : { state: lockState }) },
     })

@@ -108,6 +108,16 @@ jobs:
       - name: Terminal-capability probe
         if: matrix.dsh != '0.1.5-rc.1'
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      # "Is a window really on this session?" is a question the lock cannot
+      # answer: a cut SSH link leaves the launcher connected for as long as sshd
+      # takes to notice. This drives the real PTY, answers the relay's cursor
+      # probes, then stops — the cut-link shape, with every process still alive —
+      # and asserts the Host's answer follows. One leg is enough: the frames and
+      # the probe round trip are host-line independent, and the probe skips
+      # itself when node-pty is missing.
+      - name: Cut-link liveness probe
+        if: matrix.dsh == '0.1.7-rc.1'
+        run: node scripts/probe-home.mjs --probe --script tui-cut-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.

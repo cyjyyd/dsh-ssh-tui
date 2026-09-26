@@ -18,6 +18,10 @@
  *   5 goodbye — host → relay, then close (user /exit)
  *   6 rtt     — relay → host (u32be milliseconds; 0xffffffff = unknown)
  *   7 replaced — host → relay, then close (a newer Display took the session)
+ *   8 probe   — host → relay: round-trip your terminal and report it
+ *   9 probe?  — relay → host: 1 live, 2 silent (answered before, not now), 0 unknown
+ *  10 query   — any process → host: is a window really on this session?
+ *  11 query?  — host → that process: 1 attached, 2 detached, 0 cannot tell
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
@@ -26,7 +30,11 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { TerminalInputFilter, TerminalInputPump } from './terminal-input.js'
+import {
+  RTT_SLOW_SAMPLE_TIMEOUT_MS,
+  TerminalInputFilter,
+  TerminalInputPump,
+} from './terminal-input.js'
 import { dirname, join, resolve } from 'node:path'
 import {
   bootstrapEnv,
@@ -44,6 +52,31 @@ export const FRAME_HELLO = 4
 export const FRAME_GOODBYE = 5
 export const FRAME_RTT = 6
 export const FRAME_REPLACED = 7
+/** Host → relay: round-trip your terminal now and say what it answered. */
+export const FRAME_PROBE = 8
+/** Relay → Host: the answer to {@link FRAME_PROBE}. */
+export const FRAME_PROBE_REPLY = 9
+/** A prober → Host: is a window *really* on this session? Does not claim it. */
+export const FRAME_QUERY = 10
+/** Host → prober: the answer to {@link FRAME_QUERY}. */
+export const FRAME_QUERY_REPLY = 11
+
+/**
+ * What a relay's own terminal round trip said.
+ *
+ * `live` — the terminal answered just now, so somebody has a screen in front of
+ *   them. `silent` — it answered when this relay attached and does not answer
+ *   now: that window is gone. The distinction is the whole point: a cut SSH link
+ *   leaves the launcher *connected* (it sees no hangup until sshd does, which
+ *   can be hours with TCP keepalive), so the socket alone cannot tell a live
+ *   window from a dead one — only the far end can. `unknown` — it never answered
+ *   (a pipe, a dumb terminal, or a link that was already dead at attach), and
+ *   silence must not be read as an answer.
+ */
+export type TerminalVerdict = 'live' | 'silent' | 'unknown'
+
+/** What a Host tells a prober about the window on its session. */
+export type AttachmentVerdict = 'attached' | 'detached' | 'unknown'
 
 const MAX_FRAME = 1024 * 1024
 
@@ -67,6 +100,14 @@ const REPLACED_GRACE_MS = 250
  * attach at all — hence the wider grace.
  */
 const DISPLAY_HELLO_GRACE_MS = 6_000
+
+/**
+ * How long the Host waits for a relay's terminal round trip.
+ *
+ * The relay's own probe is two windows at most (a fast one, then a widened one
+ * for a slow link), so this only has to cover those plus the socket hop.
+ */
+const DISPLAY_PROBE_TIMEOUT_MS = 3_000
 
 /**
  * Drop launcher SIGTERM/SIGINT/SIGHUP so closing SSH cannot dispose the tree
@@ -363,6 +404,41 @@ export function decodeRtt(payload: Buffer): number | undefined {
   return value === 0xffffffff ? undefined : value
 }
 
+/** One byte of verdict: 1 live, 2 silent, 0 anything else (unknown). */
+function encodeVerdict(type: number, value: number): Buffer {
+  return encodeFrame(type, Buffer.from([value]))
+}
+
+function decodeVerdict(payload: Buffer): number {
+  return payload.length > 0 ? payload.readUInt8(0) : 0
+}
+
+export function encodeProbe(): Buffer {
+  return encodeFrame(FRAME_PROBE)
+}
+
+export function encodeProbeReply(verdict: TerminalVerdict): Buffer {
+  return encodeVerdict(FRAME_PROBE_REPLY, verdict === 'live' ? 1 : verdict === 'silent' ? 2 : 0)
+}
+
+export function decodeProbeReply(payload: Buffer): TerminalVerdict {
+  const value = decodeVerdict(payload)
+  return value === 1 ? 'live' : value === 2 ? 'silent' : 'unknown'
+}
+
+export function encodeQuery(): Buffer {
+  return encodeFrame(FRAME_QUERY)
+}
+
+export function encodeQueryReply(verdict: AttachmentVerdict): Buffer {
+  return encodeVerdict(FRAME_QUERY_REPLY, verdict === 'attached' ? 1 : verdict === 'detached' ? 2 : 0)
+}
+
+export function decodeQueryReply(payload: Buffer): AttachmentVerdict {
+  const value = decodeVerdict(payload)
+  return value === 1 ? 'attached' : value === 2 ? 'detached' : 'unknown'
+}
+
 /** Incremental decoder for one socket. */
 export class FrameReader {
   private buffer = Buffer.alloc(0)
@@ -417,12 +493,16 @@ export class DisplayHost {
   private socket: Socket | undefined
   private reader = new FrameReader()
   attached = false
+  /** Set while a {@link FRAME_PROBE} round trip is waiting for its answer. */
+  private probeSettle: ((verdict: TerminalVerdict) => void) | undefined
+  private probeInFlight: Promise<TerminalVerdict> | undefined
 
   constructor(
     readonly path: string,
     private readonly handlers: DisplayHostHandlers,
-    /** Test seam: how long a silent connection may wait for its HELLO. */
-    private readonly options: { helloGraceMs?: number } = {},
+    /** Test seams: how long a silent connection may wait for its HELLO, and
+     *  how long a relay may take to report its terminal round trip. */
+    private readonly options: { helloGraceMs?: number; probeTimeoutMs?: number } = {},
   ) {}
 
   async listen(): Promise<void> {
@@ -535,13 +615,20 @@ export class DisplayHost {
       }
       for (const frame of frames) {
         if (frame.type === FRAME_HELLO) claim()
-        else if (!claimed) continue
+        else if (frame.type === FRAME_QUERY) {
+          // A prober asking whether a window is really on this session. It is
+          // deliberately not a claim: answering must never steal the display
+          // from the window the question is about.
+          void this.answerQuery(socket)
+        } else if (!claimed) continue
         else if (frame.type === FRAME_STDIN) this.handlers.onStdin(frame.payload)
         else if (frame.type === FRAME_RESIZE) {
           const size = decodeResize(frame.payload)
           if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
         } else if (frame.type === FRAME_RTT) {
           this.handlers.onRtt?.(decodeRtt(frame.payload))
+        } else if (frame.type === FRAME_PROBE_REPLY) {
+          this.settleProbe(decodeProbeReply(frame.payload))
         }
       }
     })
@@ -555,6 +642,75 @@ export class DisplayHost {
     // A connect() with no HELLO is a liveness probe; do not steal the display.
     const probeGrace = setTimeout(dropProbe, this.options.helloGraceMs ?? DISPLAY_HELLO_GRACE_MS)
     probeGrace.unref?.()
+  }
+
+  /**
+   * Whether a window is really on this session — asked of the window itself.
+   *
+   * "The socket answers" is not evidence. A relay whose SSH link was cut stays
+   * connected (its launcher sees no hangup until sshd does), and the Host then
+   * truthfully reports a display that no longer has a screen behind it. Only the
+   * far end can settle it, so this round-trips the terminal through the relay.
+   */
+  async attachmentVerdict(): Promise<AttachmentVerdict> {
+    if (this.socket === undefined || this.attached !== true) return 'detached'
+    const terminal = await this.probeTerminal()
+    if (terminal === 'live') return 'attached'
+    if (terminal === 'silent') return 'detached'
+    return 'unknown'
+  }
+
+  /** One answer to one prober; never claims the display, never throws. */
+  private async answerQuery(socket: Socket): Promise<void> {
+    const verdict = await this.attachmentVerdict()
+    try {
+      socket.write(encodeQueryReply(verdict))
+    } catch {
+      // The prober gave up on its own deadline; nothing left to answer to.
+    }
+  }
+
+  /**
+   * Ask the claimed relay to round-trip its terminal, with a deadline.
+   *
+   * Sharing one in-flight round trip matters: a second question while the first
+   * is unanswered would be settled by the first reply, and two windows asking at
+   * once is a normal resume, not an error.
+   */
+  private async probeTerminal(): Promise<TerminalVerdict> {
+    if (this.probeInFlight !== undefined) return await this.probeInFlight
+    const socket = this.socket
+    if (socket === undefined) return 'unknown'
+    const pending = new Promise<TerminalVerdict>(resolve => {
+      // Referenced on purpose: the timer *completes* the round trip, and an
+      // unref'd one would let the loop drain with the caller still waiting.
+      const timer = setTimeout(() => {
+        this.probeSettle = undefined
+        resolve('unknown')
+      }, this.options.probeTimeoutMs ?? DISPLAY_PROBE_TIMEOUT_MS)
+      this.probeSettle = verdict => {
+        clearTimeout(timer)
+        this.probeSettle = undefined
+        resolve(verdict)
+      }
+    })
+    this.probeInFlight = pending
+    try {
+      socket.write(encodeProbe())
+    } catch {
+      this.settleProbe('unknown')
+    }
+    try {
+      return await pending
+    } finally {
+      this.probeInFlight = undefined
+    }
+  }
+
+  private settleProbe(verdict: TerminalVerdict): void {
+    const settle = this.probeSettle
+    this.probeSettle = undefined
+    settle?.(verdict)
   }
 
   sendStdout(bytes: Buffer | string): boolean {
@@ -627,6 +783,67 @@ function isPidAlive(pid: number): boolean {
  */
 export async function displaySockExists(path: string, timeoutMs = 250): Promise<boolean> {
   return await probeDisplaySock(path, timeoutMs)
+}
+
+/**
+ * How long a prober waits for the Host's answer to {@link FRAME_QUERY}.
+ *
+ * It has to cover the relay's own two probe windows (see
+ * {@link DISPLAY_PROBE_TIMEOUT_MS}) plus the hop; the answer only takes this
+ * long when the display really is silent.
+ */
+export const DISPLAY_QUERY_TIMEOUT_MS = 4_000
+
+/**
+ * Ask a live Host whether a window is really on its session.
+ *
+ * `undefined` means the Host did not answer — an older Host that does not know
+ * the frame, or one whose event loop is stuck. Every caller must read that as
+ * "cannot tell" and never as "free": the cost of the doubt is one confirmation
+ * prompt, and the cost of guessing wrong is taking a session away from a window
+ * somebody is still typing in.
+ */
+export async function queryDisplayAttachment(
+  path: string,
+  timeoutMs = DISPLAY_QUERY_TIMEOUT_MS,
+): Promise<AttachmentVerdict | undefined> {
+  return await new Promise(resolve => {
+    const socket = createConnection(path)
+    const reader = new FrameReader()
+    let settled = false
+    const finish = (verdict: AttachmentVerdict | undefined): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      resolve(verdict)
+    }
+    const timer = setTimeout(() => finish(undefined), timeoutMs)
+    socket.once('connect', () => {
+      try {
+        socket.write(encodeQuery())
+      } catch {
+        finish(undefined)
+      }
+    })
+    socket.on('data', chunk => {
+      let frames: Array<{ type: number; payload: Buffer }>
+      try {
+        frames = reader.push(chunk)
+      } catch {
+        finish(undefined)
+        return
+      }
+      for (const frame of frames) {
+        if (frame.type === FRAME_QUERY_REPLY) {
+          finish(decodeQueryReply(frame.payload))
+          return
+        }
+      }
+    })
+    socket.once('error', () => finish(undefined))
+    socket.once('close', () => finish(undefined))
+  })
 }
 
 /** Watches a freshly spawned Host so a crash is reported immediately. */
@@ -1136,6 +1353,9 @@ export async function runDisplayRelay(
     const reader = new FrameReader()
     let settled = false
     let live = false
+    /** Whether this terminal has ever answered a cursor probe. */
+    let terminalAnswered = false
+    let probeInFlight = false
     // Set when the Host tells us a newer Display took this session over. The
     // terminal restore below is the one write that must NOT happen then: this
     // relay no longer owns any screen, and if the link is dead (window killed,
@@ -1256,6 +1476,30 @@ export async function runDisplayRelay(
         sendResize()
       }, 20)
     }
+    /**
+     * The Host asking whether this display still has a terminal.
+     *
+     * The answer has to come from a real round trip. A cut SSH link leaves this
+     * relay connected and its event loop healthy — the launcher sees no hangup
+     * until sshd does, which can be hours — so anything cheaper (a ping its own
+     * loop answers) would keep reporting a window nobody can see any more.
+     */
+    const answerProbe = async (): Promise<void> => {
+      if (probeInFlight) return
+      probeInFlight = true
+      try {
+        // A slow link gets the widened window before its silence is believed:
+        // "silent" is what lets a resume take the session over, and a live
+        // window must never be misread into it.
+        const alive = await pump.measureOnce() || await pump.measureOnce(RTT_SLOW_SAMPLE_TIMEOUT_MS)
+        terminalAnswered ||= alive
+        socket.write(encodeProbeReply(alive ? 'live' : terminalAnswered ? 'silent' : 'unknown'))
+      } catch {
+        // The socket is gone; the close handler settles the relay.
+      } finally {
+        probeInFlight = false
+      }
+    }
     const onLocalHangup = (): void => {
       finish('signal')
     }
@@ -1291,6 +1535,10 @@ export async function runDisplayRelay(
           // repaint (1900 ms) instead of the link (50 ms).
           const rtt = await pump.measure()
           if (settled) return
+          // The baseline a liveness check is compared against: a terminal that
+          // answered once and is silent later is gone, one that never answered
+          // tells us nothing (see `TerminalVerdict`).
+          terminalAnswered = rtt !== undefined
           const columns = stdout.columns || 80
           const rows = stdout.rows || 24
           socket.write(Buffer.concat([
@@ -1350,6 +1598,8 @@ export async function runDisplayRelay(
           replaced = true
           finish('replaced')
           return
+        } else if (frame.type === FRAME_PROBE) {
+          void answerProbe()
         }
       }
     })

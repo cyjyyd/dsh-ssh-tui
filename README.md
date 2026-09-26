@@ -161,7 +161,12 @@ dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从�
 
 那个进程如果正被**另一个窗口**接入（选择器会标「已接入 · pid N」），`--resume <session-id>`
 会被拒绝而不是把对方踢掉——要接管就在**选择器里**选中它，再按 `y` / Enter 确认（那个窗口随即退出）。
-误标的情况同理：确认一次就能把会话接过来。
+
+**断线残留不会挡住你**：SSH 被切断时服务端常常还不知道（sshd 要等 TCP keepalive 才发现，可能几小时），
+那个窗口的 launcher 仍然连着显示通道，锁里写的还是 `attached`。所以 Host 会反过来向**终端本身**要答案
+（经 relay 做一次光标往返，见 `scripts/tui-cut-probe.mjs`）：终端答不上来就说明那个窗口已经没了——
+选择器把它标成「可接入 · 原窗口已失联」，一键接入；`--resume <session-id>` 也直接接入。
+只有终端确认还活着时才需要上面的接管确认。
 
 同一 `sessionId` 不能同时开第二份 Host（会抢 jsonl 和审批）。锁在
 `$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在

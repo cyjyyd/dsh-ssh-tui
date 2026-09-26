@@ -8,7 +8,11 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { showSessionPicker } from '../lib/picker.js'
+import { encodeQueryReply, FrameReader, FRAME_QUERY } from '../lib/display-sock.js'
 import { screen } from './screen.mjs'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
 
@@ -54,7 +58,9 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 async function waitFor(predicate, label, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (predicate()) return
+    // Awaited: a predicate that has to repaint the picker first is async, and
+    // an unawaited promise is always truthy — a wait that returns at once.
+    if (await predicate()) return
     await delay(10)
   }
   throw new Error(`timed out waiting for ${label}`)
@@ -228,4 +234,55 @@ test('the first screen waits for real titles and shows what is left to read', as
 
   abort.abort()
   await settled
+})
+
+test('a row whose display is gone corrects itself, and then attaches in one keystroke', async () => {
+  // The shape of the reported bug: the SSH link was cut, the launcher is still
+  // connected (sshd has not noticed), so the lock says `attached` and the list
+  // said 已接入 while the window was already gone. The picker asks that Host —
+  // through it, the terminal — and the row corrects itself without the user
+  // having to argue with it.
+  const answers = []
+  const server = createServer(socket => {
+    const reader = new FrameReader()
+    socket.on('data', chunk => {
+      for (const frame of reader.push(chunk)) {
+        if (frame.type !== FRAME_QUERY) continue
+        answers.push(1)
+        socket.write(encodeQueryReply('detached'))
+      }
+    })
+  })
+  const sock = join(tmpdir(), `dsh-picker-stale-${process.pid}.sock`)
+  await new Promise(resolve => server.listen(sock, resolve))
+  try {
+    const io = pickerStreams(72, 14)
+    const rows = [{
+      id: 'main-session-cut',
+      label: '断线残留的会话',
+      updatedAt: 5,
+      cwd: '/root/cut',
+      attach: { pid: 4242, sock, state: 'attached' },
+    }]
+    const { ctx, openPager } = listingContext(rows)
+    const settled = showSessionPicker(ctx, false, undefined, { ...io, openPager, terminalCaps: fullTerminal() })
+    const painted = async () => {
+      const term = screen(72, 14)
+      for (const write of io.writes) await term.write(write)
+      return term.grid().join('\n').replace(ANSI, '')
+    }
+    await waitFor(() => io.writes.join('').includes('断线残留的会话'), 'the first listing')
+    await waitFor(() => answers.length > 0, 'the liveness question')
+    await waitFor(async () => (await painted()).includes('原窗口已失联'), 'the corrected row')
+    const corrected = await painted()
+    assert.match(corrected, /可接入 · pid 4242（原窗口已失联/u)
+    assert.equal(corrected.includes('已接入 · pid 4242'), false, 'the stale label is gone')
+
+    // And the one keystroke is back: no takeover question for a window that the
+    // terminal itself said is not there.
+    io.type('\r')
+    assert.deepEqual(await settled, { kind: 'attach', id: 'main-session-cut', sock })
+  } finally {
+    server.close()
+  }
 })

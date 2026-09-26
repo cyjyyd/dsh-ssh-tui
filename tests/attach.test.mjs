@@ -250,7 +250,7 @@ test('attachOrSpawn refuses a session a window is on, instead of kicking it', as
 })
 
 test('attachOrSpawn still reattaches a Host whose window is gone', async () => {
-  for (const state of ['paused', 'running-detached', undefined]) {
+  for (const state of ['paused', 'running-detached', 'stale', undefined]) {
     const h = harness({
       relays: [{ reason: 'goodbye' }],
       live: () => ({ kind: 'attachable', sock: 'leftover-sock', pid: 7, ...(state === undefined ? {} : { state }) }),

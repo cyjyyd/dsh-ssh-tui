@@ -53,6 +53,7 @@ import {
 import {
   captureTerminalInput,
   isTuiHostProcess,
+  queryDisplayAttachment,
   quietTerminalInput,
   resolveDshHome,
   runDisplayRelay,
@@ -289,7 +290,18 @@ export function apply(ctx: Context, config: Config): void {
         if (sessionLockDisabled()) return undefined
         const live = await inspectLiveHost(sessionId)
         if (live === undefined) return undefined
-        return { kind: live.kind, sock: live.sock, pid: live.lock.pid, state: live.lock.state }
+        // `attached` is the Host's word for "a relay is connected", and a cut
+        // SSH link leaves that relay connected: the launcher sees no hangup
+        // until sshd does (TCP keepalive, which can be hours), so the window is
+        // gone while the socket still answers. Only the terminal at the far end
+        // can settle it, so ask it — through the Host — before calling a session
+        // in use. Anything but a definite "detached" keeps the lock's answer,
+        // because guessing wrong here takes a session from a live window.
+        const state = live.lock.state === 'attached'
+          && await queryDisplayAttachment(live.sock) === 'detached'
+          ? 'stale'
+          : live.lock.state
+        return { kind: live.kind, sock: live.sock, pid: live.lock.pid, state }
       },
       spawnHost: sessionId => spawnDetachedHost(sessionId),
       waitForDisplaySock: async spawned => {

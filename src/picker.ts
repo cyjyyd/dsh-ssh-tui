@@ -22,6 +22,7 @@ import {
   type ResumableSessionPager,
 } from './session-list.js'
 import { composePaintOutput, isEscapePrefix, pickerWindowStart } from './paint.js'
+import { queryDisplayAttachment } from './display-sock.js'
 import { terminalCapabilities, type TerminalCapabilities } from './terminal-caps.js'
 import { truncateToWidth } from './term-text.js'
 import { TerminalInputGuard } from './terminal-input.js'
@@ -576,12 +577,19 @@ export async function showSessionPicker(
             // background — invited the user to take a session they were already
             // using, and the attach then kicked their own window.
             ? t('picker.attachLive', { pid: session.attach.pid })
-            : t('picker.attachable', {
-              pid: session.attach.pid,
-              status: session.attach.state === 'running-detached'
-                ? t('picker.attachRunning')
-                : t('picker.attachPaused'),
-            })
+            // `stale` is what the terminal itself answered: the relay is still
+            // connected but nothing is behind it (a cut link leaves the launcher
+            // alive until sshd notices). That is the ordinary reattach, so it
+            // keeps the one-keystroke wording — with the reason, because "可接入"
+            // next to a live pid otherwise reads like a contradiction.
+            : session.attach.state === 'stale'
+              ? t('picker.attachStale', { pid: session.attach.pid })
+              : t('picker.attachable', {
+                pid: session.attach.pid,
+                status: session.attach.state === 'running-detached'
+                  ? t('picker.attachRunning')
+                  : t('picker.attachPaused'),
+              })
         const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
         if (attachNote !== '') {
           lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), '32')}`)
@@ -760,7 +768,39 @@ export async function showSessionPicker(
         cursor: retainCursor(focusedId, nextFiltered, state.cursor),
       }
       render()
+      void refineAttachedRows()
     }
+
+    /**
+     * Correct the rows whose state cannot be taken at face value.
+     *
+     * `attached` is the Host's word for "a relay is connected", and a cut SSH
+     * link leaves that relay connected: the launcher sees no hangup until sshd
+     * does (TCP keepalive, which can be hours), so the window is gone while the
+     * socket still answers. Only the terminal at the far end can settle it, so
+     * each such row is asked — through its Host — and the list is repainted when
+     * the answer lands. Nothing waits on this: the frame is already on screen
+     * with the lock's answer, and a row that turns out to be attachable becomes
+     * a one-keystroke attach instead of a takeover question.
+     */
+    const refineAttachedRows = async (): Promise<void> => {
+      const rows = state.sessions.filter(session => session.attach?.state === 'attached')
+      if (rows.length === 0) return
+      const answers = await Promise.all(rows.map(async session => ({
+        session,
+        verdict: await queryDisplayAttachment(String(session.attach?.sock ?? '')),
+      })))
+      if (done) return
+      let changed = false
+      for (const { session, verdict } of answers) {
+        const attach = session.attach
+        if (verdict !== 'detached' || attach === undefined) continue
+        session.attach = { ...attach, state: 'stale' }
+        changed = true
+      }
+      if (changed) render()
+    }
+
     const loadPage = async (): Promise<void> => {
       if (done || pager === undefined || pageInFlight) return
       pageInFlight = true

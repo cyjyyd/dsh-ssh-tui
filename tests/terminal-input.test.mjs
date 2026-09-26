@@ -16,8 +16,11 @@ import {
 } from '../lib/terminal-input.js'
 import {
   DisplayHost,
+  decodeProbeReply,
   FRAME_GOODBYE,
   FRAME_HELLO,
+  FRAME_PROBE,
+  FRAME_PROBE_REPLY,
   FRAME_REPLACED,
   FRAME_STDIN,
   FRAME_STDOUT,
@@ -639,4 +642,94 @@ test('a silent connection is dropped without claiming the display', { timeout: 1
   assert.deepEqual(attaches, [])
   assert.equal(host.attached, false)
   client.destroy()
+})
+
+// --- the relay's answer to a display-liveness probe --------------------------
+//
+// The Host cannot tell a live window from a cut link by looking at its socket:
+// the launcher stays connected until sshd notices. So it asks the relay, and the
+// relay's answer is only worth anything if it comes from the terminal itself.
+
+test('a liveness probe is answered from the terminal, not from the relay', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-probe-live')
+  const server = createServer(() => {})
+  const replies = []
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_PROBE_REPLY) replies.push(decodeProbeReply(frame.payload))
+  }, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  const terminal = scriptedTerminal({ replyDelayMs: 5 })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true)
+  host.socket.write(encodeFrame(FRAME_PROBE))
+  for (let wait = 0; wait < 300 && replies.length === 0; wait += 1) await delay(10)
+  assert.deepEqual(replies, ['live'], 'a terminal that answers is a window somebody can see')
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
+})
+
+test('a terminal that went quiet reports "silent", which is what a resume acts on', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-probe-silent')
+  const server = createServer(() => {})
+  const replies = []
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_PROBE_REPLY) replies.push(decodeProbeReply(frame.payload))
+  }, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  // Answers the attach-time measurement, then never again: the shape of a link
+  // that was cut after the window attached.
+  const terminal = scriptedTerminal({
+    onRequest: (count, stdin) => {
+      if (count === 1) stdin.write('\x1b[17;1R')
+    },
+  })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true)
+  assert.equal(terminal.requests() >= 1, true, 'the attach-time measurement ran')
+  host.socket.write(encodeFrame(FRAME_PROBE))
+  for (let wait = 0; wait < 600 && replies.length === 0; wait += 1) await delay(10)
+  assert.deepEqual(replies, ['silent'], 'silence after an earlier answer is the cut-link verdict')
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
+})
+
+test('a terminal that never answered at all reports "unknown", not "silent"', { timeout: 10_000 }, async t => {
+  // A dumb pipe never answers DSR; its silence says nothing about whether
+  // somebody is watching, so it must not license a takeover.
+  const { path } = await listenOn(t, 'relay-probe-dumb')
+  const server = createServer(() => {})
+  const replies = []
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_PROBE_REPLY) replies.push(decodeProbeReply(frame.payload))
+  }, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  const terminal = scriptedTerminal({})
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true)
+  host.socket.write(encodeFrame(FRAME_PROBE))
+  for (let wait = 0; wait < 600 && replies.length === 0; wait += 1) await delay(10)
+  assert.deepEqual(replies, ['unknown'])
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
 })

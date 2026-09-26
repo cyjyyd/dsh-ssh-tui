@@ -754,6 +754,7 @@ export const en: Record<string, string> = {
   'picker.none': 'dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n',
   'picker.attachable': 'attachable · pid {pid}{status} (live host after SSH drop)',
   'picker.attachLive': 'attached · pid {pid} (a window is on it; taking over kicks that window)',
+  'picker.attachStale': 'attachable · pid {pid} (that window is gone — a cut link; attaching takes it over)',
   'picker.takeoverConfirm': '⚠ pid {pid} has this session in a window; press y / Enter to take it over (kicks that window), any other key cancels',
   'picker.attachPaused': ' · paused',
   'picker.attachRunning': ' · running in background',

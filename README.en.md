@@ -152,8 +152,16 @@ dsh --profile tui --resume <session-id>    # attach if live, else resume the log
 If a window still has that session (the picker labels it `attached · pid N`),
 `--resume <session-id>` is refused rather than kicking that window: take it over
 from the **picker** instead — select the row and confirm with `y` / Enter, and
-the other window exits. A session left behind by a dropped link attaches with one
-keystroke, no confirmation.
+the other window exits.
+
+**A cut link does not block you.** When SSH dies the server usually does not
+know yet: sshd waits for TCP keepalive (which can be hours), the launcher stays
+connected to the display channel, and the lock still reads `attached`. So the
+Host asks the **terminal itself** (a cursor round trip through the relay — see
+`scripts/tui-cut-probe.mjs`). A terminal that cannot answer means that window is
+gone: the picker labels the row `attachable · that window is gone`, one keystroke
+attaches, and so does `--resume <session-id>`. Only a terminal that confirms it
+is still there needs the takeover question above.
 
 A second Host on the same `sessionId` is refused (it would steal the jsonl
 and approvals). Locks live under `$DSH_HOME/tui-locks/`; the display socket

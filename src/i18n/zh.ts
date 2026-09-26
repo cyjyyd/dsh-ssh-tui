@@ -754,6 +754,7 @@ export const zh: Record<string, string> = {
   'picker.none': 'dsh-ssh-tui: no resumable history sessions; starting a fresh session.\n',
   'picker.attachable': '可接入 · pid {pid}{status}（断线后的原会话）',
   'picker.attachLive': '已接入 · pid {pid}（窗口还开着；接管会踢掉那个窗口）',
+  'picker.attachStale': '可接入 · pid {pid}（原窗口已失联：断线残留，直接接管即可）',
   'picker.takeoverConfirm': '⚠ 该会话已被 pid {pid} 接入；按 y / Enter 接管（会踢掉那个窗口），其他键取消',
   'picker.attachPaused': ' · 已暂停',
   'picker.attachRunning': ' · 后台运行中',
