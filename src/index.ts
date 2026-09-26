@@ -571,9 +571,12 @@ export function apply(ctx: Context, config: Config): void {
           // The lock stops claiming a window here, so a resume that arrives
           // while the turn is being cancelled is not refused as "another window
           // has it" — and the picker's list stops offering this session as
-          // in-use the moment its window dies, not ten seconds later.
+          // in-use the moment its window dies, not ten seconds later. The agent
+          // status goes with the state, so `/diag` never shows the pair from two
+          // different moments.
           await patchLock({
             state: handle?.agent.status === 'running' ? 'running-detached' : 'paused',
+            agentStatus: handle?.agent.status === 'running' ? 'running' : 'idle',
             tty: undefined,
           })
         },

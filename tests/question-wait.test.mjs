@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -69,6 +69,56 @@ test('the marker records the question', async () => {
     assert.throws(() => statSync(path), 'answering removes the marker')
     await clearWaitingMarker(question.sessionId, home)
   } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a reader in another process never sees a half-written marker', async () => {
+  // The real reader is a jump-host shell polling `ls`/`cat`, i.e. another
+  // process. `writeFile` creates the file *before* it has content, and a reader
+  // spinning in a tight loop catches that window — which is how the Windows leg
+  // went red once (`actual: ''`) on a commit that only touched docs. The write
+  // stages a sibling and renames it, so existence implies content; without that,
+  // this case fails.
+  const home = mkdtempSync(join(tmpdir(), 'dsh-question-wait-race-'))
+  const path = waitingMarkerPath(question.sessionId, home)
+  const reader = spawn(process.execPath, ['-e', `
+    const { readFileSync } = require('node:fs')
+    const [path, ms] = process.argv.slice(1)
+    const seen = new Set()
+    const deadline = Date.now() + Number(ms)
+    do {
+      try { seen.add(readFileSync(path, 'utf8')) } catch { /* not there yet */ }
+    } while (Date.now() < deadline)
+    process.stdout.write(JSON.stringify([...seen]))
+  `, path, '1200'], { stdio: ['ignore', 'pipe', 'inherit'] })
+  const samples = new Promise((resolve, reject) => {
+    let out = ''
+    reader.stdout.on('data', chunk => { out += String(chunk) })
+    reader.on('error', reject)
+    reader.on('close', () => {
+      try {
+        resolve(JSON.parse(out))
+      } catch (error) {
+        reject(new Error(`the reader printed ${JSON.stringify(out)}: ${String(error)}`))
+      }
+    })
+  })
+  try {
+    for (let count = 1; count <= 200; count += 1) {
+      assert.equal(await writeWaitingMarker({ ...question, count }, home), true)
+    }
+    const seen = await samples
+    assert.ok(seen.length > 0, 'the reader has to catch the marker at least once for this to mean anything')
+    for (const text of seen) {
+      assert.match(
+        text,
+        /^session=main\/session\nwaiting=\d+\nsince=2026-09-26T08:00:00\.000Z\nquestion=部署到哪个环境？\n$/u,
+        'every read is a complete marker',
+      )
+    }
+  } finally {
+    reader.kill()
     rmSync(home, { recursive: true, force: true })
   }
 })
