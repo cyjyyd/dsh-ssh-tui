@@ -71,12 +71,17 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // That is not hypothetical: upstream published cordis 4.0.3/4.0.4,
   // cordis-plugin-loader 1.0.4/1.0.5 and schemastery 3.18.3/3.18.4 on
   // 2026-09-22, minutes before a CI run, and every leg went red on `npm install`.
-  // Bumping these is deliberate and comes with bumping the dsh family pin.
+  // Bumping these is deliberate and comes with bumping the dsh family pin: the
+  // 0.1.7 line re-pinned them again (cordis 4.0.4, include 1.0.9, loader 1.0.5,
+  // timer 1.1.6, plus the launcher-only cordis-plugin-group 1.0.4).
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-  // Which line this tree is pinned to is a CI matrix decision: every non-default
-  // leg rewrites the devDep pins before installing, so the expectation follows
-  // the host that actually landed in node_modules rather than the committed
-  // default. The schemastery spec below is line-independent on purpose.
+  // Which line this tree is pinned to is a CI matrix decision: `package.json`
+  // commits the default line, every other leg rewrites the pins with
+  // `scripts/ci-pin-line.mjs` before installing, and the expectation here
+  // follows the host that actually landed in node_modules rather than the line
+  // this checkout commits. The numbers are the ones that script's table holds,
+  // pinned by `tests/ci-pin-line.test.mjs`. The schemastery spec below is
+  // line-independent on purpose.
   const PINS = FORMS_HOST
     ? {
         '@deepseek-ai/cordis': '4.0.4',

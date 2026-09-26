@@ -114,6 +114,26 @@ test('the Windows leg drives the real TUI, not just the unit suite', () => {
   )
 })
 
+test('only the non-default legs rewrite the manifest, and the default one is declared', async () => {
+  // `package.json` commits one host line, and exactly the legs that are *not*
+  // that line rewrite it before installing. Losing the guard (or leaving the
+  // committed manifest on a line no leg installs unchanged) would make a green
+  // run mean nothing: the suite would be verifying a tree nobody ships.
+  const text = readWorkflow()
+  const lines = /dsh: \[([^\]]*)\]/u.exec(text)?.[1]
+    ?.split(',').map(entry => entry.trim().replaceAll('"', '')).filter(entry => entry !== '')
+  assert.ok(lines !== undefined && lines.length >= 2, 'the matrix must keep more than one leg')
+  const pinStep = jobStepBlocks(text, 'test')
+    .find(block => /^\s*(?:- )?run:/mu.test(block) && block.includes('ci-pin-line.mjs'))
+  assert.ok(pinStep !== undefined, 'the workflow must rewrite the manifest through the script')
+  const guard = /if: matrix\.dsh != '([^']+)'/u.exec(pinStep)?.[1]
+  assert.ok(guard !== undefined, 'the pin step must exclude exactly the default line')
+  assert.equal(lines.filter(line => line === guard).length, 1, 'exactly one leg installs the manifest unchanged')
+  const { DEFAULT_LINE } = await import('../scripts/ci-pin-line.mjs')
+  assert.equal(guard, DEFAULT_LINE, 'the leg the guard exempts is the line package.json commits')
+  assert.ok(lines.includes(DEFAULT_LINE), 'and it has a leg of its own')
+})
+
 test('a CRLF checkout parses the same as an LF one', () => {
   // Pinned because this is how the test itself broke on Windows: the checks are
   // line-based, and `readWorkflow` is what keeps a CRLF checkout from finding

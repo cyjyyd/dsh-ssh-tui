@@ -56,7 +56,7 @@ node scripts/verify.mjs           # 检查组合是否生效
 
 ```text
 DeepSeek Harness — 部署体检（/doctor）
-profile tui · 插件 0.7.3 · dsh 0.1.5-rc.3 · node v22.x
+profile tui · 插件 0.7.3 · dsh 0.1.7-rc.1 · node v22.x
 profile 补丁：C:\Users\you\.dsh\profiles\tui\cordis.patch.yml
 结论：8 项正常 · 1 项注意 · 0 项失败
 ```

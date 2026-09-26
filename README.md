@@ -107,7 +107,7 @@ dsh --profile tui
 ## 环境要求
 
 - Node.js ≥ 22.19
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（CI 覆盖 `0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.7-rc.1`：`0.1.5-rc.1` 跑 typecheck 与单元套件，另两条连真 PTY 探针一起跑。`0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` 与 0.1.5-rc 线共用同一套 handle API + `agent/assistant-stream` 兼容层。**`0.1.2-rc` 及更早的线不再支持**，装不上请先升到 `0.1.5-rc` 或 `0.1.7-rc`。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（本仓库默认开发线是 `0.1.7-rc.1`，CI 覆盖 `0.1.5-rc.1` / `0.1.5-rc.3` / `0.1.7-rc.1`：`0.1.5-rc.1` 跑 typecheck 与单元套件，另两条连真 PTY 探针一起跑；0.1.5 两条腿由 `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装。`0.1.5-alpha.1` / `0.1.5-alpha.2` / `0.1.3-alpha.2` 与 0.1.5-rc 线共用同一套 handle API + `agent/assistant-stream` 兼容层。**`0.1.2-rc` 及更早的线不再支持**，装不上请先升到 `0.1.5-rc` 或 `0.1.7-rc`。`0.1.3-alpha.1` 只在 GitHub 有 tag，npm 未发布，无法本地装包验证）
 - pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
 - 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
 - Windows：安装、排障与 `/doctor` 的读法见 [docs/windows.md](docs/windows.md)。Host 与显示端之间的本地通道使用命名管道

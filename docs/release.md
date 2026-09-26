@@ -60,10 +60,12 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   3.18.4，几分钟后四条 CI 腿全部倒在 `npm install` 上**（在那之前 25 分钟还是绿的）。第一轮修完
   cordis/loader/schemastery 之后，当时最老的 0.1.2-rc.1 腿又因为 **cordis-plugin-include 被 npm 拿到 1.0.9**
   而挂——1.0.9 的 peer 是 `cordis ~4.0.4`，与钉住的 4.0.2 天然冲突（rc.3 族里它是被精确钉成 1.0.7 的，
-  老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：现在写死 **六个**——`cordis 4.0.2`、
-  `cordis-plugin-{include 1.0.7, loader 1.0.3, hmr 1.0.17, timer 1.1.4}`、`schemastery 3.18.2`
-  （后四个不是我们 import 的，纯粹是钉住 npm 的选择），`peerDependencies` 里保持区间（消费者那边由宿主提供）。
-  `tests/bundle-patch.test.mjs` 会把这条钉住；要动它们就跟族一起动。
+  老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：默认线（2026-09-26 起是
+  `0.1.7-rc.1`）写死 `cordis 4.0.4`、`cordis-plugin-{include 1.0.9, loader 1.0.5, hmr 1.0.17, timer 1.1.6}`、
+  `cordis-plugin-group 1.0.4`（launcher 组装用，不是我们 import 的）、`schemastery 3.18.2 || ~3.18.4`；
+  0.1.5 的两条腿由 `scripts/ci-pin-line.mjs` 改写成那一族的 `4.0.2` / `1.0.7` / `1.0.3` / `1.1.4`。
+  `peerDependencies` 里保持区间（消费者那边由宿主提供）。`tests/bundle-patch.test.mjs` 钉住树上实际装到
+  的那条线，`tests/ci-pin-line.test.mjs` 钉住改写表；要动它们就跟族一起动。
 - **范围不要提前放宽。** 只有在真跑绿之后才把新版本纳入范围与 CI 腿；没跑过的版本宁可让
   `dsh` 拒绝加载（明确的"还不支持"），也不要静默地放进来。未验证就声明兼容，等于把
   "反正没测过"翻译成"用户装得上但没人知道会怎样"。
@@ -73,7 +75,10 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   这条已被 `tests/bundle-patch.test.mjs` 钉住，别靠感觉改。
 - **CI 腿的取舍**：`matrix.dsh` 里每个"能启动宿主"的版本都跑全套单元测试 + 真 PTY 探针；
   最老的一条（0.1.5-rc.1 的 peer 解析不了）只跑 typecheck 与单元套件。
-  默认腿跟着 `package.json` 的 pin 走（= 当前要重点验的那一版），`latest` 单独留一条腿。
+  默认腿跟着 `package.json` 的 pin 走（= 当前要重点验的那一版，现在是 `0.1.7-rc.1`；这条腿原样安装提交的
+  manifest，`test-windows` 也是），`latest`（`0.1.5-rc.3`）单独留一条完整腿；其余线由
+  `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装（顺带删锁），改写的正确性由
+  `tests/ci-pin-line.test.mjs` + `tests/workflow.test.mjs` 的守卫断言守住。
 - **摘除一条旧线要成套做**（0.1.2-rc 的先例）：范围里的 comparator、`dshReleases` 表态、CI 腿、
   固定装置（`tests/` 里的合成 facts）、只服务该线的源码分支、文档里的腿列表，一次改完。
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
@@ -89,6 +94,12 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 | 已摘 | `0.1.2-rc.1` | `incompatible`：**支持已取消**（0.1.7 适配完成后按用户决定摘除；范围不再有它的 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
+
+> **2026-09-26 起**：默认开发线 = `0.1.7-rc.1`（`package.json` 的 devDep 钉版就是它，CI 默认腿与
+> `test-windows` 按提交的 manifest 原样安装；0.1.5 两条腿走 `scripts/ci-pin-line.mjs` 改写）。
+> `next` 已经移到 **`0.1.7-rc.2`**：现有范围 `>=0.1.7-rc.1 <0.1.8` 涵盖它，但还没有腿跑过它，
+> 也就是说它现在处在"声明了但没验证"的状态——按上面"跑过了才准标 `compatible`"的规矩，
+> 下一步要么把 0.1.7 腿的 pin 移到 rc.2 并把全套探针跑绿，要么把窗口收窄回 rc.1。
 
 **0.1.7 与旧线的三处结构性差异（适配期踩过的）：**
 

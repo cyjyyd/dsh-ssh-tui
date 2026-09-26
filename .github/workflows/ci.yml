@@ -9,131 +9,84 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the whole dsh family to 0.1.5-rc.3 (upstream `next`).
-        # rc.3 was run against the suite and both lifecycle probes before it was
-        # declared compatible; the pinned family is what the default leg and the
-        # Windows leg resolve, so the newest host is the one most exercised.
-        # Pinning to rc.1 does not resolve: several rc.1 packages peer-range
-        # `^0.1.5-rc.2` siblings (dsh-storage-domain rc.2 wants dsh-invariants
-        # rc.2), so npm nests a second @deepseek-ai/dsh-scope and the agent
-        # runtime loads two module instances — `agent-presets` then refuses to
-        # compose an unscoped context and the TUI never starts. One version for
-        # the whole family keeps a single copy. 0.1.5-rc.1 is now the oldest
+        # package.json pins the whole dsh family to 0.1.7-rc.1 (upstream `next`).
+        # That line rewrote the settings seam (no `settings.get`, no
+        # `installSection`), split the plural presets package into
+        # `dsh-agent-preset` + `dsh-agent-preset-registry`, and replaced the
+        # terminal preset roster with a process-wide agent composition, so it is
+        # the line the plugin is developed against: it is what the default leg
+        # and the Windows leg resolve, and the only leg that installs the
+        # committed manifest unchanged. 0.1.7-rc.1 was run against the suite and
+        # both lifecycle probes before it became the default pin.
+        #
+        # Every other leg rewrites the manifest with `scripts/ci-pin-line.mjs`
+        # and deletes the lock, because the committed one belongs to the default
+        # line. The script holds the per-line root pins, the presets substitution
+        # and the `overrides` map that keeps the transitive family on one version;
+        # tests/ci-pin-line.test.mjs pins each rewrite, and the 0.1.5 rewrite must
+        # reproduce, byte for byte, the manifest this repository used to commit.
+        #
+        # Pinning a leg to rc.1 does not resolve: several rc.1 packages
+        # peer-range `^0.1.5-rc.2` siblings (dsh-storage-domain rc.2 wants
+        # dsh-invariants rc.2), so npm nests a second @deepseek-ai/dsh-scope and
+        # the agent runtime loads two module instances — `agent-presets` then
+        # refuses to compose an unscoped context and the TUI never starts. One
+        # version for the whole family keeps a single copy.
+        #
+        # 0.1.5-rc.3 is npm `latest` and the line most users are on, so it keeps
+        # a full leg (install, suite, PTY probes). 0.1.5-rc.1 is the oldest
         # supported stack: 0.1.2-rc.1 was dropped once the 0.1.7 line was
         # verified, because the shims its API generation needed cost more than
-        # the users it kept while 0.1.5-rc.1 covers that same generation. It is
-        # still covered here because every non-default leg rewrites the
-        # @deepseek-ai/dsh-* devDependencies and resolves from scratch.
+        # the users it kept while 0.1.5-rc.1 covers that same generation.
         #
-        # rc.2 (`latest`) has no leg, deliberately. Upstream published rc.3 with
-        # exact sibling pins; rc.2's caret ranges therefore resolve to a mixed
-        # family in a fresh install now (peer @deepseek-ai/dsh-invariants@^0.1.5-rc.3
-        # from dsh-storage-domain@0.1.5-rc.3 against a root pinned to rc.2) and npm
-        # fails the install with ERESOLVE. Building that leg anyway needs
+        # rc.2 has no leg, deliberately. Upstream published rc.3 with exact
+        # sibling pins; rc.2's caret ranges therefore resolve to a mixed family
+        # in a fresh install now (peer @deepseek-ai/dsh-invariants@^0.1.5-rc.3
+        # from dsh-storage-domain@0.1.5-rc.3 against a root pinned to rc.2) and
+        # npm fails the install with ERESOLVE. Building that leg anyway needs
         # --legacy-peer-deps, which nests the duplicate module copies the comment
         # above exists to avoid — and rc.2's published API is identical to rc.3's
-        # (all 31 packages diffed: 0 .d.ts changes, 0 member-level changes), so the
-        # leg would assert nothing the rc.3 leg does not. `dshReleases` still
+        # (all 31 packages diffed: 0 .d.ts changes, 0 member-level changes), so
+        # the leg would assert nothing the rc.3 leg does not. `dshReleases` still
         # carries rc.2 as compatible: 0.7.2 shipped against it with CI green.
-        # `next` is 0.1.7-rc.1 and gets its own leg: that line rewrote the
-        # settings seam (no `settings.get`, no `installSection`), split the
-        # plural presets package into `dsh-agent-preset` +
-        # `dsh-agent-preset-registry`, and replaced the terminal preset roster
-        # with a process-wide agent composition. The leg rewrites the manifest
-        # itself — devDep pins, the presets substitution, the family's root pins
-        # and an `overrides` map that keeps the transitive family on that line —
-        # and the shipped `dsh.compatibility` declaration already admits 0.1.7,
-        # so the leg verifies the code against the declaration users get.
+        #
+        # Upstream `next` has since moved to 0.1.7-rc.2. The shipped
+        # dsh.compatibility window (`>=0.1.7-rc.1 <0.1.8`) admits it, but no leg
+        # has run it: moving this leg's pin to rc.2 is what verifies it.
         dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.7-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Pin @deepseek-ai/dsh host devDependencies to ${{ matrix.dsh }}
-        if: matrix.dsh == '0.1.5-rc.1'
+      # One rewrite for every non-default line. It replaces two inline node -e
+      # heredocs: the version substitution was readable, but the presets split, the
+      # family's root pins and the override map were not, and a typo in one of them
+      # only showed up as a red leg twenty minutes later. The script is a pure
+      # function with a test, and it is runnable locally:
+      #   node scripts/ci-pin-line.mjs 0.1.5-rc.3
+      - name: Pin the tree to the dsh ${{ matrix.dsh }} line
+        if: matrix.dsh != '0.1.7-rc.1'
         run: |
-          node -e "
-            const fs = require('node:fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            // The CLI itself is '@deepseek-ai/dsh' (no trailing dash). Missing it
-            // left every leg on the newest CLI: a caret prerelease range such as
-            // '^0.1.5-rc.2' resolves to the 'latest' tag (rc.1), not to the
-            // highest satisfying version — so the leg ran the wrong host.
-            const hostPackage = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
-            for (const name of Object.keys(pkg.devDependencies)) {
-              if (hostPackage(name)) pkg.devDependencies[name] = '${{ matrix.dsh }}';
-            }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          rm -f package-lock.json
-      # 0.1.7 needs more than a version substitution. The plural
-      # `dsh-agent-presets` has no release on that line at all (npm fails with
-      # ETARGET) and the family's own root pins moved, so this leg rewrites the
-      # devDeps, swaps the presets package for its two successors and pins the
-      # roots. The plugin's peer window is part of the committed manifest now
-      # (0.1.7 is a declared, verified line), so nothing here rewrites it.
-      - name: Pin the whole tree to the 0.1.7 line
-        if: matrix.dsh == '0.1.7-rc.1'
-        run: |
-          node -e "
-            const fs = require('node:fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            const line = '0.1.7-rc.1';
-            delete pkg.devDependencies['@deepseek-ai/dsh-agent-presets'];
-            const hostPackage = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
-            for (const name of Object.keys(pkg.devDependencies)) {
-              if (hostPackage(name)) pkg.devDependencies[name] = line;
-            }
-            Object.assign(pkg.devDependencies, {
-              '@deepseek-ai/dsh-agent-preset': line,
-              '@deepseek-ai/dsh-agent-preset-registry': line,
-              '@deepseek-ai/cordis': '4.0.4',
-              '@deepseek-ai/cordis-plugin-include': '1.0.9',
-              '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-              '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-              // dsh-app-boot peers on this one to compose the launcher tree,
-              // and --legacy-peer-deps skips peers: without it the CLI cannot
-              // even print its help (ERR_MODULE_NOT_FOUND), which is the first
-              // thing the PTY-probe bootstrap asks it to do.
-              '@deepseek-ai/cordis-plugin-group': '1.0.4',
-            });
-            // Force the whole family onto this line, transitively. The published
-            // ranges still carry prerelease carets (^0.1.5-rc.3), which npm
-            // resolves through the latest tag rather than to the highest
-            // match, so without this a plain install drags 0.1.5 packages into a
-            // tree pinned to 0.1.7. Overrides do that AND leave peer resolution
-            // on: --legacy-peer-deps skips peers entirely, which left 37
-            // peer-only packages missing and 25 of the base's own rows
-            // (llm-deepseek, tool-fs, subagent, ...) unable to import, so
-            // no probe on this leg could reach a model.
-            // The plural dsh-agent-presets is peer-only (it has no 0.1.7
-            // release) and npm rejects an override for a root peer spec with
-            // EOVERRIDE, so it is deliberately not in this map.
-            const family = name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-');
-            pkg.overrides = {};
-            for (const name of new Set([...Object.keys(pkg.devDependencies), ...Object.keys(pkg.dependencies ?? {})])) {
-              if (family(name)) pkg.overrides[name] = line;
-            }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          node scripts/ci-pin-line.mjs ${{ matrix.dsh }}
           rm -f package-lock.json
       - name: Install
         if: matrix.dsh != '0.1.5-rc.1'
         run: npm install --no-audit --no-fund
       # 0.1.5-rc.1 is the oldest supported stack and stays declared, but its own
-      # peer ranges do not resolve (that is why the family is pinned to rc.3
-      # above): npm fights over dsh-invariants and gives up with ERESOLVE. This
+      # peer ranges do not resolve (that is why the default line pins the whole
+      # family): npm fights over dsh-invariants and gives up with ERESOLVE. This
       # leg installs with legacy peers, which skips them and nests a second
       # @deepseek-ai/dsh-scope. It covers typecheck and the plugin suite; the
       # host-contract test skips itself there (no host can boot from a tree
       # missing peers), while that contract and the roster composition are
-      # covered on the rc.3 leg and by `scripts/tui-probe.mjs` on a real profile.
+      # covered on the other two legs and by `scripts/tui-probe.mjs` on a real
+      # profile.
       #
-      # The 0.1.7 leg does *not* use this flag: its rewrite step pins the whole
-      # family through `overrides` instead, which keeps peer resolution on. The
-      # flag used to be there too, and the tree it produced was missing 37
-      # peer-only packages — the probes on that leg could not reach a model.
+      # The 0.1.7 legs do *not* use this flag: `scripts/ci-pin-line.mjs` pins the
+      # whole family through `overrides` instead, which keeps peer resolution
+      # on. The flag used to be there too, and the tree it produced was missing
+      # 37 peer-only packages — the probes on that leg could not reach a model.
       - name: Install (legacy peers for the rc.1 line)
         if: matrix.dsh == '0.1.5-rc.1'
         run: npm install --no-audit --no-fund --legacy-peer-deps
@@ -159,7 +112,7 @@ jobs:
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.
       #
-      # It runs on the 0.1.7 leg now that the install there is complete: a
+      # It runs on every leg whose install is complete: a
       # `--legacy-peer-deps` tree left the DeepSeek adapter fiberless
       # (`no adapter registered for provider "deepseek-official"`), which was an
       # install defect, not a probe one.
