@@ -8,11 +8,12 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { showSessionPicker } from '../lib/picker.js'
-import { encodeQueryReply, FrameReader, FRAME_QUERY } from '../lib/display-sock.js'
+import { encodeQueryReply, FrameReader, FRAME_QUERY, isPipePath, sessionSockPath } from '../lib/display-sock.js'
 import { screen } from './screen.mjs'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
 
@@ -253,7 +254,13 @@ test('a row whose display is gone corrects itself, and then attaches in one keys
       }
     })
   })
-  const sock = join(tmpdir(), `dsh-picker-stale-${process.pid}.sock`)
+  // The product's own rule for the channel name: a `.sock` file on POSIX, a
+  // named pipe on Windows (which cannot listen on a filesystem path at all —
+  // this test proved that by failing there with EACCES). The directory is the
+  // product's too: `DisplayHost.listen` creates it, a test has to as well.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-picker-stale-'))
+  const sock = sessionSockPath('picker-stale', home)
+  if (!isPipePath(sock)) await mkdir(dirname(sock), { recursive: true, mode: 0o700 })
   await new Promise(resolve => server.listen(sock, resolve))
   try {
     const io = pickerStreams(72, 14)
@@ -284,5 +291,6 @@ test('a row whose display is gone corrects itself, and then attaches in one keys
     assert.deepEqual(await settled, { kind: 'attach', id: 'main-session-cut', sock })
   } finally {
     server.close()
+    await rm(home, { recursive: true, force: true })
   }
 })
