@@ -16,7 +16,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { sessionErrPath, sessionSockDir } from './display-sock.js'
 import { t } from './i18n/index.js'
@@ -64,12 +64,14 @@ export function waitingMarkerPath(sessionId: string, dshHome?: string): string {
  * failure to write is reported as `false` and never thrown: the question is
  * still queued, and a marker is not worth failing it over.
  *
- * Written to a sibling temp file and renamed into place: the whole point of the
- * marker is that something else polls for it (a jump-host shell, the reconnect
- * notice), and `writeFile` creates the file before it has any content — a reader
- * that caught it in between saw an empty marker instead of the question. That is
- * not theoretical: it is what made the Windows leg red once, on a commit that
- * touched nothing but docs.
+ * Deliberately a plain `writeFile`, not a staged sibling renamed into place.
+ * The rename is atomic on POSIX, but Windows refuses to replace a file another
+ * process has open — and the whole point of this marker is that something else
+ * polls it (a jump-host `cat` in a loop), so the "atomic" version stops updating
+ * exactly while it is being read. The cost of the plain write is a window
+ * between the create and the first byte where a reader sees an empty file; the
+ * marker is rewritten on every change, so that window is what a consumer has to
+ * tolerate rather than something the writer can hide.
  * @param question - the question that just started waiting.
  * @param dshHome - the harness home; defaults to the process one.
  * @returns whether the marker is on disk.
@@ -83,22 +85,13 @@ export async function writeWaitingMarker(question: WaitingQuestion, dshHome?: st
     `question=${question.question.replaceAll('\n', ' ')}`,
     '',
   ].join('\n')
-  // One writer per session, so a pid-suffixed sibling cannot collide with
-  // another session's temp file: two sessions never share a marker path.
-  const staging = `${path}.${process.pid}.tmp`
   try {
     await mkdir(dirname(path), { recursive: true })
     await restrictPathToUser(dirname(path), { mode: 0o700, directory: true })
-    await writeFile(staging, body, { mode: 0o600 })
-    await restrictPathToUser(staging, { mode: 0o600 })
-    await rename(staging, path)
+    await writeFile(path, body, { mode: 0o600 })
+    await restrictPathToUser(path, { mode: 0o600 })
     return true
   } catch {
-    try {
-      await unlink(staging)
-    } catch {
-      // Nothing staged, or it is already gone.
-    }
     return false
   }
 }

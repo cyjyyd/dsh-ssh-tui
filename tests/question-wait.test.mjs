@@ -73,13 +73,14 @@ test('the marker records the question', async () => {
   }
 })
 
-test('a reader in another process never sees a half-written marker', async () => {
+test('a reader in another process never sees a partial marker', async () => {
   // The real reader is a jump-host shell polling `ls`/`cat`, i.e. another
-  // process. `writeFile` creates the file *before* it has content, and a reader
-  // spinning in a tight loop catches that window — which is how the Windows leg
-  // went red once (`actual: ''`) on a commit that only touched docs. The write
-  // stages a sibling and renames it, so existence implies content; without that,
-  // this case fails.
+  // process, so that is what this spawns. `writeFile` creates the file before it
+  // has content, so an empty sample is expected — the writer's docstring records
+  // why the staged-rename version is not an option (Windows refuses to replace a
+  // file the reader has open, i.e. it stops updating exactly while it is being
+  // read). What must never happen is a marker that is present and half-written:
+  // every non-empty sample has to be a whole one.
   const home = mkdtempSync(join(tmpdir(), 'dsh-question-wait-race-'))
   const path = waitingMarkerPath(question.sessionId, home)
   const reader = spawn(process.execPath, ['-e', `
@@ -111,10 +112,11 @@ test('a reader in another process never sees a half-written marker', async () =>
     const seen = await samples
     assert.ok(seen.length > 0, 'the reader has to catch the marker at least once for this to mean anything')
     for (const text of seen) {
+      if (text === '') continue
       assert.match(
         text,
         /^session=main\/session\nwaiting=\d+\nsince=2026-09-26T08:00:00\.000Z\nquestion=部署到哪个环境？\n$/u,
-        'every read is a complete marker',
+        `a marker that exists must be whole, got ${JSON.stringify(text)}`,
       )
     }
   } finally {

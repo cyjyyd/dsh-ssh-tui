@@ -54,8 +54,7 @@ test('a question with nobody attached leaves a marker the jump host can see', as
       questions: [{ id: 'q1', question: '要部署到哪个环境？', options: [{ label: '预发' }] }],
     })
     const marker = waitingMarkerPath('main-session-away', home)
-    await waitForMarker(marker)
-    const text = readFileSync(marker, 'utf8')
+    const text = await waitForMarker(marker, /question=要部署到哪个环境？/u)
     assert.match(text, /question=要部署到哪个环境？/u, 'the marker names the question')
     assert.match(text, /waiting=1/u)
 
@@ -81,17 +80,27 @@ test('a question with nobody attached leaves a marker the jump host can see', as
   }
 })
 
-/** The marker is written asynchronously; poll until it shows up. */
-async function waitForMarker(path) {
+/**
+ * The marker is written asynchronously; poll until it shows up *and* says what
+ * it has to say.
+ *
+ * Polling for existence alone is what made this flaky on the Windows leg: the
+ * file is created before it has content, so a read that lands in between gets
+ * `''` — which the writer cannot prevent (see `writeWaitingMarker`: staging and
+ * renaming is not an option there) and a consumer therefore has to tolerate. The
+ * wait is for the content, and the returned text is the read that matched.
+ */
+async function waitForMarker(path, expected) {
   const deadline = Date.now() + 2_000
+  let last = ''
   while (Date.now() < deadline) {
     try {
-      statSync(path)
-      return
+      last = readFileSync(path, 'utf8')
+      if (expected.test(last)) return last
     } catch { /* not yet */ }
     await delay(20)
   }
-  assert.fail(`the waiting marker never appeared at ${path}`)
+  assert.fail(`the waiting marker never said ${expected} at ${path} (last read ${JSON.stringify(last)})`)
 }
 
 /** And removed once the question is answered. */
