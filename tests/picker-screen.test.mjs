@@ -116,7 +116,7 @@ test('a cancelled picker gives the alternate screen back with the transcript int
   assert.equal(io.writes.length, painted, 'a settled picker paints nothing')
 })
 
-test('a session a window holds is painted as attached, and Enter asks before taking it over', async () => {
+test('a session a window holds is painted as occupied, and Enter asks before taking it over', async () => {
   const io = pickerStreams(72, 14)
   const rows = [
     { id: 'main-session-live', label: '窗口里的会话', updatedAt: 4, cwd: '/root/live', attach: { pid: 4242, sock: '/root/.dsh/tui-socks/live.sock', state: 'attached' } },
@@ -135,15 +135,17 @@ test('a session a window holds is painted as attached, and Enter asks before tak
     return term.grid().join('\n').replace(ANSI, '')
   }
   const first = await painted()
-  assert.match(first, /已接入 · pid 4242/u, 'a session with a live relay says so')
-  assert.match(first, /可接入 · pid 7 · 已暂停/u, 'a Host left by a dropped link keeps the drop wording')
+  // Two words, and the pid: a session a window holds is 已占用, anything else is
+  // 可接入 — a Host left by a dropped link attaches in one keystroke, no question.
+  assert.match(first, /已占用 · pid 4242/u, 'a session with a live relay says so')
+  assert.match(first, /可接入 · pid 7/u, 'a Host left by a dropped link reads as free')
 
   // Enter on that row must not attach: it asks, on the same screen, and the
   // picker stays open.
   io.type('\r')
   await waitFor(() => io.writes.length > 2, 'the confirmation frame')
   const asking = await painted()
-  assert.match(asking, /已被 pid 4242 接入/u)
+  assert.match(asking, /已被 pid 4242 占用/u)
   assert.match(asking, /按 y \/ Enter 接管/u)
   assert.match(asking, /窗口里的会话/u, 'the list is still there')
 
@@ -152,7 +154,7 @@ test('a session a window holds is painted as attached, and Enter asks before tak
   await waitFor(() => !io.writes.at(-1).includes('按 y'), 'the cancelled frame')
   const cancelled = await painted()
   assert.equal(/按 y \/ Enter 接管/u.test(cancelled), false, 'the question is cleared off the screen')
-  assert.match(cancelled, /已接入 · pid 4242/u, 'and the list is back')
+  assert.match(cancelled, /已占用 · pid 4242/u, 'and the list is back')
 
   // `y` confirms: the picker settles with the attach the takeover needs.
   io.type('\r')
@@ -237,12 +239,12 @@ test('the first screen waits for real titles and shows what is left to read', as
   await settled
 })
 
-test('a row whose display is gone corrects itself, and then attaches in one keystroke', async () => {
+test('a row whose display is gone is painted as free, never as occupied first', async () => {
   // The shape of the reported bug: the SSH link was cut, the launcher is still
-  // connected (sshd has not noticed), so the lock says `attached` and the list
-  // said 已接入 while the window was already gone. The picker asks that Host —
-  // through it, the terminal — and the row corrects itself without the user
-  // having to argue with it.
+  // connected (sshd has not noticed), so the lock says `attached` while the
+  // window is already gone. The picker asks that Host — through it, the terminal
+  // — *before* the first frame: showing 已占用 and correcting it a moment later is
+  // the placeholder-then-replace the page read already refuses to do with titles.
   const answers = []
   const server = createServer(socket => {
     const reader = new FrameReader()
@@ -279,14 +281,13 @@ test('a row whose display is gone corrects itself, and then attaches in one keys
       return term.grid().join('\n').replace(ANSI, '')
     }
     await waitFor(() => io.writes.join('').includes('断线残留的会话'), 'the first listing')
-    await waitFor(() => answers.length > 0, 'the liveness question')
-    await waitFor(async () => (await painted()).includes('原窗口已失联'), 'the corrected row')
-    const corrected = await painted()
-    assert.match(corrected, /可接入 · pid 4242（原窗口已失联/u)
-    assert.equal(corrected.includes('已接入 · pid 4242'), false, 'the stale label is gone')
+    assert.equal(answers.length > 0, true, 'the row was questioned before it was painted')
+    const paintedRow = await painted()
+    assert.match(paintedRow, /可接入 · pid 4242/u, 'the final verdict is what the first frame carries')
+    assert.equal(paintedRow.includes('已占用'), false, 'and the unverified answer is never on screen')
 
-    // And the one keystroke is back: no takeover question for a window that the
-    // terminal itself said is not there.
+    // The one keystroke is back: no takeover question for a window the terminal
+    // itself said is not there.
     io.type('\r')
     assert.deepEqual(await settled, { kind: 'attach', id: 'main-session-cut', sock })
   } finally {

@@ -571,25 +571,15 @@ export async function showSessionPicker(
         lines.push(style(truncateToWidth(label, width), focused ? '1;7' : '1'))
         const attachNote = session.attach === undefined
           ? ''
+          // Two words, because that is the whole decision: a session a window
+          // holds (live, or held by a Host that cannot be asked) is 已占用, and
+          // everything else is 可接入 — a Host left behind by a dropped link, one
+          // the terminal has confirmed is gone, and a lock from before the state
+          // field existed all attach in one keystroke. The pid stays: it is what
+          // the takeover question names, and `/diag` reports the same number.
           : sessionAttachedElsewhere(session)
-            // A window is on this session right now. Calling it "paused" — what
-            // this line said for anything that was not running in the
-            // background — invited the user to take a session they were already
-            // using, and the attach then kicked their own window.
-            ? t('picker.attachLive', { pid: session.attach.pid })
-            // `stale` is what the terminal itself answered: the relay is still
-            // connected but nothing is behind it (a cut link leaves the launcher
-            // alive until sshd notices). That is the ordinary reattach, so it
-            // keeps the one-keystroke wording — with the reason, because "可接入"
-            // next to a live pid otherwise reads like a contradiction.
-            : session.attach.state === 'stale'
-              ? t('picker.attachStale', { pid: session.attach.pid })
-              : t('picker.attachable', {
-                pid: session.attach.pid,
-                status: session.attach.state === 'running-detached'
-                  ? t('picker.attachRunning')
-                  : t('picker.attachPaused'),
-              })
+            ? t('picker.attachHeld', { pid: session.attach.pid })
+            : t('picker.attachFree', { pid: session.attach.pid })
         const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
         if (attachNote !== '') {
           lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), '32')}`)
@@ -752,8 +742,17 @@ export async function showSessionPicker(
       cleanup(null)
       throw error
     }
-    /** Paint a page: replace the loaded rows and keep the cursor on its row. */
-    const applyPage = (page: ResumableSessionPage): void => {
+    /**
+     * Paint a page: replace the loaded rows and keep the cursor on its row.
+     *
+     * The rows a window holds are settled *before* the first frame. Showing the
+     * lock's `attached` and then correcting it a moment later is the same
+     * placeholder-then-replace the page read already refuses to do with titles:
+     * the user sees 已占用, then 可接入, and has to work out which one the list
+     * meant. The wait is one round trip per such row, in parallel, and only when
+     * there is a live Host to ask.
+     */
+    const applyPage = async (page: ResumableSessionPage): Promise<void> => {
       // A page is steady by contract (every label resolved); hold back a
       // placeholder anyway, so a future reader cannot put a raw id on screen
       // that turns into a title a moment later.
@@ -767,38 +766,35 @@ export async function showSessionPicker(
         more: page.remaining,
         cursor: retainCursor(focusedId, nextFiltered, state.cursor),
       }
+      await resolveAttachedRows()
+      if (done) return
       render()
-      void refineAttachedRows()
     }
 
     /**
-     * Correct the rows whose state cannot be taken at face value.
+     * Ask about the rows whose state cannot be taken at face value.
      *
      * `attached` is the Host's word for "a relay is connected", and a cut SSH
      * link leaves that relay connected: the launcher sees no hangup until sshd
      * does (TCP keepalive, which can be hours), so the window is gone while the
      * socket still answers. Only the terminal at the far end can settle it, so
-     * each such row is asked — through its Host — and the list is repainted when
-     * the answer lands. Nothing waits on this: the frame is already on screen
-     * with the lock's answer, and a row that turns out to be attachable becomes
-     * a one-keystroke attach instead of a takeover question.
+     * each such row is asked — through its Host. A definite "detached" turns the
+     * row into 可接入, which is the ordinary reattach; anything else (a live
+     * terminal, a Host too old to know the question, an answer that never came)
+     * keeps 已占用 and with it the takeover question.
      */
-    const refineAttachedRows = async (): Promise<void> => {
+    const resolveAttachedRows = async (): Promise<void> => {
       const rows = state.sessions.filter(session => session.attach?.state === 'attached')
       if (rows.length === 0) return
       const answers = await Promise.all(rows.map(async session => ({
         session,
         verdict: await queryDisplayAttachment(String(session.attach?.sock ?? '')),
       })))
-      if (done) return
-      let changed = false
       for (const { session, verdict } of answers) {
         const attach = session.attach
         if (verdict !== 'detached' || attach === undefined) continue
         session.attach = { ...attach, state: 'stale' }
-        changed = true
       }
-      if (changed) render()
     }
 
     const loadPage = async (): Promise<void> => {
@@ -810,7 +806,7 @@ export async function showSessionPicker(
         const page = await pager.page(PICKER_PAGE_SIZE)
         pageInFlight = false
         if (done) return
-        applyPage(page)
+        await applyPage(page)
         // A filter that still has fewer matches than fit on screen keeps
         // deepening; a plain page load stops here until the user asks again.
         pump([], state)
@@ -860,11 +856,11 @@ export async function showSessionPicker(
         }
         // Rows exist but none is showable yet: keep reading rather than telling
         // the user their history is empty (and starting a fresh session).
-        applyPage(first)
+        await applyPage(first)
         void loadPage()
         return
       }
-      applyPage(first)
+      await applyPage(first)
     }
     void startListing().catch(() => {
       if (!done) cleanup({ kind: 'new' })
