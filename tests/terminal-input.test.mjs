@@ -17,11 +17,13 @@ import {
 import {
   DisplayHost,
   decodeProbeReply,
+  decodeRtt,
   FRAME_GOODBYE,
   FRAME_HELLO,
   FRAME_PROBE,
   FRAME_PROBE_REPLY,
   FRAME_REPLACED,
+  FRAME_RTT,
   FRAME_STDIN,
   FRAME_STDOUT,
   FrameReader,
@@ -730,6 +732,85 @@ test('a terminal that never answered at all reports "unknown", not "silent"', { 
   host.socket.write(encodeFrame(FRAME_PROBE))
   for (let wait = 0; wait < 600 && replies.length === 0; wait += 1) await delay(10)
   assert.deepEqual(replies, ['unknown'])
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
+})
+
+// --- the link is re-measured, not measured once ------------------------------
+//
+// The chip and the paint cadence (and the per-frame byte budget) all come from
+// the reported round-trip. Measuring it only in the HELLO burst is what made a
+// jittery first second decide the whole session: the chip stayed red and the
+// paint budget stayed at its slowest tier for hours.
+
+test('the relay re-measures the link and reports the change', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-rtt-recheck')
+  const server = createServer(() => {})
+  const rtts = []
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_RTT) rtts.push(decodeRtt(frame.payload))
+  }, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  // Fast at attach, then slow: the shape of a link that degrades (or of a
+  // session that attached during a burst and is fine afterwards — either way the
+  // Host has to hear about it).
+  let slow = false
+  const terminal = scriptedTerminal({
+    onRequest: (count, stdin) => {
+      const delayMs = slow ? 120 : 2
+      setTimeout(() => stdin.write('\x1b[17;1R'), delayMs)
+    },
+  })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+    rttFirstRecheckMs: 40,
+    rttRecheckMs: 40,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(rtts.length, 1, 'the attach measurement still arrives with the HELLO')
+  const first = rtts[0]
+  assert.equal(first < 50, true, `the first measurement is the fast link (got ${first})`)
+  slow = true
+  for (let wait = 0; wait < 600 && rtts.length < 2; wait += 1) await delay(10)
+  assert.equal(rtts.length >= 2, true, 'a changed link is reported again without a reattach')
+  assert.equal(rtts.at(-1) >= 100, true, `the slow link is what gets reported (got ${rtts.at(-1)})`)
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
+})
+
+test('a steady link keeps being re-reported, so the Host median can settle', { timeout: 10_000 }, async t => {
+  // Reporting only changes looks cheaper, but the Host takes the median of the
+  // last few measurements: a value sent once can never outvote the stale one it
+  // replaced, so the chip would sit on the old tier for the rest of the session.
+  // An unchanged value costs the screen nothing — the painter is incremental —
+  // which is why it is sent again.
+  const { path } = await listenOn(t, 'relay-rtt-steady')
+  const server = createServer(() => {})
+  const rtts = []
+  const host = fakeHost(server, (frame, socket) => {
+    if (frame.type === FRAME_RTT) rtts.push(decodeRtt(frame.payload))
+  }, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  const terminal = scriptedTerminal({ replyDelayMs: 2 })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: true,
+    rttFirstRecheckMs: 30,
+    rttRecheckMs: 30,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  const requestsAtAttach = terminal.requests()
+  await delay(400)
+  assert.equal(terminal.requests() > requestsAtAttach, true, 'the relay probed again')
+  assert.equal(rtts.length >= 2, true, 'and reported the value it measured again')
+  assert.equal(rtts.every(value => Math.abs(value - rtts[0]) <= 10), true, 'the same link, reported again')
   host.socket.write(encodeFrame(FRAME_GOODBYE))
   assert.equal((await relay).reason, 'goodbye')
 })

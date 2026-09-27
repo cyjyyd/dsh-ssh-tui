@@ -110,6 +110,39 @@ const DISPLAY_HELLO_GRACE_MS = 6_000
 const DISPLAY_PROBE_TIMEOUT_MS = 3_000
 
 /**
+ * The link is measured again this soon after an attach, then on the slower
+ * cadence below.
+ *
+ * The first measurement is taken while the session is still booting, and a
+ * jittery moment there used to be the only measurement there ever was: the
+ * footer chip stayed red and the paint cadence — with the per-frame byte budget
+ * — stayed at the slowest tier for hours. The early re-check corrects exactly
+ * that case without waiting a full cadence.
+ */
+const RTT_RECHECK_FIRST_MS = 8_000
+
+/** How often an attached relay re-measures the link for the Host's chip. */
+const RTT_RECHECK_MS = 20_000
+
+/** After this many silent measurements, stop asking so often. */
+const RTT_RECHECK_MAX_MISSES = 3
+
+/** A terminal that does not answer DSR is asked again only this rarely. */
+const RTT_RECHECK_BACKOFF_MS = 600_000
+
+/**
+ * A measurement that moved by at least this much is confirmed soon after.
+ *
+ * The Host smooths over the last few measurements, so the *second* sample is
+ * what makes a real change stick — or what retires a one-off spike — and waiting
+ * a whole cadence for it keeps the chip on the wrong tier for that long.
+ */
+const RTT_MOVED_MS = 50
+
+/** How soon a moved measurement is confirmed. */
+const RTT_RECHECK_CONFIRM_MS = 5_000
+
+/**
  * Drop launcher SIGTERM/SIGINT/SIGHUP so closing SSH cannot dispose the tree
  * before hangup handling. Leaving the session with setsid() is best-effort:
  * a TTY session leader gets EPERM and stays in the SSH process group.
@@ -1324,6 +1357,9 @@ export interface DisplayRelayOptions {
   signals?: Pick<NodeJS.Process, 'on' | 'off' | 'removeListener'>
   /** Link kind for the RTT probe; defaults to this process's SSH env. */
   ssh?: boolean
+  /** Re-measure cadences (tests); defaults to {@link RTT_RECHECK_FIRST_MS} / {@link RTT_RECHECK_MS}. */
+  rttFirstRecheckMs?: number
+  rttRecheckMs?: number
   /** Typing captured before this relay existed; sent to the Host after HELLO. */
   seed?: string
   /**
@@ -1356,6 +1392,10 @@ export async function runDisplayRelay(
     /** Whether this terminal has ever answered a cursor probe. */
     let terminalAnswered = false
     let probeInFlight = false
+    /** The value the Host already has, so only real changes are reported. */
+    let reportedRtt: number | undefined
+    let recheckMisses = 0
+    let rttTimer: NodeJS.Timeout | undefined
     // Set when the Host tells us a newer Display took this session over. The
     // terminal restore below is the one write that must NOT happen then: this
     // relay no longer owns any screen, and if the link is dead (window killed,
@@ -1384,6 +1424,8 @@ export async function runDisplayRelay(
       reject(error)
     }
     const cleanup = (): void => {
+      if (rttTimer !== undefined) clearTimeout(rttTimer)
+      rttTimer = undefined
       pump.stop()
       stdout.removeListener('resize', onResize)
       stdin.removeListener('end', onLocalHangup)
@@ -1477,6 +1519,50 @@ export async function runDisplayRelay(
       }, 20)
     }
     /**
+     * Keep the Host's picture of the link current.
+     *
+     * The chip and the paint cadence (and the byte budget per frame) all come
+     * from this number, and a link measured once at attach is a link measured at
+     * its worst moment forever. The probe is a cursor round trip on a quiet
+     * line: it costs one write and one reply, and the pump routes anything the
+     * user typed meanwhile to the Host as usual.
+     */
+    const recheckRtt = async (): Promise<void> => {
+      const measured = await pump.measure()
+      if (settled) return
+      if (measured === undefined) {
+        recheckMisses += 1
+        // A terminal that never answers DSR (a pipe, a dumb terminal) must not
+        // be probed every twenty seconds for the rest of the session; one that
+        // answers sometimes — a flapping link — keeps the normal cadence.
+        scheduleRttRecheck(recheckMisses >= RTT_RECHECK_MAX_MISSES ? RTT_RECHECK_BACKOFF_MS : (options.rttRecheckMs ?? RTT_RECHECK_MS))
+        return
+      }
+      recheckMisses = 0
+      const moved = reportedRtt !== undefined && Math.abs(measured - reportedRtt) >= RTT_MOVED_MS
+      reportedRtt = measured
+      // Reported every time, even when it did not move: the Host takes the
+      // median of the last few measurements, and a value sent once can never
+      // outvote the stale one it replaced. An unchanged frame costs the screen
+      // nothing (the painter is incremental), so the repetition is free.
+      try {
+        socket.write(encodeRtt(measured))
+      } catch {
+        // The socket is gone; the close handler settles the relay.
+      }
+      scheduleRttRecheck(moved
+        ? RTT_RECHECK_CONFIRM_MS
+        : (options.rttRecheckMs ?? RTT_RECHECK_MS))
+    }
+    const scheduleRttRecheck = (delayMs: number): void => {
+      if (settled) return
+      rttTimer = setTimeout(() => {
+        rttTimer = undefined
+        void recheckRtt()
+      }, delayMs)
+      rttTimer.unref?.()
+    }
+    /**
      * The Host asking whether this display still has a terminal.
      *
      * The answer has to come from a real round trip. A cut SSH link leaves this
@@ -1539,6 +1625,7 @@ export async function runDisplayRelay(
           // answered once and is silent later is gone, one that never answered
           // tells us nothing (see `TerminalVerdict`).
           terminalAnswered = rtt !== undefined
+          reportedRtt = rtt
           const columns = stdout.columns || 80
           const rows = stdout.rows || 24
           socket.write(Buffer.concat([
@@ -1547,6 +1634,7 @@ export async function runDisplayRelay(
             encodeRtt(rtt),
           ]))
           live = true
+          scheduleRttRecheck(options.rttFirstRecheckMs ?? RTT_RECHECK_FIRST_MS)
           if (options.announce === true) {
             try {
               stdout.write('\r\x1b[2K')

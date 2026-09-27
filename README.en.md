@@ -670,8 +670,11 @@ skips token chunks and lays out only the visible tail on the first paint.
 
 Each paint is one `stdout.write` of dirty rows only, so a jump host or
 corporate proxy does not see one SSH packet per line. Local ttys use 80 ms.
-Over SSH the TUI probes CSI 6n once and picks 80 / 160 / 250 / 400 ms from
-the round-trip. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
+Over SSH the TUI probes CSI 6n and picks 80 / 160 / 250 / 400 ms from the
+round-trip. It keeps measuring — 8 s after the attach, then every 20 s (a
+measurement that moved is confirmed 5 s later) — and both the chip and the paint
+tier follow the median of the last three, so a jittery entry cannot pin either
+at the slowest tier. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
 starts with `SSH ●●●○ 90ms` (1 pip red, 2 yellow, 3+ green). The probe
 does not write into the transcript.
 
@@ -736,8 +739,9 @@ Find your symptom; each answer is what to do, not a change log.
   painter asks for the narrow text form; a font without the glyph still makes the terminal
   fall back to a wider colour emoji.
 - **The screen cannot keep up on a slow link** — `DSH_TUI_PAINT_MS` sets the paint interval
-  (40–1000 ms: smaller is snappier and sends more); unset, it follows the round-trip
-  measured at start-up (80 / 160 / 250 / 400 ms).
+  (40–1000 ms: smaller is snappier and sends more); unset, it follows the round-trip,
+  which is re-measured while the session runs (80 / 160 / 250 / 400 ms, median of the last
+  three) — see `scripts/tui-rtt-probe.mjs`.
 - **Screen reader, or you want a log** — start with `DSH_TUI_LINE_MODE=1`: plain appended
   lines, no cursor control, safe to `tee`.
 - **Title bar or bell does nothing** — the terminal needs OSC 0 and BEL; `DSH_TUI_NO_BELL=1`

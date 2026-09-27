@@ -287,6 +287,8 @@ import {
   toolBodyLineLimit,
   waitUntilIdleOrTimeout,
   type PaintLinkKind,
+  RTT_HISTORY,
+  medianRtt,
 } from './paint.js'
 import { TerminalInputGuard } from './terminal-input.js'
 import {
@@ -1564,6 +1566,8 @@ export class SshTui {
   private sshSession = false
   private paintProbed = false
   private paintRttMs: number | undefined
+  /** The last few measured round-trips; the chip and the budget use their median. */
+  private paintRttHistory: number[] = []
   private sessionTitle = ''
   private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
   private quotaSnapshot: QuotaSnapshot | undefined
@@ -2923,17 +2927,37 @@ export class SshTui {
     return this.disconnectPolicy
   }
 
+  /** The paint cadence in force right now: the link tier the footer shows. */
+  currentPaintIntervalMs(): number {
+    return this.paintIntervalMs
+  }
+
   applyProbedRtt(rttMs: number | undefined): void {
     const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
     this.paintLink = 'ssh'
-    // A reattach whose probe missed its window reports "unknown"; the link has
-    // not changed, so dropping a measurement we already have just blanks the
-    // footer chip to four hollow circles. Keep it (the next attach re-measures).
-    if (rttMs === undefined && this.paintProbed && this.paintRttMs !== undefined) return
-    this.paintProbed = rttMs !== undefined
-    this.paintRttMs = rttMs
+    if (rttMs !== undefined) {
+      // The relay re-measures the link on its own cadence, so this is called
+      // again and again over one session. The reported round-trip is the median
+      // of the last few measurements: a single burst that reads like a
+      // 2-second link must not pin the footer chip — and with it the paint
+      // cadence and the per-frame byte budget — while two measurements that
+      // agree move it at once. That is the fix for a link that was red from the
+      // first second to the last: the first measurement is taken while the
+      // session is still booting, and it used to be the only one ever taken.
+      this.paintRttHistory.push(rttMs)
+      if (this.paintRttHistory.length > RTT_HISTORY) this.paintRttHistory.shift()
+      this.paintProbed = true
+      this.paintRttMs = medianRtt(this.paintRttHistory)
+    } else if (!this.paintProbed) {
+      // A probe that missed its window reports "unknown". A link that was never
+      // measured (a pipe, a terminal that does not answer DSR) stays unknown and
+      // keeps the unprobed wording; one that has a measurement keeps its number
+      // rather than blanking the chip to four hollow circles after every
+      // auto-reconnect.
+      this.paintRttMs = undefined
+    }
     if (!(Number.isFinite(envOverride) && envOverride > 0)) {
-      this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs })
+      this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: this.paintRttMs })
       if (!this.lineMode) this.startRenderTimer()
     }
     this.markDirty()

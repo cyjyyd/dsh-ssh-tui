@@ -6,6 +6,10 @@ import {
   composePaintFrame,
   composePaintOutput,
   frameByteBudget,
+  linkQualityOf,
+  medianRtt,
+  paintIntervalForRtt,
+  RTT_HISTORY,
   paintOrder,
   FRAME_BYTE_BUDGETS,
 } from '../lib/paint.js'
@@ -171,4 +175,27 @@ test('only painted rows become clean in the next snapshot', () => {
   // A frame that painted nothing (row count changed) keeps the old length, so
   // the caller still owes the trailing clear.
   assert.deepEqual(advancePaintedRows(['x'], ['x', 'y'], []), ['x'])
+})
+
+// The reported round-trip decides three things at once — the footer chip, the
+// paint cadence and the per-frame byte budget — so how it is derived from the
+// measurements matters more than it looks.
+test('the reported link is the median of the recent measurements', () => {
+  assert.equal(medianRtt([]), undefined, 'nothing measured says so')
+  assert.equal(medianRtt([Number.NaN, -5]), undefined, 'and a nonsense sample is not a measurement')
+  assert.equal(medianRtt([90]), 90)
+  assert.equal(medianRtt([90, 40]), 65, 'the pair in between averages, so the chip does not jump')
+  assert.equal(medianRtt([90, 40, 40]), 40, 'two agreeing measurements decide')
+  // One spike — a burst that beats the probe to the wire — cannot pin the paint
+  // budget at the slowest tier for the rest of the session.
+  assert.equal(medianRtt([40, 40, 900]), 40)
+  assert.equal(paintIntervalForRtt(medianRtt([40, 40, 900])), paintIntervalForRtt(40))
+  assert.equal(frameByteBudget(linkQualityOf('ssh', medianRtt([40, 40, 900]))), FRAME_BYTE_BUDGETS.good)
+  // A real degradation is followed as soon as it repeats...
+  assert.equal(medianRtt([40, 900, 900]), 900)
+  assert.equal(frameByteBudget(linkQualityOf('ssh', 900)), FRAME_BYTE_BUDGETS.poor)
+  // ...and recovery is just as quick.
+  assert.equal(medianRtt([900, 900, 45]), 900, 'one fast sample is not recovery')
+  assert.equal(medianRtt([900, 45, 45]), 45, 'two are')
+  assert.equal(RTT_HISTORY, 3, 'the window this test is about')
 })

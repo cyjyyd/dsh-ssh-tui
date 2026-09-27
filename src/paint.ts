@@ -109,6 +109,35 @@ export function paintIntervalForRtt(rttMs: number | undefined): number {
   return 400
 }
 
+/**
+ * How many measurements the link's reported round-trip is taken over.
+ *
+ * Three is the smallest window where one outlier cannot move the answer and two
+ * agreeing measurements can.
+ */
+export const RTT_HISTORY = 3
+
+/**
+ * The link's current round-trip, from the last few measurements.
+ *
+ * The median — not the latest, not the mean. The probe shares the wire with the
+ * paint it is measuring, so a single burst can read like an overloaded link, and
+ * because the cadence *and* the per-frame byte budget follow this number, one
+ * bad measurement used to sit on the footer chip (and in the paint budget) for
+ * the rest of the session. A median ignores one outlier, follows a real change
+ * as soon as two measurements agree, and averages the pair in between so the
+ * chip does not jump.
+ * @param samples - measured round-trips, oldest first; non-finite ones ignored.
+ * @returns the median in whole milliseconds, or undefined with nothing to go on.
+ */
+export function medianRtt(samples: readonly number[]): number | undefined {
+  const values = samples.filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b)
+  if (values.length === 0) return undefined
+  const middle = Math.floor(values.length / 2)
+  if (values.length % 2 === 1) return Math.round(values[middle] ?? 0)
+  return Math.round(((values[middle - 1] ?? 0) + (values[middle] ?? 0)) / 2)
+}
+
 export function paintLinkLabel(kind: PaintLinkKind, intervalMs: number, probed: boolean): string {
   if (kind === 'local') return t('paint.localMs', { ms: intervalMs })
   return probed ? t('paint.sshMs', { ms: intervalMs }) : t('paint.sshMsUnprobed', { ms: intervalMs })

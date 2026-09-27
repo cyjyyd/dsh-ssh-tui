@@ -5124,10 +5124,14 @@ test('a leaked cursor reply never reaches the prompt', async () => {
   assert.equal(tui.cursor, 3, 'arrow keys still move the cursor')
 })
 
-// A reattach whose probe misses its window reports "unknown"; blanking a
-// measurement we already have is what turned the footer chip into four hollow
+// The relay re-measures the link on its own cadence, so the chip follows the
+// link instead of the moment the session attached — and the reported round-trip
+// is the median of the last few measurements, so one burst that reads like a
+// 2-second link cannot pin the chip (and the paint budget) at the slowest tier.
+// A probe that missed its window still reports `unknown`, which must not blank
+// a measurement we already have: that is what turned the chip into four hollow
 // circles after every auto-reconnect.
-test('the link chip keeps its measurement when a reattach cannot re-measure', () => {
+test('the link chip follows the link, and one spike cannot pin it', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session', options: {}, status: 'idle',
@@ -5137,11 +5141,29 @@ test('the link chip keeps its measurement when a reattach cannot re-measure', ()
   tui.applyProbedRtt(90)
   assert.equal(tui.paintProbed, true)
   assert.equal(tui.paintRttMs, 90)
+  assert.equal(tui.currentPaintIntervalMs(), paintIntervalForRtt(90), 'the cadence follows the measurement')
   tui.applyProbedRtt(undefined)
   assert.equal(tui.paintProbed, true, 'a known link stays known')
-  assert.equal(tui.paintRttMs, 90)
+  assert.equal(tui.paintRttMs, 90, 'and a missed probe keeps its number')
+
+  // A real improvement: the pair in between averages, the next measurement
+  // settles it, and the paint cadence moves with the chip.
   tui.applyProbedRtt(40)
-  assert.equal(tui.paintRttMs, 40, 'a fresh measurement wins')
+  assert.equal(tui.paintRttMs, 65, 'the median of two measurements is their average')
+  tui.applyProbedRtt(40)
+  assert.equal(tui.paintRttMs, 40, 'two agreeing measurements move the chip')
+  assert.equal(tui.currentPaintIntervalMs(), paintIntervalForRtt(40))
+
+  // The reported bug: a jittery moment must not decide the rest of the session.
+  tui.applyProbedRtt(900)
+  assert.equal(tui.paintRttMs, 40, 'one spike cannot move a median of three')
+  assert.equal(tui.currentPaintIntervalMs(), paintIntervalForRtt(40), 'so the paint budget stays put')
+  tui.applyProbedRtt(900)
+  assert.equal(tui.paintRttMs, 900, 'but a real degradation is followed as soon as it repeats')
+  assert.equal(tui.currentPaintIntervalMs(), paintIntervalForRtt(900))
+  tui.applyProbedRtt(950)
+  assert.equal(tui.paintRttMs, 900, 'and a stable link stops moving the chip')
+
   // A link that was never measured still reports unknown.
   const fresh = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   fresh.applyProbedRtt(undefined)

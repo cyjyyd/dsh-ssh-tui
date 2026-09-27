@@ -118,6 +118,14 @@ jobs:
       - name: Cut-link liveness probe
         if: matrix.dsh == '0.1.7-rc.1'
         run: node scripts/probe-home.mjs --probe --script tui-cut-probe.mjs
+      # The link is measured at attach *and* re-measured afterwards, because one
+      # measurement taken while the session was booting used to decide the footer
+      # chip — and the paint cadence with it — for the whole session: a red chip
+      # that never recovered. This plays a terminal that is slow for the first
+      # seconds and fast afterwards and reads the chip out of the real PTY.
+      - name: Link-quality probe
+        if: matrix.dsh == '0.1.7-rc.1'
+        run: node scripts/probe-home.mjs --probe --script tui-rtt-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.
