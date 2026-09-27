@@ -807,7 +807,9 @@ test('a steady link keeps being re-reported, so the Host median can settle', { t
   })
   for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
   const requestsAtAttach = terminal.requests()
-  await delay(400)
+  // Polled, not slept: one measurement is a sample plus a quiet window before
+  // the next request, and how long that takes is the runner's business.
+  for (let wait = 0; wait < 400 && rtts.length < 2; wait += 1) await delay(10)
   assert.equal(terminal.requests() > requestsAtAttach, true, 'the relay probed again')
   assert.equal(rtts.length >= 2, true, 'and reported the value it measured again')
   assert.equal(rtts.every(value => Math.abs(value - rtts[0]) <= 10), true, 'the same link, reported again')
