@@ -95,11 +95,13 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
 
-> **2026-09-26 起**：默认开发线 = `0.1.7-rc.1`（`package.json` 的 devDep 钉版就是它，CI 默认腿与
-> `test-windows` 按提交的 manifest 原样安装；0.1.5 两条腿走 `scripts/ci-pin-line.mjs` 改写）。
-> `next` 已经移到 **`0.1.7-rc.2`**：现有范围 `>=0.1.7-rc.1 <0.1.8` 涵盖它，但还没有腿跑过它，
-> 也就是说它现在处在"声明了但没验证"的状态——按上面"跑过了才准标 `compatible`"的规矩，
-> 下一步要么把 0.1.7 腿的 pin 移到 rc.2 并把全套探针跑绿，要么把窗口收窄回 rc.1。
+> **2026-09-28**：上游 `next` 的 **`0.1.7-rc.2`** 已按完整流程验过并声明 `compatible`：干净树安装（族全部 rc.2）、
+> `tsc --noEmit` 0 错、套件 988 项 985 通过 / 0 失败 / 3 skip、六个真 PTY 探针（boot / drop / cut / rtt / busy-drop）全过。
+> 它不是重钉版：272 个族包里 59 个类型面有变化，其中 14 个落在本插件自己的接缝上（dsh-agent-loop、dsh-llm、
+> dsh-session、dsh-subagent、dsh-user-approval、dsh-tools、dsh-agent-default-model、dsh-agent-preset-registry、
+> dsh-atomic-write、dsh-sandbox 等，均为新增：新错误码 `ACCOUNT_QUOTA_EXCEEDED_CODE`、`projectToolUpdates`、原生工具声明等）。
+> 因此 CI 里 **另开一条 rc.2 腿**（默认腿仍是 rc.1，也就是提交的 manifest 与本机在跑的那条）；rc.2 那一线唯一装不上的东西是
+> `@deepseek-ai/dsh-llm-mock-server`（该线没发这个包），由 `scripts/ci-pin-line.mjs` 把它钉在 rc.1（独立 HTTP mock，无族内 peer）。
 
 **0.1.7 与旧线的三处结构性差异（适配期踩过的）：**
 

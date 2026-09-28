@@ -54,8 +54,13 @@ test('every line moves the whole family at once, and nothing else', () => {
     const pinned = pinManifest(copy(), line)
     const family = familyDevDeps(pinned)
     assert.ok(family.length > 20, `${line}: the family must be pinned as one block`)
+    const exceptions = LINES[line].devPins ?? {}
+    // A devDep the line never published keeps a pin of its own (the mock LLM
+    // server on 0.1.7-rc.2): everything else in the family moves together.
+    assert.ok(Object.keys(exceptions).length <= 1, `${line}: at most one such exception, by hand`)
     for (const name of family) {
-      assert.equal(pinned.devDependencies[name], line, `${name} must be pinned to ${line}`)
+      const wanted = exceptions[name] ?? line
+      assert.equal(pinned.devDependencies[name], wanted, `${name} must be pinned to ${wanted}`)
     }
     // The CLI itself is in the family: missing it left a leg on a caret
     // prerelease range that resolved through the `latest` tag to another line.
@@ -72,7 +77,8 @@ test('every line moves the whole family at once, and nothing else', () => {
 
 test('a legacy rewrite undoes the default line, and the default line undoes a legacy one', () => {
   for (const line of Object.keys(LINES)) {
-    if (line === DEFAULT_LINE) continue
+    // The 0.1.5 lines are the ones that install the plural presets package.
+    if (!LINES[line].presets.includes('@deepseek-ai/dsh-agent-presets')) continue
     const legacy = pinManifest(copy(), line)
     assert.deepEqual(pinManifest(legacy, DEFAULT_LINE), defaultManifest, `${line} → default must round-trip`)
     // The split packages are 0.1.7-only: the plural has no release on that line
@@ -108,12 +114,15 @@ test('the family root pins follow the line, including the launcher-only one', ()
     .filter(([name]) => name !== '@deepseek-ai/cordis-plugin-hmr'))
   assert.deepEqual(roots(defaultManifest), defaultRoots)
   for (const line of Object.keys(LINES)) {
-    if (line === DEFAULT_LINE) continue
+    if (!LINES[line].presets.includes('@deepseek-ai/dsh-agent-presets')) continue
     assert.deepEqual(roots(pinManifest(copy(), line)), legacyRoots, line)
   }
   // hmr is the same on both lines and is not part of the per-line table.
   assert.equal(defaultManifest.devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
   assert.equal(pinManifest(copy(), '0.1.5-rc.3').devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
+  for (const line of ['0.1.7-rc.1', '0.1.7-rc.2']) {
+    assert.deepEqual(roots(pinManifest(copy(), line)), defaultRoots, line)
+  }
 })
 
 test('the default line keeps the override map that holds the family together', () => {

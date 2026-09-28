@@ -24,7 +24,8 @@
  *    substitute: it skips peer resolution entirely, which leaves peer-only
  *    packages (the plural presets among them) missing.
  *
- * Usage: node scripts/ci-pin-line.mjs <line>
+ * Usage: node scripts/ci-pin-line.mjs <line> — rewrites the `package.json` of the
+ * *current* directory, so running it from a scratch checkout pins that checkout.
  * CI deletes `package-lock.json` after the rewrite: the committed lock belongs
  * to the default line.
  */
@@ -42,20 +43,30 @@ const LEGACY_ROOTS = {
   '@deepseek-ai/cordis-plugin-timer': '1.1.4',
 }
 
+/** The family's own pins on the 0.1.7 line, shared by its rcs. */
+const NEW_LINE_ROOTS = {
+  '@deepseek-ai/cordis': '4.0.4',
+  '@deepseek-ai/cordis-plugin-include': '1.0.9',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+  // dsh-app-boot peers on this one to compose the launcher tree; without it
+  // the CLI cannot even print its help (ERR_MODULE_NOT_FOUND).
+  '@deepseek-ai/cordis-plugin-group': '1.0.4',
+}
+/** The presets split: the plural has no release on this line at all. */
+const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
+
 export const LINES = {
-  '0.1.7-rc.1': {
-    /** The family's own pins on this line. `group` is not in the legacy table. */
-    roots: {
-      '@deepseek-ai/cordis': '4.0.4',
-      '@deepseek-ai/cordis-plugin-include': '1.0.9',
-      '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-      // dsh-app-boot peers on this one to compose the launcher tree; without it
-      // the CLI cannot even print its help (ERR_MODULE_NOT_FOUND).
-      '@deepseek-ai/cordis-plugin-group': '1.0.4',
-    },
-    presets: ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry'],
+  '0.1.7-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
+  '0.1.7-rc.2': {
+    roots: NEW_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
     overrides: true,
+    // The rc.2 family never published the mock LLM server, and the suite's
+    // host-contract case and the busy-drop probe need it. It is a standalone
+    // HTTP mock with no family peer, so it stays on the last version that
+    // exists instead of taking the whole leg down with ETARGET.
+    devPins: { '@deepseek-ai/dsh-llm-mock-server': '0.1.7-rc.1' },
   },
   '0.1.5-rc.3': { roots: LEGACY_ROOTS, presets: ['@deepseek-ai/dsh-agent-presets'], overrides: false },
   '0.1.5-rc.1': { roots: LEGACY_ROOTS, presets: ['@deepseek-ai/dsh-agent-presets'], overrides: false },
@@ -111,15 +122,22 @@ export function pinManifest(manifest, line) {
     if (target.presets.includes(name)) dev[name] = line
     else delete dev[name]
   }
+  // Per-line exceptions first, then the family: a devDep that does not exist
+  // on this line keeps a pin of its own and must not be overwritten by the
+  // family rewrite (see the rc.2 table entry).
+  for (const [name, pinned] of Object.entries(target.devPins ?? {})) dev[name] = pinned
   for (const name of Object.keys(dev)) {
-    if (isFamilyPackage(name)) dev[name] = line
+    if (isFamilyPackage(name) && target.devPins?.[name] === undefined) dev[name] = line
   }
   next.devDependencies = sorted(dev)
 
   if (target.overrides) {
     const overrides = {}
     for (const name of new Set([...Object.keys(dev), ...Object.keys(next.dependencies ?? {})])) {
-      if (isFamilyPackage(name)) overrides[name] = line
+      // A devPin is pinned by hand to a version this line never published; an
+      // override demanding the line's version for it is an EOVERRIDE, not a
+      // resolution (see the rc.2 table entry).
+      if (isFamilyPackage(name) && target.devPins?.[name] === undefined) overrides[name] = line
     }
     next.overrides = sorted(overrides)
   } else {
@@ -131,7 +149,7 @@ export function pinManifest(manifest, line) {
 }
 
 /** Read, re-pin, and write `package.json` in `cwd`. */
-export function pinFile(line, cwd = root) {
+export function pinFile(line, cwd = process.cwd()) {
   const path = join(cwd, 'package.json')
   const manifest = JSON.parse(readFileSync(path, 'utf8'))
   const next = pinManifest(manifest, line)

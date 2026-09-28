@@ -50,10 +50,16 @@ jobs:
         # the leg would assert nothing the rc.3 leg does not. `dshReleases` still
         # carries rc.2 as compatible: 0.7.2 shipped against it with CI green.
         #
-        # Upstream `next` has since moved to 0.1.7-rc.2. The shipped
-        # dsh.compatibility window (`>=0.1.7-rc.1 <0.1.8`) admits it, but no leg
-        # has run it: moving this leg's pin to rc.2 is what verifies it.
-        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.7-rc.1"]
+        # 0.1.7-rc.2 (upstream `next`) gets a leg of its own rather than replacing
+        # rc.1, because it is not a re-pin: 59 of the family’s 272 packages changed
+        # their type surface, 14 of them on this plugin’s own seam (dsh-agent-loop,
+        # dsh-llm, dsh-session, dsh-subagent, dsh-user-approval, dsh-tools, …), and
+        # rc.1 is what the committed manifest installs — so both rcs of the line stay
+        # covered. The leg needs `scripts/ci-pin-line.mjs` for one thing it cannot
+        # work around: the family never published dsh-llm-mock-server on that line,
+        # and the suite’s host-contract case and the busy-drop probe need it, so that
+        # devDep keeps the rc.1 mock (a standalone HTTP mock with no family peer).
+        dsh: ["0.1.5-rc.3", "0.1.5-rc.1", "0.1.7-rc.1", "0.1.7-rc.2"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
