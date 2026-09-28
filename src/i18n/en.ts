@@ -227,6 +227,8 @@ export const en: Record<string, string> = {
   'boot.directHost': 'The host is a direct child (no system PowerShell found): closing the terminal '
     + 'window ends this session. The history is still there for --resume.',
   'prompt.contextPrefix': '(context) {text}',
+  'turn.emptyThinkingOnly': '⚠ upstream ended this turn after thinking only, with no reply text (finish_reason: stop); it is not really done — press Enter or send another message to continue.',
+  'turn.emptyReply': '⚠ upstream ended this turn without returning anything (finish_reason: stop); it is not really done — press Enter or send another message to continue.',
   'turn.failed': 'Turn {turn} failed: {error}',
   'agent.disposed': 'Agent was disposed; press Ctrl+C to exit.',
   'diag.title': 'DeepSeek Harness — local diagnostics (/diag)',

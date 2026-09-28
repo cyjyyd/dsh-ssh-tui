@@ -744,6 +744,14 @@ Find your symptom; each answer is what to do, not a change log.
   (40–1000 ms: smaller is snappier and sends more); unset, it follows the round-trip,
   which is re-measured while the session runs (80 / 160 / 250 / 400 ms, median of the last
   three) — see `scripts/tui-rtt-probe.mjs`.
+- **The model “thinks, then says it is done”** — that is an **empty turn from upstream**: some
+  gateways map a Gemini/Claude thought part onto `reasoning_content` and then finish with
+  `finish_reason: stop` and no content at all, so the harness assembles a reply that is only
+  thinking and the turn legitimately ends. The TUI now says so in the transcript
+  (“upstream ended this turn after thinking only … it is not really done — press Enter or send
+  another message to continue”) instead of letting 完成 read as an answer. Measured on one
+  gateway (`google-ai-pro` / `gemini-3.8-flash-high`): about **29%** of turns, with the rest of
+  the same session replying normally.
 - **Screen reader, or you want a log** — start with `DSH_TUI_LINE_MODE=1`: plain appended
   lines, no cursor control, safe to `tee`.
 - **Title bar or bell does nothing** — the terminal needs OSC 0 and BEL; `DSH_TUI_NO_BELL=1`

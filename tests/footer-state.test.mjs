@@ -190,3 +190,103 @@ test('an end whose id matches no card still closes the compaction in flight', ()
   assert.equal(card?.summary, 'kept', 'and keeps the summary it had already collected')
   assert.doesNotMatch(activityLine(tui), /压缩中/)
 })
+
+// A turn can end without an answer: some gateways map a reply that only carries
+// a thought part onto `reasoning_content`, finish with `stop`, and send no
+// content at all. The turn is legitimately completed — and the footer said 空闲
+// with no hint, so the only way on was to guess that another Enter continues it.
+// (Measured shape: assistant/message with one reasoning block and
+// usage.outputTokens 0, then turn/end completed.)
+test('a turn that ends with thinking only says so instead of reading as done', () => {
+  const { tui, agent } = makeTui('running')
+  send(tui, agent, 'turn/start', { turn: 1 })
+  send(tui, agent, 'assistant/message', {
+    turn: 1,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: '想了一下' }], source: { kind: 'model' } },
+    usage: { inputTokens: 231896, outputTokens: 0, totalTokens: 231896 },
+  })
+  assert.equal(tui.rows.some(row => row.kind === 'system' && row.text.includes('上游')), false, 'nothing said yet')
+
+  send(tui, agent, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  const hint = tui.rows.filter(row => row.kind === 'system').map(row => row.text).find(text => text.includes('没有正文'))
+  assert.notEqual(hint, undefined, 'the empty stop is explained')
+  assert.match(hint, /finish_reason: stop/, 'with what the provider actually reported')
+  assert.match(hint, /按 Enter/, 'and what continues it')
+})
+
+test('a turn that said something, or ran a tool, gets no such hint', () => {
+  for (const kind of ['text', 'tool']) {
+    const { tui, agent } = makeTui('running')
+    send(tui, agent, 'turn/start', { turn: 1 })
+    if (kind === 'text') {
+      send(tui, agent, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: { role: 'assistant', content: [{ type: 'reasoning', text: '想' }, { type: 'text', text: '答' }], source: { kind: 'model' } },
+        usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+      })
+    } else {
+      send(tui, agent, 'tool/call', { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' })
+    }
+    send(tui, agent, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    assert.equal(
+      tui.rows.some(row => row.kind === 'system' && row.text.includes('这不是真正的完成')),
+      false,
+      `${kind}: a turn with output needs no explanation`,
+    )
+  }
+})
+
+test('an interrupted turn is not an upstream empty stop', () => {
+  const { tui, agent } = makeTui('running')
+  send(tui, agent, 'turn/start', { turn: 1 })
+  send(tui, agent, 'assistant/message', {
+    turn: 1,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'reasoning', text: '想' }], source: { kind: 'model' } },
+    usage: { inputTokens: 10, outputTokens: 0, totalTokens: 10 },
+  })
+  send(tui, agent, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: 'user' } })
+  assert.equal(
+    tui.rows.some(row => row.kind === 'system' && row.text.includes('这不是真正的完成')),
+    false,
+    'a cancelled turn already explains itself',
+  )
+})
+
+test('replaying such a turn does not print the hint again', async () => {
+  // A resume replays the whole log — including turns that ended empty, possibly
+  // many of them. The hint belongs to the live turn that just happened, so it
+  // must not reappear on every `--resume`.
+  const events = [
+    { type: 'turn/start', time: Date.now() - 3_000, data: { turn: 1 } },
+    {
+      type: 'assistant/message',
+      time: Date.now() - 2_000,
+      data: {
+        turn: 1,
+        step: 1,
+        message: { role: 'assistant', content: [{ type: 'reasoning', text: '想了一下' }], source: { kind: 'model' } },
+        usage: { inputTokens: 100, outputTokens: 0, totalTokens: 100 },
+      },
+    },
+    { type: 'turn/end', time: Date.now() - 1_000, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', seq: events.length, eventAt: seq => events[seq] },
+    cancel() {},
+  }
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  await tui.replayHistory()
+  assert.equal(
+    tui.rows.some(row => row.kind === 'system' && row.text.includes('这不是真正的完成')),
+    false,
+    'history is not the place for it',
+  )
+  assert.equal(tui.rows.some(row => row.kind === 'reasoning'), true, 'the thinking itself is there')
+})

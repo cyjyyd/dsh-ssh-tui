@@ -1499,6 +1499,15 @@ export class SshTui {
   private readonly inputGuard = new TerminalInputGuard(text => this.handleInputText(text))
   private thinkingStartedAt: number | undefined
   private waitStartedAt: number | undefined
+  /**
+   * Whether the running turn produced anything a person can read: reply text or
+   * a tool card. A turn that ends with thinking only is the upstream returning
+   * an empty stop, and painting 完成 for it reads as a finished answer — see
+   * the hint at `turn/end`.
+   */
+  private turnSawOutput = false
+  /** Whether the turn produced thinking, which the empty-stop hint names. */
+  private turnSawReasoning = false
   private completionSignaled = false
   private replaying = false
   /** Display-line budget for the first paint after resume; 0 = full transcript. */
@@ -5524,7 +5533,9 @@ export class SshTui {
         if (reasoning !== '') {
           this.pushRow({ kind: 'reasoning', text: `${reasoning}${interruptedMark}`, expanded: reasoningExpanded })
         }
+        if (reasoning !== '') this.turnSawReasoning = true
         if (text !== '') {
+          this.turnSawOutput = true
           this.pushRow({ kind: 'assistant', text: `${text}${interruptedMark}` })
         } else if (interrupted && reasoning === '') {
           this.pushRow({ kind: 'system', text: t('stream.interruptedEmpty') })
@@ -5533,6 +5544,7 @@ export class SshTui {
         break
       }
       case 'tool/call': {
+        this.turnSawOutput = true
         this.openToolCalls.set(String(event.data.callId), event.data.name)
         this.toolCallNames.set(String(event.data.callId), event.data.name)
         this.statsTracker.noteToolStart(String(event.data.callId), event.time)
@@ -5708,6 +5720,8 @@ export class SshTui {
         break
       case 'turn/start':
         this.stalledWarningShown = false
+        this.turnSawOutput = false
+        this.turnSawReasoning = false
         this.llmRetry = undefined
         this.status = `turn ${event.data.turn} running`
         // A turn is about to spend on this route: make sure the session's record
@@ -5745,6 +5759,17 @@ export class SshTui {
             : `idle (${reason.kind})`
         if (reason.kind === 'error') {
           this.pushRow({ kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) })
+        }
+        if (reason.kind === 'completed' && !this.replaying && !this.turnSawOutput) {
+          // The provider ended the turn without an answer. Some gateways map a
+          // Gemini/Claude reply that only contains a thought part onto
+          // `reasoning_content` and then finish with stop and no content, so the
+          // turn looks completed while nothing was said and the user is left to
+          // guess that another Enter is what continues it. Say so instead.
+          this.pushRow({
+            kind: 'system',
+            text: t(this.turnSawReasoning ? 'turn.emptyThinkingOnly' : 'turn.emptyReply'),
+          })
         }
         const livePlan = this.findLivePlanRow()
         if (livePlan !== undefined && reason.kind === 'completed') {

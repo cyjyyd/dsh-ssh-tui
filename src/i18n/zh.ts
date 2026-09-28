@@ -227,6 +227,8 @@ export const zh: Record<string, string> = {
   'boot.directHost': '宿主是直接子进程（未找到系统 PowerShell）：关闭终端窗口会结束本会话，'
     + '历史仍可 --resume 恢复。',
   'prompt.contextPrefix': '(context) {text}',
+  'turn.emptyThinkingOnly': '⚠ 上游只返回了思考、没有正文就结束了这一轮（finish_reason: stop）；这不是真正的完成，按 Enter 或再输入一句即可继续。',
+  'turn.emptyReply': '⚠ 上游没有返回任何内容就结束了这一轮（finish_reason: stop）；这不是真正的完成，按 Enter 或再输入一句即可继续。',
   'turn.failed': 'Turn {turn} failed: {error}',
   'agent.disposed': 'Agent was disposed; press Ctrl+C to exit.',
   'diag.title': 'DeepSeek Harness — 本地诊断（/diag）',
