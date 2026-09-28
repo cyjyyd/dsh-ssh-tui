@@ -104,3 +104,39 @@ test('an empty selection paints nothing and copies nothing', () => {
   assert.deepEqual(selectionSpans(lines, { from: { line: 0, column: 0 }, to: { line: 0, column: 0 } }), [])
   assert.equal(selectionText(lines, { from: { line: 0, column: 0 }, to: { line: 0, column: 0 } }), '')
 })
+
+test('the focus marker on a selected reply is chrome, not text', () => {
+  // The TUI marks the selected row with `▶ ` (three cells: the arrow is one
+  // character and two cells wide). The line stays copyable, so a drag that
+  // starts on the marker — or covers the whole line — must not paste it.
+  const lines = [{ text: '▶ hello there', copyable: true, gutter: 3 }]
+  const whole = { from: { line: 0, column: 0 }, to: { line: 0, column: 14 } }
+  assert.deepEqual(selectionSpans(lines, whole), [{ line: 0, start: 3, end: 14 }])
+  assert.equal(selectionText(lines, whole), 'hello there')
+  assert.equal(selectionText(lines, { from: { line: 0, column: 3 }, to: { line: 0, column: 8 } }), 'hello')
+  assert.equal(selectionText(lines, { from: { line: 0, column: 0 }, to: { line: 0, column: 1 } }), '')
+})
+
+test('a drag that starts on the marker still copies that line from its first character', () => {
+  // Starting inside the chrome is not "nothing selected": the drag covers the
+  // rest of that line, and everything the pointer reached on the next one.
+  const lines = [
+    { text: '▶ first', copyable: true, gutter: 3 },
+    { text: 'second', copyable: true },
+  ]
+  const selection = { from: { line: 0, column: 1 }, to: { line: 1, column: 3 } }
+  assert.equal(selectionText(lines, selection), 'first\nsec')
+})
+
+test('a multi-line drag starts the first line after the marker', () => {
+  const lines = [
+    { text: '▶ one', copyable: true, gutter: 3 },
+    { text: 'two', copyable: true },
+  ]
+  const selection = { from: { line: 0, column: 4 }, to: { line: 1, column: 3 } }
+  assert.deepEqual(selectionSpans(lines, selection), [
+    { line: 0, start: 4, end: 6 },
+    { line: 1, start: 0, end: 3 },
+  ])
+  assert.equal(selectionText(lines, selection), 'ne\ntwo')
+})

@@ -112,7 +112,10 @@ test('without color the match is marked with a prefix, and only there', t => {
   tui.runCommand('/find deploy')
   const frame = tui.captureFrame(100, 30).map(stripAnsi)
   const marked = frame.filter(line => line.startsWith('» '))
-  assert.deepEqual(marked, ['» alpha deploy here'], 'only the line with the match carries the marker')
+  // The hit's own row is also the selected row (`▶`): a search that lands on a
+  // reply leaves it ready for `/copy`, exactly as landing on a tool card does.
+  // The two prefixes say different things, so both are expected here.
+  assert.deepEqual(marked, ['» ▶ alpha deploy here'], 'only the line with the match carries the hit marker')
 })
 
 test('a search with no hits highlights nothing and says so', t => {

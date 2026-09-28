@@ -17,6 +17,7 @@ node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + �
 | A-2 计划条进度 | 让模型跑一次多步任务：卡片首行应形如 `⣿⣿⣀⣀… 2 已完成 · 1 进行中 · 1 待处理`；模型写 `failed/skipped` 时单独计数 | `tests/todo-progress.test.mjs`（含 24/30/40/80 列窄屏） |
 | A-3 错误块复制 | 制造一次失败（如 `/doctor` 报缺行）→ `/copy error` → 粘贴：**整份**报告，长路径不因折行被插入换行 | `tests/copy-error.test.mjs`；`tui-probe.mjs` 断言 OSC 52 实际发出 |
 | A-4 `/find` 高亮 | `/find 某词`：只有该词反色（同行多处都亮），窄屏折行后不错位；`NO_COLOR` 下命中行前有 `»` | `tests/find-highlight.test.mjs`；`tui-mock-probe.mjs` 真机反色断言 |
+| A-5 回复可选中、可复制 | 空输入按一次 **↑**：最新回复行首出现 `▶`；`/copy`（或 `Ctrl+Shift+C`）粘出来的是**该条回复原文**而不是折行后的屏幕文本；再按 ↑ 走上一张卡片/上一条回复，标记跟着走；在选中的回复上按 **Enter**：开「回复全文」覆盖层（`Esc` 返回），工具卡**不会**被顺手展开；覆盖层里按复制键同样有效，并在覆盖层底部回显「已复制…」；**连按两次复制键拿到同一条**；从选中回复第一行起拖选，复制内容**不含** `▶`；`Alt+4` 跳到并选中最新回复 | `tests/reply-focus.test.mjs`（焦点环 / 标记 / Enter / 覆盖层内复制 / Ctrl+R 不抢焦点 / 拖选不含标记）、`tests/selection.test.mjs`（gutter 语义）、`tests/copy-text.test.mjs`（复制后保留选中） |
 
 ## B 批 · 底栏、模式与配色（本轮交付）
 

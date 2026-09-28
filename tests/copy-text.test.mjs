@@ -42,7 +42,10 @@ test('/copy writes OSC 52 and a workspace notice', () => {
   tui.runCommand('/copy')
   assert.ok(tui.lastCopiedText.includes('可复制的回复'))
   assert.ok(writes.some(chunk => chunk.includes('\x1b]52;c;') && chunk.endsWith('\x1b\\')))
-  assert.equal(tui.focusedRow, null)
+  // The selection survives the copy: `▶` stays on the row it copied, which is
+  // how the reader sees what went to the clipboard, and pressing the key again
+  // copies the same thing instead of silently falling back to "latest reply".
+  assert.equal(tui.focusedRow, tui.rows[0])
   const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
   assert.match(String(notice), /已复制/)
   assert.match(String(notice), /最近回复/)

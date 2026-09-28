@@ -56,6 +56,22 @@ export interface InspectDialog {
   subagentSessionId?: string
   /** `/find` already scrolled to its hit here; later repaints keep the offset. */
   searchRevealed?: boolean
+  /**
+   * What the copy key takes while this overlay is up.
+   *
+   * The reader asked to see this body full-screen, so the body is what they
+   * mean by "copy this" — the overlay has no input line, and `/copy` typed at
+   * the prompt is covered by it. Undefined falls back to whatever is selected
+   * behind the overlay, which is the card the reader opened to get here.
+   */
+  copyText?: string
+  /**
+   * Confirmation line shown in place of the key hint after an in-overlay copy.
+   *
+   * The notice row the copy also pushes is behind this screen, and silence after
+   * a clipboard write is the one thing that reads as a failure.
+   */
+  notice?: string
 }
 
 export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog

@@ -439,8 +439,9 @@ export const zh: Record<string, string> = {
   'tool.result': '结果',
   'tool.reading': '读取中…',
   'tool.inspectTitle': '工具全文 · {title}',
-  'tool.inspectHint': 'PgUp/PgDn/滚轮滚动 · Esc 返回会话',
+  'tool.inspectHint': 'PgUp/PgDn/滚轮滚动 · Ctrl+Shift+C 复制全文 · Esc 返回会话',
   'tool.inspectFooter': '全文 {pos} · Esc 返回',
+  'reply.inspectTitle': '回复全文 · {lines} 行',
   'sub.inspectTitle': '子代理全文 · {title}',
 
   // Shipped preset names, keyed by preset id (the same rule
@@ -863,8 +864,8 @@ export const zh: Record<string, string> = {
   'usage.goHttp': 'OpenCode Go 额度接口返回 HTTP {status}{detail}',
 
   'help.intro1': '运行中按 Enter 可插入指示；Esc 取消选择或当前轮次；空闲连按两次 Ctrl+C 退出。',
-  'help.intro2': '空输入时 ↑/↓ 选卡片（与 Ctrl+N/P 相同）；Enter 展开（正文超出窗口则单独全览，Esc 返回；子代理始终打开全文，不把过程嵌进时间线）；Ctrl+R 展开最新一条（已选卡片时全部展开/收起，子代理跳过）；Ctrl+T 折叠输入。/copy 复制焦点卡片（无焦点则最近回复）、/copy error 复制最近错误/诊断行到本机剪贴板。斜杠联想和模型列表固定 12 行，↑/↓ 滑动窗口。',
-  'help.intro3': 'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复。',
+  'help.intro2': '空输入时 ↑/↓ 选卡片与回复（与 Ctrl+N/P 相同，↑ 先落到最新回复）；Enter 展开（回复则打开全文，正文超出窗口的卡片也单独全览，Esc 返回；子代理始终打开全文，不把过程嵌进时间线）；Ctrl+R 展开最新一条（已选卡片时全部展开/收起，子代理跳过）；Ctrl+T 折叠输入。/copy 复制焦点卡片或回复（无焦点则最近回复）、/copy error 复制最近错误/诊断行到本机剪贴板；复制不会清掉焦点，连按两次拿到的是同一条。斜杠联想和模型列表固定 12 行，↑/↓ 滑动窗口。',
+  'help.intro3': 'Alt+1 最新思考 · Alt+2 计划 · Alt+3 子代理 · Alt+4 最新回复（跳到并选中它，可直接 /copy）。',
   'help.intro4': '/find [思考|计划|子代理|回复|提示词] 关键字；Ctrl+/ 或 Alt+/ 打开搜索，Ctrl+G / Alt+N 下一条。',
   'help.intro5': '/model 切换当前提供商的模型与思考强度；/provider 切换提供商并重选模型（下一次请求生效，无需重启）。/submodel 可给子代理另选提供商；与父不同时卡片换色。',
   'help.intro6': '/setup 只新增或更新某一条 API Key 提供商，不会删掉其它已保存的路由。SuperGrok 走本机 OAuth，不需要填 Key。',
@@ -958,9 +959,10 @@ export const zh: Record<string, string> = {
   'copy.osc52Hint': '本终端（{terminal}）不接收 OSC 52 剪贴板写入，刚才的复制可能没有生效。按住 Shift 再拖选：多数终端会把这次选择留给自己，之后用它自己的复制键；若它照样把鼠标事件转发过来，Shift+拖选 会直接复制（每会话只提示一次）。',
   'copy.noError': '最近没有错误或诊断行可复制。',
   'copy.sourceError': '最近错误/诊断',
-  'copy.usage': '用法：/copy 复制焦点卡片（无焦点则最近回复）；/copy error 复制最近一条错误或诊断行。',
-  'copy.empty': '没有可复制的内容。先用空输入 ↑/↓ 选一张卡片，或等模型回复。',
+  'copy.usage': '用法：/copy 复制焦点卡片或回复（无焦点则最近回复）；/copy error 复制最近一条错误或诊断行。',
+  'copy.empty': '没有可复制的内容。先用空输入 ↑/↓ 选一张卡片或回复，或等模型回复。',
   'copy.sourceFocused': '焦点卡片',
+  'copy.sourceFocusedReply': '焦点回复',
   'copy.sourceAssistant': '最近回复',
   'copy.link': '已复制链接到本机剪贴板：{url}',
 

@@ -1209,6 +1209,17 @@ const DEEPSEEK_LOGO_VARIANTS: { width: number; lines: string[] }[] = [
 
 export type WorkspaceView = 'detailed' | 'compact'
 
+/**
+ * One row the card cursor can land on.
+ *
+ * Every collapsible card, plus the model replies. A reply has nothing to expand,
+ * which is why it used to be left out of the ring — and that is exactly what
+ * made `/copy` unreachable for it: `/copy` takes the focused row, so as soon as
+ * the reader selected any card the reply stopped being a copy target, and the
+ * newest reply survived only as the no-focus fallback.
+ */
+export type FocusTarget = Row | CollapsibleBlock
+
 export function parseDisconnectPolicy(raw: string): DisconnectPolicyName | undefined {
   const id = raw.trim().toLowerCase()
   if (id === 'pause' || id === 'cancel' || id === '暂停') return 'pause'
@@ -1429,7 +1440,7 @@ export class SshTui {
   private onboarding: OnboardingState | undefined
   private commandSuggestions: { name: string; description: string; local: boolean }[] = []
   private suggestionIndex = 0
-  private focusedRow: CollapsibleBlock | null = null
+  private focusedRow: FocusTarget | null = null
   private pendingMessages = new Map<string, string>()
   private lastActivity = Date.now()
   private lastIdleCtrlCAt = 0
@@ -1463,7 +1474,13 @@ export class SshTui {
    * from a model reply are copyable: the mouse belongs to the TUI, so dragging
    * cannot reach the terminal's own selection, and this is what replaces it.
    */
-  private selectableLines: { raw: string; copyable: boolean; ref?: Row | CollapsibleBlock }[] = []
+  private selectableLines: {
+    raw: string
+    copyable: boolean
+    ref?: Row | CollapsibleBlock
+    /** Leading cells of chrome (the focus marker on a selected reply's first line). */
+    gutter?: number
+  }[] = []
   /** Screen row (1-based) of the first transcript line in the last frame. */
   private transcriptTopScreenY = 1
   /** Where a drag started; the run it belongs to decides what can be selected. */
@@ -3085,6 +3102,19 @@ export class SshTui {
     return rows
   }
 
+  /**
+   * Everything the card cursor walks, in transcript order: the collapsible
+   * cards plus the model replies.
+   *
+   * Kept as a filter over `this.rows` rather than a concatenation so ↑/↓ always
+   * follows the screen — in the compact view the collapsible list ends with the
+   * tool bursts it collected, which is not where those rows sit.
+   */
+  private focusRing(): FocusTarget[] {
+    const collapsible = new Set<FocusTarget>(this.collapsibleRows())
+    return this.rows.filter(row => row.kind === 'assistant' || collapsible.has(row))
+  }
+
   private spinnerFrame(periodMs = 120): string {
     return SPINNER[Math.floor(Date.now() / periodMs) % SPINNER.length] ?? '⠋'
   }
@@ -3439,7 +3469,10 @@ export class SshTui {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'inspect') return
     const header = this.styleLine('system', truncateToWidth(dialog.title, width))
-    const hint = this.styleLine('system', truncateToWidth(t('tool.inspectHint'), width))
+    // A copy from inside the overlay replaces the key legend for the rest of the
+    // visit: the notice row it also pushes is behind this screen, and a copy the
+    // reader cannot confirm is the one thing worse than no copy at all.
+    const hint = this.styleLine('system', truncateToWidth(dialog.notice ?? t('tool.inspectHint'), width))
     const divider = this.styleLine('system', repeatToWidth('─', width))
     const bodyBudget = Math.max(1, height - 4)
     const rendered: string[] = []
@@ -3536,6 +3569,26 @@ export class SshTui {
   }
 
   /**
+   * Read one reply full-screen.
+   *
+   * What Enter does on a selected reply: a reply has no body to fold away, and
+   * the transcript wraps it to the window — which for a long answer with tables
+   * or code blocks is not how it reads. The overlay is the same surface the tool
+   * cards use, and the copy key works inside it, so "read it, then copy it"
+   * needs no trip back through the timeline.
+   */
+  private openReplyInspect(row: Extract<Row, { kind: 'assistant' }>): void {
+    const width = Math.max(20, this.screenColumns() - 4)
+    // Plain: `styleLine` strips escapes, so a coloured render would lose its
+    // styling anyway — and the overlay's own frame supplies the base style.
+    const lines: DiffDisplayLine[] = renderMarkdownLines(row.text, width, false, false)
+      .map(line => ({ kind: 'assistant' as const, text: line }))
+    const title = t('reply.inspectTitle', { lines: lines.length })
+    if (this.echoInspectToLog(title, lines)) return
+    this.openDialog({ kind: 'inspect', title, lines, offset: 0, copyText: row.text })
+  }
+
+  /**
    * Line mode has no framed scroller, so an inspect body goes into the log.
    *
    * Opening the modal there printed nothing and then swallowed the next Enter:
@@ -3604,9 +3657,9 @@ export class SshTui {
     return index - 1
   }
 
-  /** Move the expand/collapse focus among reasoning and tool rows. */
-  private moveCollapsibleFocus(delta: number): void {
-    const rows = this.collapsibleRows()
+  /** Move the card cursor among the cards and the replies. */
+  private moveFocus(delta: number): void {
+    const rows = this.focusRing()
     if (rows.length === 0) return
     if (this.focusedRow === null) {
       const target = delta >= 0 ? rows[0] : rows[rows.length - 1]
@@ -3621,12 +3674,22 @@ export class SshTui {
 
   /** Toggle the focused block; without focus, toggle the most recent one. */
   toggleCollapsible(): void {
+    const focused = this.focusedRow
+    // A reply has no body to fold away, so Enter reads it full-screen instead.
+    // Falling through to the lookup below would be worse than doing nothing:
+    // a reply is not in `collapsibleRows()`, and the fallback is "the newest
+    // card" — Enter on a selected reply would expand a card the reader never
+    // picked.
+    if (focused !== null && focused.kind === 'assistant') {
+      this.openReplyInspect(focused)
+      return
+    }
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
-    const focused = this.focusedRow !== null && rows.includes(this.focusedRow)
-      ? this.focusedRow
+    const inRing = focused !== null && rows.includes(focused as CollapsibleBlock)
+      ? focused as CollapsibleBlock
       : undefined
-    const target = focused ?? rows[rows.length - 1]
+    const target = inRing ?? rows[rows.length - 1]
     if (target === undefined) return
     this.toggleCard(target)
   }
@@ -3682,10 +3745,13 @@ export class SshTui {
   toggleAllCollapsible(): void {
     const rows = this.collapsibleRows()
     if (rows.length === 0) return
+    // Ctrl+R acts on the cards; a selected reply is not one, and it must survive
+    // the sweep either way (it was not collapsed, so it must not be deselected).
+    const selected = this.focusedRow?.kind === 'assistant' ? this.focusedRow : undefined
     const allExpanded = rows.every(row => row.expanded)
     if (allExpanded) {
       for (const row of rows) row.expanded = false
-      this.focusedRow = null
+      this.focusedRow = selected ?? null
     } else {
       const width = Math.max(10, this.screenColumns())
       const height = Math.max(6, this.screenRows())
@@ -3698,7 +3764,7 @@ export class SshTui {
         }
         row.expanded = true
       }
-      this.focusedRow = rows[rows.length - 1] ?? null
+      this.focusedRow = selected ?? rows[rows.length - 1] ?? null
     }
     this.forceFullPaint = true
     this.markDirty()
@@ -3761,6 +3827,13 @@ export class SshTui {
       row.expanded = true
       this.focusedRow = row as CollapsibleBlock
       this.forceFullPaint = true
+    } else if (row.kind === 'assistant') {
+      // A reply has nothing to expand, but revealing it must leave it selected:
+      // Alt+4 and `/find 回复` land here, and clearing the focus (which is what
+      // this branch used to do) meant `/copy` afterwards only worked by falling
+      // back to "the latest reply" — silently, and only when it happened to be
+      // the same row.
+      this.focusedRow = row
     } else {
       this.focusedRow = null
     }
@@ -3865,18 +3938,31 @@ export class SshTui {
 
     const display: string[] = []
     const displayRefs: (Row | CollapsibleBlock | undefined)[] = []
+    // Cells at the start of each painted line that are chrome rather than text.
+    // Only the focus marker has any, and the drag-selection needs to know how
+    // many so a copy off the selected row does not paste the marker.
+    const displayGutters: number[] = []
     const searchHit = this.searchHits[this.searchIndex]
     const addDisplay = (
       line: string,
       ref?: Row | CollapsibleBlock,
+      gutter = 0,
     ): void => {
       display.push(clipAnsiToWidth(line, width))
       displayRefs.push(ref)
+      displayGutters.push(gutter)
     }
     const pushRow = (kind: DisplayKind, text: string, ref?: Row): void => {
       if (kind === 'assistant') {
+        const focused = ref !== undefined && this.focusedRow === ref
+        let first = true
         for (const line of renderMarkdownLines(text, width, this.color, this.terminalCaps.osc8)) {
-          addDisplay(line, ref)
+          // The marker goes on the first painted line only, and its width is
+          // measured rather than assumed: `▶` is one character and two cells,
+          // so `▶ ` is three, not two.
+          if (focused && first) addDisplay(`▶ ${line}`, ref, displayWidth('▶ '))
+          else addDisplay(line, ref)
+          first = false
         }
         return
       }
@@ -4473,6 +4559,10 @@ export class SshTui {
     const start = window.start
     const visible = window.visibleLines
     const visibleRefs = window.visibleRefs
+    // `padding` blank rows are unshifted when the transcript is shorter than the
+    // window, so the gutter of a visible line is read off the same offset the
+    // window itself used (negative before the transcript starts → 0).
+    const visibleGutters = visible.map((_, index) => displayGutters[start + index - window.padding] ?? 0)
     this.clickableRows.clear()
     this.paintedLinkHitsByRow.clear()
     this.transcriptTopScreenY = headerLines.length + 1
@@ -4484,6 +4574,7 @@ export class SshTui {
       // Only a model reply is freely copyable; a tool card, a notice or the
       // chrome keeps its click behavior instead.
       copyable: (visibleRefs[index] as { kind?: string } | undefined)?.kind === 'assistant',
+      gutter: visibleGutters[index] ?? 0,
     }))
     for (let index = 0; index < visibleRefs.length; index++) {
       const ref = visibleRefs[index]
@@ -9293,7 +9384,7 @@ export class SshTui {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
           } else if (this.input === '' && this.collapsibleRows().length > 0) {
-            this.moveCollapsibleFocus(-1)
+            this.moveFocus(-1)
           } else {
             this.historyBack()
           }
@@ -9311,7 +9402,7 @@ export class SshTui {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
             this.markDirty()
           } else if (this.input === '' && this.collapsibleRows().length > 0) {
-            this.moveCollapsibleFocus(1)
+            this.moveFocus(1)
           } else {
             this.historyForward()
           }
@@ -9518,8 +9609,8 @@ export class SshTui {
       case '\x05': this.cursor = this.input.length; this.markDirty(); return
       case '\x15': this.leaveHistoryBrowse(); this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
       case '\x0b': this.leaveHistoryBrowse(); this.input = this.input.slice(0, this.cursor); this.markDirty(); return
-      case '\x0e': this.moveCollapsibleFocus(1); return
-      case '\x10': this.moveCollapsibleFocus(-1); return
+      case '\x0e': this.moveFocus(1); return
+      case '\x10': this.moveFocus(-1); return
       case '\x12':
         if (this.focusedRow === null) this.toggleCollapsible()
         else this.toggleAllCollapsible()
@@ -10642,7 +10733,11 @@ export class SshTui {
 
   /** The painted lines as plain text, for the selection rules. */
   private plainSelectableLines(): SelectableLine[] {
-    return this.selectableLines.map(line => ({ text: stripAnsi(line.raw), copyable: line.copyable }))
+    return this.selectableLines.map(line => ({
+      text: stripAnsi(line.raw),
+      copyable: line.copyable,
+      gutter: line.gutter,
+    }))
   }
 
   /** Screen row from a mouse report to an index into `selectableLines`. */
@@ -10765,7 +10860,10 @@ export class SshTui {
 
   private copyPlainText(text: string, notice: string): void {
     this.copyYank = text
-    this.focusedRow = null
+    // The selection stays: the marker on the copied row is how the reader sees
+    // *what* went to the clipboard, and a second press of the copy key must be
+    // idempotent. Clearing it here made the next `/copy` silently fall back to
+    // "the latest reply" — a different row, with nothing on screen to say so.
     this.input = ''
     this.cursor = 0
     this.inputFolded = false
@@ -10800,7 +10898,11 @@ export class SshTui {
   }
 
   copyFocusedCard(arg = ''): boolean {
-    if (this.dialog !== undefined) return false
+    // A dialog covers the input line, so the copy key is the only way to copy
+    // from inside one. The inspect overlay carries what it is showing; every
+    // other dialog keeps the key inert, exactly as it always was.
+    const overlay = this.dialog?.kind === 'inspect' ? this.dialog : undefined
+    if (this.dialog !== undefined && overlay === undefined) return false
     // `error` copies the newest failure or diagnostic row: a long path or a
     // command in one of those must reach the clipboard whole, which is exactly
     // what copying the row's own text does (the wrapped screen lines a drag
@@ -10817,14 +10919,25 @@ export class SshTui {
       return true
     }
     if (arg.trim() === '') {
-      const picked = copyTextFromTranscript(this.rows, this.focusedRow)
+      const shown = overlay?.copyText
+      const picked = shown !== undefined && shown.trim() !== ''
+        ? { text: shown, source: 'focused' as const }
+        : copyTextFromTranscript(this.rows, this.focusedRow)
       if (picked.text.trim() === '') {
         this.pushRow({ kind: 'system', text: t('copy.empty') })
         this.markDirty()
         return false
       }
-      const source = picked.source === 'focused' ? t('copy.sourceFocused') : t('copy.sourceAssistant')
-      this.copyPlainText(picked.text, t('copy.ok', { chars: picked.text.length, source }))
+      const source = picked.source === 'focused'
+        ? t(this.focusedRow?.kind === 'assistant' ? 'copy.sourceFocusedReply' : 'copy.sourceFocused')
+        : t('copy.sourceAssistant')
+      const notice = t('copy.ok', { chars: picked.text.length, source })
+      this.copyPlainText(picked.text, notice)
+      if (overlay !== undefined) {
+        // The notice row is behind the overlay, so the overlay says it too.
+        overlay.notice = notice
+        this.markDirty()
+      }
       return true
     }
     this.pushRow({ kind: 'system', text: t('copy.usage') })

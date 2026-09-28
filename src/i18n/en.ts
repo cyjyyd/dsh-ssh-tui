@@ -439,8 +439,9 @@ export const en: Record<string, string> = {
   'tool.result': 'result',
   'tool.reading': 'reading…',
   'tool.inspectTitle': 'full tool · {title}',
-  'tool.inspectHint': 'PgUp/PgDn/wheel to scroll · Esc back to session',
+  'tool.inspectHint': 'PgUp/PgDn/wheel to scroll · Ctrl+Shift+C to copy · Esc back to session',
   'tool.inspectFooter': 'full {pos} · Esc to return',
+  'reply.inspectTitle': 'reply · {lines} lines',
   'sub.inspectTitle': 'full subagent · {title}',
 
   // Shipped preset names, keyed by preset id (the same rule
@@ -863,8 +864,8 @@ export const en: Record<string, string> = {
   'usage.goHttp': 'OpenCode Go quota API returned HTTP {status}{detail}',
 
   'help.intro1': 'Enter steers while running; Esc drops selection or the turn; idle Ctrl+C twice to exit.',
-  'help.intro2': 'Empty ↑/↓ selects cards (same as Ctrl+N/P); Enter expands (oversized bodies open a full view, Esc returns; a subagent always opens the full view and never dumps into the timeline); Ctrl+R expands the latest card (or all, once a card is selected; subagents are skipped); Ctrl+T folds input. /copy copies the focused card (or latest reply) to the local clipboard. Slash suggestions and model lists keep 12 rows; ↑/↓ slides the window.',
-  'help.intro3': 'Alt+1 latest thinking · Alt+2 plan · Alt+3 subagent · Alt+4 latest reply.',
+  'help.intro2': 'Empty ↑/↓ selects cards and replies (same as Ctrl+N/P; ↑ lands on the latest reply first); Enter expands (a reply opens full-screen, as do oversized bodies, Esc returns; a subagent always opens the full view and never dumps into the timeline); Ctrl+R expands the latest card (or all, once a card is selected; subagents are skipped); Ctrl+T folds input. /copy copies the focused card or reply (or latest reply) to the local clipboard and keeps the selection, so pressing it twice copies the same thing. Slash suggestions and model lists keep 12 rows; ↑/↓ slides the window.',
+  'help.intro3': 'Alt+1 latest thinking · Alt+2 plan · Alt+3 subagent · Alt+4 latest reply (jumps to it and selects it, ready for /copy).',
   'help.intro4': '/find [thinking|plan|subagent|reply|prompt] query; Ctrl+/ or Alt+/ opens search, Ctrl+G / Alt+N next.',
   'help.intro5': '/model changes model and effort for the current provider. /provider switches provider (then model); takes effect on next request without restart. /submodel can pin a different provider for children; a foreign chip is recolored.',
   'help.intro6': '/setup adds or updates one API-key provider without wiping others. SuperGrok uses local OAuth; no key.',
@@ -958,9 +959,10 @@ export const en: Record<string, string> = {
   'copy.osc52Hint': 'This terminal ({terminal}) does not accept OSC 52 clipboard writes, so that copy may not have landed. Hold Shift and drag: most terminals then keep the selection for themselves, and you copy it with their own shortcut; one that forwards the mouse anyway copies the drag directly. Shown once per session.',
   'copy.noError': 'no recent error or diagnostic row to copy.',
   'copy.sourceError': 'latest error/diagnostic',
-  'copy.usage': 'usage: /copy copies the focused card, the latest reply, or with `/copy error` the newest error row; /copy error copies the newest error or diagnostic row.',
-  'copy.empty': 'Nothing to copy. Select a card with empty-input ↑/↓, or wait for a reply.',
+  'copy.usage': 'usage: /copy copies the focused card or reply (the latest reply when nothing is focused); /copy error copies the newest error or diagnostic row.',
+  'copy.empty': 'Nothing to copy. Select a card or reply with empty-input ↑/↓, or wait for a reply.',
   'copy.sourceFocused': 'focused card',
+  'copy.sourceFocusedReply': 'focused reply',
   'copy.sourceAssistant': 'latest reply',
   'copy.link': 'Copied link to the local clipboard: {url}',
 

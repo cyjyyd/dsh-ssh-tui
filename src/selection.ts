@@ -9,10 +9,10 @@
  * OSC 52 (the channel `/copy` already uses).
  *
  * Only **model replies** are freely selectable. Everything here is pure: the
- * caller passes the painted lines (plain text plus whether each one came from a
- * reply) and gets back the ordered selection, the cell spans to paint in
- * reverse video, and the text to copy. The IO — mouse reports, OSC 52, notices —
- * stays in `tui.ts`.
+ * caller passes the painted lines (plain text, whether each one came from a
+ * reply, and how many leading cells are chrome) and gets back the ordered
+ * selection, the cell spans to paint in reverse video, and the text to copy.
+ * The IO — mouse reports, OSC 52, notices — stays in `tui.ts`.
  *
  * Columns are **cells**, not characters: a CJK glyph is two cells wide, and a
  * selection that touches either half includes the whole glyph. Surrogate pairs
@@ -27,6 +27,25 @@ export interface SelectableLine {
   text: string
   /** True when this line came from a model reply, the only freely copyable kind. */
   copyable: boolean
+  /**
+   * Cells at the start of the line that are chrome, not content.
+   *
+   * The focused card or reply carries a `▶ ` marker, and a reply's lines are
+   * copyable, so without this the marker was part of the text a drag copied off
+   * its first line. Only the first line of the focused row carries one.
+   */
+  gutter?: number
+}
+
+/**
+ * Characters at the start of a line that cover its gutter.
+ *
+ * Cells and characters differ (`▶` is one character and two cells wide), so the
+ * cut is found by measuring the way the painter measures, and a selection's
+ * offsets are then computed inside the content that follows it.
+ */
+function gutterCut(text: string, gutter: number): number {
+  return gutter <= 0 ? 0 : offsetAtColumn(text, gutter)
 }
 
 /** A point in the transcript: `line` indexes the painted lines, `column` is a cell. */
@@ -158,7 +177,12 @@ export function selectionSpans(
   for (let line = selection.from.line; line <= selection.to.line; line += 1) {
     const text = lines[line]?.text ?? ''
     const width = lineWidth(text)
-    const start = line === selection.from.line ? Math.min(selection.from.column, width) : 0
+    const gutter = Math.min(width, Math.max(0, lines[line]?.gutter ?? 0))
+    // The marker is never part of the selection: it says which row is focused,
+    // it is not content, and inverting it made the marker look selected too.
+    const start = line === selection.from.line
+      ? Math.max(gutter, Math.min(selection.from.column, width))
+      : gutter
     const end = line === selection.to.line ? Math.min(selection.to.column, width) : width
     if (end > start) spans.push({ line, start, end })
   }
@@ -176,14 +200,17 @@ export function selectionText(
   const parts: string[] = []
   for (let line = selection.from.line; line <= selection.to.line; line += 1) {
     const text = lines[line]?.text ?? ''
-    const startOffset = line === selection.from.line ? offsetAtColumn(text, selection.from.column) : 0
-    const endOffset = line === selection.to.line ? offsetAfterColumn(text, selection.to.column) : text.length
+    const gutter = Math.max(0, lines[line]?.gutter ?? 0)
+    const cut = gutterCut(text, gutter)
+    const body = text.slice(cut)
+    const startOffset = line === selection.from.line ? offsetAtColumn(body, selection.from.column - gutter) : 0
+    const endOffset = line === selection.to.line ? offsetAfterColumn(body, selection.to.column - gutter) : body.length
     if (endOffset <= startOffset) {
       // A drag that stops at a line's first cell still selects that line's break.
       parts.push('')
       continue
     }
-    parts.push(text.slice(startOffset, endOffset).replace(/\s+$/u, ''))
+    parts.push(body.slice(startOffset, endOffset).replace(/\s+$/u, ''))
   }
   return parts.join('\n').replace(/\n+$/u, '')
 }

@@ -87,7 +87,10 @@ Reproducible, no model in the loop: `npm run screenshots:slow` writes
 
 0.7 highlights: drag-select any part of a model reply to copy it (hold the button, or Shift;
 OSC 52 into your local clipboard; a tool card still expands on click; an SSH session copies
-into the local terminal and no longer warns that it cannot) · the footer is one priority-ordered chip
+into the local terminal and no longer warns that it cannot) · a reply is a selectable card too:
+one `↑` on an empty input lands on the latest reply (marked `▶`), `/copy` then takes that one
+as written rather than the wrapped screen text, `Enter` opens it full-screen and `Alt+4` jumps
+to and selects it · the footer is one priority-ordered chip
 strip, and `⚠` opens `/doctor` · the quota bar is on screen from the first frame and names
 its window (`5Hr`/`1Wk`/`1Mo`, smallest window by default, `?%` with a 15-second retry until
 a reading arrives) · `/mode` groups presets and filters with `/` · the compact view names
@@ -397,14 +400,14 @@ You can reopen the wizard at any time with:
 
 | Key | Action |
 | --- | --- |
-| `Enter` | send; while running, steer; with empty input, toggle the selected card. Oversized tool bodies open a dedicated inspect view; `Esc` returns |
+| `Enter` | send; while running, steer; with empty input, toggle the selected card, or open the full view when the selected row is a reply (`Esc` returns). Oversized tool bodies open a dedicated inspect view too |
 | `Tab` | complete the highlighted slash command |
-| `↑` / `↓` | empty input: move among cards; otherwise history (↓ past the newest item restores the live draft). Same as `Ctrl+N` / `Ctrl+P` |
-| `Ctrl+R` | expand the latest card; once a card is selected, expand or collapse all |
+| `↑` / `↓` | empty input: move among cards **and replies** (`↑` lands on the latest reply first; the `▶` marker is only ever on the selected row); otherwise history (↓ past the newest item restores the live draft). Same as `Ctrl+N` / `Ctrl+P` |
+| `Ctrl+R` | expand the latest card; once something is selected, expand or collapse all (a selected reply keeps its selection) |
 | `Ctrl+T` | fold the input box (display-only) |
-| `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply |
-| `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`). `Ctrl+/` or `Alt+/` opens it |
-| `/copy` | copy the focused card as plain text to the local clipboard (latest reply if none; OSC 52) |
+| `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply (a reply is selected, ready for `/copy`) |
+| `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`), which is also selected. `Ctrl+/` or `Alt+/` opens it |
+| `/copy` | copy the selected card or reply **as written** to the local clipboard (latest reply if none is selected; OSC 52). The selection survives, so pressing it twice copies the same thing |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |
