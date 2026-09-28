@@ -68,16 +68,28 @@ test('↑ with an empty input lands on the newest reply and marks it', () => {
 })
 
 test('/copy copies the selected reply, not the newest one', () => {
-  const tui = makeTui()
-  const [older] = assistantRows(tui)
-  tui.moveFocus(-1)
-  tui.moveFocus(-1)
-  tui.moveFocus(-1)
-  assert.equal(tui.focusedRow, older)
-  assert.equal(tui.copyFocusedCard(), true)
-  assert.equal(tui.lastCopiedText, '第一版回复', 'the row\'s own text, not the newest reply')
-  const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
-  assert.match(String(notice), /焦点回复/)
+  // The clipboard caveat is a row of its own on every terminal the capability
+  // table does not promise OSC 52 for, and CI runs outside SSH — which is the
+  // one case that silences it. Declare the clipboard working so the notice
+  // under test is the newest row (the local suite is an SSH session and would
+  // otherwise pass for the wrong reason).
+  const previous = process.env.DSH_TUI_TERM_CAPS
+  process.env.DSH_TUI_TERM_CAPS = 'osc52'
+  try {
+    const tui = makeTui()
+    const [older] = assistantRows(tui)
+    tui.moveFocus(-1)
+    tui.moveFocus(-1)
+    tui.moveFocus(-1)
+    assert.equal(tui.focusedRow, older)
+    assert.equal(tui.copyFocusedCard(), true)
+    assert.equal(tui.lastCopiedText, '第一版回复', 'the row\'s own text, not the newest reply')
+    const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
+    assert.match(String(notice), /焦点回复/)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previous
+  }
 })
 
 test('a second copy takes the same row again', () => {
