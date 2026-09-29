@@ -99,8 +99,11 @@ test('the family root pins follow the line, including the launcher-only one', ()
   assert.equal(defaultManifest.devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
 })
 
-test('the default line keeps the override map that holds the family together', async () => {
-  const { default: manifest } = await import(join(REPO, 'package.json'), { with: { type: 'json' } })
+test('the default line keeps the override map that holds the family together', () => {
+  // `tree`, read with `readFileSync` at the top of this file — not a dynamic
+  // `import(join(REPO, 'package.json'))`, which Windows rejects: `D:\…` is a
+  // path, not an ESM URL, and the runner answers ERR_UNSUPPORTED_ESM_URL_SCHEME.
+  const manifest = tree
   const overridden = Object.keys(defaultManifest.overrides ?? {})
   assert.deepEqual(overridden, familyDevDeps(defaultManifest).sort())
   for (const name of overridden) assert.equal(defaultManifest.overrides[name], DEFAULT_LINE)
