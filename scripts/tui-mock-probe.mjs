@@ -15,7 +15,10 @@
  *   3. `/find` the token inside it and assert the *token* is the thing wrapped
  *      in reverse video — not the whole card;
  *   4. drag across the reply by feeding the terminal's own mouse reports and
- *      assert the OSC 52 clipboard write carries exactly the dragged text.
+ *      assert the OSC 52 clipboard write carries exactly the dragged text;
+ *   5. select the reply (Alt+4) and press the copy key, so the whole reply as
+ *      written reaches the clipboard — the selection marker the focused row
+ *      paints is chrome and must not ride along.
  *
  * Usage:
  *   node scripts/tui-mock-probe.mjs [--keep]
@@ -49,6 +52,11 @@ const { closeWindow, crashWindow, windowDeathNote, IS_WINDOWS } = await import(
 )
 const { hostBootstrapCommand } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/platform.js')).href,
+)
+// The painter's own width table, so the screen model this probe rebuilds from
+// the byte stream measures a cell the way the terminal does (see `cellWidth`).
+const { displayWidth } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/term-text.js')).href,
 )
 
 const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy [--crash]] [--keep] [--cols N] [--rows N]
@@ -117,9 +125,40 @@ function screenRows(text) {
 function locateOnScreen(text, needle) {
   for (const [row, line] of screenRows(text)) {
     const at = line.indexOf(needle)
-    if (at !== -1) return { row, column: at + 1 }
+    if (at !== -1) return { row, column: cellWidth(line.slice(0, at)) + 1 }
   }
   return undefined
+}
+
+/**
+ * The cells `text` spends on the real terminal.
+ *
+ * `displayWidth` is the painter's table, and the painter's rows are what the
+ * bytes carry — with one exception it has to undo: symbols an emoji font would
+ * draw too wide are pinned to their text form, which inserts `VS15` and a
+ * *reserving* space (`▶` becomes `▶︎ `). Those two cells are budgeted once, by
+ * the base glyph, so the reserving space is not a cell of its own — counting it
+ * (or counting characters, as a naive `indexOf` column does) reports a column
+ * one cell too far right, and a mouse report built from it lands one character
+ * off inside a selected row.
+ */
+function cellWidth(text) {
+  let width = 0
+  let pinned = false
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0
+    if (cp === 0xfe0e || cp === 0xfe0f) {
+      pinned = true
+      continue
+    }
+    if (pinned && char === ' ') {
+      pinned = false
+      continue
+    }
+    pinned = false
+    width += displayWidth(char)
+  }
+  return width
 }
 
 async function synthesizeHome() {
@@ -558,7 +597,41 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
       console.log(`drag copied: ${JSON.stringify(copied.at(-1)?.slice(0, 90))}`)
     }
 
-    // 4. The window still exits on its own terms.
+    // 4. A reply is a card the cursor can land on, and the copy key takes the
+    //    *selected* row as written: the whole reply rather than a dragged
+    //    fragment, and without the `▶` the selection paints — that marker is
+    //    chrome, and a copy off its own line must not paste it.
+    //
+    //    Alt+4 rather than ↑: ↑ walks the ring only once the session has a
+    //    collapsible card (that gate is deliberate — with no cards an empty ↑
+    //    still recalls the previous prompt), and this scripted turn is a plain
+    //    reply with no tool or thinking card in it.
+    const beforeSelect = output.length
+    term.write('\x1b4')
+    await waitFor(
+      text => plain(text.slice(beforeSelect)).includes('▶'),
+      15_000,
+      'the selection marker on the newest reply',
+    )
+    term.write('\x1b[99;6u')
+    await waitFor(
+      text => /52;[^;]*;[A-Za-z0-9+/=]+\x1b/u.test(text.slice(beforeSelect)),
+      15_000,
+      'the copy-key clipboard write',
+    )
+    const selected = clipboardWrites(output.slice(beforeSelect))
+    check(
+      selected.includes(REPLY_TEXT),
+      'the copy key must copy the selected reply as written'
+      + ` (${JSON.stringify(REPLY_TEXT)}), got ${JSON.stringify(selected.map(text => text.slice(0, 90)))}`,
+    )
+    check(
+      selected.every(text => !text.includes('▶')),
+      'the selection marker must never be part of a copy',
+    )
+    console.log(`selected reply copied: ${JSON.stringify(selected.at(-1)?.slice(0, 90))}`)
+
+    // 5. The window still exits on its own terms.
     term.write('\x15')
     term.write('/exit\r')
     const exitCode = await waitForExit(15_000)
@@ -584,7 +657,8 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: a scripted turn was copied by dragging, and /find marked the match itself')
+  console.log('OK: a scripted turn was copied by dragging and by the copy key on the selected reply,')
+  console.log('    and /find marked the match itself')
   return 0
 }
 

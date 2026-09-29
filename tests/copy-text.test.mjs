@@ -38,17 +38,21 @@ test('/copy writes OSC 52 and a workspace notice', () => {
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   tui.write = (chunk) => { writes.push(String(chunk)) }
   tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
-  tui.focusedRow = tui.rows[0]
+  // The row the copy is about, not `rows[0]` — that is the constructor's logo row
+  // (it is not an assistant row, so focusing it made the copy fall back to "the
+  // latest reply" and the assertions below passed for the wrong reason).
+  const reply = tui.rows.at(-1)
+  tui.focusedRow = reply
   tui.runCommand('/copy')
   assert.ok(tui.lastCopiedText.includes('可复制的回复'))
   assert.ok(writes.some(chunk => chunk.includes('\x1b]52;c;') && chunk.endsWith('\x1b\\')))
   // The selection survives the copy: `▶` stays on the row it copied, which is
   // how the reader sees what went to the clipboard, and pressing the key again
   // copies the same thing instead of silently falling back to "latest reply".
-  assert.equal(tui.focusedRow, tui.rows[0])
+  assert.equal(tui.focusedRow, reply)
   const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
   assert.match(String(notice), /已复制/)
-  assert.match(String(notice), /最近回复/)
+  assert.match(String(notice), /焦点回复/)
   tui.handleChar('a')
   assert.equal(tui.input, 'a')
   if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS

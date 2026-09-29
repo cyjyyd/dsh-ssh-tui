@@ -143,6 +143,16 @@ jobs:
       - name: Busy-drop probe (window closed mid-turn)
         if: matrix.dsh != '0.1.5-rc.1'
         run: node scripts/tui-mock-probe.mjs --busy
+      # The other half of that script: a scripted turn, then the copy paths a
+      # reader actually takes — `/find` highlights the match, a drag over the
+      # reply copies exactly what it covered, and the copy key takes the
+      # *selected* reply as written (its `▶` marker is chrome, not text). The
+      # mouse reports come from the probe rebuilding the screen, so this is also
+      # where the marker's cell accounting is pinned. One leg: it needs the mock
+      # model, and the frames it asserts are host-line independent.
+      - name: Reply copy probe (scripted turn)
+        if: matrix.dsh == '0.1.7-rc.1'
+        run: node scripts/tui-mock-probe.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
   # path only gets real coverage on a Windows runner.

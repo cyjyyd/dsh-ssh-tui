@@ -5,6 +5,10 @@ node_modules/
 lib/
 
 # logs, temp, and local state
+# scratch checkout for probe runs (never commit: it carries node_modules)
+.probe-tree/
+# registry cache used when the shared one is not writable from inside the sandbox
+.npm-cache-tmp/
 *.log
 *.tgz
 .DS_Store

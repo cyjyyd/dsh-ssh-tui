@@ -864,7 +864,7 @@ export const en: Record<string, string> = {
   'usage.goHttp': 'OpenCode Go quota API returned HTTP {status}{detail}',
 
   'help.intro1': 'Enter steers while running; Esc drops selection or the turn; idle Ctrl+C twice to exit.',
-  'help.intro2': 'Empty ↑/↓ selects cards and replies (same as Ctrl+N/P; ↑ lands on the latest reply first); Enter expands (a reply opens full-screen, as do oversized bodies, Esc returns; a subagent always opens the full view and never dumps into the timeline); Ctrl+R expands the latest card (or all, once a card is selected; subagents are skipped); Ctrl+T folds input. /copy copies the focused card or reply (or latest reply) to the local clipboard and keeps the selection, so pressing it twice copies the same thing. Slash suggestions and model lists keep 12 rows; ↑/↓ slides the window.',
+  'help.intro2': 'Empty ↑/↓ walks the newest reply-or-card downwards (same as Ctrl+N/P; with no card in the session yet ↑ keeps its history meaning — select a reply there with Alt+4); Enter expands (a reply opens full-screen, as do oversized bodies, Esc returns; a subagent always opens the full view and never dumps into the timeline); Ctrl+R expands the latest card (or all, once something is selected; subagents are skipped); Ctrl+T folds input. /copy copies the focused card or reply (or latest reply) to the local clipboard and keeps the selection, so pressing it twice copies the same thing; inside a full view the copy key takes the body on screen. Slash suggestions and model lists keep 12 rows; ↑/↓ slides the window.',
   'help.intro3': 'Alt+1 latest thinking · Alt+2 plan · Alt+3 subagent · Alt+4 latest reply (jumps to it and selects it, ready for /copy).',
   'help.intro4': '/find [thinking|plan|subagent|reply|prompt] query; Ctrl+/ or Alt+/ opens search, Ctrl+G / Alt+N next.',
   'help.intro5': '/model changes model and effort for the current provider. /provider switches provider (then model); takes effect on next request without restart. /submodel can pin a different provider for children; a foreign chip is recolored.',
@@ -963,6 +963,7 @@ export const en: Record<string, string> = {
   'copy.empty': 'Nothing to copy. Select a card or reply with empty-input ↑/↓, or wait for a reply.',
   'copy.sourceFocused': 'focused card',
   'copy.sourceFocusedReply': 'focused reply',
+  'copy.sourceFull': 'full view',
   'copy.sourceAssistant': 'latest reply',
   'copy.link': 'Copied link to the local clipboard: {url}',
 
