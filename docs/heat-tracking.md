@@ -181,3 +181,11 @@ comparator、CI 删腿、只服务该 API 代的兼容分支与测试固定装�
 按 stars DESC 排序的行（8 分钟上限），那段时间又撞上连续 cancelled 的每日同步，于是旧版本被留在卡片上。
 2026-09-24 复查，页面已显示 **版本 0.7.2**，说明自然重探追上了。下次发版后同样先观察一两天；若超过一周
 仍不动，再用 `gh workflow run sync-plugins.yml -f only=cyjyyd/dsh-ssh-tui` 点名重探。
+
+## 0.8.0 已发布（2026-09-29，只上 `next`）
+
+> 发版完成：`5146b3b`（Release 0.8.0）→ tag `v0.8.0` → npm **`next` = `0.8.0`**，`latest` 保持 `0.7.4`
+> → GitHub Release <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.0>（正文含当日基线）。
+> **2026-10-01 待办：`npm dist-tag add dsh-ssh-tui@0.8.0 latest`**（用户要求先 soak 两天）。
+> 内容是三条：跟上宿主 0.2.0-rc 线（源码零改动，三处"宿主代际判定"改为按元组比较）、
+> **摘除 0.1.5**（范围/表态/CI 腿一起走）、以及 401/403 分流 + `/retryauth` 重试一次。

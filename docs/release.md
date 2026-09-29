@@ -2,8 +2,22 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **下一次发版**（0.7.4）的正文草稿、当日核对清单与已知限制：[`release-notes-0.7.4.md`](release-notes-0.7.4.md)。
-> 版本号、tag、Release、npm 都还没动——这份文件只是把该做的动作先写下来。
+> **0.8.0 已发布（2026-09-29，只上 `next`）**：tag `v0.8.0` → CI 全绿 → GitHub Release
+> <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.0> → npm `next` = `0.8.0`。
+> **`latest` 仍是 0.7.4，按用户要求等 2026-10-01 再提升**（见下方"待办"）。
+> 发版说明：[`release-notes-0.8.0.md`](release-notes-0.8.0.md)；更早一版的草稿留在
+> [`release-notes-0.7.4.md`](release-notes-0.7.4.md)。
+
+## 待办：2026-10-01 把 0.8.0 提升为 `latest`
+
+```sh
+npm dist-tag add dsh-ssh-tui@0.8.0 latest --registry=https://registry.npmjs.org/
+# token 在 /root/.npm.token（用 --userconfig <只含该 token 的文件>，别把 token 写进仓库）
+curl -s https://registry.npmjs.org/-/package/dsh-ssh-tui/dist-tags   # 期望 latest=0.8.0、next=0.8.0
+```
+
+提升前值得看一眼：0.8.0 上是否有新报的 issue；`docs/heat-tracking.md` 里那几天的下载曲线；若上游这几天又发
+新 rc，先确认窗口是否仍覆盖它（现在的窗口是 `>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1`，**不含 0.1.5**）。
 
 ## 三条规则
 
@@ -87,7 +101,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 当前快照（2026-09-29 · 0.8.0 线）
+### 当前快照（2026-09-29 · 0.8.0 已发布到 `next`，`latest` 仍是 0.7.4）
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
