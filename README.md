@@ -36,6 +36,11 @@ dsh --profile tui
 
 当前 `dsh` 必须带 `--profile`（`dsh plugin add …` 会报缺选项）。装进别的 profile 把 `tui` 换成那个名字即可。
 
+> **宿主已升到 0.2.0-rc 的用户请看这里**：0.8.0 支持 `0.2.0-rc` 线（旧版会因声明窗口不符被 launcher 拒绝），
+> 但它目前只挂在 `next` 上——`latest` 仍是 0.7.4，2026-10-01 起才切到 0.8.0。这段时间请用
+> `dsh plugin --profile tui add dsh-ssh-tui@next` 安装；还在 `0.1.7-rc` 线的话 `@latest`(0.7.4) 就够用，
+> 等 0.8.0 上 `latest` 再升也不迟。**0.1.5 及更早的宿主从 0.8.0 起不再支持**。
+
 **更新必须带 `@latest`。** `dsh plugin` 只是把后面的参数转给 profile 目录里的 pnpm。写成 `add dsh-ssh-tui`（没有版本）时，pnpm 会沿用 `pnpm-lock.yaml` 里已经钉死的版本（常见就是一直停在 0.3.7）。也不要把 `--profile` 写到 `add` 后面：`dsh plugin add --profile tui add dsh-ssh-tui` 不是合法用法。卸载：`dsh plugin --profile tui remove dsh-ssh-tui`。
 
 ## 官方 headless 和这个 TUI
