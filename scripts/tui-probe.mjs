@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
+import { isFormsVersion } from './host-line.mjs'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
@@ -32,7 +33,7 @@ const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
  * and has no terminal preset roster. Read from the launcher itself rather than
  * sniffed from the UI: the probe's preset assertions differ by host line.
  */
-const FORMS_HOST = /^0\.1\.(?:[7-9]|\d{2,})/u.test(require('@deepseek-ai/dsh/package.json').version)
+const FORMS_HOST = isFormsVersion(require('@deepseek-ai/dsh/package.json').version)
 // `import()` needs a URL, not a path: on Windows `D:\…` is rejected with
 // ERR_UNSUPPORTED_ESM_URL_SCHEME, which is what the first Windows CI run hit.
 const { sessionLockLookupPaths } = await import(

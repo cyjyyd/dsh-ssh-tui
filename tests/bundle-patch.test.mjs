@@ -50,17 +50,22 @@ test('manifest declares exact dshReleases for the store window', async () => {
     const status = releases[version]
     assert.ok(status === 'compatible' || status === 'incompatible' || status === 'unknown', version)
   }
-  // 0.1.2-rc.1 keeps an explicit verdict after support was dropped: a user still
-  // on that line gets a definite "incompatible, upgrade" from the store instead
-  // of silence, and no range comparator can admit it by accident.
+  // Two lines have been dropped by now, and both keep an explicit verdict
+  // instead of being deleted: a user still on that line gets a definite
+  // "incompatible, upgrade" from the store rather than silence, and no range
+  // comparator can admit them by accident.
   assert.equal(releases['0.1.2-rc.1'], 'incompatible')
-  assert.equal(releases['0.1.3-alpha.1'], 'unknown')
-  assert.equal(releases['0.1.3-alpha.2'], 'compatible')
-  assert.equal(releases['0.1.5-alpha.1'], 'compatible')
-  assert.equal(releases['0.1.5-alpha.2'], 'compatible')
-  assert.equal(releases['0.1.5-rc.1'], 'compatible')
-  assert.equal(releases['0.1.5-rc.2'], 'compatible')
-  assert.equal(releases['0.1.5-rc.3'], 'compatible')
+  assert.equal(releases['0.1.3-alpha.1'], 'incompatible')
+  assert.equal(releases['0.1.3-alpha.2'], 'incompatible')
+  assert.equal(releases['0.1.5-alpha.1'], 'incompatible')
+  assert.equal(releases['0.1.5-alpha.2'], 'incompatible')
+  assert.equal(releases['0.1.5-rc.1'], 'incompatible')
+  assert.equal(releases['0.1.5-rc.2'], 'incompatible')
+  assert.equal(releases['0.1.5-rc.3'], 'incompatible')
+  // The lines that are supported state it per release, newest included.
+  assert.equal(releases['0.1.7-rc.1'], 'compatible')
+  assert.equal(releases['0.1.7-rc.2'], 'compatible')
+  assert.equal(releases['0.2.0-rc.1'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })
 
@@ -82,21 +87,16 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // this checkout commits. The numbers are the ones that script's table holds,
   // pinned by `tests/ci-pin-line.test.mjs`. The schemastery spec below is
   // line-independent on purpose.
-  const PINS = FORMS_HOST
-    ? {
-        '@deepseek-ai/cordis': '4.0.4',
-        '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
-        '@deepseek-ai/cordis-plugin-include': '1.0.9',
-        '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-        '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-      }
-    : {
-        '@deepseek-ai/cordis': '4.0.2',
-        '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
-        '@deepseek-ai/cordis-plugin-include': '1.0.7',
-        '@deepseek-ai/cordis-plugin-loader': '1.0.3',
-        '@deepseek-ai/cordis-plugin-timer': '1.1.4',
-      }
+  // One set, because 0.1.5 is no longer a supported line (0.8.0 dropped it):
+  // every leg that still runs installs a forms host, and the legacy pins that
+  // came with the 0.1.5 family are gone from the table with that line.
+  const PINS = {
+    '@deepseek-ai/cordis': '4.0.4',
+    '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+    '@deepseek-ai/cordis-plugin-include': '1.0.9',
+    '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+    '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+  }
   for (const [name, pinned] of Object.entries(PINS)) {
     assert.equal(
       manifest.devDependencies?.[name] ?? manifest.dependencies?.[name],
@@ -132,14 +132,24 @@ test('declared dsh range admits every release marked compatible', async () => {
   // catch a stray `>=0.1.2-rc.1` comparator creeping back into the manifest.
   assert.equal(inRange('0.1.1-rc.2'), false)
   assert.equal(inRange('0.1.2-rc.1'), false)
-  assert.equal(inRange('0.1.3-alpha.2'), true)
-  assert.equal(inRange('0.1.5-alpha.1'), true)
-  assert.equal(inRange('0.1.5-alpha.2'), true)
-  assert.equal(inRange('0.1.5-rc.1'), true)
-  assert.equal(inRange('0.1.5-rc.2'), true)
-  assert.equal(inRange('0.1.5-rc.3'), true)
-  assert.equal(inRange('0.1.5'), true)
   assert.equal(inRange('0.1.3-alpha.1'), false)
+  assert.equal(inRange('0.1.3-alpha.2'), false)
+  // The whole 0.1.5 line is out: 0.8.0 dropped it, so no comparator may admit
+  // it again — including the final 0.1.5 release.
+  assert.equal(inRange('0.1.5-alpha.1'), false)
+  assert.equal(inRange('0.1.5-alpha.2'), false)
+  assert.equal(inRange('0.1.5-rc.1'), false)
+  assert.equal(inRange('0.1.5-rc.2'), false)
+  assert.equal(inRange('0.1.5-rc.3'), false)
+  assert.equal(inRange('0.1.5'), false)
+  // Both verified lines are in, and the window stops at each line's end.
+  assert.equal(inRange('0.1.7-rc.1'), true)
+  assert.equal(inRange('0.1.7-rc.2'), true)
+  assert.equal(inRange('0.1.8'), false)
+  assert.equal(inRange('0.1.9'), false)
+  assert.equal(inRange('0.2.0-rc.1'), true)
+  assert.equal(inRange('0.2.0'), true)
+  assert.equal(inRange('0.2.1'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
   // admit them. A prerelease only satisfies a comparator set when a comparator
   // with the *same* [major, minor, patch] tuple carries one, so these stay out
@@ -149,44 +159,37 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.1.5-rc.1', '0.1.7-rc.1'], range), '0.1.7-rc.1')
+  assert.equal(semver.maxSatisfying(['0.1.7-rc.2', '0.2.0-rc.1'], range), '0.2.0-rc.1')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
     assert.equal(inRange(version), true, `${version} is marked compatible but outside ${range}`)
   }
-  // Every dsh peer declares both verified lines, and the dropped 0.1.2 line is
-  // in neither side of the window.
-  // Every dsh peer declares every verified line. That includes the plural
-  // `dsh-agent-presets`, which has no release past 0.1.6-alpha.2 and is not
-  // installed on 0.1.7 at all: the launcher reads each declared peer range when
-  // it decides whether a plugin may load, so an optional peer that stops at the
-  // old line would veto the plugin on the new one. It is optional there, and the
-  // profile mounts the roster row itself on the lines that have it.
+  // Every dsh peer declares both supported lines in one window. The plural
+  // `dsh-agent-presets` used to be here for the 0.1.5 line; it has no release
+  // past 0.1.6-alpha.2, and 0.8.0 dropped that line, so the declaration is gone
+  // with it — a peer range nothing can satisfy would veto the plugin instead.
   //
   // One comparator per prerelease tuple: node-semver only lets a prerelease
   // satisfy a comparator set when a comparator with the *same* [major, minor,
-  // patch] tuple also carries a prerelease, so `>=0.1.3-alpha.2 <0.1.6` alone
-  // would reject every 0.1.5-rc.
-  const NEW_LINE = '>=0.1.7-rc.1 <0.1.8'
-  const LEGACY_WINDOW = '>=0.1.3-alpha.2 <0.1.6 || >=0.1.5-alpha.1 <0.1.6'
-  const sharedPeerRange = `${LEGACY_WINDOW} || ${NEW_LINE}`
-  const NEW_LINE_ONLY = new Set([
-    '@deepseek-ai/dsh-agent-preset',
-    '@deepseek-ai/dsh-agent-preset-registry',
-  ])
-  for (const [name, peerRange] of Object.entries(manifest.peerDependencies ?? {})) {
-    if (!name.startsWith('@deepseek-ai/dsh-')) continue
-    if (NEW_LINE_ONLY.has(name)) {
-      assert.equal(peerRange, NEW_LINE, `${name} only exists on the 0.1.7 line`)
-      continue
-    }
-    assert.equal(peerRange, sharedPeerRange, `${name} must accept both verified hosts (host ${HOST_VERSION})`)
+  // patch] tuple also carries a prerelease, so `>=0.1.7-rc.1 <0.1.8` alone
+  // would reject every 0.2.0-rc.
+  const SUPPORTED = '>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1'
+  const dshPeers = Object.entries(manifest.peerDependencies ?? {})
+    .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+  assert.ok(dshPeers.length > 0)
+  for (const [name, peerRange] of dshPeers) {
+    assert.equal(peerRange, SUPPORTED, `${name} must accept both supported hosts (host ${HOST_VERSION})`)
   }
-  // Those two are optional: a 0.1.5 host has no such package, and a required
-  // peer npm cannot satisfy is an install failure, not a fallback.
-  for (const name of NEW_LINE_ONLY) {
+  // The two preset packages are optional: a host that composes presets
+  // process-wide has no such service, and a required peer npm cannot satisfy is
+  // an install failure rather than a fallback.
+  for (const name of ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']) {
+    assert.ok(dshPeers.some(([peer]) => peer === name), `${name} must stay declared`)
     assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true, `${name} must be optional`)
   }
-  assert.equal(manifest.peerDependenciesMeta?.['@deepseek-ai/dsh-agent-presets']?.optional, true)
+  // The dropped line's package is declared nowhere at all any more — neither as
+  // a peer nor in the optional list next to it.
+  assert.equal(manifest.peerDependencies?.['@deepseek-ai/dsh-agent-presets'], undefined)
+  assert.equal(manifest.peerDependenciesMeta?.['@deepseek-ai/dsh-agent-presets'], undefined)
 })

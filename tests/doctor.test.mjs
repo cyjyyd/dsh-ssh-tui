@@ -386,7 +386,12 @@ test('collectDoctor reads the real patch, manifest, and bundle rows', async () =
     const snapshot = await collectDoctor({
       profile: 'tui',
       dshHome: home,
-      hostVersion: '0.1.5-rc.1',
+      hostVersion: '0.2.0-rc.1',
+      // The generation is what the caller detected on the running host (a
+      // feature probe, not a version): a supported host composes the agent
+      // process-wide, so the fixture has to say so for the agent-plane check to
+      // be the one under test.
+      generation: 'forms',
       services: { roster: false, codeRuntime: false },
       anchors: [],
     })
@@ -395,12 +400,20 @@ test('collectDoctor reads the real patch, manifest, and bundle rows', async () =
     // The reported version is the manifest's, so a release bump never breaks
     // this: hard-coding it here made every version bump a failing test.
     assert.equal(snapshot.pluginVersion, JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version)
-    assert.equal(snapshot.compatibility.releases['0.1.5-rc.1'], 'compatible')
+    // 0.1.5 is a dropped line now: the verdict stays explicit (a user on it reads
+    // "incompatible, upgrade") while the supported lines say compatible.
+    assert.equal(snapshot.compatibility.releases['0.1.5-rc.1'], 'incompatible')
+    assert.equal(snapshot.compatibility.releases['0.2.0-rc.1'], 'compatible')
     // The shipped bundle patch is read from the package root, next to lib/.
     assert.ok(Array.isArray(snapshot.bundleRows))
     const checks = doctorChecks(snapshot)
-    assert.equal(checkOf(checks, 'roster').status, 'fail')
-    assert.equal(checkOf(checks, 'version').status, 'ok')
+    // A supported host is a forms host, so the check that matters is the
+    // agent-plane one — the legacy `roster` check does not exist on that line at
+    // all. The fixture's patch is an empty array, so the rows are missing and the
+    // verdict is a warning with the rows listed (never a silent pass).
+    assert.equal(checkOf(checks, 'agent-plane')?.status, 'warn')
+    assert.equal(checkOf(checks, 'roster'), undefined)
+    assert.equal(checkOf(checks, 'version')?.status, 'ok')
     assert.deepEqual(snapshot.scopeCopies, [])
   } finally {
     await rm(home, { recursive: true, force: true })

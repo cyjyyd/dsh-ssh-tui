@@ -13,7 +13,8 @@
  *  - the 0.1.7 family split the plural `dsh-agent-presets` into `dsh-agent-preset`
  *    + `dsh-agent-preset-registry` (the plural has no release on that line at
  *    all, so npm fails with ETARGET if it stays), and it moved the family's own
- *    root pins (cordis 4.0.4, include 1.0.9, loader 1.0.5, timer 1.1.6);
+ *    root pins (cordis 4.0.4, include 1.0.9, loader 1.0.5, timer 1.1.6) —
+ *    0.2.0-rc.1 keeps exactly those, so the two lines share one roots table;
  *  - every line needs the whole family on one version: a root spec that floats
  *    resolves above the family's exact peer and the install dies with ERESOLVE;
  *  - 0.1.7 additionally needs `overrides`, because the published ranges still
@@ -35,15 +36,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** Root specs the plugin pins without importing, per line. */
-const LEGACY_ROOTS = {
-  '@deepseek-ai/cordis': '4.0.2',
-  '@deepseek-ai/cordis-plugin-include': '1.0.7',
-  '@deepseek-ai/cordis-plugin-loader': '1.0.3',
-  '@deepseek-ai/cordis-plugin-timer': '1.1.4',
-}
-
-/** The family's own pins on the 0.1.7 line, shared by its rcs. */
+/** The family's own pins: 0.1.7 and 0.2.0-rc.1 declare the same ones. */
 const NEW_LINE_ROOTS = {
   '@deepseek-ai/cordis': '4.0.4',
   '@deepseek-ai/cordis-plugin-include': '1.0.9',
@@ -57,6 +50,9 @@ const NEW_LINE_ROOTS = {
 const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
 
 export const LINES = {
+  // The line 0.8.0 is developed against and declares: same roots as 0.1.7, the
+  // presets split, and the whole family on one version.
+  '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.1.7-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.1.7-rc.2': {
     roots: NEW_LINE_ROOTS,
@@ -68,8 +64,6 @@ export const LINES = {
     // exists instead of taking the whole leg down with ETARGET.
     devPins: { '@deepseek-ai/dsh-llm-mock-server': '0.1.7-rc.1' },
   },
-  '0.1.5-rc.3': { roots: LEGACY_ROOTS, presets: ['@deepseek-ai/dsh-agent-presets'], overrides: false },
-  '0.1.5-rc.1': { roots: LEGACY_ROOTS, presets: ['@deepseek-ai/dsh-agent-presets'], overrides: false },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */
@@ -85,7 +79,7 @@ const ALL_PRESETS = [...new Set(Object.values(LINES).flatMap(line => line.preset
  * manifest on one line installed by a leg that rewrites to another is how a
  * green run stops meaning anything.
  */
-export const DEFAULT_LINE = '0.1.7-rc.1'
+export const DEFAULT_LINE = '0.2.0-rc.1'
 
 /** `@deepseek-ai/dsh` itself, or a package of the family. */
 export function isFamilyPackage(name) {
@@ -141,8 +135,8 @@ export function pinManifest(manifest, line) {
     }
     next.overrides = sorted(overrides)
   } else {
-    // The legacy lines resolve from their own exact pins; an override left over
-    // from the default line would drag 0.1.7 siblings into that tree instead.
+    // A line that resolves from exact pins of its own: an override left over from
+    // the default line would drag that line's siblings into its tree instead.
     delete next.overrides
   }
   return next

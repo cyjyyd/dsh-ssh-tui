@@ -25,6 +25,7 @@
  *   node scripts/profile-rows.mjs [profile]      # default: tui (or $DSH_TUI_PROFILE)
  */
 import { spawnSync } from 'node:child_process'
+import { isFormsVersion } from './host-line.mjs'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
@@ -131,7 +132,7 @@ export function profileGeneration({ profile, home, cli, run = spawnSync }) {
   if (dump !== undefined) return dump.includes('- id: config-editor') ? 'forms' : 'legacy'
   try {
     const version = JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8')).version
-    return String(version).startsWith('0.1.7') || /^0\.1\.(?:[89]|\d{2,})/u.test(String(version)) ? 'forms' : 'legacy'
+    return isFormsVersion(version) ? 'forms' : 'legacy'
   } catch {
     return 'legacy'
   }

@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { isFormsVersion } from '../scripts/host-line.mjs'
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** The exact version of the host resolved into this tree's `node_modules`. */
@@ -25,10 +27,10 @@ export const HOST_VERSION = JSON.parse(
 ).version
 
 /**
- * Whether the installed host is the 0.1.7+ settings-form line.
+ * Whether the installed host is a settings-form line (0.1.7 and later).
  *
- * A version sniff is deliberate here: the split is a host release, the test
- * tree is pinned to one host, and a feature probe of the *plugin's* behaviour
- * would be answering a different question than "which line is installed".
+ * The rule itself lives in `scripts/host-line.mjs` so the test tree, the
+ * end-to-end probe and the profile-row writer cannot drift apart: each one
+ * decides which rows a terminal profile mounts.
  */
-export const FORMS_HOST = /^0\.1\.(?:[7-9]|\d{2,})/u.test(String(HOST_VERSION))
+export const FORMS_HOST = isFormsVersion(HOST_VERSION)

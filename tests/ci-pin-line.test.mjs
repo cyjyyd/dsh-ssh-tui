@@ -75,27 +75,12 @@ test('every line moves the whole family at once, and nothing else', () => {
   }
 })
 
-test('a legacy rewrite undoes the default line, and the default line undoes a legacy one', () => {
-  for (const line of Object.keys(LINES)) {
-    // The 0.1.5 lines are the ones that install the plural presets package.
-    if (!LINES[line].presets.includes('@deepseek-ai/dsh-agent-presets')) continue
-    const legacy = pinManifest(copy(), line)
-    assert.deepEqual(pinManifest(legacy, DEFAULT_LINE), defaultManifest, `${line} → default must round-trip`)
-    // The split packages are 0.1.7-only: the plural has no release on that line
-    // (npm fails with ETARGET) and the two successors do not exist before it.
-    assert.equal(legacy.devDependencies['@deepseek-ai/dsh-agent-presets'], line)
-    assert.equal(legacy.devDependencies['@deepseek-ai/dsh-agent-preset'], undefined)
-    assert.equal(legacy.devDependencies['@deepseek-ai/dsh-agent-preset-registry'], undefined)
-    // No override may survive: a 0.1.5 tree with 0.1.7 overrides resolves the
-    // transitive family onto the wrong line.
-    assert.equal(legacy.overrides, undefined)
-  }
-})
-
 test('the family root pins follow the line, including the launcher-only one', () => {
   // These are not imported by the plugin: they are pinned so npm cannot pick a
-  // version whose peer range fights the pinned cordis.
-  const defaultRoots = {
+  // version whose peer range fights the pinned cordis. Both supported lines
+  // declare the same set — 0.2.0-rc.1 kept what 0.1.7 pinned, which is why one
+  // roots table serves the whole `LINES` entry set now that 0.1.5 is gone.
+  const roots = {
     '@deepseek-ai/cordis': '4.0.4',
     '@deepseek-ai/cordis-plugin-include': '1.0.9',
     '@deepseek-ai/cordis-plugin-loader': '1.0.5',
@@ -103,35 +88,33 @@ test('the family root pins follow the line, including the launcher-only one', ()
     // dsh-app-boot peers on this one; without it the CLI cannot print its help.
     '@deepseek-ai/cordis-plugin-group': '1.0.4',
   }
-  const legacyRoots = {
-    '@deepseek-ai/cordis': '4.0.2',
-    '@deepseek-ai/cordis-plugin-include': '1.0.7',
-    '@deepseek-ai/cordis-plugin-loader': '1.0.3',
-    '@deepseek-ai/cordis-plugin-timer': '1.1.4',
-  }
-  const roots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
+  const pinnedRoots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
     .filter(([name]) => name.startsWith('@deepseek-ai/cordis'))
     .filter(([name]) => name !== '@deepseek-ai/cordis-plugin-hmr'))
-  assert.deepEqual(roots(defaultManifest), defaultRoots)
+  assert.deepEqual(pinnedRoots(defaultManifest), roots)
   for (const line of Object.keys(LINES)) {
-    if (!LINES[line].presets.includes('@deepseek-ai/dsh-agent-presets')) continue
-    assert.deepEqual(roots(pinManifest(copy(), line)), legacyRoots, line)
+    assert.deepEqual(pinnedRoots(pinManifest(copy(), line)), roots, line)
   }
-  // hmr is the same on both lines and is not part of the per-line table.
+  // hmr is line-independent and not part of the per-line table.
   assert.equal(defaultManifest.devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
-  assert.equal(pinManifest(copy(), '0.1.5-rc.3').devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
-  for (const line of ['0.1.7-rc.1', '0.1.7-rc.2']) {
-    assert.deepEqual(roots(pinManifest(copy(), line)), defaultRoots, line)
-  }
 })
 
-test('the default line keeps the override map that holds the family together', () => {
+test('the default line keeps the override map that holds the family together', async () => {
+  const { default: manifest } = await import(join(REPO, 'package.json'), { with: { type: 'json' } })
   const overridden = Object.keys(defaultManifest.overrides ?? {})
   assert.deepEqual(overridden, familyDevDeps(defaultManifest).sort())
   for (const name of overridden) assert.equal(defaultManifest.overrides[name], DEFAULT_LINE)
-  // A peer-only package must stay out: npm rejects an override for a root peer
-  // spec with EOVERRIDE, which is why the plural presets is not in the map.
-  assert.equal(overridden.includes('@deepseek-ai/dsh-agent-presets'), false)
+  // The map is built from the roots this manifest *installs* (devDeps and
+  // dependencies) and from family names only. A non-family root dependency is
+  // resolved by the host's own copy, and overriding it here is what an
+  // EOVERRIDE — npm rejecting an override that contradicts a root spec — would
+  // answer for. `schemastery` is exactly that case: the plugin ships it, the
+  // host provides it, and it must not be dragged onto the dsh line.
+  assert.equal(overridden.includes('@deepseek-ai/schemastery'), false)
+  for (const name of Object.keys(manifest.dependencies ?? {})) {
+    if (name.startsWith('@deepseek-ai/dsh')) continue
+    assert.equal(overridden.includes(name), false, name)
+  }
 })
 
 test('the declared peer window is the same on every line', () => {
