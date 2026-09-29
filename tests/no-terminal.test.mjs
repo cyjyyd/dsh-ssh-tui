@@ -29,7 +29,10 @@ const ctx = {
   effect: () => { throw new Error('the plugin mounted something without a terminal') },
   logger: name => ({ info: message => logs.push(name + ': ' + message) }),
 }
-import(process.env.PROBE_MODULE).then(async module => {
+// pathToFileURL, not the raw path: on Windows a drive path is not an ESM URL
+// and import() rejects it with ERR_UNSUPPORTED_ESM_URL_SCHEME — the same trap
+// the probe scripts carry a comment about.
+import(require('node:url').pathToFileURL(process.env.PROBE_MODULE).href).then(async module => {
   module.apply(ctx, { sessionId: 'probe', ...(process.env.PROBE_CONFIG ? JSON.parse(process.env.PROBE_CONFIG) : {}) })
   console.log(JSON.stringify({ ok: true, logs }))
 }).catch(error => {
