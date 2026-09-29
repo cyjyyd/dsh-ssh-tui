@@ -87,13 +87,14 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 当前快照（2026-09-29）
+### 当前快照（2026-09-29 · 0.8.0 线）
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
-| `latest` | `0.1.5-rc.3` | `compatible`：进 CI 腿 |
-| `next` | **`0.1.7-rc.2`**（09-28 发布） | `compatible`：见下方 rc.2 段（干净树安装、`tsc` 0 错、套件全绿、六个真 PTY 探针全过）。提交的 manifest 与 CI 默认腿仍是 `0.1.7-rc.1`（本机在跑的那条），rc.2 单独一条腿 |
-| 旧线 | `0.1.5-rc.1` | `compatible`：continue（非默认腿，legacy peers 安装） |
+| `latest` | `0.1.7-rc.2` | `compatible`：进 CI 腿（完整探针） |
+| `next` | **`0.2.0-rc.1`**（09-29 发布） | `compatible`：见 [upstream-0.2.0.md](upstream-0.2.0.md)（干净树安装、`tsc` 0 错、套件 1009 通过 / 0 失败、七条真 PTY 探针全过）。它是 **0.8.0 的默认线**：提交的 manifest、锁与 Windows 腿都装它 |
+| `0.1.7` 线 | `0.1.7-rc.1` / **`0.1.7-rc.2`** | `compatible`：rc.2 跑完整探针，rc.1 跑 typecheck + 套件（同一代际，代码路径相同） |
+| 旧线 | `0.1.5-rc.1` / `0.1.5-rc.3` | **`incompatible`**：0.8.0 随用户决定摘除（范围不再有 comparator、CI 两条腿与 legacy-peers 安装步骤删除、复数 `dsh-agent-presets` 的 peer 删除；`dshReleases` 保留明确表态） |
 | 已摘 | `0.1.2-rc.1` | `incompatible`：**支持已取消**（0.1.7 适配完成后按用户决定摘除；范围不再有它的 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
