@@ -790,6 +790,7 @@ export const zh: Record<string, string> = {
   'auth.providerRejected': '⚠ 这次失败是**提供商**拒绝了请求（{status}），不是本机缺凭据：{env} 已配置。这类 401/403 常见于上游瞬时故障、套餐/额度或模型权限——不必改配置，直接重发即可；要自动重试一次就 /retryauth on。',
   'auth.credentialMissing': '⚠ 本机没有可用的 {env}，所以请求到不了模型。用 /setup 配置该提供商（或在 /model 里换一条已配好的路由）再试。',
   'auth.retryOnce': '按设置重试一次（提供商侧鉴权失败，每次发送最多一次）…',
+  'auth.reasoningReplay': '⚠ 这是上游的已知缺陷，不是你的配置：思考模式下网关要求把上一轮的 reasoning 回传，而 harness 重建长会话历史时会丢块（上游已记录：#1780 / #231）。绕开办法：这条路线上 /effort off 关掉思考（没有思考就没有要回传的东西），或改用同一网关的 command-code-messages（anthropic-messages 风味，带签名的思考块会被正确回传）。',
   'cmd.retryauth': '提供商侧鉴权失败时是否自动重试一次：/retryauth <on|off>（默认关；重试会把整段上下文再发一遍）',
   'retryauth.status': '提供商侧鉴权失败自动重试：{state}。',
   'retryauth.on': '开',

@@ -249,6 +249,21 @@ effort=max),但**分两族、两个不同的成因**:
 绕开办法:把这条路由的**思考关掉**(`/effort off`,没有思考就没有要回传的东西),或改用同一网关的
 **`command-code-messages`**(anthropic-messages 风味,思考块带签名、harness 会正确回传),或者等上游修。
 
+**插件会在失败时直接说这句话**(与 A 族同理):B 族 400 一到,TUI 会补一行
+「这是上游的已知缺陷…绕开办法:`/effort off` 或 `command-code-messages`」并附 #1780/#231——它**不会**触发
+`/retryauth` 的自动重试,因为这个 400 是确定性的(重发必然再失败)。
+
+**A 族要主动维护**:补丁在依赖里,升级族就会丢。升级后跑一次
+
+```bash
+node scripts/patch-pi-ai-summary.mjs --check   # 退出码 1 = 有文件需要修
+node scripts/patch-pi-ai-summary.mjs           # 修,自动留 <file>.bak(幂等)
+```
+
+它覆盖 `openai-responses.js` 与 `azure-openai-responses.js`,并会在"上游改了形状、既不匹配原文也不匹配补丁后"
+时**拒绝动手**并让你先读文件(而不是假装已经好了)。2026-09-29 首次运行修好了 `azure-*`(三处安装各一份)
+与 `/usr/lib/node_modules` 那份未打的副本。
+
 ## 5. 明确不做（以及为什么）
 
 - **内置 `--daemon` 常驻模式**：Host 不是服务。它是"某个会话的写者"，靠 idle-exit 把写锁交还；把它变成常驻服务会让 Web UI 与其它窗口长期打不开同一会话。
@@ -259,6 +274,7 @@ effort=max),但**分两族、两个不同的成因**:
 
 - `/diag`：这条会话的通道、锁、Host 身份、判定链（"会接入后台 Host，不要另开第二个窗口"）。
 - `/retryauth [on|off]`：要不要在"提供商侧鉴权失败"时自动重试一次（见 4.8）；`/doctor` 看路由与凭据是否就位。
+- 桌面版(官方 GUI 应用)与终端配置的关系、两个上游缺陷:见 [`desktop.md`](desktop.md)。
 - **400 先分族**:`unknown field "summary"` 是本地 pi-ai 补丁丢了(4.9 A 族),`reasoning_text must be passed back` 是上游 harness 的 bug(4.9 B 族)。
 - `/doctor`：profile 组合、依赖、兼容与 `dsh-scope` 副本数；`/doctor --fix` 修 profile 补丁（写前备份）。
 - 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//copy error//preset/鼠标模式/退出）、

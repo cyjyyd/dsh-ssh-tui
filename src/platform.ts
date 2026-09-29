@@ -500,3 +500,46 @@ function runIcaclsAsync(command: string, args: string[]): Promise<boolean> {
     }
   }))
 }
+
+/**
+ * Whether this process is the desktop app's launcher rather than a terminal Node.
+ *
+ * The desktop Harness ships a PATH shim that runs its own GUI-subsystem binary
+ * with `ELECTRON_RUN_AS_NODE=1` (`DeepSeek Harness.exe --expose-internals
+ * app.asar/dsh/.../cli.js`). A GUI-subsystem process started from a console does
+ * not attach to it on Windows, so `process.stdin.isTTY` / `stdout.isTTY` stay
+ * undefined and no terminal profile can start under it. That is a property of
+ * the launcher, not of the user's terminal, and the two cases deserve different
+ * advice — which is all this decides.
+ * @param facts - the runtime's own answers (`process.versions`, `execPath`, `argv`).
+ * @returns true when the launcher is the desktop app's Electron-as-Node shim.
+ */
+export function desktopLauncher(facts: {
+  electron?: string | undefined
+  execPath?: string | undefined
+  argv?: readonly string[] | undefined
+}): boolean {
+  if (facts.electron !== undefined) return true
+  const exec = String(facts.execPath ?? '')
+  if (/DeepSeek[\\/ ]?Harness\.exe$/iu.test(exec)) return true
+  return (facts.argv ?? []).some(arg => String(arg).includes('app.asar'))
+}
+
+/**
+ * The message a terminal profile fails with when the launcher has no TTY.
+ *
+ * The desktop case is worth its own wording: the generic "must be TTYs" line
+ * sends a desktop user hunting for a broken terminal, while the real answer is
+ * "this launcher never has one — use the npm CLI in a terminal/SSH session, and
+ * note the desktop app does not need this plugin at all".
+ * @param desktop - whether {@link desktopLauncher} recognised the launcher.
+ * @returns the error text for the plugin to throw.
+ */
+export function nonTtyErrorMessage(desktop: boolean): string {
+  if (!desktop) return 'dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session'
+  return 'dsh-ssh-tui: this launcher has no terminal — the desktop Harness runs Electron as Node '
+    + '(GUI subsystem, no console attached), so stdin/stdout are not TTYs and no terminal profile can '
+    + 'start under it. Run this profile from a real terminal or an SSH session with the npm CLI: '
+    + 'npm i -g @deepseek-ai/dsh, then dsh --profile tui. The desktop app itself does not need this '
+    + 'plugin. See docs/desktop.md.'
+}

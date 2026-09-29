@@ -112,6 +112,21 @@ dsh --profile tui
   `DSH_TUI_LINE_MODE=1` 纯行模式（屏幕阅读器 / `tee`）；`ssh-tui.keys` 可改键位（冲突会明确拒绝）；
   `DSH_TUI_COLOR_DEPTH` 指定色深（truecolor / 256 / 8 / none）。
 
+## 桌面版 Harness 用户请看这里
+
+**官方桌面版（<https://www.deepseek.com/harness/>）不需要这个插件。** 它是 GUI 应用，用桌面版自己的界面
+或 `dsh web` 即可。本插件是**终端 UI**，必须在真实 TTY 里运行；桌面版写入 PATH 的那个 `dsh` 启动器
+（`DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE`）是 GUI 子系统进程、**不提供 TTY**，所以
+`dsh --profile tui` 在它下面必然失败。想在终端里用，请装 npm 的 CLI 再跑：
+
+```bash
+npm i -g @deepseek-ai/dsh        # 真正的 console 运行时
+dsh --profile tui                # 在真实终端或 SSH 会话里
+```
+
+完整诊断、桌面版缺陷报告的两个问题（TTY 不可用 / 两个内部包没有 0.2.0 发布版）与上游建议见
+[`docs/desktop.md`](docs/desktop.md)。
+
 ## 环境要求
 
 - Node.js ≥ 22.19

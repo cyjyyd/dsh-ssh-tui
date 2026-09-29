@@ -101,6 +101,21 @@ side-by-side at 100 columns or more · `DSH_TUI_LINE_MODE=1` appends plain lines
 readers and `tee` · `ssh-tui.keys` rebinds keys, refusing conflicts · `DSH_TUI_COLOR_DEPTH`
 pins the palette (truecolor / 256 / 8 / none).
 
+## Desktop Harness users, read this first
+
+**The official desktop app (<https://www.deepseek.com/harness/>) does not need this plugin** — use its own UI
+or `dsh web`. This plugin is a *terminal* UI and must run on a real TTY; the launcher the desktop app puts on
+your PATH (`DeepSeek Harness.exe` with `ELECTRON_RUN_AS_NODE`) is a GUI-subsystem process with no console, so
+`dsh --profile tui` cannot start under it. For a terminal session, install the npm CLI:
+
+```bash
+npm i -g @deepseek-ai/dsh        # a real console runtime
+dsh --profile tui                # from a terminal or an SSH session
+```
+
+The full diagnosis, both desktop defects (no TTY / two internal packages with no 0.2.0 release) and what the
+upstream should change are in [`docs/desktop.md`](docs/desktop.md).
+
 ## Requirements
 
 - Node.js >= 22.19

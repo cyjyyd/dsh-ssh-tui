@@ -790,6 +790,7 @@ export const en: Record<string, string> = {
   'auth.providerRejected': '⚠ The **provider** rejected this request ({status}) — it is not a missing local credential: {env} is configured. 401/403 like this usually means a transient upstream failure, a plan/quota limit, or a model your account may not call, so resending is the fix; /retryauth on retries once automatically.',
   'auth.credentialMissing': '⚠ No usable {env} on this machine, so the request never reached a model. Configure that provider with /setup (or pick a configured route in /model) and try again.',
   'auth.retryOnce': 'Retrying once, as configured (provider-side auth failure; at most one attempt per message)…',
+  'auth.reasoningReplay': '⚠ A known upstream defect, not your configuration: a thinking-mode gateway requires the previous turn\'s reasoning to be passed back, and the harness drops it when rebuilding a long history (tracked upstream: #1780 / #231). Workarounds: `/effort off` on this route (no thinking, nothing to pass back), or use the same gateway\'s command-code-messages route, where signed thinking blocks are replayed correctly.',
   'cmd.retryauth': 'Auto-retry once on a provider-side auth failure: /retryauth <on|off> (off by default; a retry re-sends the whole context)',
   'retryauth.status': 'Auto-retry on provider-side auth failure: {state}.',
   'retryauth.on': 'on',

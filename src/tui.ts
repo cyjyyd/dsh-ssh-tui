@@ -71,7 +71,7 @@ import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type Doc
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
-import { classifyAuthFailure, type AuthFailure } from './auth-failure.js'
+import { classifyAuthFailure, isReasoningReplayFailure, type AuthFailure } from './auth-failure.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -8920,6 +8920,13 @@ export class SshTui {
    */
   private reportAuthFailure(message: string): void {
     if (this.replaying) return
+    // The reasoning-replay 400 is an upstream bug with its own workarounds, so it
+    // gets its own sentence rather than the auth advice.
+    if (isReasoningReplayFailure(message)) {
+      this.pushRow({ kind: 'system', text: t('auth.reasoningReplay') })
+      this.markDirty()
+      return
+    }
     const classified = classifyAuthFailure(message)
     if (classified === undefined) return
     void this.explainAuthFailure(classified)

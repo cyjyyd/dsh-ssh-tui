@@ -13,7 +13,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { colorDepth } from '../lib/color-depth.js'
-import { hostSpawnOptions } from '../lib/platform.js'
+import { desktopLauncher, hostSpawnOptions, nonTtyErrorMessage } from '../lib/platform.js'
 import { resolveDshInvocation } from '../lib/update-check.js'
 
 const SRC = join(import.meta.dirname, '..', 'src')
@@ -143,4 +143,31 @@ test('platform decisions live in the seam, not in feature code', () => {
     [],
     'move the decision into src/platform.ts and import it (or take `platform` as a parameter)',
   )
+})
+
+test('the desktop launcher is recognised, and an ordinary node is not', () => {
+  // The desktop Harness runs `DeepSeek Harness.exe` as Node (ELECTRON_RUN_AS_NODE
+  // plus an `app.asar` CLI path). That process never has a console, so a terminal
+  // profile cannot start under it — and the message has to say so instead of
+  // sending the reader after a broken terminal.
+  const electron = { electron: '33.0.0', execPath: 'D:/Deepseek-harness/DeepSeek Harness.exe', argv: ['node', 'cli.js'] }
+  const asar = { execPath: 'C:/node.exe', argv: ['node', 'D:/Deepseek-harness/resources/app.asar/dsh/lib/bin.js'] }
+  const plain = { execPath: '/usr/bin/node', argv: ['node', '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js'] }
+  const windows = { execPath: 'C:/Program Files/nodejs/node.exe', argv: ['node', 'C:/Users/x/.dsh/profiles/tui/x.js'] }
+  assert.equal(desktopLauncher(electron), true)
+  assert.equal(desktopLauncher(asar), true)
+  assert.equal(desktopLauncher(plain), false, 'the npm CLI must keep the generic message')
+  assert.equal(desktopLauncher(windows), false)
+  assert.equal(desktopLauncher({}), false)
+})
+
+test('the no-TTY message names the fix for each launcher', () => {
+  const generic = nonTtyErrorMessage(false)
+  assert.match(generic, /TTY/u)
+  assert.equal(/desktop/u.test(generic), false, 'a terminal user is not told about the desktop app')
+  const desktop = nonTtyErrorMessage(true)
+  assert.match(desktop, /desktop Harness/u)
+  assert.match(desktop, /npm i -g @deepseek-ai\/dsh/u, 'the workaround is in the message')
+  assert.match(desktop, /does not need this plugin/u, 'and it says the desktop app does not need us')
+  assert.match(desktop, /docs\/desktop\.md/u, 'pointing at the write-up')
 })

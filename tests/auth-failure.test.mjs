@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { classifyAuthFailure, statusOf } from '../lib/auth-failure.js'
+import { classifyAuthFailure, isReasoningReplayFailure, statusOf } from '../lib/auth-failure.js'
 import { SshTui } from '../lib/tui.js'
 
 setLocale('zh')
@@ -46,6 +46,39 @@ test('the status reader knows both host shapes', () => {
   assert.equal(statusOf('OpenAI API error (403): {}'), 403)
   assert.equal(statusOf('HTTP 429 Too Many Requests'), 429)
   assert.equal(statusOf('no status here'), undefined)
+})
+
+/** The verbatim body from the long session that hit this five times. */
+const REASONING_REPLAY_400 = 'OpenAI API error (400): {"message":"{\"type\":\"invalid_request_error\",\"code\":\"invalid_request_error\",\"message\":\"The `reasoning_text` in the thinking mode must be passed back to the API. (request_id: 38ff3639)\n","type":"invalid_request_error"}'
+
+test('the reasoning-replay 400 is recognised, and only it', () => {
+  assert.equal(isReasoningReplayFailure(REASONING_REPLAY_400), true)
+  assert.equal(isReasoningReplayFailure('The `content[].thinking` in the thinking mode must be passed back'), true)
+  // The other 400 family (the `summary` field) is a different fix.
+  assert.equal(isReasoningReplayFailure('OpenAI API error (400): {"message":"json: unknown field \"summary\""}'), false)
+  assert.equal(isReasoningReplayFailure(''), false)
+  assert.equal(isReasoningReplayFailure('socket hang up'), false)
+})
+
+test('that 400 gets its own advice rather than the auth hint', async () => {
+  const previous = process.env.DSH_TUI_RETRY_PROVIDER_AUTH
+  process.env.DSH_TUI_RETRY_PROVIDER_AUTH = 'on'
+  try {
+    const { tui, agent, calls } = makeTui({ credentials: configuredCredentials })
+    send(tui, agent, 'turn/start', { turn: 45 })
+    tui.lastUserText = 'carry on'
+    send(tui, agent, 'turn/end', { turn: 45, reason: { kind: 'error', error: { message: REASONING_REPLAY_400, code: 'INVALID_REQUEST' } } })
+    await flush()
+    const said = rows(tui).join('\n')
+    assert.match(said, /上游/u, 'it says the defect is upstream')
+    assert.match(said, /1780|#231/u, 'and points at the reports')
+    assert.match(said, /effort off|command-code-messages/u, 'and gives the workarounds')
+    assert.equal(/提供商拒绝了请求|没有可用的/u.test(said), false, 'not the auth advice')
+    assert.equal(calls.length, 0, 'and never an automatic retry — this 400 is deterministic')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_TUI_RETRY_PROVIDER_AUTH
+    else process.env.DSH_TUI_RETRY_PROVIDER_AUTH = previous
+  }
 })
 
 function makeTui({ credentials } = {}) {

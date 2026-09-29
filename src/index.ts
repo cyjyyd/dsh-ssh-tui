@@ -85,6 +85,7 @@ import {
 } from './dsh-compat.js'
 import z from '@deepseek-ai/schemastery'
 import { installUiLocale, t } from './i18n/index.js'
+import { desktopLauncher, nonTtyErrorMessage } from './platform.js'
 
 
 export const name = 'ssh-tui'
@@ -199,7 +200,14 @@ export const Config: z<ConfigFields> = z.object({
 export function apply(ctx: Context, config: Config): void {
   const hostProcess = isTuiHostProcess()
   if (!hostProcess && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-    throw new Error('dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session')
+    // The desktop app's launcher has no console at all (see `desktopLauncher`), so
+    // it gets the message that says so instead of sending the reader after a
+    // broken terminal.
+    throw new Error(nonTtyErrorMessage(desktopLauncher({
+      electron: process.versions.electron,
+      execPath: process.execPath,
+      argv: process.argv,
+    })))
   }
   const subagentSelection = createSubagentSelection(ctx)
   installRouteMemory(ctx)
