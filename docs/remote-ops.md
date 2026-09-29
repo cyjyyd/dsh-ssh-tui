@@ -163,6 +163,58 @@ exec /path/to/node --use-env-proxy /path/to/@deepseek-ai/dsh/lib/bin.js "$@"
 "某家必须走代理"的证据；判断标准应该是**该域名直连是否稳定**，而不是一次超时。
 `127.0.0.1` / 本机网段务必留在 `NO_PROXY` 里：显示通道虽然走 AF_UNIX，但别把本地流量也绕出去。
 
+## 4.8 401/403「凭据失效」怎么判断是谁的问题
+
+会话里突然出现 `Turn N failed: OpenAI API error (403): {...}` 时，先别改 key——**同样是 403/401，来源可能是
+提供商、也可能是本机没配凭据，两者的处置相反**。照着下面三步走，两分钟能定性（2026-09-29 实测过一次）。
+
+**第一步：看错误体长什么样。** 三种形状对应三个不同的层：
+
+| 你看到的 | 含义 |
+|---|---|
+| `{"success":false,"error":{"code":"UNAUTHORIZED",...}}`（HTTP 401） | **提供商自己的鉴权层**：请求带的 key 为空/无效。先查本机凭据。 |
+| `{"message":"Authentication failed. Please check your credentials.","type":"permission_error"}`（HTTP 403） | 这个信封不是提供商鉴权层的格式——通常是它把请求转给上游后，**上游的鉴权失败被原样转回**（瞬时故障或上游凭据问题）。 |
+| `{"type":"error","error":{"type":"permission_error","message":"MODEL_NOT_IN_PLAN: …"}}`（HTTP 403） | **套餐/权限**：这个模型不在你的计划内。换模型或升级套餐，与 key 无关。 |
+
+**第二步：确认本机凭据还在（而不是"插件把配置弄丢了"）。**
+
+```bash
+# 路由声明是否完整（apiKeyEnv 指向哪个变量、baseURL 是什么）
+grep -A6 'command-code:' ~/.dsh/profiles/tui/cordis.patch.yml | head -12
+# 凭据库里那个变量有没有值（只打印名字与长度，不打印内容）
+node -e "const y=require('js-yaml'),fs=require('fs');const d=y.load(fs.readFileSync(process.env.HOME+'/.dsh/.credentials.yaml','utf8'));console.log(Object.keys(d.refs))"
+```
+
+`.credentials.yaml` 的 mtime 也是个线索：如果它很久没被动过，而 TUI 每次都按会话重写 `cordis.patch.yml`
+（里面的 `!!js ctx.sshTuiStartup.sessionId` 每启动都会变），那么"配置被插件改坏"基本可以排除。
+
+**第三步：拿同一把 key 直接打提供商**（这一步才能真正分清"key 死了"和"上游抖了"）：
+
+```bash
+KEY=$(node -e "const y=require('js-yaml'),fs=require('fs');const d=y.load(fs.readFileSync(process.env.HOME+'/.dsh/.credentials.yaml','utf8'));process.stdout.write(d.refs.COMMAND_CODE_API_KEY)")
+# 需要鉴权的端点：200 = key 有效；401 = 本机凭据问题；403+permission_error = 上游/套餐
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://api.commandcode.ai/provider/v1/responses \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $KEY" \
+  -d '{"model":"deepseek/deepseek-v4.1-flash","input":"hi","max_output_tokens":16,"stream":true,"reasoning":{"effort":"max"}}'
+```
+
+注意 `GET /provider/v1/models` 是**公开**的：带不带 key 都返回 200，用它判断鉴权会得出错误结论。
+
+**结论怎么读**：第三步 200 + 会话里是第二种信封 ⇒ **提供商侧瞬时故障**，直接重发即可（那次实测：同一会话 37 轮
+在同一条路由上成功，失败只有间隔 45 秒的两次，而随后同一把 key 打同一模型 200）。第三步 401 ⇒ 本机凭据要重配。
+第三种信封 ⇒ 套餐/模型权限。
+
+**插件替你做的事**：失败时除了原始错误行，还会补一行来源判断——`提供商拒绝了请求（HTTP 403）…{ENV} 已配置`
+（意思是别改 key，重发即可）或 `本机没有可用的 {ENV}`（意思是先去配）。原因是宿主的 `llm/retry` **不重试
+AUTH 类错误**，所以一次瞬时 403 会直接终结整轮。要让它在"提供商侧鉴权失败"时**自动重试一次**：
+
+```
+/retryauth on      # 默认关；重试会把整段上下文再发一遍，长会话请自己权衡
+```
+
+重试**每次发送最多一次**（重试自己那一轮不会再触发），且只对"提供商拒绝 + 本机有凭据"这一类生效——
+本机缺凭据时重试毫无意义。
+
 ## 5. 明确不做（以及为什么）
 
 - **内置 `--daemon` 常驻模式**：Host 不是服务。它是"某个会话的写者"，靠 idle-exit 把写锁交还；把它变成常驻服务会让 Web UI 与其它窗口长期打不开同一会话。
@@ -172,6 +224,7 @@ exec /path/to/node --use-env-proxy /path/to/@deepseek-ai/dsh/lib/bin.js "$@"
 ## 6. 排障入口
 
 - `/diag`：这条会话的通道、锁、Host 身份、判定链（"会接入后台 Host，不要另开第二个窗口"）。
+- `/retryauth [on|off]`：要不要在"提供商侧鉴权失败"时自动重试一次（见 4.8）；`/doctor` 看路由与凭据是否就位。
 - `/doctor`：profile 组合、依赖、兼容与 `dsh-scope` 副本数；`/doctor --fix` 修 profile 补丁（写前备份）。
 - 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//copy error//preset/鼠标模式/退出）、
   `node scripts/tui-drop-probe.mjs`（杀掉窗口再接管，断言转录保留、可输入、无乱码）与

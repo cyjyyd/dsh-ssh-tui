@@ -71,6 +71,7 @@ import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type Doc
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
+import { classifyAuthFailure, type AuthFailure } from './auth-failure.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -1462,6 +1463,14 @@ export class SshTui {
   private commandSuggestions: { name: string; description: string; local: boolean }[] = []
   private suggestionIndex = 0
   private focusedRow: FocusTarget | null = null
+  /**
+   * The text of the last prompt the user sent, kept so an opted-in retry can
+   * send the same thing again after a provider-side auth failure. Cleared when
+   * the retry fires, which is what bounds it to one attempt per user message.
+   */
+  private lastUserText = ''
+  /** Set on every turn/start; a retry consumes it. */
+  private authRetryArmed = false
   private pendingMessages = new Map<string, string>()
   private lastActivity = Date.now()
   private lastIdleCtrlCAt = 0
@@ -1898,6 +1907,7 @@ export class SshTui {
     notify?: string
     notifySmtpUser?: string
     notifySmtpPassword?: string
+    retryProviderAuth?: boolean
   }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
@@ -1912,6 +1922,7 @@ export class SshTui {
         notify?: string
         notifySmtpUser?: string
         notifySmtpPassword?: string
+        retryProviderAuth?: boolean
       }
       : {}
     await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
@@ -5866,6 +5877,9 @@ export class SshTui {
         this.turnSawOutput = false
         this.turnSawReasoning = false
         this.llmRetry = undefined
+        // One automatic retry per user message, and only for the failure class
+        // that is worth retrying (see `auth-failure.ts`).
+        this.authRetryArmed = true
         this.status = `turn ${event.data.turn} running`
         // A turn is about to spend on this route: make sure the session's record
         // names it, whatever changed it (a preset, a settings edit, a resume).
@@ -5902,6 +5916,7 @@ export class SshTui {
             : `idle (${reason.kind})`
         if (reason.kind === 'error') {
           this.pushRow({ kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) })
+          this.reportAuthFailure(String(reason.error.message ?? ''))
         }
         if (reason.kind === 'completed' && !this.replaying && !this.turnSawOutput) {
           // The provider ended the turn without an answer. Some gateways map a
@@ -8894,6 +8909,98 @@ export class SshTui {
   }
 
   /** /disconnect: pause (default) or continue the turn after SSH drop. */
+  /**
+   * Say where an auth failure came from, and retry it if the user asked for that.
+   *
+   * `code: "AUTH"` collapses two opposite situations (see `auth-failure.ts`), and
+   * the host does not retry either of them: a provider-side 401/403 that lasted
+   * 45 seconds killed two turns in a row on 2026-09-29 while the same key, model
+   * and route answered 200 straight afterwards. The hint costs nothing and the
+   * retry is opt-in, because resending a long session re-sends its whole context.
+   */
+  private reportAuthFailure(message: string): void {
+    if (this.replaying) return
+    const classified = classifyAuthFailure(message)
+    if (classified === undefined) return
+    void this.explainAuthFailure(classified)
+  }
+
+  private async explainAuthFailure(classified: AuthFailure): Promise<void> {
+    const provider = this.currentProviderId()
+    const envRef = provider === 'deepseek-official' ? 'DEEPSEEK_API_KEY' : envRefForId(provider)
+    const configured = (await this.resolveCredential(envRef)) !== undefined
+    if (classified.origin === 'provider' && configured) {
+      this.pushRow({
+        kind: 'system',
+        text: t('auth.providerRejected', {
+          env: envRef,
+          status: classified.status === undefined ? '' : `HTTP ${classified.status}`,
+        }),
+      })
+    } else {
+      this.pushRow({ kind: 'system', text: t('auth.credentialMissing', { env: envRef }) })
+    }
+    const retryable = classified.origin === 'provider' && configured
+      && this.retryProviderAuthEnabled() && this.authRetryArmed
+      && this.lastUserText !== '' && this.agent.status !== 'running'
+    if (!retryable) {
+      this.markDirty()
+      return
+    }
+    this.authRetryArmed = false
+    const text = this.lastUserText
+    // Cleared first: the retry starts its own turn, and a second failure inside
+    // it must not fire another attempt.
+    this.lastUserText = ''
+    this.pushRow({ kind: 'system', text: t('auth.retryOnce') })
+    this.beginWait()
+    this.agent.followup(createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }))
+    this.markDirty()
+  }
+
+  /** Whether the opt-in retry is on (`/retryauth`, the settings form, or the env). */
+  private retryProviderAuthEnabled(): boolean {
+    const raw = String(process.env.DSH_TUI_RETRY_PROVIDER_AUTH ?? '').trim().toLowerCase()
+    if (['1', 'true', 'on', 'yes'].includes(raw)) return true
+    if (['0', 'false', 'off', 'no'].includes(raw)) return false
+    const saved = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
+    if (saved !== null && typeof saved === 'object' && !Array.isArray(saved)) {
+      const value = (saved as { retryProviderAuth?: unknown }).retryProviderAuth
+      if (typeof value === 'boolean') return value
+      const text = String(value ?? '').trim().toLowerCase()
+      if (['1', 'true', 'on', 'yes'].includes(text)) return true
+      if (['0', 'false', 'off', 'no'].includes(text)) return false
+    }
+    return false
+  }
+
+  /** `/retryauth [on|off]` — the setting that lets one provider 401/403 retry itself. */
+  private async runRetryAuthCommand(arg: string): Promise<void> {
+    const id = arg.trim().toLowerCase()
+    if (id === '' || id === 'status') {
+      this.pushRow({
+        kind: 'system',
+        text: t('retryauth.status', {
+          state: this.retryProviderAuthEnabled() ? t('retryauth.on') : t('retryauth.off'),
+        }),
+      })
+      this.markDirty()
+      return
+    }
+    if (!['on', 'off'].includes(id)) {
+      this.pushRow({ kind: 'error', text: t('retryauth.usage') })
+      this.markDirty()
+      return
+    }
+    const on = id === 'on'
+    await this.mergeUiSettings({ retryProviderAuth: on })
+    this.pushRow({ kind: 'system', text: t('retryauth.switched', { state: on ? t('retryauth.on') : t('retryauth.off') }) })
+    this.markDirty()
+  }
+
   private async runDisconnectCommand(arg: string): Promise<void> {
     const direct = parseDisconnectPolicy(arg)
     let next: DisconnectPolicyName | undefined = direct
@@ -11107,6 +11214,7 @@ export class SshTui {
     this.history.push(text)
     this.historyIndex = this.history.length
     this.historyDraft = ''
+    this.lastUserText = text
     this.input = ''
     this.cursor = 0
     this.inputFolded = false
@@ -11257,6 +11365,12 @@ export class SshTui {
           } else {
             this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) })
           }
+          this.markDirty()
+        })
+        break
+      case 'retryauth':
+        void this.runRetryAuthCommand(arg).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'retryauth', error: errorChain(error) }) })
           this.markDirty()
         })
         break

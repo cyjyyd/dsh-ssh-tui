@@ -408,6 +408,7 @@ You can reopen the wizard at any time with:
 | `Alt+1` / `2` / `3` / `4` | jump to latest thinking / plan / subagent / reply (a reply is selected, ready for `/copy`) |
 | `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`), which is also selected. `Ctrl+/` or `Alt+/` opens it |
 | `/copy` | copy the selected card or reply **as written** to the local clipboard (latest reply if none is selected; OSC 52). The selection survives, so pressing it twice copies the same thing. Inside a full view the copy key (`Ctrl+Shift+C`) takes **the body on screen** — a tool body, a changes diff, or the reply as written — and the overlay echoes the confirmation |
+| `/retryauth [on\|off]` | auto-retry once when the *provider* rejects a request (HTTP 401/403 while a local credential is configured); off by default. The three-step diagnosis is in [`docs/remote-ops.md`](docs/remote-ops.md) §4.8 |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |

@@ -135,6 +135,12 @@ export interface Config {
   autoApproval?: string
   /** Milliseconds a leftover finished Host waits before exiting; 0 = never. */
   idleExit?: number
+  /**
+   * Retry once when the *provider* rejects a request with 401/403 while a local
+   * credential is configured (see `auth-failure.ts`). Off by default: the retry
+   * re-sends the whole context, which in a long session is expensive.
+   */
+  retryProviderAuth?: boolean
 }
 
 /** Every field above, as schemastery resolves them (all optional). */
@@ -155,6 +161,7 @@ interface ConfigFields {
   disconnect?: string
   autoApproval?: string
   idleExit?: number
+  retryProviderAuth?: boolean
 }
 
 /**
@@ -180,6 +187,7 @@ export const Config: z<ConfigFields> = z.object({
   disconnect: liveField(z.string()),
   autoApproval: liveField(z.string()),
   idleExit: liveField(z.number()),
+  retryProviderAuth: liveField(z.boolean()),
 })
 
 /**
