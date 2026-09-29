@@ -9,6 +9,8 @@ lib/
 .probe-tree/
 # registry cache used when the shared one is not writable from inside the sandbox
 .npm-cache-tmp/
+# release staging (holds a registry token: never commit)
+.release/
 *.log
 *.tgz
 .DS_Store
