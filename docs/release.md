@@ -84,12 +84,12 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 当前快照（2026-09-24）
+### 当前快照（2026-09-29）
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
 | `latest` | `0.1.5-rc.3` | `compatible`：进 CI 腿 |
-| `next` | **`0.1.7-rc.1`**（09-23 发布） | `compatible`：设置接缝、preset 改名、roster→agent-plane 全部适配完；真机核验＝同源 `tsc` 两行 0 错、mock 轮次探针 PASS（真跑一轮＋拖选复制＋`/find`）、`tui-probe` PASS、`settings.yaml` 四段迁移在 PTY 下全部落到我们的 entry；已进 CI 腿 |
+| `next` | **`0.1.7-rc.2`**（09-28 发布） | `compatible`：见下方 rc.2 段（干净树安装、`tsc` 0 错、套件全绿、六个真 PTY 探针全过）。提交的 manifest 与 CI 默认腿仍是 `0.1.7-rc.1`（本机在跑的那条），rc.2 单独一条腿 |
 | 旧线 | `0.1.5-rc.1` | `compatible`：continue（非默认腿，legacy peers 安装） |
 | 已摘 | `0.1.2-rc.1` | `incompatible`：**支持已取消**（0.1.7 适配完成后按用户决定摘除；范围不再有它的 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |

@@ -380,7 +380,16 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       term.write('\x15')
       term.write('/exit\r')
     })
-    check(exitCode === 0, `the launcher exited on /exit (got ${exitCode === undefined ? 'no exit within 15s' : exitCode})`)
+    // A timeout here has two very different shapes — the command never ran, or
+    // it ran and the launcher stayed up — and the bare timeout alone cannot tell
+    // them apart. The screen at that moment can: the composer still holding the
+    // text means the key never reached the command path, a dialog or an overlay
+    // means something swallowed it, and a prompt back with the process alive is
+    // the lingering-handle shape this step exists to catch.
+    const exitTail = exitCode === undefined
+      ? `\n--- screen at the timeout ---\n${plain(output.slice(beforeExit)).split('\n').slice(-8).join('\n')}`
+      : ''
+    check(exitCode === 0, `the launcher exited on /exit (got ${exitCode === undefined ? 'no exit within 15s' : exitCode})${exitTail}`)
     check(output.slice(beforeExit).includes('\x1b[?1049l'), 'the relay handed the alternate screen back')
   } catch (error) {
     problems.push(String(error.message ?? error))
