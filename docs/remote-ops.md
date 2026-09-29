@@ -215,6 +215,40 @@ AUTH 类错误**，所以一次瞬时 403 会直接终结整轮。要让它在"�
 重试**每次发送最多一次**（重试自己那一轮不会再触发），且只对"提供商拒绝 + 本机有凭据"这一类生效——
 本机缺凭据时重试毫无意义。
 
+## 4.9 两种 400:一种是我们能压的,一种是上游的 bug
+
+2026-09-29 在一个长会话里数出 **6 次 400**,全部落在同一条路由(`command-code` + `deepseek/deepseek-v4.1-flash`,
+effort=max),但**分两族、两个不同的成因**:
+
+| 族 | 正文 | 次数与时间(UTC) | 归属 |
+|---|---|---|---|
+| A | `json: unknown field "summary"`(HTTP 400 `InvalidParameter`) | 1 次(09-28 01:45,turn 26) | pi-ai 的 `openai-responses` 适配器在设了强度时会发 `reasoning.summary`,而这家的 Go 网关不认这个字段 |
+| B | `The reasoning_text in the thinking mode must be passed back to the API.`(`invalid_request_error`) | **5 次**(09-29 07:24 turn 36;14:02 / 14:05 / 14:13 / 14:16 turn 45–48) | **上游 harness 的 bug**:多轮会话把上一轮的 reasoning 块丢了,而思考模式下网关要求回传 |
+
+**A 族**:全局 CLI 里的 pi-ai 副本被本机打过一个补丁(一直在,`.bak` 也在),
+`dist/api/openai-responses.js` 第 260 行:
+
+```js
+- summary: options?.reasoningSummary || "auto",              // 原文:没设也会发 "auto"
++ ...(options?.reasoningSummary ? { summary: options.reasoningSummary } : {}),   // 补丁:只在显式设置时才发
+```
+
+单轮探针也验证过:带 `reasoning:{effort:"max"}`(不含 `summary`)打 `/provider/v1/responses` 返回 200。
+**升级 dsh 族会覆盖这个文件,补丁会丢**——补丁丢了的症状就是 A 族 400 重新出现,照上面这行重新打即可
+(打之前先 `cp openai-responses.js openai-responses.js.bak`)。
+
+**B 族不是我们的问题,而且已被上游记录**:
+
+- <https://github.com/deepseek-ai/deepseek-harness/discussions/1780>(切到第三方模型后多轮对话报同一个错)
+- <https://github.com/deepseek-ai/deepseek-harness/discussions/231>(多轮会话丢 reasoning 块 → 400,
+  openai-responses 自定义提供商 —— 与我们的路由形态一致)
+
+本机实验支持"是客户端丢块,不是网关挑剔":同一模型、同一 `effort=max`,第一轮拿到 `reasoning` 项(id `rs_…`),
+第二轮**带上/不带**它都成功(两轮短对话测不出差异);失败只出现在长会话的**续写**上,正是"历史重建时丢块"的特征。
+
+绕开办法:把这条路由的**思考关掉**(`/effort off`,没有思考就没有要回传的东西),或改用同一网关的
+**`command-code-messages`**(anthropic-messages 风味,思考块带签名、harness 会正确回传),或者等上游修。
+
 ## 5. 明确不做（以及为什么）
 
 - **内置 `--daemon` 常驻模式**：Host 不是服务。它是"某个会话的写者"，靠 idle-exit 把写锁交还；把它变成常驻服务会让 Web UI 与其它窗口长期打不开同一会话。
@@ -225,6 +259,7 @@ AUTH 类错误**，所以一次瞬时 403 会直接终结整轮。要让它在"�
 
 - `/diag`：这条会话的通道、锁、Host 身份、判定链（"会接入后台 Host，不要另开第二个窗口"）。
 - `/retryauth [on|off]`：要不要在"提供商侧鉴权失败"时自动重试一次（见 4.8）；`/doctor` 看路由与凭据是否就位。
+- **400 先分族**:`unknown field "summary"` 是本地 pi-ai 补丁丢了(4.9 A 族),`reasoning_text must be passed back` 是上游 harness 的 bug(4.9 B 族)。
 - `/doctor`：profile 组合、依赖、兼容与 `dsh-scope` 副本数；`/doctor --fix` 修 profile 补丁（写前备份）。
 - 真机验收脚本：`node scripts/tui-probe.mjs`（启动/缩放//diag//doctor//copy error//preset/鼠标模式/退出）、
   `node scripts/tui-drop-probe.mjs`（杀掉窗口再接管，断言转录保留、可输入、无乱码）与

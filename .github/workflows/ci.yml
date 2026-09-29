@@ -19,7 +19,15 @@ jobs:
         # with `scripts/ci-pin-line.mjs` and deletes the lock, because the
         # committed lock belongs to the default line.
         #
-        # 0.1.7-rc.2 (what npm calls `latest`) keeps a leg of its own: the line is
+        # Every version we declare stays covered, at the depth its risk deserves:
+        # the default (0.2.0-rc.2) and 0.1.7-rc.2 run the full probe set, while
+        # 0.2.0-rc.1 and 0.1.7-rc.1 — same generation as their newer sibling, and
+        # the rc.1s are only declared because they were run — keep typecheck plus
+        # the suite. rc.2 became the default when upstream pointed *both*
+        # `latest` and `next` at it: it is the baseline the desktop harness
+        # ships, so it is what a fresh user resolves.
+        #
+        # 0.1.7-rc.2 keeps a full leg because the line is still declared:
         # still declared compatible, and 59 of its 272 packages changed their type
         # surface against rc.1, so both rcs stay covered. Its one wrinkle is that
         # the family never published dsh-llm-mock-server on that line, so the pin
@@ -38,7 +46,7 @@ jobs:
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
         # the newest rc of that generation it can install cleanly, plus the rs
         # upstream still points a dist-tag at.
-        dsh: ["0.2.0-rc.1", "0.1.7-rc.2", "0.1.7-rc.1"]
+        dsh: ["0.2.0-rc.2", "0.2.0-rc.1", "0.1.7-rc.2", "0.1.7-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,7 +59,7 @@ jobs:
       # function with a test, and it is runnable locally:
       #   node scripts/ci-pin-line.mjs 0.1.7-rc.2
       - name: Pin the tree to the dsh ${{ matrix.dsh }} line
-        if: matrix.dsh != '0.2.0-rc.1'
+        if: matrix.dsh != '0.2.0-rc.2'
         run: |
           node scripts/ci-pin-line.mjs ${{ matrix.dsh }}
           rm -f package-lock.json
@@ -85,7 +93,7 @@ jobs:
       # the probe round trip are host-line independent, and the probe skips
       # itself when node-pty is missing.
       - name: Cut-link liveness probe
-        if: matrix.dsh == '0.2.0-rc.1'
+        if: matrix.dsh == '0.2.0-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-cut-probe.mjs
       # The link is measured at attach *and* re-measured afterwards, because one
       # measurement taken while the session was booting used to decide the footer
@@ -93,7 +101,7 @@ jobs:
       # that never recovered. This plays a terminal that is slow for the first
       # seconds and fast afterwards and reads the chip out of the real PTY.
       - name: Link-quality probe
-        if: matrix.dsh == '0.2.0-rc.1'
+        if: matrix.dsh == '0.2.0-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-rtt-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
@@ -113,7 +121,7 @@ jobs:
       # where the marker's cell accounting is pinned. One leg: it needs the mock
       # model, and the frames it asserts are host-line independent.
       - name: Reply copy probe (scripted turn)
-        if: matrix.dsh == '0.2.0-rc.1'
+        if: matrix.dsh == '0.2.0-rc.2'
         run: node scripts/tui-mock-probe.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup

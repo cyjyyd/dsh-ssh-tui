@@ -50,8 +50,11 @@ const NEW_LINE_ROOTS = {
 const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
 
 export const LINES = {
-  // The line 0.8.0 is developed against and declares: same roots as 0.1.7, the
-  // presets split, and the whole family on one version.
+  // The line 0.8.x is developed against and declares: same roots as 0.1.7, the
+  // presets split, and the whole family on one version. rc.2 is what upstream
+  // points both `latest` and `next` at (the desktop harness's baseline), so it is
+  // the default; rc.1 keeps a light leg because it stays declared compatible.
+  '0.2.0-rc.2': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.1.7-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.1.7-rc.2': {
@@ -79,7 +82,7 @@ const ALL_PRESETS = [...new Set(Object.values(LINES).flatMap(line => line.preset
  * manifest on one line installed by a leg that rewrites to another is how a
  * green run stops meaning anything.
  */
-export const DEFAULT_LINE = '0.2.0-rc.1'
+export const DEFAULT_LINE = '0.2.0-rc.2'
 
 /** `@deepseek-ai/dsh` itself, or a package of the family. */
 export function isFamilyPackage(name) {

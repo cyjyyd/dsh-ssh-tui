@@ -386,7 +386,7 @@ test('collectDoctor reads the real patch, manifest, and bundle rows', async () =
     const snapshot = await collectDoctor({
       profile: 'tui',
       dshHome: home,
-      hostVersion: '0.2.0-rc.1',
+      hostVersion: '0.2.0-rc.2',
       // The generation is what the caller detected on the running host (a
       // feature probe, not a version): a supported host composes the agent
       // process-wide, so the fixture has to say so for the agent-plane check to
@@ -403,7 +403,7 @@ test('collectDoctor reads the real patch, manifest, and bundle rows', async () =
     // 0.1.5 is a dropped line now: the verdict stays explicit (a user on it reads
     // "incompatible, upgrade") while the supported lines say compatible.
     assert.equal(snapshot.compatibility.releases['0.1.5-rc.1'], 'incompatible')
-    assert.equal(snapshot.compatibility.releases['0.2.0-rc.1'], 'compatible')
+    assert.equal(snapshot.compatibility.releases['0.2.0-rc.2'], 'compatible')
     // The shipped bundle patch is read from the package root, next to lib/.
     assert.ok(Array.isArray(snapshot.bundleRows))
     const checks = doctorChecks(snapshot)

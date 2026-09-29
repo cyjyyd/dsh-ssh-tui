@@ -66,6 +66,7 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.1.7-rc.1'], 'compatible')
   assert.equal(releases['0.1.7-rc.2'], 'compatible')
   assert.equal(releases['0.2.0-rc.1'], 'compatible')
+  assert.equal(releases['0.2.0-rc.2'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })
 
@@ -148,6 +149,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.8'), false)
   assert.equal(inRange('0.1.9'), false)
   assert.equal(inRange('0.2.0-rc.1'), true)
+  assert.equal(inRange('0.2.0-rc.2'), true)
   assert.equal(inRange('0.2.0'), true)
   assert.equal(inRange('0.2.1'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
@@ -159,7 +161,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.1.7-rc.2', '0.2.0-rc.1'], range), '0.2.0-rc.1')
+  assert.equal(semver.maxSatisfying(['0.1.7-rc.2', '0.2.0-rc.1', '0.2.0-rc.2'], range), '0.2.0-rc.2')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
