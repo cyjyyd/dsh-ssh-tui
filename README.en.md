@@ -113,8 +113,9 @@ npm i -g @deepseek-ai/dsh        # a real console runtime
 dsh --profile tui                # from a terminal or an SSH session
 ```
 
-The full diagnosis, both desktop defects (no TTY / two internal packages with no 0.2.0 release) and what the
-upstream should change are in [`docs/desktop.md`](docs/desktop.md).
+**Under the desktop app this plugin stays inert rather than failing**: it logs one "inactive here" line through `ctx.logger` and mounts nothing (no locks, no timers, no update check), so the desktop never shows a failed plugin and cannot be broken by it. A profile that would rather fail loudly can set `requireTerminal: true`.
+
+The full diagnosis, both desktop defects, the strategy and a copy-paste-ready upstream issue are in [`docs/desktop.md`](docs/desktop.md) and [`docs/upstream-desktop-report.md`](docs/upstream-desktop-report.md).
 
 ## Requirements
 

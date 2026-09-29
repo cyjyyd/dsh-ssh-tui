@@ -502,6 +502,43 @@ function runIcaclsAsync(command: string, args: string[]): Promise<boolean> {
 }
 
 /**
+ * What this process can serve.
+ *
+ * The plugin is a *terminal* UI, and the host it is mounted into decides whether
+ * there is a terminal at all:
+ *
+ *  - `host-relay`: this is the detached TUI Host itself (see
+ *    `isTuiHostProcess`); its terminal lives in whichever window attaches to the
+ *    session, so a missing TTY here is expected and it must serve.
+ *  - `terminal`: a real TTY on stdin and stdout.
+ *  - `desktop`: the desktop Harness launcher (Electron-as-Node, GUI subsystem).
+ *    It never has a console, so no terminal profile can ever run under it.
+ *  - `no-tty`: anything else without a TTY — a pipe (`… | tee`), cron, a service.
+ */
+export type TerminalAvailability = 'host-relay' | 'terminal' | 'desktop' | 'no-tty'
+
+/**
+ * Decide what to serve, from facts the caller can state.
+ *
+ * Pure on purpose: this is the one branch that decides whether the plugin mounts
+ * anything at all, and every caller-visible behaviour difference (a window, a
+ * log line, a hard failure) hangs off it.
+ * @param facts - the host process marker, the two TTY answers, and whether the
+ *   launcher is the desktop's.
+ * @returns the availability bucket.
+ */
+export function terminalAvailability(facts: {
+  hostProcess: boolean
+  stdinIsTty: boolean
+  stdoutIsTty: boolean
+  desktop: boolean
+}): TerminalAvailability {
+  if (facts.hostProcess) return 'host-relay'
+  if (facts.stdinIsTty && facts.stdoutIsTty) return 'terminal'
+  return facts.desktop ? 'desktop' : 'no-tty'
+}
+
+/**
  * Whether this process is the desktop app's launcher rather than a terminal Node.
  *
  * The desktop Harness ships a PATH shim that runs its own GUI-subsystem binary
@@ -542,4 +579,44 @@ export function nonTtyErrorMessage(desktop: boolean): string {
     + 'start under it. Run this profile from a real terminal or an SSH session with the npm CLI: '
     + 'npm i -g @deepseek-ai/dsh, then dsh --profile tui. The desktop app itself does not need this '
     + 'plugin. See docs/desktop.md.'
+}
+
+/**
+ * What to log when the plugin has nowhere to draw.
+ *
+ * Deliberately not an error: on the desktop the situation is normal (a GUI app
+ * has no console), and a terminal profile is not a thing the user broke. The
+ * line has to (a) say nothing is running *from this plugin*, (b) explain why,
+ * (c) give the one command that fixes it, and (d) not read as a failure — the
+ * plugin used to throw here, which surfaced as "1 entry did not activate" and,
+ * on the desktop, took the app down with it.
+ * @param availability - `desktop` or `no-tty`.
+ * @returns the log line.
+ */
+export function inactiveNotice(availability: 'desktop' | 'no-tty'): string {
+  if (availability === 'desktop') {
+    return 'inactive here — the desktop Harness launcher has no console (Electron-as-Node), and this '
+      + 'plugin is a terminal UI, so nothing from it is running in this app. The desktop app needs nothing from '
+      + 'it: use the app itself or `dsh web`. For the terminal UI, install the npm CLI '
+      + '(`npm i -g @deepseek-ai/dsh`) and run `dsh --profile tui` in a terminal or an SSH session (docs/desktop.md).'
+  }
+  return 'inactive here — stdin/stdout are not a terminal, and this plugin draws a terminal UI, so it '
+    + 'mounted nothing. Run it in a terminal, an SSH session, or a window that can attach to this session '
+    + '(docs/desktop.md).'
+}
+
+/**
+ * The message for the opt-in hard failure (`requireTerminal: true`).
+ *
+ * Same two situations as {@link inactiveNotice}, but for callers who would
+ * rather a profile fail loudly than quietly do nothing — a script asserting that
+ * a terminal profile really starts, for one.
+ * @param desktop - whether the launcher is the desktop's.
+ * @returns the error text.
+ */
+export function requiredTerminalError(desktop: boolean): string {
+  if (!desktop) return 'dsh-ssh-tui: both stdin and stdout must be TTYs; use a terminal/SSH session'
+  return 'dsh-ssh-tui: the desktop Harness launcher has no console (Electron-as-Node), so a terminal profile '
+    + 'cannot run under it. Install the npm CLI (`npm i -g @deepseek-ai/dsh`) and run this profile from a '
+    + 'terminal or an SSH session (docs/desktop.md).'
 }

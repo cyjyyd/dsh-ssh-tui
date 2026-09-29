@@ -124,8 +124,11 @@ npm i -g @deepseek-ai/dsh        # 真正的 console 运行时
 dsh --profile tui                # 在真实终端或 SSH 会话里
 ```
 
-完整诊断、桌面版缺陷报告的两个问题（TTY 不可用 / 两个内部包没有 0.2.0 发布版）与上游建议见
-[`docs/desktop.md`](docs/desktop.md)。
+**本插件在桌面版下不会启用、也不会报错**：它经 `ctx.logger` 记一行「此处不启用」就保持惰性（不取锁、不挂定时器、不查更新），不会让桌面版出现「插件失败」或崩溃。若你确实需要硬失败（例如脚本要断言某个终端 profile 真能起来），在 profile 行里加 `requireTerminal: true`。
+
+完整诊断、桌面版缺陷报告的两个问题（TTY 不可用 / 两个内部包没有 0.2.0 发布版）、我们的惰性策略与
+**可直接贴给上游的英文 issue 文本**见 [`docs/desktop.md`](docs/desktop.md) 与
+[`docs/upstream-desktop-report.md`](docs/upstream-desktop-report.md)。
 
 ## 环境要求
 

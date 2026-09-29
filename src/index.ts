@@ -85,7 +85,12 @@ import {
 } from './dsh-compat.js'
 import z from '@deepseek-ai/schemastery'
 import { installUiLocale, t } from './i18n/index.js'
-import { desktopLauncher, nonTtyErrorMessage } from './platform.js'
+import {
+  desktopLauncher,
+  inactiveNotice,
+  requiredTerminalError,
+  terminalAvailability,
+} from './platform.js'
 
 
 export const name = 'ssh-tui'
@@ -142,11 +147,21 @@ export interface Config {
    * re-sends the whole context, which in a long session is expensive.
    */
   retryProviderAuth?: boolean
+  /**
+   * Fail loudly instead of staying inert when there is no terminal.
+   *
+   * The default (`false`) logs one line and mounts nothing — that is what keeps
+   * this plugin harmless in a GUI host with no console (the desktop app) and in
+   * pipes. Set it when a missing terminal *is* an error for the caller: a script
+   * asserting that a terminal profile really starts, for one.
+   */
+  requireTerminal?: boolean
 }
 
 /** Every field above, as schemastery resolves them (all optional). */
 interface ConfigFields {
   sessionId?: string
+  requireTerminal?: boolean
   showReasoning?: boolean
   maxToolOutputLines?: number
   color?: boolean
@@ -189,6 +204,7 @@ export const Config: z<ConfigFields> = z.object({
   autoApproval: liveField(z.string()),
   idleExit: liveField(z.number()),
   retryProviderAuth: liveField(z.boolean()),
+  requireTerminal: z.boolean(),
 })
 
 /**
@@ -198,16 +214,35 @@ export const Config: z<ConfigFields> = z.object({
  * uses). Launch flags still win when supplied.
  */
 export function apply(ctx: Context, config: Config): void {
+  // A terminal UI with nowhere to draw must not take its host down with it. The
+  // desktop app mounts this plugin in a process that has no console at all (see
+  // `terminalAvailability`), and throwing there surfaced as "1 entry did not
+  // activate" — and, on the desktop, as a crash of the app the user was using.
+  // So the default is to log one calm line and mount nothing: an inert plugin
+  // cannot break anything, and the line says which command brings the TUI back.
+  // `requireTerminal: true` restores the hard failure for callers who want it.
   const hostProcess = isTuiHostProcess()
-  if (!hostProcess && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-    // The desktop app's launcher has no console at all (see `desktopLauncher`), so
-    // it gets the message that says so instead of sending the reader after a
-    // broken terminal.
-    throw new Error(nonTtyErrorMessage(desktopLauncher({
-      electron: process.versions.electron,
-      execPath: process.execPath,
-      argv: process.argv,
-    })))
+  const desktop = desktopLauncher({
+    electron: process.versions.electron,
+    execPath: process.execPath,
+    argv: process.argv,
+  })
+  const availability = terminalAvailability({
+    hostProcess,
+    stdinIsTty: process.stdin.isTTY === true,
+    stdoutIsTty: process.stdout.isTTY === true,
+    desktop,
+  })
+  if (availability !== 'terminal' && availability !== 'host-relay') {
+    if (config.requireTerminal === true) throw new Error(requiredTerminalError(desktop))
+    // `ctx.logger(name)` when the host has one (the desktop shows it in its logs),
+    // stderr as the fallback. Never fatal, and never more than one line.
+    const line = inactiveNotice(availability)
+    const logger = (ctx as unknown as { logger?: (name: string) => { info?: (message: string) => void } }).logger
+    const named = typeof logger === 'function' ? logger('ssh-tui') : undefined
+    if (typeof named?.info === 'function') named.info(line)
+    else process.stderr.write(`dsh-ssh-tui: ${line}\n`)
+    return
   }
   const subagentSelection = createSubagentSelection(ctx)
   installRouteMemory(ctx)
