@@ -2282,7 +2282,10 @@ export class SshTui {
       addDisplay(this.selectLine(styled, this.focusedRow === anchor), anchor)
       // A collapsed burst is all the reader sees, so the two things that decide
       // whether to expand belong on it: which files moved, and what failed.
-      if (kind === 'edits') {
+      // The breakdown is for a burst that touched *several* files: with one
+      // file the header below already carries its path and its diffstat, and
+      // repeating them printed the same line twice.
+      if (kind === 'edits' && groups.edits.length > 1) {
         const stats = compactFileStats(groups.edits)
         const shown = stats.slice(0, MAX_COMPACT_FILE_STATS)
         const parts = shown.map(stat => `${stat.path} ${diffStatToken(stat.add, stat.del)}`.trim())
@@ -2294,7 +2297,9 @@ export class SshTui {
         }
       }
       for (const line of compactFailureLines(items)) {
-        addDisplay(this.styleLine('error', truncateToWidth(`    ${line}`, width)), anchor)
+        // Same grammar as the header: the state ball is what marks a line as a
+        // tool's, and a failure that is only red text loses that reading.
+        addDisplay(this.styleLine('error', truncateToWidth(`    ● ${line}`, width)), anchor)
       }
       return
     }
