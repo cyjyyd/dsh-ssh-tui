@@ -124,12 +124,18 @@ const PARTIAL_REPORT = /^\u001b(?:\[(?:8(?:;(?:\d*(?:;\d*)?)?)?)?)?$/u
  * A report can arrive split across two reads (`ESC [ 8 ; 2` then `4 ; 80 t`),
  * and forwarding half of it as typing would send escape bytes to the model's
  * prompt. The tail is held until the next read, exactly like the cursor-reply
- * filter holds a half-arrived reply.
+ * filter holds a half-arrived reply — with the same deadline that filter gets:
+ * a lone `ESC` matches the prefix, and the byte after it may never come, so a
+ * caller that forwards typing **must** release a {@link pending} run when its
+ * window passes (`flush()`). Waiting for the next read instead swallows the
+ * user's Escape key, and delivers it glued to whatever key follows as an Alt
+ * chord. `TerminalInputGuard` is the same filter with that timer attached.
  * @returns a filter for one input stream.
  */
 export function createParentResizeFilter(): {
   push(text: string): { forward: string; sizes: ParentResize[] }
   flush(): string
+  readonly pending: boolean
 } {
   let held = ''
   return {
@@ -162,6 +168,10 @@ export function createParentResizeFilter(): {
       const tail = held
       held = ''
       return tail
+    },
+    /** Is a run held that could still grow into a report? */
+    get pending(): boolean {
+      return held !== ''
     },
   }
 }

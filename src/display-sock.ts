@@ -31,6 +31,7 @@ import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import {
+  INPUT_HOLD_MS,
   RTT_SLOW_SAMPLE_TIMEOUT_MS,
   TerminalInputFilter,
   TerminalInputPump,
@@ -1551,6 +1552,11 @@ export async function runDisplayRelay(
         }
       }
     }
+    /** Drop the frames held for the glyph probe without writing them. */
+    const discardHeldOutput = (): void => {
+      heldOutput = []
+      heldOutputBytes = 0
+    }
     if (options.seed !== undefined && options.seed !== '') {
       const seed = Buffer.from(options.seed, 'utf8')
       pending.push(seed)
@@ -1605,6 +1611,14 @@ export async function runDisplayRelay(
         clearTimeout(resizeTimer)
         resizeTimer = undefined
       }
+      // A run still held for a report that never came is dropped, not forwarded:
+      // the relay is going away, and every path here has already stopped reading
+      // stdin (`handBack` above marks the pump as dropping), so nothing can turn
+      // it into a report now.
+      if (parentResizeTimer !== undefined) {
+        clearTimeout(parentResizeTimer)
+        parentResizeTimer = undefined
+      }
       stdout.off('resize', onResize)
       if (usesSigwinch()) {
         signals.off('SIGWINCH', onResize)
@@ -1639,6 +1653,7 @@ export async function runDisplayRelay(
      * was attached afterwards. Hold them (bounded) and flush on HELLO.
      */
     const parentResize = createParentResizeFilter()
+    let parentResizeTimer: NodeJS.Timeout | undefined
     const forwardInput = (text: string): void => {
       if (text === '') return
       const bytes = Buffer.from(text, 'utf8')
@@ -1656,6 +1671,29 @@ export async function runDisplayRelay(
         finish('host-closed')
       }
     }
+    /**
+     * Hand a held run over once its window passes.
+     *
+     * A lone `ESC` is the case this exists for: it is the first byte of a report
+     * that could still be split across two reads, but it is far more often the
+     * user's Escape key — and the pump in front of this filter has already given
+     * it the same window. Held without a deadline of its own, Escape reached the
+     * Host only when another key arrived, and then glued to it as an Alt chord:
+     * cancelling a dialog or interrupting a running turn did nothing.
+     */
+    const releaseParentResize = (): void => {
+      if (parentResizeTimer !== undefined) {
+        clearTimeout(parentResizeTimer)
+        parentResizeTimer = undefined
+      }
+      const held = parentResize.flush()
+      // A relay that has been replaced (or told goodbye) writes nothing more —
+      // not even a key it was still holding. `finish` only settles the relay and
+      // then waits out a round trip before `cleanup`, so this deadline can fire
+      // inside that window; the key goes with the link it was typed on.
+      if (settled) return
+      forwardInput(held)
+    }
     const deliver = (text: string): void => {
       // A pipe parent has no `resize` event to fire and no SIGWINCH to raise:
       // `CSI 8 ; rows ; cols t` on the input pipe is how it says the panel is
@@ -1666,6 +1704,14 @@ export async function runDisplayRelay(
         size.columns = reported.columns
         size.rows = reported.rows
         sendResize()
+      }
+      if (parentResize.pending) {
+        if (parentResizeTimer !== undefined) clearTimeout(parentResizeTimer)
+        // Referenced on purpose, like the pump's own hold timer: this timer
+        // *completes* an operation the caller started (releasing a held key),
+        // and an unref'd one would let the event loop drain with the release
+        // still pending.
+        parentResizeTimer = setTimeout(releaseParentResize, INPUT_HOLD_MS)
       }
       forwardInput(forward)
     }
@@ -1847,7 +1893,14 @@ export async function runDisplayRelay(
               })
             } finally {
               holdingOutput = false
-              flushHeldOutput()
+              // A relay that was replaced (or told goodbye) while the probe was
+              // waiting owes this link nothing — that is the replacement path's
+              // whole contract. Flushing here put the old Host's queued frame
+              // back on a window the user has left: a live one shows a stale
+              // frame, and a dropped SSH link buffers it until it comes back,
+              // where it paints over the session that took over.
+              if (settled) discardHeldOutput()
+              else flushHeldOutput()
             }
             if (settled) return
             if (measured !== undefined) {

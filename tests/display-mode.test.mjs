@@ -71,15 +71,26 @@ test('a report split across two reads is held, not typed', () => {
   assert.equal(second.forward, ' b')
 })
 
-test('a lone escape is held for the next read, then released as typing', () => {
+test('a lone escape is held for the next read, and releasable without one', () => {
   // The user's own Esc key: it must not be swallowed because it *could* be the
-  // start of a size report. It comes back out with the next read.
+  // start of a size report. A read that follows settles it…
   const filter = createParentResizeFilter()
   assert.equal(filter.push('\u001b').forward, '')
+  assert.equal(filter.pending, true, 'the caller can see the run is being held')
   assert.equal(filter.push('[A').forward, '\u001b[A')
+  assert.equal(filter.pending, false)
+  // …but a bare `ESC` matches the report prefix on its own, so waiting for the
+  // next read is waiting forever when the user pressed Escape and nothing else.
+  // The deadline is the caller's (`flush()`), which is what the relay arms.
   const held = createParentResizeFilter()
-  held.push('\u001b[')
-  assert.equal(held.flush(), '\u001b[')
+  assert.equal(held.push('\u001b').forward, '')
+  assert.equal(held.pending, true)
+  assert.equal(held.flush(), '\u001b', 'the deadline hands the Escape over as typing')
+  assert.equal(held.pending, false)
+  // The same window covers a half-arrived report that never completed.
+  const prefix = createParentResizeFilter()
+  prefix.push('\u001b[')
+  assert.equal(prefix.flush(), '\u001b[')
 })
 
 test('a malformed report is ignored rather than hiding the panel', () => {
