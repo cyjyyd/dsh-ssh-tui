@@ -423,7 +423,14 @@ export function apply(ctx: Context, config: Config): void {
         // goes to this process (the splash and the picker draw here) and to the
         // Host through its environment, because the Host paints every later frame
         // with a socket for stdout and cannot measure anything itself.
-        const measured = await measureAmbiguousGlyphWidth()
+        // The boot probe writes a line of glyphs before the splash, which is
+        // invisible in use but not to a harness asserting the exact bytes of a
+        // boot. This switch is for those (and for a serial terminal that dislikes
+        // a cursor request): the width then falls back to the locale, exactly as
+        // it did before the measurement existed.
+        const measured = process.env.DSH_TUI_NO_GLYPH_PROBE === '1'
+          ? undefined
+          : await measureAmbiguousGlyphWidth()
         if (measured !== undefined) setAmbiguousWidthMeasured(measured.wide)
         writeBootSplash(resume ? t('boot.resume') : t('boot.host'), config.color !== false)
         await spawnHostAndRelay(String(sessionId), true, { ambiguousWide: measured?.wide })

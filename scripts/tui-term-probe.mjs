@@ -39,36 +39,36 @@ const { IS_WINDOWS } = await import(pathToFileURL(join(REPO, 'lib', 'platform.js
 const PROFILES = [
   {
     name: 'GNOME Terminal (VTE 0.70)',
-    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'gnome-terminal' },
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'gnome-terminal', DSH_TUI_NO_GLYPH_PROBE: '1' },
     // VTE never implemented OSC 52, so this is the terminal where the caveat
     // matters most — the case the first version of this table got wrong.
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'XFCE Terminal (VTE 0.70)',
-    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'xfce4-terminal' },
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', VTE_VERSION: '7000', TERM_PROGRAM: 'xfce4-terminal', DSH_TUI_NO_GLYPH_PROBE: '1' },
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'Konsole 23.08 (before OSC 52)',
-    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '230800' },
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '230800', DSH_TUI_NO_GLYPH_PROBE: '1' },
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'Konsole 24.12 (OSC 52 landed here)',
-    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '241200' },
+    env: { TERM: 'xterm-256color', COLORTERM: 'truecolor', KONSOLE_VERSION: '241200', DSH_TUI_NO_GLYPH_PROBE: '1' },
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
   },
   {
     name: 'tmux',
-    env: { TERM: 'tmux-256color', TMUX: '/tmp/tmux-1000/default,1,0' },
+    env: { TERM: 'tmux-256color', TMUX: '/tmp/tmux-1000/default,1,0', DSH_TUI_NO_GLYPH_PROBE: '1' },
     // tmux forwards OSC 52 only with `set-clipboard on`, so it is unpromised and
     // the user is told once.
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
     name: 'screen',
-    env: { TERM: 'screen-256color', STY: '1234.pts-0.host' },
+    env: { TERM: 'screen-256color', STY: '1234.pts-0.host', DSH_TUI_NO_GLYPH_PROBE: '1' },
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
   },
   {
@@ -77,12 +77,12 @@ const PROFILES = [
     // come from a wrapper, and the platform wins (see terminal-caps.ts), so the
     // profile is skipped there rather than asserting a state that cannot occur.
     posixOnly: true,
-    env: { TERM: 'linux' },
+    env: { TERM: 'linux', DSH_TUI_NO_GLYPH_PROBE: '1' },
     expect: { mouse: false, sgr: false, paste: false, alt: false, clipboardHint: true },
   },
   {
     name: 'dumb terminal',
-    env: { TERM: 'dumb' },
+    env: { TERM: 'dumb', DSH_TUI_NO_GLYPH_PROBE: '1' },
     // An unlabelled terminal keeps the baseline (the escapes are ignored where
     // unsupported) but is promised no clipboard, so it gets the caveat once.
     expect: { mouse: true, sgr: true, paste: true, alt: true, clipboardHint: true },
@@ -90,7 +90,7 @@ const PROFILES = [
   {
     name: 'Windows Terminal',
     win32Only: true,
-    env: { WT_SESSION: '9d0f5b6a-0000-4000-8000-000000000000', COLORTERM: 'truecolor' },
+    env: { WT_SESSION: '9d0f5b6a-0000-4000-8000-000000000000', COLORTERM: 'truecolor', DSH_TUI_NO_GLYPH_PROBE: '1' },
     // TERM is unset here on purpose: that is what Windows Terminal reports, and
     // reading it as "no terminal" is what turned Windows black and white.
     expect: { term: '', mouse: true, sgr: true, paste: true, alt: true, clipboardHint: false },
@@ -98,7 +98,7 @@ const PROFILES = [
   {
     name: 'Windows console (conhost)',
     win32Only: true,
-    env: { SESSIONNAME: 'Console' },
+    env: { SESSIONNAME: 'Console', DSH_TUI_NO_GLYPH_PROBE: '1' },
     // No bracketed paste: conhost only gained `?2004` in Windows 11 22H2.
     expect: { term: '', mouse: true, sgr: true, paste: false, alt: true, clipboardHint: true },
   },
