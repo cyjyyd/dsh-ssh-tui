@@ -444,6 +444,7 @@ You can reopen the wizard at any time with:
 | `/copy` | copy the selected card or reply **as written** to the local clipboard (latest reply if none is selected; OSC 52). The selection survives, so pressing it twice copies the same thing. Inside a full view the copy key (`Ctrl+Shift+C`) takes **the body on screen** — a tool body, a changes diff, or the reply as written — and the overlay echoes the confirmation |
 | `/retryauth [on\|off]` | auto-retry once when the *provider* rejects a request (HTTP 401/403 while a local credential is configured); off by default. The three-step diagnosis is in [`docs/remote-ops.md`](docs/remote-ops.md) §4.8 |
 | `/theme [name]` | palette: `default` / `catppuccin` / `gruvbox` / `mono` (emits no colour at all — bold, dim and underline carry the differences). `/theme` lists them and marks the current one; the choice is remembered, and `DSH_TUI_THEME` overrides it for one launch |
+| Question dialog | ↑/↓ moves the highlight and `●` marks what Enter will submit; in a multi-select, Space (or a digit/letter) ticks a row (`✓`), Enter submits the ticked set (or the highlighted row if none is ticked), Esc cancels |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |

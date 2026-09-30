@@ -569,8 +569,8 @@ export const zh: Record<string, string> = {
   'dialog.freeform': '  （自由输入：在下方输入后按 Enter）',
   'dialog.filterLabel': '筛选：{query}',
   'dialog.filterHint': '输入筛选 · Enter 应用 · Esc 清除',
-  'dialog.multiHint': '  数字/字母切换，Enter 提交，Esc 取消（首项默认选中）',
-  'dialog.singleHint': '  数字/字母选择，Enter 提交，Esc 取消（首项默认选中）',
+  'dialog.multiHint': '  ↑/↓ 移动，Space 或数字/字母勾选，Enter 提交（未勾选时提交当前项），Esc 取消',
+  'dialog.singleHint': '  ↑/↓ 或数字/字母选择，Enter 提交，Esc 取消（首项默认选中）',
   'dialog.scrolled': '↑ 已回看 {count} 行 · PgUp/PgDn/滚轮滚动 · Esc 回到底部',
 
   'reason.done': '{marker} 已思考 · {lines} 行',

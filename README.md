@@ -390,6 +390,7 @@ dsh --profile tui --no-color
 | `/retryauth [on\|off]` | "提供商侧鉴权失败"（HTTP 401/403，且本机凭据已配）时要不要自动重试一次；默认关。判断口诀与排查三步见 [`docs/remote-ops.md`](docs/remote-ops.md) 4.8 |
 | `/theme [名称]` | 配色:默认 / `catppuccin` / `gruvbox` / `mono`(完全不发颜色,靠加粗/暗淡/下划线区分)。只打 `/theme` 打开**选择器**:↑/↓ 即时预览、Enter 应用、Esc 还原;选择会记住,`DSH_TUI_THEME` 可单次覆盖 |
 | `/cleanup` | 清理**从未有过用户输入**的会话(启动后直接退出留下的空壳;它们会出现在别的 profile 的会话菜单里)。`/cleanup --dry-run` 只报告不删 |
+| 问答对话框 | ↑/↓ 移动高亮，`●` 标出 Enter 将提交的那一项；多选时 Space（或数字/字母）勾选，勾选行显示 `✓`，Enter 提交勾选集合（未勾选则提交高亮项），Esc 取消 |
 | 鼠标左键 | 点击卡片标题展开/收起；点 markdown 链接则复制 URL；**拖过回复**按屏幕所见复制（不含选中标记 `▶`） |
 | `PgUp` / `PgDn`、滚轮 | 转录回看 |
 | `Esc` | 取消选择 → 回底部 → 取消当前轮次 |

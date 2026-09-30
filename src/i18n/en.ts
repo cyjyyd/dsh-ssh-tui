@@ -569,8 +569,8 @@ export const en: Record<string, string> = {
   'dialog.freeform': '  (freeform: type below and press Enter)',
   'dialog.filterLabel': 'filter: {query}',
   'dialog.filterHint': 'type to filter · Enter applies · Esc clears',
-  'dialog.multiHint': '  digits/letters toggle, Enter submits, Esc cancels (first option preselected)',
-  'dialog.singleHint': '  digits/letters select, Enter submits, Esc cancels (first option preselected)',
+  'dialog.multiHint': '  ↑/↓ moves, Space or a digit/letter toggles, Enter submits (the highlighted row if nothing is marked), Esc cancels',
+  'dialog.singleHint': '  ↑/↓ or a digit/letter selects, Enter submits, Esc cancels (the first option starts selected)',
   'dialog.scrolled': '↑ scrolled {count} lines · PgUp/PgDn/wheel · Esc to bottom',
 
   'reason.done': '{marker} thought · {lines} lines',

@@ -11,10 +11,12 @@ import {
   backspaceQuestionFilter,
   clearQuestionFilter,
   confirmAnswer,
+  initialQuestionSelection,
   inspectClosesOn,
   moveQuestionCursor,
   optionsLength,
   questionOptionIndex,
+  questionOptionMarker,
   questionSubmit,
   selectQuestionOption,
   selectQuestionOptionByKey,
@@ -269,4 +271,42 @@ test('a filtered list that matches nothing submits the custom text instead of an
   // a filter that matches nothing must not turn Enter into a silent no-op.
   const submit = questionSubmit(dialog, '')
   assert.equal(submit.kind, 'resolve')
+})
+
+test('a multi-select list opens with nothing chosen', () => {
+  // The mis-answer this pins: the dialog used to open with the first option
+  // already ticked, so a reader who highlighted the row they wanted and pressed
+  // Enter submitted the first row instead. `questionSubmit` answers with the
+  // highlighted row when nothing is ticked — that fallback is the fix, and it
+  // only works if a fresh multi-select really starts empty.
+  const multi = { options: OPTIONS, multiSelect: true }
+  assert.deepEqual(initialQuestionSelection(multi), [])
+  assert.deepEqual(initialQuestionSelection(multi, 1), [1], 'an explicit preselection is still honoured')
+  // Single-select keeps its default: Enter answers the first row.
+  assert.deepEqual(initialQuestionSelection({ options: OPTIONS }), [0])
+  assert.deepEqual(initialQuestionSelection({ options: OPTIONS }, 2), [2])
+  assert.deepEqual(initialQuestionSelection({}), [], 'a free-form question has nothing to preselect')
+})
+
+test('the filled circle marks what Enter will submit, and follows the cursor', () => {
+  const single = questionDialog(OPTIONS)
+  assert.equal(questionOptionMarker(single, 0), '●')
+  assert.equal(questionOptionMarker(single, 1), '○')
+  moveQuestionCursor(single, 1)
+  assert.equal(questionOptionMarker(single, 0), '○', 'the circle left the old row')
+  assert.equal(questionOptionMarker(single, 1), '●', 'and followed the highlight')
+
+  // Multi-select, nothing ticked: the circle still shows what Enter answers with.
+  const multi = questionDialog(OPTIONS, { question: { ...OPTIONS, multiSelect: true } , selected: new Set() })
+  assert.equal(questionOptionMarker(multi, 0), '●')
+  moveQuestionCursor(multi, 2)
+  assert.equal(questionOptionMarker(multi, 0), '○')
+  assert.equal(questionOptionMarker(multi, 2), '●')
+
+  // Ticked rows carry a tick so several can be seen at once. The circle is gone
+  // once the answer is the ticked set rather than the highlighted row.
+  const ticked = questionDialog(OPTIONS, { question: { ...OPTIONS, multiSelect: true }, selected: new Set([1]) })
+  assert.equal(questionOptionMarker(ticked, 1), '✓')
+  assert.equal(questionOptionMarker(ticked, 0), '○')
+  assert.equal(questionOptionMarker(ticked, 2), '○')
 })

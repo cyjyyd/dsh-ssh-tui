@@ -119,6 +119,8 @@ import {
   moveQuestionCursor,
   optionsLength,
   questionOptionIndex,
+  initialQuestionSelection,
+  questionOptionMarker,
   questionSubmit,
   selectQuestionOptionByKey,
   type ConfirmDialog,
@@ -4546,7 +4548,9 @@ export class SshTui {
           if (index === undefined) continue
           const option = options[index]
           if (option === undefined) continue
-          const marker = d.selected.has(index) ? '●' : '○'
+          // `●` follows the cursor: it is the row Enter submits. Ticked rows in a
+          // multi-select list show `✓` so both facts stay visible at once.
+          const marker = questionOptionMarker(d, index)
           const key = QUESTION_OPTION_KEYS[index] ?? '↕'
           const focused = index === d.cursor ? '›' : ' '
           const recommended = option.label === approve ? t('dialog.recommended') : ''
@@ -7495,12 +7499,23 @@ export class SshTui {
     const initial = preselected !== undefined && preselected >= 0 && preselected < optionCount
       ? preselected
       : optionCount > 0 ? 0 : -1
+    // A single-select list opens with its first option chosen, so Enter answers
+    // that default (and moving the highlight moves the `●`).
+    //
+    // A **multi-select** list must open with nothing chosen. It used to inherit
+    // the same default, and the result was the worst kind of mis-answer: the
+    // reader moved the highlight to the row they wanted, pressed Enter, and got
+    // the first row — because `●` still sat on it. `questionSubmit` already
+    // falls back to the highlighted row when nothing is marked, which is exactly
+    // the "this one" the reader meant; the inherited selection was what kept that
+    // fallback from firing. The caller can still pass an explicit preselection.
+    const initialSelection = initialQuestionSelection(question, preselected)
     const dialog: QuestionDialog = {
       kind: 'questions',
       question,
       index,
       total,
-      selected: new Set(initial >= 0 ? [initial] : []),
+      selected: new Set(initialSelection),
       cursor: initial >= 0 ? initial : 0,
       ...(matchKeys === undefined ? {} : { matchKeys }),
       ...(onCursor === undefined ? {} : { onCursor }),

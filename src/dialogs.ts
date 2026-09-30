@@ -190,6 +190,49 @@ export function moveQuestionCursor(dialog: QuestionDialog, delta: number): boole
   return true
 }
 
+/**
+ * Which options a fresh question dialog starts with.
+ *
+ * The rule that caused a real mis-answer: a **multi-select** list used to inherit
+ * the single-select default of "the first option is already chosen", so a reader
+ * who moved the highlight to the row they wanted and pressed Enter answered with
+ * the first row instead — the `●` never left it. A multi-select starts empty
+ * unless the caller asks for a specific preselection; `questionSubmit` then falls
+ * back to the highlighted row, which is what pressing Enter means.
+ * @param question - the question being asked.
+ * @param preselected - an index the caller wants chosen up front, if any.
+ * @returns the indexes to select initially.
+ */
+export function initialQuestionSelection(
+  question: AskUserQuestionItem,
+  preselected?: number,
+): number[] {
+  const count = question.options?.length ?? 0
+  if (count === 0) return []
+  const wanted = preselected !== undefined && preselected >= 0 && preselected < count ? preselected : undefined
+  if (question.multiSelect === true) return wanted === undefined ? [] : [wanted]
+  return [wanted ?? 0]
+}
+
+/**
+ * The circle drawn beside one option.
+ *
+ * `●` marks **what Enter will submit**, which is why it sits on the highlighted
+ * row while nothing is ticked — the mark follows the cursor, so what the reader
+ * sees is what the answer will be. A ticked row in a multi-select list carries
+ * `✓` instead: several rows can be chosen at once, and the circle cannot be in
+ * two places without lying about one of them.
+ * @param dialog - the open question dialog.
+ * @param index - the option index being drawn.
+ * @returns the marker for that row.
+ */
+export function questionOptionMarker(dialog: QuestionDialog, index: number): '●' | '○' | '✓' {
+  const toggled = dialog.selected.has(index)
+  if (dialog.question.multiSelect !== true) return index === dialog.cursor ? '●' : '○'
+  if (toggled) return '✓'
+  return index === dialog.cursor && dialog.selected.size === 0 ? '●' : '○'
+}
+
 /** Select option `index`: toggles in a multi-select list, replaces otherwise. */
 export function selectQuestionOption(dialog: QuestionDialog, index: number): void {
   dialog.cursor = index
