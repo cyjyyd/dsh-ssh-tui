@@ -70,6 +70,31 @@ test('a terminal that does not answer, or answers oddly, decides nothing', async
   assert.equal(pipeOut.read(), null, 'nothing is written when there is no terminal to answer')
 })
 
+test('the probe leaves nothing behind for the next reader to trip over', async () => {
+  // Two things must hold, and both were learned the hard way (the first version
+  // broke the Windows terminal-capability leg): the listener is gone afterwards,
+  // and the stream's flow state is untouched — a `resume()` here would leave a
+  // flowing stdin behind, and bytes typed into it would be discarded by whoever
+  // reads next.
+  const terminal = fakeTerminal(cells => cells * 2)
+  const rawCalls = []
+  terminal.stdin.setRawMode = value => { rawCalls.push(value) }
+  await measureAmbiguousGlyphWidth({ stdin: terminal.stdin, stdout: terminal.stdout, timeoutMs: 200 })
+  assert.equal(terminal.stdin.listenerCount('data'), 0, 'no listener outlives the probe')
+  assert.deepEqual(rawCalls, [], 'raw mode is not ours to change')
+
+  // The property that actually matters (`readableFlowing` is not it: Node leaves
+  // it true once a data listener has ever been attached): whatever arrives after
+  // the probe is still there for the next reader. A `resume()` with a gap before
+  // the next listener is what drops bytes on the floor.
+  terminal.stdin.write('typed-later')
+  const seen = await new Promise(resolve => {
+    terminal.stdin.once('data', chunk => resolve(String(chunk)))
+    setTimeout(() => resolve('(nothing)'), 100)
+  })
+  assert.equal(seen, 'typed-later', 'the next reader receives what was typed after the probe')
+})
+
 test('a one-cell advance reserves the second cell, and the width contract holds', () => {
   setAmbiguousWidthMeasured(false)
   assert.equal(ambiguousWidthReserved(), true, 'the measurement is what turns the reservation on')

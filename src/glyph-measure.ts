@@ -15,9 +15,13 @@
  * This is deliberately not built on {@link TerminalInputPump}: the pump counts
  * replies to time the link and keeps their contents to itself. Here the
  * coordinates are the whole point, so the reply is read straight from the stream.
- * The cursor request is only answered in raw mode — a canonical-mode terminal
- * would hold a reply with no newline in it forever — so raw mode is set for the
- * duration and restored exactly as it was found.
+ *
+ * It touches the terminal as little as `probeTerminalRttMs` does — one write and
+ * one listener, no raw mode, no `resume()`. That is not laziness: both of those
+ * actions are visible to whatever else is driving the same pty, and the first
+ * version of this probe broke the Windows terminal-capability leg by taking them.
+ * A terminal that only answers a cursor request in raw mode simply answers
+ * nothing here, and the caller keeps its locale-based default.
  *
  * @module dsh-ssh-tui/glyph-measure
  */
@@ -80,7 +84,6 @@ export async function measureAmbiguousGlyphWidth(options: {
 
   const count = [...probe].length
   const timeoutMs = options.timeoutMs ?? GLYPH_PROBE_TIMEOUT_MS
-  const wasRaw = stdin.isRaw === true
 
   return await new Promise<GlyphWidthMeasurement | undefined>(resolve => {
     let settled = false
@@ -98,18 +101,10 @@ export async function measureAmbiguousGlyphWidth(options: {
     }
     const cleanup = (): void => {
       stdin.removeListener('data', onData)
-      if (!wasRaw) {
-        try {
-          stdin.setRawMode?.(false)
-        } catch {
-          // A terminal on its way out cannot be restored, and must not throw
-          // into the boot path.
-        }
-      }
       try {
         stdout.write(CLEAR_LINE)
       } catch {
-        // Same: the probe line is not worth a crash.
+        // The probe line is not worth a crash on the way out.
       }
     }
     const settle = (result: GlyphWidthMeasurement | undefined): void => {
@@ -121,8 +116,6 @@ export async function measureAmbiguousGlyphWidth(options: {
     }
     const timer = setTimeout(() => settle(undefined), timeoutMs)
     try {
-      stdin.setRawMode?.(true)
-      stdin.resume()
       stdin.on('data', onData)
       stdout.write(`${CLEAR_LINE}${probe}${CURSOR_REQUEST}`)
     } catch {
