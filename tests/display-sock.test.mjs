@@ -11,6 +11,7 @@ import {
   DisplayHost,
   displaySockExists,
   FRAME_HELLO,
+  FRAME_GOODBYE,
   FRAME_STDIN,
   FRAME_STDOUT,
   FRAME_RESIZE,
@@ -429,6 +430,59 @@ test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () =>
   await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(detaches.length, 0)
   await host.close()
+  await rm(home, { recursive: true, force: true })
+})
+
+// The Host's own exit writes the goodbye frame and then destroys the socket. A
+// write only *queues* on libuv until the peer drains it, and closing the handle
+// cancels whatever is still queued — so the frame has to be out first. When it
+// is not, the launcher reads the bare close as a crash and re-attaches instead
+// of exiting: a `/exit` that never goes (the red the stdio probe shows on a
+// loaded runner and never on a quiet one).
+test('the goodbye is on the wire before the Host closes its socket', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-goodbye-'))
+  const path = sessionSockPath('goodbye-flush', home)
+  const host = new DisplayHost(path, {
+    onStdin: () => {},
+    onResize: () => {},
+    onDetach: () => {},
+    onAttach: () => {},
+  })
+  await host.listen()
+  const client = createConnection(path)
+  client.on('error', () => {})
+  await new Promise((resolve, reject) => {
+    client.once('connect', resolve)
+    client.once('error', reject)
+  })
+  client.write(encodeFrame(FRAME_HELLO))
+  const deadline = Date.now() + 2_000
+  while (!host.attached && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(host.attached, true, 'the fake relay attached')
+
+  // A relay that is behind, not gone: nothing is read yet, so the frames stay
+  // in the writer's queue — which is the state a starting session is in.
+  client.pause()
+  assert.equal(
+    host.sendStdout(Buffer.alloc(1024 * 1024, 0x61)),
+    true,
+    'a frame larger than any pipe buffer is accepted',
+  )
+
+  const received = []
+  client.on('data', chunk => received.push(chunk))
+  const closing = host.close()
+  // The relay starts reading while the Host is still closing: the queue drains,
+  // and the goodbye with it.
+  setTimeout(() => client.resume(), 20)
+  await closing
+  await new Promise(resolve => client.once('close', resolve))
+  const frames = new FrameReader().push(Buffer.concat(received))
+  assert.equal(
+    frames.some(frame => frame.type === FRAME_GOODBYE),
+    true,
+    `the close must not swallow the goodbye (${frames.length} frames arrived)`,
+  )
   await rm(home, { recursive: true, force: true })
 })
 

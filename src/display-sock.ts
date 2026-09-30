@@ -95,14 +95,6 @@ export type AttachmentVerdict = 'attached' | 'detached' | 'unknown'
 const MAX_FRAME = 1024 * 1024
 
 /**
- * Grace period for a kicked relay to read FRAME_REPLACED before its socket is
- * torn down. Without the frame the relay only saw `close`, read it as "the
- * Host is going away", and re-attached — two SSH windows then kicked each
- * other off the display forever, repainting the whole screen on every lap.
- */
-const REPLACED_GRACE_MS = 250
-
-/**
  * How long a connection may stay silent before the Host treats it as a
  * liveness probe and drops it.
  *
@@ -122,6 +114,18 @@ const DISPLAY_HELLO_GRACE_MS = 6_000
  * for a slow link), so this only has to cover those plus the socket hop.
  */
 const DISPLAY_PROBE_TIMEOUT_MS = 3_000
+
+/**
+ * How long a farewell frame may hold its socket open before the backstop reaps
+ * it: `FRAME_REPLACED` to a kicked relay, `FRAME_GOODBYE` on the way out.
+ *
+ * The frame is what tells the other end *why* the socket is going — a bare close
+ * reads as a crash, and the launcher re-attaches over it. A write only queues on
+ * libuv until that end drains it, so the socket is reaped on the write callback
+ * and this is the bound that keeps a stalled reader from holding the shutdown
+ * (`launcher-exit.ts` bounds the whole graceful exit at 2 s anyway).
+ */
+const FAREWELL_FLUSH_MS = 250
 
 /**
  * How long the glyph probe may hold the Host's output waiting for an answer.
@@ -667,7 +671,7 @@ export class DisplayHost {
           } catch {
             // already gone
           }
-        }, REPLACED_GRACE_MS)
+        }, FAREWELL_FLUSH_MS)
         reap.unref?.()
         try {
           previous.end(encodeFrame(FRAME_REPLACED), () => {
@@ -842,12 +846,46 @@ export class DisplayHost {
     }
   }
 
+  /**
+   * Say goodbye and let the frame leave before the socket is reaped.
+   *
+   * The frame is what tells the launcher to exit instead of reading the close as
+   * a crash and re-attaching (`attach.ts`) — the replacement path flushes
+   * `FRAME_REPLACED` for exactly the same reason. A write only *queues* on libuv
+   * until the peer drains it, and reaping the socket cancels what is still
+   * queued: on a busy link, with a starting session still painting into that
+   * socket, the goodbye was dropped along with those frames and the launcher
+   * re-attached over the user's own `/exit` instead of exiting.
+   */
+  private async farewellAndReap(socket: Socket): Promise<void> {
+    await new Promise<void>(resolve => {
+      let settled = false
+      const done = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(reap)
+        try {
+          socket.destroy()
+        } catch {
+          // already gone
+        }
+        resolve()
+      }
+      const reap = setTimeout(done, FAREWELL_FLUSH_MS)
+      reap.unref?.()
+      try {
+        socket.end(encodeFrame(FRAME_GOODBYE), done)
+      } catch {
+        done()
+      }
+    })
+  }
+
   async close(): Promise<void> {
-    this.sendGoodbye()
     const socket = this.socket
     this.socket = undefined
     this.attached = false
-    socket?.destroy()
+    if (socket !== undefined) await this.farewellAndReap(socket)
     const server = this.server
     this.server = undefined
     await new Promise<void>(resolve => {
