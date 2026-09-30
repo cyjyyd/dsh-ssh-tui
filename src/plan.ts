@@ -7,7 +7,7 @@ import { isTuiMessageSource } from './dsh-compat.js'
 import { CONTEXT_RING_EMPTY, CONTEXT_RING_FULL, CONTEXT_RING_SEGMENTS, formatTokens, providerShortCode } from './footer.js'
 import { parseJsonArgs } from './json-args.js'
 import { subagentCourtesyName } from './job-label.js'
-import { subagentIdentitySgr } from './subagent-model.js'
+import { activeTheme, themeExtraToken, themeThresholdToken, themeToken, type Theme } from './theme.js'
 import { sliceCodePoints, type TextSegment } from './term-text.js'
 import type { DiffDisplayLine, DisplayKind, PlanTodoItem, Row, SubagentLogEntry } from './transcript-types.js'
 
@@ -414,14 +414,15 @@ function subagentStatusLabel(status: Extract<Row, { kind: 'subagent' }>['status'
   return t('sub.failed')
 }
 
-/** Running / ok / aborted / error → ANSI for the status dot and status word. */
+/** Running / ok / aborted / error → theme token for the status dot and word. */
 export function subagentStateColor(
   status: Extract<Row, { kind: 'subagent' }>['status'],
-): '33' | '32' | '31' | '90' {
-  if (status === 'ok') return '32'
-  if (status === 'error') return '31'
-  if (status === 'aborted') return '90'
-  return '33'
+  theme: Theme = activeTheme(),
+): string {
+  if (status === 'ok') return themeThresholdToken(theme, 'ok')
+  if (status === 'error') return themeThresholdToken(theme, 'over')
+  if (status === 'aborted') return themeToken(theme, 'system')
+  return themeThresholdToken(theme, 'warn')
 }
 
 /**
@@ -513,6 +514,8 @@ export function buildSubagentHeader(input: {
   inspectHint?: string
   /** Different provider from the parent: paint the title cyan, not violet. */
   foreign?: boolean
+  /** Active palette; callers pass the session's theme so `mono` stays monochrome. */
+  theme?: Theme
 }): { plain: string; segments: TextSegment[] } {
   const prefix = input.focused ? '▶ ' : '  '
   const marker = '▸'
@@ -525,14 +528,14 @@ export function buildSubagentHeader(input: {
   const plain = `${lead}${stateText}${summaryText}${spinner}${hint}`
   const dotIndex = lead.indexOf('●')
   const titleIndex = lead.indexOf(input.title)
-  const stateCode = subagentStateColor(input.status)
+  const stateCode = subagentStateColor(input.status, input.theme)
   const segments: TextSegment[] = []
   if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
   if (titleIndex >= 0 && input.title !== '') {
     segments.push({
       start: titleIndex,
       end: titleIndex + input.title.length,
-      sgr: subagentIdentitySgr(input.foreign === true),
+      sgr: themeExtraToken(input.theme ?? activeTheme(), input.foreign === true ? 'subagent-foreign' : 'subagent-self'),
     })
   }
   segments.push({ start: lead.length, end: lead.length + stateText.length, sgr: stateCode })
@@ -540,12 +543,12 @@ export function buildSubagentHeader(input: {
     segments.push({
       start: lead.length + stateText.length,
       end: lead.length + stateText.length + summaryText.length,
-      sgr: '90',
+      sgr: themeToken(input.theme ?? activeTheme(), 'system'),
     })
   }
   const tailStart = lead.length + stateText.length + summaryText.length
   if (spinner !== '' || hint !== '') {
-    segments.push({ start: tailStart, end: plain.length, sgr: '90' })
+    segments.push({ start: tailStart, end: plain.length, sgr: themeToken(input.theme ?? activeTheme(), 'system') })
   }
   return { plain, segments: segments.filter(segment => segment.end > segment.start) }
 }

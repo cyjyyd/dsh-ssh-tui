@@ -146,15 +146,15 @@ export function subagentProviderDiffers(parent: string | undefined, child: strin
 }
 
 /**
- * Identity SGR for a subagent chip title. Same provider as the parent stays
- * the violet used since the courtesy-name work; a different provider uses
- * cyan so the foreign route is visible without a second color layer.
+ * Which identity role a subagent chip title wears.
+ *
+ * The colours themselves live in `theme.ts`: the same provider as the parent
+ * gets the identity role, a different provider gets the foreign one, and the
+ * palette decides what those look like (under `mono` they become an attribute,
+ * because the distinction has to survive a terminal without colour).
  */
-export const SUBAGENT_IDENTITY_SGR = '38;5;141'
-export const SUBAGENT_FOREIGN_SGR = '38;5;80'
-
-export function subagentIdentitySgr(foreign: boolean): typeof SUBAGENT_IDENTITY_SGR | typeof SUBAGENT_FOREIGN_SGR {
-  return foreign ? SUBAGENT_FOREIGN_SGR : SUBAGENT_IDENTITY_SGR
+export function subagentIdentityRole(foreign: boolean): 'subagent-self' | 'subagent-foreign' {
+  return foreign ? 'subagent-foreign' : 'subagent-self'
 }
 
 /**

@@ -6,6 +6,7 @@
  */
 
 import { t } from './i18n/index.js'
+import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from './theme.js'
 import { lineModeEnabled } from './line-mode.js'
 import { terminalCapabilities } from './terminal-caps.js'
 import { mapAsciiChrome } from './term-text.js'
@@ -211,12 +212,13 @@ export function toolBodyLineLimit(quality: LinkQuality): number {
   return TOOL_BODY_LINES_BY_QUALITY[quality] ?? Number.POSITIVE_INFINITY
 }
 
-const LINK_PIP_COLOR: Record<number, string> = {
-  0: '90',
-  1: '31',
-  2: '33',
-  3: '32',
-  4: '32',
+/** Pips speak the one threshold vocabulary the whole status area uses. */
+function linkPipToken(filled: number): string {
+  const theme = activeTheme()
+  if (filled <= 0) return themeToken(theme, 'system')
+  if (filled === 1) return themeThresholdToken(theme, 'over')
+  if (filled === 2) return themeThresholdToken(theme, 'warn')
+  return themeThresholdToken(theme, 'ok')
 }
 
 /** Compact footer chip: `SSH ●●●○ 90ms` — 1 pip red, 2 yellow, 3+ green. */
@@ -231,7 +233,7 @@ export function formatLinkQualityChip(
   const filled = linkSignalPips(quality)
   const pips = `${'●'.repeat(filled)}${'○'.repeat(4 - filled)}`
   const colored = color
-    ? `\x1b[${LINK_PIP_COLOR[filled] ?? '90'}m${pips}\x1b[0m`
+    ? `\x1b[${linkPipToken(filled)}m${pips}\x1b[0m`
     : pips
   if (kind === 'local') return t('paint.localChip', { pips: colored })
   const delay = probed && rttMs !== undefined && Number.isFinite(rttMs)
@@ -502,7 +504,7 @@ export function writeBootSplash(message: string, color = true): void {
     ? `\x1b[1m${truncateToWidth(title, width)}\x1b[0m`
     : truncateToWidth(title, width)
   const detail = color
-    ? `\x1b[36m${truncateToWidth(message, width)}\x1b[0m`
+    ? `\x1b[${themeExtraToken(activeTheme(), 'notice')}m${truncateToWidth(message, width)}\x1b[0m`
     : truncateToWidth(message, width)
   // The capability table, not the raw switch: a Linux virtual console has no
   // alternate screen to return to, and entering one there costs the scrollback

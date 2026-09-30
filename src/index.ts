@@ -131,6 +131,8 @@ export interface Config {
    */
   /** UI language (`/language`); zh unless the environment says otherwise. */
   language?: string
+  /** Palette (`/theme`): default | catppuccin | gruvbox | mono. */
+  theme?: string
   /** Newest plugin version whose update notice was dismissed. */
   skipUpdate?: string
   /** Workspace pane layout (`/view`). */
@@ -172,6 +174,7 @@ interface ConfigFields {
   model?: string
   paintIntervalMs?: number
   language?: string
+  theme?: string
   skipUpdate?: string
   view?: string
   disconnect?: string
@@ -198,6 +201,7 @@ export const Config: z<ConfigFields> = z.object({
   model: z.string(),
   paintIntervalMs: z.number(),
   language: liveField(z.string()),
+  theme: liveField(z.string()),
   skipUpdate: liveField(z.string()),
   view: liveField(z.string()),
   disconnect: liveField(z.string()),

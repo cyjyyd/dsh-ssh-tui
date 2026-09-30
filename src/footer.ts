@@ -4,7 +4,8 @@
 
 import { t } from './i18n/index.js'
 import { pinEmojiCells, truncateAnsiToWidth, visibleWidth } from './term-text.js'
-import { describeSubagentFit, subagentIdentitySgr, subagentProviderDiffers } from './subagent-model.js'
+import { describeSubagentFit, subagentProviderDiffers } from './subagent-model.js'
+import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from './theme.js'
 import { downgradeSgr, type ColorDepth } from './color-depth.js'
 import {
   commandCodeSourceFor, formatQuotaStatusLine, openCodeSourceFor,
@@ -117,9 +118,7 @@ export function formatContextPressureRing(percent: number): string {
 }
 
 export function contextPressureRingColor(level: ContextPressureView['level']): string {
-  if (level === 'danger') return '31'
-  if (level === 'warn') return '33'
-  return '32'
+  return themeThresholdToken(activeTheme(), level === 'danger' ? 'over' : level === 'warn' ? 'warn' : 'ok')
 }
 
 export function formatContextPressureChip(view: ContextPressureView, color = false): string {
@@ -299,7 +298,7 @@ export function footerHealthChip(
   kind: 'roster' | 'agent-plane' = 'roster',
 ): FooterChip | undefined {
   if (!missing) return undefined
-  const glyph = color ? `\x1b[33m⚠\x1b[0m` : '⚠'
+  const glyph = color ? `\x1b[${themeExtraToken(activeTheme(), 'warn')}m⚠\x1b[0m` : '⚠'
   return {
     id: 'health',
     long: `${glyph} ${t(kind === 'agent-plane' ? 'footer.agentPlaneMissing' : 'footer.rosterMissing')}`,
@@ -431,11 +430,12 @@ export function paintFooterSubagentChip(
   line: string,
   chip: string,
   foreign: boolean,
-  muteSgr = '90',
+  muteSgr = themeToken(activeTheme(), 'system'),
   depth: ColorDepth = 'truecolor',
+  identitySgr = themeExtraToken(activeTheme(), 'subagent-foreign'),
 ): string {
   if (!foreign || chip === '' || !line.includes(chip)) return line
-  const code = downgradeSgr(subagentIdentitySgr(true), depth)
+  const code = downgradeSgr(identitySgr, depth)
   if (code === '') return line
   const mute = muteSgr === '' ? '0' : muteSgr
   return line.replace(chip, `\x1b[${code}m${chip}\x1b[0m\x1b[${mute}m`)

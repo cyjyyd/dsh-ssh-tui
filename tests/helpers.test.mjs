@@ -150,7 +150,7 @@ import {
   defaultSubagentModelForProvider,
   describeSubagentFit,
   subagentCostClass,
-  subagentIdentitySgr,
+  subagentIdentityRole,
   subagentModelMatchesProvider,
   subagentProviderDiffers,
 } from '../lib/subagent-model.js'
@@ -1534,9 +1534,13 @@ test('formatLinkQualityChip is a compact colored signal bar', () => {
   assert.equal(formatLinkQualityChip('ssh', 160, 90, true), 'SSH ●●●○ 90ms')
   assert.equal(formatLinkQualityChip('ssh', 400, 500, true), 'SSH ●○○○ 500ms')
   assert.equal(formatLinkQualityChip('local', 80, undefined, false), '本机 ●●●●')
-  assert.match(formatLinkQualityChip('ssh', 400, 500, true, true), /\x1b\[31m●○○○\x1b\[0m/)
-  assert.match(formatLinkQualityChip('ssh', 250, 200, true, true), /\x1b\[33m●●○○\x1b\[0m/)
-  assert.match(formatLinkQualityChip('ssh', 160, 90, true, true), /\x1b\[32m●●●○\x1b\[0m/)
+  // Pips speak the theme's threshold vocabulary now, so the expectation is
+  // derived from the palette rather than frozen to a code that a theme (or
+  // `mono`) is entitled to change.
+  const pip = pips => `\\x1b\\[${themeThresholdToken(activeTheme(), pips)}m`
+  assert.match(formatLinkQualityChip('ssh', 400, 500, true, true), new RegExp(`${pip('over')}●○○○`))
+  assert.match(formatLinkQualityChip('ssh', 250, 200, true, true), new RegExp(`${pip('warn')}●●○○`))
+  assert.match(formatLinkQualityChip('ssh', 160, 90, true, true), new RegExp(`${pip('ok')}●●●○`))
 })
 
 test('detectSshSession and paintIntervalForRtt do not need a model', () => {
@@ -2229,8 +2233,10 @@ test('renderMarkdownLines contrasts inline bold against a non-bold body', () => 
   const lines = renderMarkdownLines('**跳板机上的风**比文档里写的更干。', 80, true, false)
   assert.equal(lines.length, 1)
   const line = lines[0]
-  assert.match(line, /^\x1b\[37m/)
-  assert.match(line, /\x1b\[1;97m跳板机上的风\x1b\[0m\x1b\[37m/)
+  // The body no longer forces a foreground: `37` was white, which is invisible
+  // on a light terminal. Emphasis still comes from the palette's bold role.
+  assert.equal(/^\x1b\[\d+m/u.test(line), false, 'the body must not open with a colour')
+  assert.match(line, new RegExp(`\\x1b\\[${themeExtraToken(activeTheme(), 'md-bold')}m跳板机上的风\\x1b\\[0m`), 'the emphasised run wears md-bold')
   assert.match(line, /比文档里写的更干。/)
   assert.equal(line.includes('\x1b[1;37m'), false)
 })
@@ -2238,7 +2244,7 @@ test('renderMarkdownLines contrasts inline bold against a non-bold body', () => 
 test('renderMarkdownLines resets italic so it does not leak into following text', () => {
   const lines = renderMarkdownLines('a *slant* b', 80, true, false)
   assert.equal(lines.length, 1)
-  assert.match(lines[0], /\x1b\[3;37mslant\x1b\[0m\x1b\[37m b/)
+  assert.match(lines[0], new RegExp(`\\x1b\\[${themeExtraToken(activeTheme(), 'md-italic')}mslant\\x1b\\[0m b`))
 })
 
 test('renderMarkdownLines wraps markdown and bare URLs in OSC 8', () => {
@@ -4668,8 +4674,11 @@ test('default subagent model follows the parent provider family', () => {
   assert.equal(subagentProviderDiffers('deepseek-official', 'xai'), true)
   assert.equal(subagentProviderDiffers('xai', 'xai'), false)
   assert.equal(subagentProviderDiffers('xai', undefined), false)
-  assert.equal(subagentIdentitySgr(false), '38;5;141')
-  assert.equal(subagentIdentitySgr(true), '38;5;80')
+  // The colour moved into `theme.ts`; what `subagent-model` owes a caller now is
+  // the *role*, which is what lets a palette answer for it (and `mono` answer
+  // with an attribute).
+  assert.equal(subagentIdentityRole(false), 'subagent-self')
+  assert.equal(subagentIdentityRole(true), 'subagent-foreign')
   // A dirty catalog that still lists the leftover DeepSeek id must not keep it on xAI.
   assert.equal(
     subagentModelMatchesProvider('xai', 'deepseek-v4-flash', ['grok-4.6', 'deepseek-v4-flash']),
@@ -4805,6 +4814,7 @@ import {
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from '../lib/theme.js'
 
 test('parseSuperGrokAuthFile reads grok-bridge auth.json', () => {
   const now = 1_700_000_000_000

@@ -27,6 +27,7 @@ import { terminalCapabilities, type TerminalCapabilities } from './terminal-caps
 import { truncateToWidth } from './term-text.js'
 import { TerminalInputGuard } from './terminal-input.js'
 import { t } from './i18n/index.js'
+import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from './theme.js'
 
 /** What the launch picker decided. */
 export type SessionPickerResult =
@@ -539,13 +540,13 @@ export async function showSessionPicker(
     const filterLine = !filtering
       ? t('picker.filterHint')
       : t('picker.filter', { query: state.query === '' ? '▌' : `${state.query}▌` })
-    lines.push(style(truncateToWidth(filterLine, width), filtering ? '36' : '90'))
+    lines.push(style(truncateToWidth(filterLine, width), filtering ? themeExtraToken(activeTheme(), 'accent') : themeToken(activeTheme(), 'system')))
     const more = state.more ?? 0
     lines.push(style(truncateToWidth(t('picker.count', {
       shown: filtered.length,
       total: state.sessions.length,
     }) + (more > 0 ? t('picker.countMore', { count: more }) : '')
-      + (state.loading === true ? t('picker.loading') : ''), width), '90'))
+      + (state.loading === true ? t('picker.loading') : ''), width), themeToken(activeTheme(), 'system')))
     if (filtered.length === 0) {
       // An empty list with history still unread is "loading", never "there is
       // nothing": the pager reads on by itself until it has a row or the
@@ -555,10 +556,10 @@ export async function showSessionPicker(
         : state.query === ''
           ? t('picker.noneYet')
           : t('picker.noMatch', { query: state.query })
-      lines.push(style(truncateToWidth(empty, width), '33'))
+      lines.push(style(truncateToWidth(empty, width), themeThresholdToken(activeTheme(), 'warn')))
     } else {
       if (start > 0) {
-        lines.push(style(truncateToWidth(t('picker.moreAbove', { count: start }), width), '90'))
+        lines.push(style(truncateToWidth(t('picker.moreAbove', { count: start }), width), themeToken(activeTheme(), 'system')))
       }
       for (let index = start; index < end; index += 1) {
         const session = filtered[index]
@@ -568,7 +569,7 @@ export async function showSessionPicker(
         const marker = focused ? '›' : ' '
         const key = quick ?? ' '
         const label = `${marker}${key}  ${session.label}`
-        lines.push(style(truncateToWidth(label, width), focused ? '1;7' : '1'))
+        lines.push(style(truncateToWidth(label, width), focused ? themeExtraToken(activeTheme(), 'accent') : '1'))
         const attachNote = session.attach === undefined
           ? ''
           // Two words, because that is the whole decision: a session a window
@@ -582,16 +583,16 @@ export async function showSessionPicker(
             : t('picker.attachFree', { pid: session.attach.pid })
         const meta = `${session.unreadable === true ? t('resume.unreadable') : ''}${formatSessionTime(session.updatedAt)} · ${session.cwd}`
         if (attachNote !== '') {
-          lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), '32')}`)
+          lines.push(`   ${style(truncateToWidth(attachNote, Math.max(1, width - 3)), themeThresholdToken(activeTheme(), 'ok'))}`)
         }
-        lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), '90')}`)
+        lines.push(`   ${style(truncateToWidth(meta, Math.max(1, width - 3)), themeToken(activeTheme(), 'system'))}`)
       }
       if (end < filtered.length) {
-        lines.push(style(truncateToWidth(t('picker.moreBelow', { count: filtered.length - end }), width), '90'))
+        lines.push(style(truncateToWidth(t('picker.moreBelow', { count: filtered.length - end }), width), themeToken(activeTheme(), 'system')))
       } else if (more > 0) {
         // Everything read is on screen: say how to reach the rest instead of
         // reading it now. Filtering looks deeper on its own (see `pump`).
-        lines.push(style(truncateToWidth(t('picker.loadMore', { count: more }), width), '90'))
+        lines.push(style(truncateToWidth(t('picker.loadMore', { count: more }), width), themeToken(activeTheme(), 'system')))
       }
     }
     lines.push(state.confirmTakeover === undefined
@@ -599,11 +600,11 @@ export async function showSessionPicker(
       // The blank separator's line is reused on purpose: the picker's capacity
       // is computed from a fixed row count, and an extra line here would push
       // the hints off a short terminal.
-      : style(truncateToWidth(t('picker.takeoverConfirm', { pid: state.confirmTakeover.pid }), width), '33'))
-    lines.push(style(truncateToWidth(filtering ? t('picker.hintFilter') : t('picker.hint'), width), '36'))
+      : style(truncateToWidth(t('picker.takeoverConfirm', { pid: state.confirmTakeover.pid }), width), themeThresholdToken(activeTheme(), 'warn')))
+    lines.push(style(truncateToWidth(filtering ? t('picker.hintFilter') : t('picker.hint'), width), themeExtraToken(activeTheme(), 'accent')))
     lines.push(filtering
-      ? `${style('Esc', '36')}  ${t('picker.cancel')}`
-      : `${style('0', '36')}  ${t('picker.new')} · ${style('Esc', '36')}  ${t('picker.cancel')}`)
+      ? `${style('Esc', themeExtraToken(activeTheme(), 'accent'))}  ${t('picker.cancel')}`
+      : `${style('0', themeExtraToken(activeTheme(), 'accent'))}  ${t('picker.new')} · ${style('Esc', themeExtraToken(activeTheme(), 'accent'))}  ${t('picker.cancel')}`)
     return lines
   }
 

@@ -8,6 +8,7 @@
 import { t } from './i18n/index.js'
 import { downgradeSgr, type ColorDepth } from './color-depth.js'
 import { asciiFallbackEnabled } from './platform.js'
+import { activeTheme, themeExtraToken } from './theme.js'
 
 /**
  * Codex-style compact elapsed: `0s`, `1m 05s`, `1h 01m 01s`.
@@ -880,28 +881,31 @@ function wrapMarkdownSegments(
 }
 
 function markdownSegmentCode(kind: InlineMarkdownKind): string {
+  const theme = activeTheme()
   switch (kind) {
     // Bright + bold so **span** still pops when the font has no heavy CJK weight.
-    case 'bold': return '1;97'
-    case 'italic': return '3;37'
-    case 'code': return '36'
-    case 'link': return '4;36'
-    case 'muted': return '2;37'
+    case 'bold': return themeExtraToken(theme, 'md-bold')
+    case 'italic': return themeExtraToken(theme, 'md-italic')
+    case 'code': return themeExtraToken(theme, 'md-code')
+    case 'link': return themeExtraToken(theme, 'md-link')
+    case 'muted': return themeExtraToken(theme, 'md-muted')
     default: return ''
   }
 }
 
 function markdownBaseCode(kind: MarkdownBlockKind): string {
+  const theme = activeTheme()
   switch (kind) {
-    case 'heading1': return '1;4;97'
-    case 'heading2': return '1;4;36'
-    case 'heading3': return '1;36'
-    case 'code': return '36'
-    case 'quote': return '3;37'
-    case 'rule': return '90'
-    // Body is normal white so inline bold/italic/code are not painted on
-    // already-bold text (CJK fonts often have only one weight).
-    default: return '37'
+    case 'heading1': return themeExtraToken(theme, 'md-h1')
+    case 'heading2': return themeExtraToken(theme, 'md-h2')
+    case 'heading3': return themeExtraToken(theme, 'md-h3')
+    case 'code': return themeExtraToken(theme, 'md-code')
+    case 'quote': return themeExtraToken(theme, 'md-quote')
+    case 'rule': return themeExtraToken(theme, 'md-rule')
+    // Body keeps the terminal's own foreground: freezing it to white was
+    // unreadable on a light background, and bold/italic runs carry their own
+    // emphasis (CJK fonts often have only one weight).
+    default: return ''
   }
 }
 
@@ -921,14 +925,19 @@ function renderMarkdownBlockLine(block: MarkdownBlockLine, color: boolean, hyper
     return segments.map(segment => wrapHyperlink(segment.text, segment.href, hyperlinks)).join('')
   }
   const base = markdownBaseCode(block.base)
-  let out = `\x1b[${base}m`
+  // An empty base means "the terminal's own foreground", and opening with
+  // `\x1b[m` would emit a reset the row does not need — on a slow link that is
+  // one wasted escape per line, and it makes the transcript harder to read in a
+  // log. So the base is only emitted when the palette actually asks for it.
+  const open = base === '' ? '' : `\x1b[${base}m`
+  let out = open
   for (const segment of segments) {
     const code = markdownSegmentCode(segment.kind)
     const body = code === ''
       ? segment.text
       // SGR 0 first: restoring only the base codes does not clear italic,
       // underline, or bold, so those attributes would leak into later spans.
-      : `\x1b[${code}m${segment.text}\x1b[0m\x1b[${base}m`
+      : `\x1b[${code}m${segment.text}\x1b[0m${open}`
     out += wrapHyperlink(body, segment.href, hyperlinks)
   }
   return `${out}\x1b[0m`

@@ -28,6 +28,7 @@ import {
   planMarkdownFromArgs,
 } from './plan.js'
 import type { DiffDisplayLine, DisplayKind, Row, ToolDiffHunk } from './transcript-types.js'
+import { activeTheme, themeExtraToken, themeToken } from './theme.js'
 
 export const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 export const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
@@ -476,11 +477,12 @@ export function capDisplayLines(lines: readonly DiffDisplayLine[], maxLines: num
   return [...lines.slice(0, budget - 2), marker, ...lines.slice(-1)]
 }
 
-/** Running / ok / error → ANSI color for the status dot and status word only. */
-export function toolStateColor(status: 'running' | 'ok' | 'error' | undefined): '33' | '32' | '31' {
-  if (status === 'ok') return '32'
-  if (status === 'error') return '31'
-  return '33'
+/** Running / ok / error → theme token for the status dot and status word only. */
+export function toolStateColor(status: 'running' | 'ok' | 'error' | undefined): string {
+  const theme = activeTheme()
+  if (status === 'ok') return themeExtraToken(theme, 'tool-ok')
+  if (status === 'error') return themeToken(theme, 'error')
+  return themeExtraToken(theme, 'tool-running')
 }
 
 export function toolStateLabel(status: 'running' | 'ok' | 'error' | undefined): string {
@@ -529,11 +531,11 @@ export function buildToolHeader(input: {
   const segments: TextSegment[] = []
   if (flipping) {
     const markerIndex = prefix.length
-    segments.push({ start: markerIndex, end: markerIndex + marker.length, sgr: '36' })
+    segments.push({ start: markerIndex, end: markerIndex + marker.length, sgr: themeExtraToken(activeTheme(), 'accent') })
   }
   if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
   if (summaryText.length > 0) {
-    segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: '90' })
+    segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: themeToken(activeTheme(), 'system') })
   }
   if (statToken !== '') {
     // Git diffstat colors: deletions red, additions green. The token sits
@@ -544,12 +546,12 @@ export function buildToolHeader(input: {
       segments.push({
         start: statStart,
         end: statStart + (delEnd === -1 ? statToken.length : delEnd),
-        sgr: '31',
+        sgr: themeToken(activeTheme(), 'error'),
       })
     }
     if (delEnd !== -1) {
       const addStart = statStart + delEnd + 1
-      segments.push({ start: addStart, end: statStart + statToken.length, sgr: '32' })
+      segments.push({ start: addStart, end: statStart + statToken.length, sgr: themeExtraToken(activeTheme(), 'tool-ok') })
     }
   }
   if (stateIndex >= 0) {
@@ -563,7 +565,7 @@ export function buildToolHeader(input: {
     segments.push({
       start: spinnerStart,
       end: plain.length,
-      sgr: '90',
+      sgr: themeToken(activeTheme(), 'system'),
     })
   }
   return { plain, segments: segments.filter(segment => segment.end > segment.start) }

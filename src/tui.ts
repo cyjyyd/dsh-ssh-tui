@@ -72,6 +72,17 @@ import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
 import { classifyAuthFailure, isReasoningReplayFailure, type AuthFailure } from './auth-failure.js'
+import {
+  activeTheme,
+  resolveTheme,
+  setActiveTheme,
+  themeByName,
+  themeEmphasisToken,
+  themeExtraToken,
+  themeNames,
+  themeToken,
+  type Theme,
+} from './theme.js'
 import { presetLabel, profileFromArgv } from './preset-label.js'
 import { flattenGroups, groupPresets, optionMatches, type PresetPickerOption } from './preset-picker.js'
 import {
@@ -1037,10 +1048,6 @@ const LINE_MODE_INSPECT_LINES = 80
  * a changed word is marked without stepping outside the muted palette. The
  * fills they lighten live in `styleLine` (`diff-add` / `diff-del`).
  */
-const DIFF_EMPHASIS_SGR: Partial<Record<DisplayKind, string>> = {
-  'diff-add': '38;2;198;232;190;48;2;34;72;44',
-  'diff-del': '38;2;246;206;206;48;2;86;34;34',
-}
 const STALL_WARNING_MS = 60000
 /** Bytes already queued for the terminal before a frame is skipped instead. */
 const STDOUT_BACKLOG_BYTES = 32 * 1024
@@ -1464,6 +1471,11 @@ export class SshTui {
   private suggestionIndex = 0
   private focusedRow: FocusTarget | null = null
   /**
+   * The active palette. Roles resolve through `theme.ts`, so switching themes is
+   * a repaint, not a re-render — no row holds a colour of its own.
+   */
+  private theme: Theme = resolveTheme(undefined)
+  /**
    * The text of the last prompt the user sent, kept so an opted-in retry can
    * send the same thing again after a provider-side auth failure. Cleared when
    * the retry fires, which is what bounds it to one attempt per user message.
@@ -1658,6 +1670,11 @@ export class SshTui {
     // The palette the terminal can take, decided once: a truecolor pair on an
     // 8-colour terminal is not a cosmetic loss, it is the wrong colour.
     this.colorDepth = config.color === false ? 'none' : colorDepth(process.env)
+    // The theme is a live setting: `DSH_TUI_THEME` wins for one launch, the
+    // `ssh-tui` settings section remembers the user's choice across them.
+    // Publish as well as store: the footer, plan dock, tool cards and markdown
+    // renderers have no session handle and read the active palette.
+    this.theme = setActiveTheme(process.env.DSH_TUI_THEME ?? this.readThemeName())
     this.color = this.colorDepth !== 'none'
     this.lastSessionRoute = config.restoredRoute
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
@@ -1908,6 +1925,7 @@ export class SshTui {
     notifySmtpUser?: string
     notifySmtpPassword?: string
     retryProviderAuth?: boolean
+    theme?: string
   }): Promise<void> {
     const settings = this.ctx.get('settings')
     if (settings === undefined) return
@@ -1923,6 +1941,7 @@ export class SshTui {
         notifySmtpUser?: string
         notifySmtpPassword?: string
         retryProviderAuth?: boolean
+        theme?: string
       }
       : {}
     await settings.replace(UI_LOCALE_NAMESPACE, { ...previous, ...patch })
@@ -4566,7 +4585,9 @@ export class SshTui {
     }
 
     const promptPlain = this.color ? '❯ ' : '> '
-    const prompt = this.color ? `\x1b[36m${promptPlain.trimEnd()}\x1b[0m ` : promptPlain
+    const prompt = this.color
+      ? `\x1b[${themeExtraToken(this.theme, 'accent')}m${promptPlain.trimEnd()}\x1b[0m `
+      : promptPlain
     const promptWidth = displayWidth(promptPlain)
     const masked = this.dialog?.kind === 'onboarding' && this.onboarding?.step === 'key'
     const inputTextWidth = Math.max(1, width - promptWidth)
@@ -4743,7 +4764,7 @@ export class SshTui {
       const ring = formatContextPressureRing(this.contextPressure.percent)
       statusLine = statusLine.replace(
         ring,
-        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${ring}\x1b[0m\x1b[90m`,
+        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${ring}\x1b[0m\x1b[${themeToken(this.theme, 'system')}m`,
       )
     }
     if (this.color) {
@@ -4752,7 +4773,7 @@ export class SshTui {
         statusLine,
         chip,
         footerSubagentForeign(footer),
-        this.mutedSgr() || '90',
+        this.mutedSgr() || themeToken(this.theme, 'system'),
         this.colorDepth,
       )
     }
@@ -5412,32 +5433,17 @@ export class SshTui {
   }
 
   private mutedSgr(): string {
-    return this.color ? downgradeSgr('90', this.colorDepth) : ''
+    return this.color ? downgradeSgr(themeToken(this.theme, 'system'), this.colorDepth) : ''
   }
 
   private styleLine(kind: DisplayKind, text: string): string {
     const safe = sanitizeTerminalText(text)
     if (!this.color) return safe
-    const requested =
-      kind === 'user' ? '36' :
-      kind === 'assistant' ? '37' :
-      kind === 'reasoning' ? '2;3' :
-      kind === 'brand' ? '1;38;2;77;107;253' :
-      kind === 'tool' || kind === 'tool-result' ? '37' :
-      // Codex-like: muted add/del that blend into the terminal background.
-      kind === 'diff-add' ? '38;2;122;168;116;48;2;18;42;24' :
-      kind === 'diff-del' ? '38;2;196;122;122;48;2;48;20;20' :
-      kind === 'diff-path' ? '1;36' :
-      kind === 'todo-done' ? '2;32' :
-      kind === 'todo-active' ? '1;36' :
-      kind === 'todo-failed' ? '31' :
-      kind === 'todo-skipped' ? '2;33' :
-      kind === 'todo-pending' ? '90' :
-      kind === 'plan-dock' ? '38;5;180' :
-      kind === 'subagent-header' ? '38;5;141' :
-      kind === 'diag' ? '2;36' :
-      kind === 'error' ? '31' :
-      '90'
+    // Roles, not colours: `theme.ts` owns the palette, this method owns the
+    // escaping. Primary text and tool output carry an empty token on purpose —
+    // they take the terminal's own foreground, which is the only choice that is
+    // readable on both light and dark terminals.
+    const requested = themeToken(this.theme, kind)
     const code = downgradeSgr(requested, this.colorDepth)
     // Nothing left to paint: the text stands on its own.
     if (code === '') return safe
@@ -5455,7 +5461,7 @@ export class SshTui {
    * the inverse video stays for that case.
    */
   private styleEmphasisedPiece(kind: DisplayKind, text: string): string {
-    const requested = DIFF_EMPHASIS_SGR[kind]
+    const requested = themeEmphasisToken(this.theme, kind)
     if (requested !== undefined && this.color) {
       const code = downgradeSgr(requested, this.colorDepth)
       if (code !== '') return `\x1b[${code}m${sanitizeTerminalText(text)}\x1b[0m`
@@ -8984,6 +8990,52 @@ export class SshTui {
     return false
   }
 
+  /** The theme saved in the `ssh-tui` settings section, if any. */
+  private readThemeName(): string | undefined {
+    const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const value = (raw as { theme?: unknown }).theme
+    const name = String(value ?? '').trim()
+    return name === '' ? undefined : name
+  }
+
+  /**
+   * `/theme [name]` — list the palettes, or switch to one and remember it.
+   *
+   * Switching repaints from the row cache, so it costs one frame rather than a
+   * re-render of the transcript; `mono` exists for terminals where colour is the
+   * problem rather than the answer, and it keeps every difference as an
+   * attribute instead of throwing the difference away.
+   */
+  private async runThemeCommand(arg: string): Promise<void> {
+    const wanted = arg.trim().toLowerCase()
+    if (wanted === '') {
+      const current = this.theme.name
+      this.pushRow({
+        kind: 'system',
+        text: [
+          t('theme.current', { name: current }),
+          ...themeNames().map(name => `  ${name === current ? '●' : '○'} /theme ${name}`),
+          t('theme.hint'),
+        ].join('\n'),
+      })
+      this.markDirty()
+      return
+    }
+    const next = themeByName(wanted)
+    if (next === undefined) {
+      this.pushRow({ kind: 'error', text: t('theme.unknown', { name: wanted, known: themeNames().join(', ') }) })
+      this.markDirty()
+      return
+    }
+    this.theme = setActiveTheme(next.name)
+    await this.mergeUiSettings({ theme: next.name })
+    // A theme change touches every cached line, so the whole frame is stale.
+    this.forceFullPaint = true
+    this.pushRow({ kind: 'system', text: t('theme.switched', { name: next.name }) })
+    this.markDirty()
+  }
+
   /** `/retryauth [on|off]` — the setting that lets one provider 401/403 retry itself. */
   private async runRetryAuthCommand(arg: string): Promise<void> {
     const id = arg.trim().toLowerCase()
@@ -11372,6 +11424,12 @@ export class SshTui {
           } else {
             this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) })
           }
+          this.markDirty()
+        })
+        break
+      case 'theme':
+        void this.runThemeCommand(arg).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'theme', error: errorChain(error) }) })
           this.markDirty()
         })
         break

@@ -101,6 +101,22 @@ side-by-side at 100 columns or more · `DSH_TUI_LINE_MODE=1` appends plain lines
 readers and `tee` · `ssh-tui.keys` rebinds keys, refusing conflicts · `DSH_TUI_COLOR_DEPTH`
 pins the palette (truecolor / 256 / 8 / none).
 
+## Which host lines this covers
+
+The plugin declares and tests **both `@deepseek-ai/dsh` lines in flight**:
+
+| Host line | Status |
+| --- | --- |
+| `0.1.7-rc.1` / `0.1.7-rc.2` (`latest`) | declared compatible; CI runs the full real-PTY probe set on rc.2 and typecheck + unit suite on rc.1 |
+| `0.2.0-rc.1` / `0.2.0-rc.2` (`next`, also the desktop app's baseline) | declared compatible; rc.2 is the default development line with the full probe set, rc.1 gets typecheck + suite |
+| `0.1.5` and older | **unsupported as of 0.8.0**, with an explicit `incompatible` entry in `dshReleases` |
+
+The declared window is `>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1` (peer dependencies and `dshReleases`
+state the same fact), and every release re-installs those versions in a clean tree and re-runs the types, the
+suite and the real-PTY probes — not "no errors, so it probably works". Many terminal plugins on npm are still
+stranded on the 0.1.5 line; few terminal UIs install on the 0.2.0-rc line at all, which is why the window is
+maintained this tightly.
+
 ## Desktop Harness users, read this first
 
 **The official desktop app (<https://www.deepseek.com/harness/>) does not need this plugin** — use its own UI
@@ -427,6 +443,7 @@ You can reopen the wizard at any time with:
 | `/find [kind] query` | search and jump to the full matching message (`thinking` `plan` `subagent` `reply` `prompt` `tool`), which is also selected. `Ctrl+/` or `Alt+/` opens it |
 | `/copy` | copy the selected card or reply **as written** to the local clipboard (latest reply if none is selected; OSC 52). The selection survives, so pressing it twice copies the same thing. Inside a full view the copy key (`Ctrl+Shift+C`) takes **the body on screen** — a tool body, a changes diff, or the reply as written — and the overlay echoes the confirmation |
 | `/retryauth [on\|off]` | auto-retry once when the *provider* rejects a request (HTTP 401/403 while a local credential is configured); off by default. The three-step diagnosis is in [`docs/remote-ops.md`](docs/remote-ops.md) §4.8 |
+| `/theme [name]` | palette: `default` / `catppuccin` / `gruvbox` / `mono` (emits no colour at all — bold, dim and underline carry the differences). `/theme` lists them and marks the current one; the choice is remembered, and `DSH_TUI_THEME` overrides it for one launch |
 | `Ctrl+G` / `Alt+N` | next search hit; `Alt+P` previous |
 | `Esc` | drop selection → scroll to bottom → cancel the running turn |
 | `Ctrl+C` | cancel the running turn; press twice when idle to exit |
