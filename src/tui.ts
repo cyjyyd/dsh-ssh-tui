@@ -1540,6 +1540,25 @@ export class SshTui {
   }
 
   /**
+   * Fingerprint of one tool burst.
+   *
+   * A burst is a *group of tool rows drawn inside the reply above them*, so the
+   * reply's cached lines contain cards belonging to rows the reply's own
+   * fingerprint never sees. Without this, the reply kept replaying its cached
+   * burst: a finished tool went on saying "processing" and the stale card stayed
+   * on screen beside the live one — the residue a reader reported twice.
+   */
+  private static burstKey(groups: { edits: Row[]; calls: Row[] }): string {
+    const one = (rows: Row[]): string =>
+      rows.map(row => {
+        const loose = row as unknown as Record<string, unknown>
+        const output = typeof loose.output === 'string' ? loose.output.length : 0
+        return `${String(loose.callId ?? '')}/${String(loose.status ?? '')}/${output}`
+      }).join(',')
+    return `${one(groups.edits)}#${one(groups.calls)}`
+  }
+
+  /**
    * Whether a row's rendering depends on the clock.
    *
    * A running card draws a spinner and an elapsed time, and a streaming row is
@@ -4252,7 +4271,16 @@ export class SshTui {
       let cacheKey: string | undefined
       if (cachedRow !== undefined && !skipMiddle) {
         const live = SshTui.isLiveRow(cachedRow)
-        cacheKey = `${displayBase}|${rowIndex === 4 ? 'fold' : ''}|${leadingPhase ? 'lead' : '-'}|${inBurst ? 'burst' : '-'}|${live ? `t${liveTick}` : 'settled'}|${SshTui.rowKey(cachedRow)}`
+        // The burst belongs to this row's rendering even though its rows are
+        // elsewhere in the transcript, so its content is part of the key.
+        const burst = inBurst ? compactBurstByReply.get(cachedRow as Extract<Row, { kind: 'assistant' }>) : undefined
+        const leadingBurst = compact && !leadingPhase && (cachedRow.kind === 'assistant' || cachedRow.kind === 'user')
+          ? compactBursts.find(candidate => candidate.after === undefined)
+          : undefined
+        const burstKey = burst === undefined && leadingBurst === undefined
+          ? '-'
+          : `${burst === undefined ? '' : SshTui.burstKey(burst.groups)}|${leadingBurst === undefined ? '' : SshTui.burstKey(leadingBurst.groups)}`
+        cacheKey = `${displayBase}|${rowIndex === 4 ? 'fold' : ''}|${leadingPhase ? 'lead' : '-'}|${live ? `t${liveTick}` : 'settled'}|${burstKey}|${SshTui.rowKey(cachedRow)}`
         const entry = this.displayRowCache.get(cachedRow)
         if (SshTui.rowRendersEqual(cachedRow, entry, cacheKey)) {
           for (const line of entry.lines) display.push(line)

@@ -421,6 +421,34 @@ export function encodeFrame(type: number, payload: Buffer = Buffer.alloc(0)): Bu
   return Buffer.concat([header, payload])
 }
 
+/**
+ * The size a relay should report.
+ *
+ * A terminal knows its own size; a parent that speaks the protocol on pipes is
+ * not a terminal, so it declares one through `COLUMNS`/`LINES` — the convention
+ * every shell and TUI already shares — and corrects it later with a resize frame
+ * if the window changes. Without either, the historical 80×24 stands.
+ * @param stdout - the stream that may be a terminal.
+ * @param env - the environment to read.
+ * @returns the columns and rows to send as the first resize.
+ */
+export function relayTerminalSize(
+  stdout: { columns?: number; rows?: number } = process.stdout,
+  env: NodeJS.ProcessEnv = process.env,
+): { columns: number; rows: number } {
+  const fromEnv = (name: string, fallback: number): number => {
+    const raw = Number.parseInt(String(env[name] ?? ''), 10)
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback
+  }
+  const columns = Number.isFinite(stdout.columns) && (stdout.columns ?? 0) > 0
+    ? Number(stdout.columns)
+    : fromEnv('COLUMNS', 80)
+  const rows = Number.isFinite(stdout.rows) && (stdout.rows ?? 0) > 0
+    ? Number(stdout.rows)
+    : fromEnv('LINES', 24)
+  return { columns, rows }
+}
+
 export function encodeResize(columns: number, rows: number): Buffer {
   const payload = Buffer.alloc(4)
   payload.writeUInt16BE(Math.max(0, Math.min(0xffff, columns)), 0)
@@ -1585,9 +1613,12 @@ export async function runDisplayRelay(
         : {}),
     })
     let resizeTimer: NodeJS.Timeout | undefined
+    // Resolved once per relay: a terminal can change size and says so with a
+    // resize event, while a pipe parent declares it up front and sends a frame.
+    const size = relayTerminalSize(stdout)
     const sendResize = (): void => {
       try {
-        socket.write(encodeResize(stdout.columns || 80, stdout.rows || 24))
+        socket.write(encodeResize(size.columns, size.rows))
       } catch {
         finish('host-closed')
       }
@@ -1707,8 +1738,7 @@ export async function runDisplayRelay(
           // tells us nothing (see `TerminalVerdict`).
           terminalAnswered = rtt !== undefined
           reportedRtt = rtt
-          const columns = stdout.columns || 80
-          const rows = stdout.rows || 24
+          const { columns, rows } = size
           socket.write(Buffer.concat([
             encodeFrame(FRAME_HELLO),
             encodeResize(columns, rows),
