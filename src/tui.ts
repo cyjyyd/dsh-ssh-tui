@@ -148,6 +148,7 @@ import {
   restrictPathToUser,
   usesSigwinch,
 } from './platform.js'
+import { asciiFallbackEnabled } from './platform.js'
 import {
   bracketedPasteSequence,
   mouseDisableSequence,
@@ -999,6 +1000,22 @@ const COMPACTION_STALE_MS = 15 * 60_000
 const FAMILY_OWNER_CACHE_MAX = 512
 
 /** Lifecycle handle for a mounted interactive terminal channel. */
+/**
+ * Row fields the display rendering reads, for the per-row render cache.
+ *
+ * Kept next to the cache's fingerprint rather than beside the row type: the list
+ * only has to be complete for *rendering* purposes, and a single place makes it
+ * obvious what to extend when the rendering starts reading something new.
+ */
+const SCALAR_KEY_FIELDS = [
+  'kind', 'text', 'summary', 'detail', 'header', 'title', 'output', 'planMarkdown',
+  'blockedReason', 'diff', 'command', 'expanded', 'archived', 'status', 'phase', 'signal',
+  'more', 'startedAt', 'endedAt', 'flipUntil', 'modelProvider', 'provider', 'model', 'id', 'callId',
+] as const
+
+/** Row fields holding structures the rendering walks; compared one level deep. */
+const NESTED_KEY_FIELDS = ['todos', 'sources', 'intent'] as const
+
 export interface TuiController {
   dispose(): Promise<void>
   handleHangup(): Promise<void>
@@ -1487,6 +1504,98 @@ export class SshTui {
    * a repaint, not a re-render — no row holds a colour of its own.
    */
   private theme: Theme = resolveTheme(undefined)
+
+  /**
+   * Rendered display lines per row, keyed by the row object.
+   *
+   * Every frame used to re-render the whole transcript — markdown parsing, card
+   * layout, wrapping and clipping for thousands of rows — to show the twenty on
+   * screen. Measured on a 5000-row session that was ~550 ms per frame, which is
+   * what "rendering feels slower the longer the session runs" was: a keystroke
+   * costs the same as a full repaint because both redo all of it.
+   *
+   * The cache is `WeakMap`-keyed on the row object, so a replaced row starts a new
+   * entry and an unreferenced one is collected. What each entry stores is a
+   * *fingerprint* of every input the row's rendering depends on plus the lines it
+   * produced; a row whose fingerprint is unchanged replays instead of re-rendering,
+   * which is the common case — during a turn only the streaming row changes.
+   */
+  private displayRowCache = new WeakMap<Row, { key: string; lines: string[]; refs: unknown[]; gutters: number[] }>()
+
+  /** Fingerprint of the state that affects *every* row's rendering. */
+  private displayBaseKey(width: number): string {
+    return [
+      width,
+      String(this.isCompactView()),
+      this.showReasoning === true ? 'r' : '-',
+      this.searchIndex,
+      this.searchHits.length,
+      this.theme.name,
+      this.colorDepth,
+      this.focusedRow === null ? '' : String((this.focusedRow as Row).kind ?? 'block'),
+      String(this.paintTailBudget),
+      this.pendingReveal === undefined ? '' : String(this.pendingReveal),
+      asciiFallbackEnabled() ? 'ascii' : 'utf8',
+    ].join('|')
+  }
+
+  /**
+   * Fingerprint of everything one row's rendering reads.
+   *
+   * Written by hand rather than hashing the object: the rendering reads a known
+   * set of fields, and a generic walk would cost more per frame than the render
+   * it is meant to avoid. Scalar fields are compared by value; nested arrays the
+   * rendering walks (todos, sources, intent) get a shallow signature of their own
+   * scalars, because those are updated in place.
+   *
+   * The list is a contract: a field the rendering starts reading must be added
+   * here, or a frame replays stale lines. A test mutates one field in place and
+   * asserts the next frame notices, which is the pattern to copy for a new field.
+   */
+  private static rowKey(row: Row): string {
+    const loose = row as unknown as Record<string, unknown>
+    let key = ''
+    for (const field of SCALAR_KEY_FIELDS) {
+      const value = loose[field]
+      key += typeof value === 'string' ? `${value.length}:${value.charCodeAt(0)}:${value.charCodeAt(value.length - 1)};`
+        : value === undefined ? '-;'
+          : `${String(value)};`
+    }
+    for (const field of NESTED_KEY_FIELDS) {
+      const value = loose[field]
+      if (value === undefined) {
+        key += '-;'
+        continue
+      }
+      if (!Array.isArray(value)) {
+        key += `o${Object.keys(value as object).length};`
+        continue
+      }
+      key += `a${value.length}:`
+      // Bounded: a list longer than this changes its length when it changes, and
+      // walking hundreds of items per frame would defeat the cache.
+      for (const item of value.slice(0, 24)) {
+        if (item === null || typeof item !== 'object') {
+          key += String(item) + ','
+          continue
+        }
+        for (const [name, inner] of Object.entries(item as Record<string, unknown>)) {
+          key += name + '=' + (typeof inner === 'string' ? inner.length : String(inner)) + ','
+        }
+        key += '|'
+      }
+      key += ';'
+    }
+    return key
+  }
+
+  private static rowRendersEqual(
+    row: Row,
+    entry: { key: string; lines: string[]; refs: unknown[]; gutters: number[] } | undefined,
+    key: string,
+  ): entry is { key: string; lines: string[]; refs: unknown[]; gutters: number[] } {
+    return entry !== undefined && entry.key === key
+  }
   /**
    * The text of the last prompt the user sent, kept so an opted-in retry can
    * send the same thing again after a provider-side auth failure. Cleared when
@@ -4093,7 +4202,45 @@ export class SshTui {
       && this.rows.length > this.paintTailBudget + 8
     const historyStart = skipMiddle ? Math.max(0, this.rows.length - this.paintTailBudget) : 0
     let paintedLeadingCompact = skipMiddle
+    // Per-row render cache. A row whose fingerprint is unchanged replays its
+    // lines instead of re-rendering them, which is what turns a frame from
+    // "parse every markdown block in the transcript" into "parse the one that
+    // changed". The base key covers the state every row reads (width, view mode,
+    // focus, search, theme, ascii fallback); the row key covers its own fields.
+    const displayBase = this.displayBaseKey(width)
+    // The row body has several `continue`s, so its cache entry is written when the
+    // *next* row starts (and once after the loop) rather than at every exit.
+    let pendingFinish: (() => void) | undefined
+    const flushPending = (): void => {
+      const finish = pendingFinish
+      pendingFinish = undefined
+      finish?.()
+    }
     for (let rowIndex = 0; rowIndex < this.rows.length; rowIndex += 1) {
+      flushPending()
+      const cachedRow = this.rows[rowIndex]
+      let cacheKey: string | undefined
+      if (cachedRow !== undefined && !skipMiddle) {
+        cacheKey = `${displayBase}|${rowIndex === 4 ? 'fold' : ''}|${SshTui.rowKey(cachedRow)}`
+        const entry = this.displayRowCache.get(cachedRow)
+        if (SshTui.rowRendersEqual(cachedRow, entry, cacheKey)) {
+          for (const line of entry.lines) display.push(line)
+          for (const ref of entry.refs) displayRefs.push(ref as Row | CollapsibleBlock | undefined)
+          for (const gutter of entry.gutters) displayGutters.push(gutter)
+          continue
+        }
+      }
+      const markStart = { line: display.length, ref: displayRefs.length, gutter: displayGutters.length }
+      const finishRow = (): void => {
+        if (cacheKey === undefined || cachedRow === undefined) return
+        this.displayRowCache.set(cachedRow, {
+          key: cacheKey,
+          lines: display.slice(markStart.line),
+          refs: displayRefs.slice(markStart.ref),
+          gutters: displayGutters.slice(markStart.gutter),
+        })
+      }
+      pendingFinish = finishRow
       if (skipMiddle && rowIndex >= 4 && rowIndex < historyStart) {
         if (rowIndex === 4) addDisplay(this.styleLine('system', t('history.folded')))
         continue
@@ -4662,6 +4809,7 @@ export class SshTui {
     const inputDivider = this.styleLine('system', repeatToWidth('─', width))
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
     const available = Math.max(0, height - reserved - dialogLines.length)
+    flushPending()
     const window = windowTranscript({
       lines: display,
       refs: displayRefs,

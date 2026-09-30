@@ -378,6 +378,60 @@ let ambiguousMeasured: boolean | undefined
 let ambiguousReserve: boolean | undefined
 
 /**
+ * The resolved policy, cached.
+ *
+ * This used to be worked out *inside* `displayWidth`'s per-character loop, which
+ * read `process.env` and ran regexes for every character of every painted line —
+ * a profile of a 2000-row frame put ~75% of the samples there, and it is why
+ * rendering in a long session felt slow. The policy cannot change during a frame,
+ * so it is resolved once and read as plain booleans afterwards; the setters below
+ * and `ambiguousPolicy()`'s own cheap key check are what invalidate it.
+ */
+let ambiguousPolicyCache: { key: string; wide: boolean; reserve: boolean } | undefined
+
+/** The three inputs the policy depends on, as one cheap-to-compare string. */
+function ambiguousPolicyKey(env: NodeJS.ProcessEnv, onTerminal: boolean): string {
+  return `${env.DSH_TUI_AMBIGUOUS_WIDTH ?? ''}|${env.DSH_TUI_AMBIGUOUS_RESERVE ?? ''}|`
+    + `${env.LC_ALL ?? ''}|${env.LC_CTYPE ?? ''}|${env.LANG ?? ''}|`
+    + `${onTerminal ? 'tty' : 'pipe'}|${String(ambiguousMeasured)}|${String(ambiguousReserve)}`
+}
+
+/**
+ * Resolve the ambiguous-glyph policy for this process.
+ *
+ * Cheap enough to call once per line (it compares one string) and far too
+ * expensive to call per character, which is the distinction that matters.
+ * @param env - the environment to read.
+ * @param onTerminal - whether the output is a terminal at all.
+ * @returns whether the glyphs are two cells wide, and whether the second cell is
+ *   ours to reserve.
+ */
+export function ambiguousPolicy(
+  env: NodeJS.ProcessEnv = process.env,
+  onTerminal = process.stdout?.isTTY === true,
+): { wide: boolean; reserve: boolean } {
+  const key = ambiguousPolicyKey(env, onTerminal)
+  const cached = ambiguousPolicyCache
+  if (cached !== undefined && cached.key === key) return cached
+  const override = String(env.DSH_TUI_AMBIGUOUS_WIDTH ?? '').trim()
+  const reserveOverride = String(env.DSH_TUI_AMBIGUOUS_RESERVE ?? '').trim()
+  const locale = `${env.LC_ALL ?? ''} ${env.LC_CTYPE ?? ''} ${env.LANG ?? ''}`.toLowerCase()
+  const localeIsCjk = /(?:^|[^a-z])(?:zh|ja|ko)[_@.-]/u.test(locale) || /(?:^|\s)(?:zh|ja|ko)(?:\s|$)/u.test(locale)
+  let wide: boolean
+  if (override === '1') wide = false
+  else if (override === '2') wide = true
+  else if (ambiguousMeasured !== undefined) wide = ambiguousMeasured
+  else wide = onTerminal && localeIsCjk
+  // The reservation is only worth its space when the terminal advances one cell
+  // for a glyph it draws wider than a cell; a measurement is the evidence for it,
+  // and the environment is the manual override.
+  let reserve = ambiguousReserve ?? (reserveOverride === '1' || reserveOverride === 'true')
+  if (override === '1' || override === '2') reserve = ambiguousReserve ?? false
+  ambiguousPolicyCache = { key, wide, reserve }
+  return ambiguousPolicyCache
+}
+
+/**
  * The reserve setting from the environment, when a parent passed one.
  *
  * The Host cannot measure, so its launcher hands the verdict over in the
@@ -402,6 +456,7 @@ function reserveFromEnv(): boolean {
  */
 export function setAmbiguousWidthMeasured(wide: boolean | undefined): void {
   ambiguousMeasured = wide
+  ambiguousPolicyCache = undefined
   // A terminal that advances one cell for a glyph drawn wider than a cell is
   // exactly the collision case; reserve the second cell so the next character is
   // not painted on top of it.
@@ -416,12 +471,29 @@ export function setAmbiguousWidthMeasured(wide: boolean | undefined): void {
  */
 export function setAmbiguousWidthReserve(reserve: boolean): void {
   ambiguousReserve = reserve
+  ambiguousPolicyCache = undefined
   ambiguousCache = undefined
 }
 
 /** Whether the second cell is currently reserved with a space. */
 export function ambiguousWidthReserved(): boolean {
-  return ambiguousReserve ?? reserveFromEnv()
+  return ambiguousPolicy().reserve
+}
+
+/**
+ * Whether one code point is in a family the ambiguous policy governs.
+ *
+ * A scan over a handful of pairs, cheap enough for the per-character path — which
+ * is why the policy booleans are resolved once per line and passed in, rather
+ * than looked up per character.
+ * @param cp - the code point.
+ * @returns true when the ambiguous table applies to it.
+ */
+function inAmbiguousRange(cp: number): boolean {
+  for (const [start, end] of AMBIGUOUS_WIDE_RANGES) {
+    if (cp >= start && cp <= end) return true
+  }
+  return false
 }
 
 /**
@@ -434,8 +506,9 @@ export function ambiguousWidthReserved(): boolean {
  * @returns 0, 1 or 2 cells.
  */
 export function ambiguousCellCost(cp: number): number {
-  if (!ambiguousWidthReserved()) return 0
-  return AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end) ? 2 : 0
+  if (!inAmbiguousRange(cp)) return 0
+  const policy = ambiguousPolicy()
+  return policy.reserve || policy.wide ? 2 : 1
 }
 
 /** What the last measurement decided, for diagnostics and tests. */
@@ -462,43 +535,24 @@ export function ambiguousWidthIsTwo(
   env: NodeJS.ProcessEnv = process.env,
   onTerminal = process.stdout?.isTTY === true,
 ): boolean {
-  const override = String(env.DSH_TUI_AMBIGUOUS_WIDTH ?? '').trim()
-  const locale = `${env.LC_ALL ?? ''} ${env.LC_CTYPE ?? ''} ${env.LANG ?? ''}`
-  // The locale is part of the key: it is an input to the answer, and a process
-  // that resolves it twice with different environments (a test, or a launcher
-  // that passes a scrubbed env) must not get the first answer back.
-  const key = `${override}|${locale}|${onTerminal ? 'tty' : 'pipe'}|${String(ambiguousMeasured)}`
-  if (ambiguousCache?.key === key) return ambiguousCache.value
-  let value: boolean
-  // Order matters: an explicit setting, then what the terminal actually said,
-  // then the locale — the guess of last resort.
-  if (override === '1') value = false
-  else if (override === '2') value = true
-  else if (ambiguousMeasured !== undefined) value = ambiguousMeasured
-  else {
-    // The locale is evidence about the *terminal* — which font it is configured
-    // to use — so it only counts when there is one. A pipe, a log, or a test
-    // harness has no font metrics to speak of, and reading the locale there made
-    // geometry depend on whose machine ran the tests (a zh laptop said two
-    // cells, a CI runner said one).
-    const raw = `${env.LC_ALL ?? ''} ${env.LC_CTYPE ?? ''} ${env.LANG ?? ''}`.toLowerCase()
-    value = onTerminal
-      && (/(?:^|[^a-z])(?:zh|ja|ko)[_@.-]/u.test(raw) || /(?:^|\s)(?:zh|ja|ko)(?:\s|$)/u.test(raw))
-  }
-  ambiguousCache = { key, value }
-  return value
+  return ambiguousPolicy(env, onTerminal).wide
 }
 
 export function displayWidth(text: string): number {
   let width = 0
   const measured = mapAsciiChrome(text)
+  // Resolved once per call rather than per character: this runs for every
+  // character of every painted line, and the old lookup read `process.env` and
+  // ran a regex each time (a profile of a 2000-row frame put ~75% of its samples
+  // there). Here it costs one string comparison for the whole line.
+  const policy = ambiguousPolicy()
   for (let index = 0; index < measured.length;) {
     const char = measured[index] ?? ''
     if (char === '') break
     // A reserved glyph plus our own space is ONE two-cell unit: the pin adds the
     // space so the terminal spends the second cell, and counting it again here
     // would make every padded row one cell short.
-    if (char !== ' ' && ambiguousCellCost(char.codePointAt(0) ?? 0) === 2) {
+    if (char !== ' ' && policy.reserve && inAmbiguousRange(char.codePointAt(0) ?? 0)) {
       width += 2
       index += char.length
       if (measured[index] === ' ') index += 1
@@ -525,10 +579,8 @@ export function displayWidth(text: string): number {
     }
     // NOTE: `index` has already advanced past this character above; the branches
     // below only decide how many cells it cost.
-    const ambiguousWide = ambiguousWidthIsTwo() && AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end)
     const wide =
-      ambiguousWide ||
-      ambiguousCellCost(cp) === 2 ||
+      ((policy.wide || policy.reserve) && inAmbiguousRange(cp)) ||
       (cp >= 0x1100 && cp <= 0x115f) ||
       cp === 0x2329 || cp === 0x232a ||
       (cp >= 0x2e80 && cp <= 0xa4cf) ||
@@ -574,6 +626,7 @@ export function displayWidth(text: string): number {
 export function pinEmojiCells(text: string): string {
   const mapped = mapAsciiChrome(text)
   if (mapped !== text) return mapped
+  const reserveWide = ambiguousPolicy().reserve
   let out = ''
   let index = 0
   while (index < text.length) {
@@ -586,7 +639,7 @@ export function pinEmojiCells(text: string): string {
     // wider: reserve the second cell so the next character is not painted on top
     // of it. Skipped when the glyph is already followed by a space (the run may
     // have been pinned once and be repainted), so pinning stays idempotent.
-    if (ambiguousCellCost(cp) === 2) {
+    if (reserveWide && inAmbiguousRange(cp)) {
       if (!/^[ ]/u.test(text.slice(index))) out += ' '
       continue
     }
