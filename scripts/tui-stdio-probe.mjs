@@ -50,6 +50,23 @@ const RESIZED_WIDTH = 120
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/** Control sequences, which are not text: see `plain()`. */
+const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
+const OSC = /\x1b\][^\x07]*\x07/gu
+
+/**
+ * What the parent's terminal widget would actually show.
+ *
+ * The assertions are about what a reader sees, and the prompt is drawn as
+ * `\x1b[36m❯\x1b[0m ` on the colour terminal this probe declares — so a match
+ * against the raw byte stream has to know the palette, and does not. Strip the
+ * escapes and the row reads `❯ x`, which is the same thing the PTY probe reads
+ * (`tui-probe.mjs`).
+ */
+function plain(text) {
+  return text.replace(CSI, '').replace(OSC, '')
+}
+
 const home = process.env.PROBE_HOME
 if (home === undefined || home === '') {
   // Deliberately not `DSH_HOME`: this probe creates a session, and the
@@ -98,9 +115,12 @@ const child = spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sess
     COLUMNS: String(WIDTH),
     LINES: String(HEIGHT),
     DSH_TUI_NO_UPDATE_CHECK: '1',
-    // Deterministic capability table: this probe is about the pipe, not about
-    // the terminal underneath it.
-    DSH_TUI_TERM_CAPS: '{}',
+    // No capability overrides: the empty value is the spelling for "none", where
+    // `{}` is not a token the parser knows (it lands in `/diag` as rejected). The
+    // table then comes from the TERM/COLORTERM declared above, so it is the same
+    // on every runner — this probe is about the pipe, not about the terminal
+    // underneath it, and it must not inherit one from the machine it runs on.
+    DSH_TUI_TERM_CAPS: '',
   },
   stdio: ['pipe', 'pipe', 'pipe'],
   windowsHide: true,
@@ -155,9 +175,19 @@ try {
   check(probed, `the child probed the terminal and we answered (${answered} answers)`)
 
   // 2. Keystrokes typed into the pipe reach the input box.
+  //
+  // The prompt is `❯ ` on a colour terminal and `> ` on a plain one, and this
+  // probe declares truecolor (COLORTERM above), so both spellings are accepted:
+  // the assertion is about the keystroke landing in the input box, not about
+  // which glyph the prompt happens to use. The padding is part of the check —
+  // the row is padded to the full width, and a bare `x` could be anything.
   const before = output.length
   child.stdin.write('x')
-  const echoed = await waitFor(() => /> x\s{3,}/u.test(output.slice(before)), STEP_TIMEOUT_MS, 'the input echo')
+  const echoed = await waitFor(
+    () => /(?:❯|>) x\s{3,}/u.test(plain(output.slice(before))),
+    STEP_TIMEOUT_MS,
+    'the input echo',
+  )
   check(echoed, 'a keystroke on the pipe is painted in the input box')
 
   // 3. A resize: the parent reports the new size the way a terminal does.
