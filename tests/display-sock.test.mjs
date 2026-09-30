@@ -439,7 +439,7 @@ test('DisplayHost ignores a connect with no HELLO (liveness probe)', async () =>
 // is not, the launcher reads the bare close as a crash and re-attaches instead
 // of exiting: a `/exit` that never goes (the red the stdio probe shows on a
 // loaded runner and never on a quiet one).
-test('the goodbye is on the wire before the Host closes its socket', async () => {
+test('the goodbye is on the wire before the Host closes its socket', { timeout: 15_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-goodbye-'))
   const path = sessionSockPath('goodbye-flush', home)
   const host = new DisplayHost(path, {
@@ -471,12 +471,19 @@ test('the goodbye is on the wire before the Host closes its socket', async () =>
 
   const received = []
   client.on('data', chunk => received.push(chunk))
+  // Subscribed *before* the Host starts closing: `close()` waits out its own
+  // reap window, so the client can be done before that await returns, and a
+  // listener attached afterwards waits for an event that already happened — the
+  // hang that cancelled the rest of this file on CI (the runner reports it as
+  // "Promise resolution is still pending but the event loop has already
+  // resolved").
+  const closed = new Promise(resolve => client.once('close', resolve))
   const closing = host.close()
   // The relay starts reading while the Host is still closing: the queue drains,
   // and the goodbye with it.
   setTimeout(() => client.resume(), 20)
   await closing
-  await new Promise(resolve => client.once('close', resolve))
+  await closed
   const frames = new FrameReader().push(Buffer.concat(received))
   assert.equal(
     frames.some(frame => frame.type === FRAME_GOODBYE),
