@@ -47,7 +47,7 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**On the 0.2.0-rc host line?** 0.8.0 is the release that supports it (older versions are refused by the launcher's version check), but it is published under `next` for now — `latest` is still 0.7.4 until 2026-10-01. Until then install with `dsh plugin --profile tui add dsh-ssh-tui@next`; on the 0.1.7-rc line `@latest` (0.7.4) is enough, and moving to 0.8.0 later costs nothing. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** `0.8.1` is `latest` and supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.1.7-rc`; older releases are refused by the launcher's version check. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 **Updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version

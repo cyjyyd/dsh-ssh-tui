@@ -2,6 +2,14 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.1 已发布（2026-09-30，`latest` + `next`）**：版本提交 `5edb033` → 推 `main` → tag `v0.8.1` →
+> CI 五条腿全 success（`test (0.2.0-rc.2)` / `0.2.0-rc.1` / `0.1.7-rc.2` / `0.1.7-rc.1` / `test-windows`）→
+> GitHub Release <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.1> → `npm publish --tag latest`
+> （registry 回 **202 Accepted**，约 4 分钟后 packument 出现 0.8.1；shasum `1c03d62d…`、205 个文件）→
+> `npm dist-tag add dsh-ssh-tui@0.8.1 next`。发版说明：[`release-notes-0.8.1.md`](release-notes-0.8.1.md)。
+> 本版头等事：**没有终端时插件保持惰性**（0.8.0 会抛错，桌面版会把它读成"插件失败"并把 GUI 带崩）。
+> 用户在本机 Windows 实机测过这一版后才要求发布。
+
 > **0.8.0 已发布（2026-09-29，只上 `next`）**：tag `v0.8.0` → CI 全绿 → GitHub Release
 > <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.0> → npm `next` = `0.8.0`。
 > **`latest` 仍是 0.7.4，按用户要求等 2026-10-01 再提升**（见下方"待办"）。
