@@ -31,6 +31,7 @@ import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import {
+  INPUT_HOLD_MS,
   RTT_SLOW_SAMPLE_TIMEOUT_MS,
   TerminalInputFilter,
   TerminalInputPump,
@@ -44,8 +45,10 @@ import {
   usesSigwinch,
 } from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
+import { createParentResizeFilter } from './display-mode.js'
 import { ambiguousWidthIsTwo, setAmbiguousWidthMeasured, setAmbiguousWidthReserve } from './term-text.js'
 import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
+import type { GlyphWidthMeasurement } from './glyph-measure.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -92,14 +95,6 @@ export type AttachmentVerdict = 'attached' | 'detached' | 'unknown'
 const MAX_FRAME = 1024 * 1024
 
 /**
- * Grace period for a kicked relay to read FRAME_REPLACED before its socket is
- * torn down. Without the frame the relay only saw `close`, read it as "the
- * Host is going away", and re-attached — two SSH windows then kicked each
- * other off the display forever, repainting the whole screen on every lap.
- */
-const REPLACED_GRACE_MS = 250
-
-/**
  * How long a connection may stay silent before the Host treats it as a
  * liveness probe and drops it.
  *
@@ -119,6 +114,33 @@ const DISPLAY_HELLO_GRACE_MS = 6_000
  * for a slow link), so this only has to cover those plus the socket hop.
  */
 const DISPLAY_PROBE_TIMEOUT_MS = 3_000
+
+/**
+ * How long a farewell frame may hold its socket open before the backstop reaps
+ * it: `FRAME_REPLACED` to a kicked relay, `FRAME_GOODBYE` on the way out.
+ *
+ * The frame is what tells the other end *why* the socket is going — a bare close
+ * reads as a crash, and the launcher re-attaches over it. A write only queues on
+ * libuv until that end drains it, so the socket is reaped on the write callback
+ * and this is the bound that keeps a stalled reader from holding the shutdown
+ * (`launcher-exit.ts` bounds the whole graceful exit at 2 s anyway).
+ */
+const FAREWELL_FLUSH_MS = 250
+
+/**
+ * How long the glyph probe may hold the Host's output waiting for an answer.
+ *
+ * The timing measurement immediately before it already says what a round trip
+ * costs on this link, so the glyph probe does not need a fixed generous window:
+ * two round trips plus a margin covers a terminal that answers late, and a
+ * terminal that answers nothing costs the attach this budget once rather than
+ * the full {@link DISPLAY_PROBE_TIMEOUT_MS}.
+ * @param rttMs - the round trip just measured, if the terminal answered.
+ */
+function glyphProbeTimeoutMs(rttMs: number | undefined): number {
+  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs <= 0) return 200
+  return Math.min(DISPLAY_PROBE_TIMEOUT_MS, Math.max(120, Math.ceil(rttMs * 2 + 80)))
+}
 
 /**
  * The link is measured again this soon after an attach, then on the slower
@@ -649,7 +671,7 @@ export class DisplayHost {
           } catch {
             // already gone
           }
-        }, REPLACED_GRACE_MS)
+        }, FAREWELL_FLUSH_MS)
         reap.unref?.()
         try {
           previous.end(encodeFrame(FRAME_REPLACED), () => {
@@ -824,12 +846,46 @@ export class DisplayHost {
     }
   }
 
+  /**
+   * Say goodbye and let the frame leave before the socket is reaped.
+   *
+   * The frame is what tells the launcher to exit instead of reading the close as
+   * a crash and re-attaching (`attach.ts`) — the replacement path flushes
+   * `FRAME_REPLACED` for exactly the same reason. A write only *queues* on libuv
+   * until the peer drains it, and reaping the socket cancels what is still
+   * queued: on a busy link, with a starting session still painting into that
+   * socket, the goodbye was dropped along with those frames and the launcher
+   * re-attached over the user's own `/exit` instead of exiting.
+   */
+  private async farewellAndReap(socket: Socket): Promise<void> {
+    await new Promise<void>(resolve => {
+      let settled = false
+      const done = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(reap)
+        try {
+          socket.destroy()
+        } catch {
+          // already gone
+        }
+        resolve()
+      }
+      const reap = setTimeout(done, FAREWELL_FLUSH_MS)
+      reap.unref?.()
+      try {
+        socket.end(encodeFrame(FRAME_GOODBYE), done)
+      } catch {
+        done()
+      }
+    })
+  }
+
   async close(): Promise<void> {
-    this.sendGoodbye()
     const socket = this.socket
     this.socket = undefined
     this.attached = false
-    socket?.destroy()
+    if (socket !== undefined) await this.farewellAndReap(socket)
     const server = this.server
     this.server = undefined
     await new Promise<void>(resolve => {
@@ -1514,23 +1570,80 @@ export async function runDisplayRelay(
     let replaced = false
     const pending: Buffer[] = []
     let pendingBytes = 0
+    // The Host's output while the glyph probe owns the terminal. Writing a frame
+    // between the probe's print and its erase is what puts the erase on the
+    // frame's row and leaves the glyphs on the screen the shell comes back to.
+    let holdingOutput = false
+    let heldOutput: Buffer[] = []
+    let heldOutputBytes = 0
+    const heldOutputLimit = 256 * 1024
+    const flushHeldOutput = (): void => {
+      const held = heldOutput
+      heldOutput = []
+      heldOutputBytes = 0
+      for (const payload of held) {
+        try {
+          stdout.write(payload)
+        } catch {
+          finish('signal')
+          return
+        }
+      }
+    }
+    /** Drop the frames held for the glyph probe without writing them. */
+    const discardHeldOutput = (): void => {
+      heldOutput = []
+      heldOutputBytes = 0
+    }
     if (options.seed !== undefined && options.seed !== '') {
       const seed = Buffer.from(options.seed, 'utf8')
       pending.push(seed)
       pendingBytes += seed.length
     }
+    /**
+     * Say out loud what settled the relay, under `DSH_TUI_DEBUG=1`.
+     *
+     * The reason decides whether the launcher exits or re-attaches
+     * (`attach.ts`), and nothing on either side of the socket prints it: a red
+     * probe shows frames and a process that never went, with no way to tell "the
+     * Host said goodbye and the launcher ignored it" from "the link broke before
+     * the goodbye arrived". One line each way is what makes that readable, and
+     * it is off unless the variable is set.
+     */
+    const note = (message: string): void => {
+      if (process.env.DSH_TUI_DEBUG === '1') process.stderr.write(`dsh-ssh-tui: display relay ${message}\n`)
+    }
     const finish = (reason: RelayResult['reason']): void => {
       if (settled) return
       settled = true
-      cleanup()
-      resolve({ reason })
+      note(`settling: ${reason}`)
+      void releaseTerminal().then(() => {
+        cleanup()
+        resolve({ reason })
+      })
     }
     /** Reject like `finish`, but restore the terminal first. */
     const fail = (error: unknown): void => {
       if (settled) return
       settled = true
-      cleanup()
-      reject(error)
+      note(`failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`)
+      void releaseTerminal().then(() => {
+        cleanup()
+        reject(error)
+      })
+    }
+    /**
+     * One more round trip in raw mode before the shell gets the TTY back.
+     *
+     * A reply to a probe we have already given up on would otherwise be echoed
+     * by the tty as `^[[25;1R` text at the user's prompt — the leaked escape
+     * sequence readers report after leaving a session over a slow link.
+     */
+    const releaseTerminal = async (): Promise<void> => {
+      const grace = reportedRtt === undefined
+        ? 0
+        : Math.min(400, Math.max(60, Math.ceil(reportedRtt * 2 + 40)))
+      await pump.handBack(grace)
     }
     const cleanup = (): void => {
       if (rttTimer !== undefined) clearTimeout(rttTimer)
@@ -1543,13 +1656,21 @@ export async function runDisplayRelay(
       signals.removeListener('SIGHUP', onLocalHangup)
       signals.removeListener('SIGTERM', onLocalHangup)
       try {
-        stdin.setRawMode(false)
+        stdin.setRawMode?.(false)
       } catch {
         // ignore
       }
       if (resizeTimer !== undefined) {
         clearTimeout(resizeTimer)
         resizeTimer = undefined
+      }
+      // A run still held for a report that never came is dropped, not forwarded:
+      // the relay is going away, and every path here has already stopped reading
+      // stdin (`handBack` above marks the pump as dropping), so nothing can turn
+      // it into a report now.
+      if (parentResizeTimer !== undefined) {
+        clearTimeout(parentResizeTimer)
+        parentResizeTimer = undefined
       }
       stdout.off('resize', onResize)
       if (usesSigwinch()) {
@@ -1584,7 +1705,9 @@ export async function runDisplayRelay(
      * on the floor: the probe owned the only stdin listener and the forwarder
      * was attached afterwards. Hold them (bounded) and flush on HELLO.
      */
-    const deliver = (text: string): void => {
+    const parentResize = createParentResizeFilter()
+    let parentResizeTimer: NodeJS.Timeout | undefined
+    const forwardInput = (text: string): void => {
       if (text === '') return
       const bytes = Buffer.from(text, 'utf8')
       if (!live) {
@@ -1600,6 +1723,50 @@ export async function runDisplayRelay(
       } catch {
         finish('host-closed')
       }
+    }
+    /**
+     * Hand a held run over once its window passes.
+     *
+     * A lone `ESC` is the case this exists for: it is the first byte of a report
+     * that could still be split across two reads, but it is far more often the
+     * user's Escape key — and the pump in front of this filter has already given
+     * it the same window. Held without a deadline of its own, Escape reached the
+     * Host only when another key arrived, and then glued to it as an Alt chord:
+     * cancelling a dialog or interrupting a running turn did nothing.
+     */
+    const releaseParentResize = (): void => {
+      if (parentResizeTimer !== undefined) {
+        clearTimeout(parentResizeTimer)
+        parentResizeTimer = undefined
+      }
+      const held = parentResize.flush()
+      // A relay that has been replaced (or told goodbye) writes nothing more —
+      // not even a key it was still holding. `finish` only settles the relay and
+      // then waits out a round trip before `cleanup`, so this deadline can fire
+      // inside that window; the key goes with the link it was typed on.
+      if (settled) return
+      forwardInput(held)
+    }
+    const deliver = (text: string): void => {
+      // A pipe parent has no `resize` event to fire and no SIGWINCH to raise:
+      // `CSI 8 ; rows ; cols t` on the input pipe is how it says the panel is
+      // now a different size. Those bytes are not typing, and the rest of the
+      // read is.
+      const { forward, sizes } = parentResize.push(text)
+      for (const reported of sizes) {
+        size.columns = reported.columns
+        size.rows = reported.rows
+        sendResize()
+      }
+      if (parentResize.pending) {
+        if (parentResizeTimer !== undefined) clearTimeout(parentResizeTimer)
+        // Referenced on purpose, like the pump's own hold timer: this timer
+        // *completes* an operation the caller started (releasing a held key),
+        // and an unref'd one would let the event loop drain with the release
+        // still pending.
+        parentResizeTimer = setTimeout(releaseParentResize, INPUT_HOLD_MS)
+      }
+      forwardInput(forward)
     }
     const pump = new TerminalInputPump({
       stdin,
@@ -1640,6 +1807,9 @@ export async function runDisplayRelay(
      * user typed meanwhile to the Host as usual.
      */
     const recheckRtt = async (): Promise<void> => {
+      // Never probe a terminal we have already given back: the request would be
+      // answered by the shell's tty in cooked mode, which echoes it as text.
+      if (settled) return
       const measured = await pump.measure()
       if (settled) return
       if (measured === undefined) {
@@ -1707,7 +1877,10 @@ export async function runDisplayRelay(
     socket.on('connect', () => {
       void (async () => {
         try {
-          stdin.setRawMode(true)
+          // Optional: a pipe parent (`DSH_TUI_DISPLAY=stdio`) has no line
+          // discipline to put in raw mode, and calling it unguarded threw here —
+          // before the relay could say hello, which made the mode unusable.
+          stdin.setRawMode?.(true)
           stdin.resume()
           // Subscribed before the first await: an EOF that lands during the
           // probe (SSH dropped while the TTY was quiet) used to be missed
@@ -1752,20 +1925,48 @@ export async function runDisplayRelay(
           // The Host decides every width in the session, so the verdict travels
           // as a frame; it is sent after HELLO, because the Host ignores
           // everything that arrives before the claim.
-          const measureGlyphs = process.env.DSH_TUI_NO_GLYPH_PROBE === '1'
-            ? Promise.resolve(undefined)
-            : measureAmbiguousGlyphWidth({ pump, timeoutMs: DISPLAY_PROBE_TIMEOUT_MS })
-          void measureGlyphs.then(measured => {
-            if (settled || measured === undefined) return
-            const reserve = measured.wide === false
-            setAmbiguousWidthReserve(reserve)
-            setAmbiguousWidthMeasured(measured.wide)
+          //
+          // The probe prints the glyphs and then asks where the cursor ended up:
+          // both writes belong to the terminal, and nothing else may land between
+          // them. On a slow SSH link the answer takes longer than the Host takes
+          // to paint its first frame, so the frame used to arrive inside that
+          // window — the erase then wiped a row of it, and the glyphs stayed on
+          // the screen for the shell to show again on the way out. Hold the
+          // Host's output for the round trip instead; it is one frame, and the
+          // boot splash is what the user is looking at.
+          // A terminal that never answered the timing probe will not answer this
+          // one either: asking would only cost the reply budget at every attach.
+          if (terminalAnswered && process.env.DSH_TUI_NO_GLYPH_PROBE !== '1') {
+            holdingOutput = true
+            let measured: GlyphWidthMeasurement | undefined
             try {
-              socket.write(encodeMetrics({ wide: measured.wide, reserve }))
-            } catch {
-              // The link is gone; the Host keeps the locale default.
+              measured = await measureAmbiguousGlyphWidth({
+                pump,
+                timeoutMs: glyphProbeTimeoutMs(rtt ?? reportedRtt),
+              })
+            } finally {
+              holdingOutput = false
+              // A relay that was replaced (or told goodbye) while the probe was
+              // waiting owes this link nothing — that is the replacement path's
+              // whole contract. Flushing here put the old Host's queued frame
+              // back on a window the user has left: a live one shows a stale
+              // frame, and a dropped SSH link buffers it until it comes back,
+              // where it paints over the session that took over.
+              if (settled) discardHeldOutput()
+              else flushHeldOutput()
             }
-          })
+            if (settled) return
+            if (measured !== undefined) {
+              const reserve = measured.wide === false
+              setAmbiguousWidthReserve(reserve)
+              setAmbiguousWidthMeasured(measured.wide)
+              try {
+                socket.write(encodeMetrics({ wide: measured.wide, reserve }))
+              } catch {
+                // The link is gone; the Host keeps the locale default.
+              }
+            }
+          }
           scheduleRttRecheck(options.rttFirstRecheckMs ?? RTT_RECHECK_FIRST_MS)
           if (options.announce === true) {
             try {
@@ -1802,6 +2003,18 @@ export async function runDisplayRelay(
       }
       for (const frame of frames) {
         if (frame.type === FRAME_STDOUT) {
+          if (holdingOutput) {
+            // Bound the hold: a Host that streams into a probe that never comes
+            // back must not be able to grow this without bound.
+            if (heldOutputBytes + frame.payload.length > heldOutputLimit) {
+              holdingOutput = false
+              flushHeldOutput()
+            } else {
+              heldOutput.push(frame.payload)
+              heldOutputBytes += frame.payload.length
+              continue
+            }
+          }
           try {
             stdout.write(frame.payload)
           } catch {

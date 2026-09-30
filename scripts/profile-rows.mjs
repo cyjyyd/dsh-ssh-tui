@@ -154,10 +154,15 @@ export function profileComposesRoster({ profile, home, cli, run = spawnSync, gen
 /**
  * Materialize the rows in `home`'s profile patch. Returns what it did so
  * callers can log it; never throws on an already-mounted profile.
+ *
+ * `home` defaults to the dsh home the caller's environment names, the way `cli`
+ * defaults to the checkout's own CLI: `install.mjs` forgot to pass it and the
+ * whole install step died on `join(undefined, …)` after the profile had already
+ * been linked.
  */
 export function mountProfileRows({
   profile,
-  home,
+  home = resolveDshHome(),
   cli = require.resolve('@deepseek-ai/dsh/lib/bin.js'),
   log = console.log,
   run,

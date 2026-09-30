@@ -55,18 +55,40 @@ const tool = (overrides = {}) => ({
   ...overrides,
 })
 
+/**
+ * Render with a frozen clock.
+ *
+ * A running card carries a spinner and an elapsed time, and the cache key of a
+ * live row carries the paint tick. Two renders a millisecond apart therefore
+ * disagree for reasons that have nothing to do with the cache — this file went
+ * red once under a loaded runner for exactly that. Freezing the clock also keeps
+ * the *first* render's cache entry valid for the second, so the mutation really
+ * exercises the hit path instead of a cold render.
+ */
+function withFrozenClock(nowMs, body) {
+  const real = Date.now
+  Date.now = () => nowMs
+  try {
+    return body()
+  } finally {
+    Date.now = real
+  }
+}
+
 /** Compare a session whose row was mutated in place with one built that way. */
 function sameAfterMutation({ before, mutate, after }, { compact = false } = {}) {
-  const mutated = fixture(before.map(row => ({ ...row })), { compact })
-  // Paint once, so the cached entry exists in the pre-mutation state.
-  frame(mutated)
-  const row = mutated.rows.find(candidate => candidate.kind === before[before.length - 1].kind)
-  mutate(row)
-  const live = frame(mutated)
+  withFrozenClock(1_700_000_000_000, () => {
+    const mutated = fixture(before.map(row => ({ ...row })), { compact })
+    // Paint once, so the cached entry exists in the pre-mutation state.
+    frame(mutated)
+    const row = mutated.rows.find(candidate => candidate.kind === before[before.length - 1].kind)
+    mutate(row)
+    const live = frame(mutated)
 
-  const fresh = fixture(before.slice(0, -1).map(row => ({ ...row })).concat([{ ...before[before.length - 1], ...after }]), { compact })
-  const scratch = frame(fresh)
-  assert.equal(live, scratch, 'a mutated row renders like one built in that state')
+    const fresh = fixture(before.slice(0, -1).map(row => ({ ...row })).concat([{ ...before[before.length - 1], ...after }]), { compact })
+    const scratch = frame(fresh)
+    assert.equal(live, scratch, 'a mutated row renders like one built in that state')
+  })
 }
 
 test('a tool whose arguments stream in does not keep its old card', () => {

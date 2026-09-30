@@ -216,6 +216,13 @@ interface ReplyWaiter {
    * round-trip request for anything else in the pump.
    */
   position?: (reply: string | undefined) => void
+  /**
+   * Give up on this waiter without an answer. `settle` cannot do it: a position
+   * waiter's `settle` is a no-op because the answer arrives through `position`,
+   * and cancelling through it would resolve the probe before the reply that is
+   * already in the filter could be read.
+   */
+  cancel?: () => void
 }
 
 /**
@@ -240,6 +247,8 @@ export class TerminalInputPump {
   private slowestSampleMs: number | undefined
   private holdTimer: NodeJS.Timeout | undefined
   private listening = false
+  /** Set by {@link quiet}: the held tail is dropped instead of forwarded. */
+  private dropping = false
   readonly ssh: boolean
 
   constructor(private readonly options: TerminalInputPumpOptions) {
@@ -262,12 +271,43 @@ export class TerminalInputPump {
     }
     for (const waiter of this.waiters.splice(0)) {
       clearTimeout(waiter.timer)
-      waiter.settle(undefined)
+      if (waiter.cancel !== undefined) waiter.cancel()
+      else waiter.settle(undefined)
     }
-    const held = this.filter.flush()
-    if (held !== '') this.options.onInput(held)
-    const tail = this.decoder.end()
-    if (tail !== '') this.options.onInput(tail)
+    // On the way out the held tail is either a half-arrived reply (`17;1R`, the
+    // digits the filter exists to keep off the screen) or half a user's escape
+    // sequence. Neither belongs in the last keystrokes before the shell.
+    if (!this.dropping) {
+      const held = this.filter.flush()
+      if (held !== '') this.options.onInput(held)
+      const tail = this.decoder.end()
+      if (tail !== '') this.options.onInput(tail)
+    }
+  }
+
+  /**
+   * Wait one more round trip before letting go of the terminal.
+   *
+   * A cursor reply can still be on the wire when a relay stops. The terminal
+   * answers a Device Status Report after the round trip, so on a slow SSH link
+   * that is hundreds of milliseconds after the request; restoring cooked mode
+   * first lets the tty echo the answer as literal `^[[25;1R` text at the user's
+   * prompt, and leaves it in the tty queue for the shell to read as typing.
+   * Staying in raw mode for one round trip swallows it instead. Typing that
+   * lands in this window is forwarded as usual — the window exists to drop
+   * answers, not keystrokes.
+   * @param graceMs - how long the terminal may still owe us a reply.
+   */
+  async handBack(graceMs = 0): Promise<void> {
+    if (this.listening && graceMs > 0) {
+      await new Promise<void>(resolve => {
+        // Deliberately referenced: a teardown that resolves before this fires
+        // would hand the terminal back while the reply is still in flight.
+        setTimeout(resolve, graceMs)
+      })
+    }
+    this.dropping = true
+    this.stop()
   }
 
   /**
@@ -523,14 +563,34 @@ export class TerminalInputPump {
   async askPosition(probe: string, timeoutMs = RTT_SAMPLE_TIMEOUT_MS): Promise<{ row: number; column: number } | undefined> {
     return await new Promise<{ row: number; column: number } | undefined>(resolve => {
       let settled = false
+      /**
+       * Put the line back the way the probe found it.
+       *
+       * The probe text is screen content, and nothing guarantees that a frame
+       * ever paints over it: a Host that fails to attach, or a relay torn down
+       * between the write and the answer, leaves it on the terminal for the rest
+       * of the shell session. That is the `①—…“”·•Ⅰ` a reader reported sitting
+       * in front of their prompt.
+       */
+      const erase = (): void => {
+        try {
+          this.options.stdout.write('\r\u001b[2K')
+        } catch {
+          // The TTY may already be gone.
+        }
+      }
       const settleOnce = (value: { row: number; column: number } | undefined): void => {
         if (settled) return
         settled = true
+        erase()
         resolve(value)
       }
       const waiter: ReplyWaiter = {
         started: Date.now(),
+        // The answer arrives through `position`; the elapsed time only feeds the
+        // pump's timing bookkeeping, exactly as it does for a timing waiter.
         settle: () => {},
+        cancel: () => { settleOnce(undefined) },
         position: reply => {
           if (reply === undefined) {
             settleOnce(undefined)

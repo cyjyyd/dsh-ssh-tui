@@ -5,740 +5,559 @@
 [![CI](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml)
 [![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
 
-给跳板机、无桌面服务器、高延迟 SSH 用的 DeepSeek Harness 终端。纯 ANSI、增量重绘，
-不需要浏览器。**SSH 掉线时，正在跑的回合留在 Host 里，重连用同一条命令接回，会话不丢。**
+**A resilient terminal frontend for DeepSeek Harness.**
+
+纯 ANSI · 增量重绘 · SSH 断线重接 · Windows / ConPTY · Host-aware activation · 无需浏览器
+
+**连接可以断，终端可以换，Harness 可以升级；正在工作的会话不应该因此变得脆弱。**
 
 English: [README.en.md](README.en.md)
 
-如果你主要在 SSH 里写代码——公司跳板、测试机、只有键盘的会话——可以从这里开始。
-本机桌面终端若更在意主题和布局，也可以继续用你已经习惯的界面。
+---
 
-和现成的东西不重叠：
+## 30 秒开始
 
-- **官方 headless**：同一条任务只把最后一条回复打到 stdout，过程全在日志里。
-- **官方 `dsh-ssh`（0.1.6 起）**：本机跑 Harness、远端跑文件和进程，要预装 helper。人已经 SSH 在那台机器上时用本插件；两者可以叠用，不是替代。
-- **其它终端皮肤**（`dsh-TUI` 等）：本机漂亮终端，比主题和布局。本插件比的是弱网下的增量重绘、掉线后 Host 留下、纯文本行模式。
-
-掉线之后怎么接回来，见下面的[「SSH 断了之后」](#ssh-断了之后)。
-
-已经在付 SuperGrok / X Premium 的话，用独立插件 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth) 把订阅接进 dsh（headless / web / 本 TUI 都能用），复用本机 grok-bridge token，不需要 xAI API Key。
-
-本插件已被 [dshfind 插件目录](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui) 收录：
-
-[![dshfind](https://dshfind.com/api/card/cyjyyd/dsh-ssh-tui?lang=zh)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
-
-安装（官方 CLI，无需 clone）：
+需要 Node.js ≥ 22.19 和 DeepSeek Harness CLI。
 
 ```bash
+npm i -g @deepseek-ai/dsh
 dsh plugin --profile tui add dsh-ssh-tui@latest
 dsh --profile tui
 ```
 
-当前 `dsh` 必须带 `--profile`（`dsh plugin add …` 会报缺选项）。装进别的 profile 把 `tui` 换成那个名字即可。
+恢复旧会话：
 
-> **宿主已升到 0.2.0-rc 的用户请看这里**：0.8.0 支持 `0.2.0-rc` 线（旧版会因声明窗口不符被 launcher 拒绝），
-> 但它目前只挂在 `next` 上——`latest` 仍是 0.7.4，2026-10-01 起才切到 0.8.0。这段时间请用
-> `dsh plugin --profile tui add dsh-ssh-tui@next` 安装；还在 `0.1.7-rc` 线的话 `@latest`(0.7.4) 就够用，
-> 等 0.8.0 上 `latest` 再升也不迟。**0.1.5 及更早的宿主从 0.8.0 起不再支持**。
+```bash
+dsh --profile tui --resume
+```
 
-**更新必须带 `@latest`。** `dsh plugin` 只是把后面的参数转给 profile 目录里的 pnpm。写成 `add dsh-ssh-tui`（没有版本）时，pnpm 会沿用 `pnpm-lock.yaml` 里已经钉死的版本（常见就是一直停在 0.3.7）。也不要把 `--profile` 写到 `add` 后面：`dsh plugin add --profile tui add dsh-ssh-tui` 不是合法用法。卸载：`dsh plugin --profile tui remove dsh-ssh-tui`。
+更新：
 
-## 官方 headless 和这个 TUI
+```bash
+dsh plugin --profile tui add dsh-ssh-tui@latest
+```
 
-官方没有预置 TUI。远程机器上的默认终端入口是 `dsh --profile headless`：跑完一个任务，把**最后一条助手回复**打到 stdout 就退出。思考、工具调用、子代理、计划都在会话日志里，终端上看不到。
+> `dsh plugin` 由 profile 内的 pnpm 管理依赖。更新时请显式带 `@latest`，否则已有 lockfile 可能继续沿用旧版本。
 
-下面两帧是**同一条任务**。上：官方 headless 的 stdout（按 `@deepseek-ai/dsh-headless` 的契约：只打印最终文本）。下：本插件把同一组事件画进 88 列 SSH 窗口。
+Windows 用户见 [Windows 指南](docs/windows.md)。
+
+---
+
+## 为什么会有这个 TUI
+
+DeepSeek Harness 已经有 Web、headless 和不断扩展的插件生态。
+
+`dsh-ssh-tui` 不试图把浏览器搬进终端。
+
+它解决另一类问题：
+
+### 连接不可靠
+
+SSH 会断、笔记本会合盖、网络会切换、跳板机会超时。
+
+正在运行的回合不应该因为显示终端消失，就和整个 Harness Host 一起死亡。
+
+`dsh-ssh-tui` 将 **Host 与显示端分离**：
+
+```text
+Harness session
+      │
+      ▼
+   TUI Host
+      │
+      ├── 当前 SSH / terminal
+      │
+      └── 断线后重新 attach
+```
+
+忙碌中的 Host 可以在显示端离开后继续存在；重新连接后，同一条命令即可接回。
+
+---
+
+### 终端环境并不统一
+
+Linux PTY、Windows ConPTY、SSH、旧控制台、不同 OSC / mouse / clipboard 能力，并不是同一种终端。
+
+本项目不会假定：
+
+```text
+process.stdin/stdout == terminal == display == host
+```
+
+而是显式区分：
+
+```text
+Harness Host
+    ↓
+Display Transport
+    ↓
+Terminal Capability
+```
+
+TTY 是一种能力，不是宿主存在的前提。
+
+这也是为什么在没有真实终端的 Host 中，插件应该**安全地不激活**，而不是让宿主一起崩掉。
+
+---
+
+### Harness 本身仍在快速变化
+
+本项目把 **兼容性当成功能维护，而不是发版后顺便测试**。
+
+当前声明窗口：
+
+| DeepSeek Harness | 状态 |
+|---|---|
+| `0.1.7-rc.1` / `0.1.7-rc.2` | ✅ 支持 |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持 |
+| `0.1.5` 及更早 | ❌ 自 `dsh-ssh-tui 0.8.0` 起不再支持 |
+
+声明范围：
+
+```text
+>=0.1.7-rc.1 <0.1.8
+|| >=0.2.0-rc.1 <0.2.1
+```
+
+发布前会针对支持线重新安装依赖并运行类型检查、测试和真实终端探针。
+
+不是：
+
+> “安装没有报错，所以应该能用。”
+
+而是尽量回答：
+
+> **“这个 Harness 版本、这个 Host、这个终端路径，我们实际验证过什么？”**
+
+---
+
+## 同一个 Harness，终端里看到完整过程
+
+官方 headless 很适合一次性任务：
+
+```bash
+dsh --profile headless "..."
+```
+
+它完成任务后将最终回复写到 stdout。
+
+如果你需要持续观察思考、工具、diff、子代理、计划和审批，则可以进入 TUI。
+
+下面是同一个任务：
 
 ![官方 headless stdout 对照 dsh-ssh-tui](docs/screenshots/compare.png)
 
-上：`$ dsh --profile headless "…"` 之后只有最终 Markdown。  
-下：思考默认折叠、`edit` 整行红/绿 diff、两个子代理各自一张卡、计划条钉在输入框上方。
+在 TUI 中：
 
-单独看：[headless stdout](docs/screenshots/headless.png) · [dsh-ssh-tui](docs/screenshots/workspace.png)
+- reasoning 可折叠、可实时展开；
+- 工具调用以卡片呈现；
+- edit 显示 git 风格 diff；
+- 子代理独立显示；
+- plan / approval / ask-user 直接进入交互界面；
+- 模型输出持续流式显示，而不是等整个任务结束。
 
-## 弱网 SSH 上过程还在
+---
 
-同一条任务，按 **2 kB/s** 限速回放真实增量绘制（88×30，一帧一次 `stdout.write`）。官方 headless 这条链路上只会在全部结束后突然打出最终 Markdown；这里思考、`edit` diff、子代理卡和计划条是随着字节到达逐步出现的。
+## 为弱网而设计
 
-![2 kB/s SSH 上回放同一任务](docs/screenshots/slow-link.gif)
+TUI 使用纯 ANSI 和增量重绘，不依赖浏览器或重量级远程 UI。
 
-协议（可复现，不靠模型估）：`npm run screenshots:slow` → `docs/screenshots/slow-link.json`。这次回放 14 次绘制、约 **18.0 KB**，在 2 kB/s 上大约 **8.8 s** 画完。数字是这条固定事件序的 stdout 字节账。
+下面是在 **2 kB/s** 限速下回放真实绘制事件：
 
-## 功能一览
+![2 kB/s SSH 上的增量绘制](docs/screenshots/slow-link.gif)
 
-- 纯终端渲染，无需浏览器/鼠标/重量级终端框架，适合慢速或远程 SSH；
-- 模型思考流默认折叠，显示 `▸ 思考中 ⠹ · N 字 · Ns` 动画；结束后折叠为
-  `▸ 已思考 · N 行`，可单独展开；思考过程中也能实时展开/收起查看原文；
-- 工作区支持 markdown 渲染：多级标题（H1 放大/下划线、H2 下划线、H3 着色）、
-  粗体、斜体、行内代码、代码块、列表、引用与链接；模型最终回复以普通白色显示，行内 `**粗体**` 用更亮的粗体区分；
-- 系统提示词 / `system-reminder` / `AGENTS.md` 等注入折叠为「提示词注入:系统预设 AGENTS.MD」卡片，默认收起，Enter 展开看全文；
-- 工具调用卡片化：标题默认色，状态球绿/黄/红表示成功/运行中/失败（成功不再跟 `[ok]` 重复；失败仍标 `[error]`）；
-  连续读/编辑同一路径会叠成一张卡（`×N` + 累计字数/行数，编辑 diff 跟随追加，合并时翻牌动画）；
-  shell 命令浅灰、路径 cyan；编辑工具 git 风格 diff（`-` 暗红底 / `+` 暗绿底 /
-  文件统计），头部带 git 红绿增删行数（如 ` -13 +24`），默认收起，Enter 展开；
-  正文超出窗口时单独全览（Esc 返回）；JSON 参数与结果自动转可读内容；
-- 转录区滚动回看（`PgUp`/`PgDn`、鼠标滚轮），点击思考/工具标题行直接展开收起；
-- 输入框下方两行底栏：第一行链路芯片 + 按宽度丢组的会话数字（轮次、入/出 token、速度）；
-  第二行只留一个活动词（运行中 / 工具 N / 子代理 N / 压缩中…），身份收到右侧（含 `目录:srv`；点击打印完整工作目录）；
-  身份里始终带 `sub:<子代理模型>`（如 `sub:grok-4.5(xhigh)`）：`/submodel` 选模型、`/subeffort` 选档位（带括号后缀）；
-  子代理跟随主模型时它就是身份行的暗色；只有 `/submodel` 钉到**别的提供商**才变色并补上 `提供商/` 前缀
-  （如 `sub:xai/grok-4.5`）——完整路由在顶栏与 `/status`；
-- 恢复旧会话会切到该会话记录的工作目录；新建会话用启动时的当前目录；
-- 历史会话启动选择器：`dsh --profile tui --resume`（或 `resume`）先选会话再进入；
-- 终端窗口标题栏：运行中旋转图标 + `运行中 · 工具 N`，完成后 `✓ 已完成`，并响
-  一声终端铃（`DSH_TUI_NO_BELL=1` 关闭）；
-- 审批、`ask_user_question`、计划模式、子代理进度、`/mode` 模式切换、`/model` 模型切换、
-  `/disconnect` 断线策略等完整支持；
-- `/approval auto` 自动审批模式（Codex 式）：读类/构建/测试、工作区 `edit`/`write`/`read` 自动放行；
-  `rm -rf`、`sudo`、`curl|sh`、`git push --force`、敏感路径只读等危险命令自动**拒绝**，并把原因
-  回给模型由其自行调整；`npm publish`、解释器 `-c`/`-e` 等未识别形状交给**子代理模型 AI 复核**
-  （用户消息 + args/reason/sandbox，英文界面走英文审核员；`authorization=yes` 才放行）；
-  仍未可判定时接入才询问、断开时自动拒绝——配合 `/disconnect continue` 断线后回合不停摆；
-  `/approval status` 另报本轮 AI 复核次数；
-- 每个子代理都是独立可折叠卡片，默认收起，运行中带旋转动画；多个子代理互不混排；
-- 进入计划模式、待审计划、提问用户都会显示对应卡片和底部提示，而不是只塞进系统消息。
-- 工作区底部有 Codex 式「处理中」动画卡：思考里第一个闭合的 `**加粗**` 作为 shimmer
-  标题（还没出现就保持「处理中」），运行中的工具摘要在 `└` 下自动折行（最多 3 行，末行
-  加省略号），带计时和 Esc 中断；回复开始流式输出时自动让位。
-
-- 0.7 起：模型回复可**拖选自由复制**（按住鼠标拖过一段，走 OSC 52 写回本机剪贴板；按住 Shift 拖选
-  结果相同；工具卡仍是点击展开）。回复也是**可选中卡片**：空输入 `↑` 落到最新的一条回复或卡片（`▶` 标记，
-  走屏幕顺序；`Alt+4` 直接选中最新回复），
-  `/copy` 复制的是选中的那一条（原文，不是折行后的屏幕文本），`Enter` 打开全文；
-  SSH 会话里复制落到本机终端，不再误报「本终端不接收 OSC 52」；
-  底栏收敛成一条带优先级的芯片带（先丢文字后丢组，`⚠` 可点击打开 `/doctor`）；**额度条常驻**并标注窗口
-  （`5Hr`/`1Wk`/`1Mo`，默认显示最小窗口，未取到时显示 `?%` 并每 15 秒重试）；`/mode` 分组显示并可用 `/` 过滤；
-  极简视图逐文件列 `+/-`；工具 diff 为**行级**、只高亮变化字符、≥100 列时并排显示；
-  `DSH_TUI_LINE_MODE=1` 纯行模式（屏幕阅读器 / `tee`）；`ssh-tui.keys` 可改键位（冲突会明确拒绝）；
-  `DSH_TUI_COLOR_DEPTH` 指定色深（truecolor / 256 / 8 / none）。
-
-## 覆盖哪些宿主线
-
-这个插件目前**同时覆盖在飞的两条 `@deepseek-ai/dsh` 线**:
-
-| 宿主线 | 状态 |
-|---|---|
-| `0.1.7-rc.1` / `0.1.7-rc.2`(`latest`) | 声明兼容;CI 腿:rc.2 跑全套真 PTY 探针,rc.1 跑类型检查与单元套件 |
-| `0.2.0-rc.1` / `0.2.0-rc.2`(`next`,亦是官方桌面版基线) | 声明兼容;rc.2 为默认开发线并跑全套探针,rc.1 跑类型与套件 |
-| `0.1.5` 及更早 | 自 0.8.0 起**不再支持**,`dshReleases` 里保留明确的 `incompatible` 表态 |
-
-声明窗口是 `>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1`(peer 与 `dshReleases` 同一份事实),
-每次发版前都会在干净树里装对应版本重跑类型、套件与真机探针——不是"没报错所以大概能用"。
-终端类插件在 npm 上不少仍停留在 0.1.5 线;在 0.2.0-rc 线上能直接安装的终端 UI 目前很少,这也是我们
-把声明窗口维护得这么紧的原因。
-
-## 桌面版 Harness 用户请看这里
-
-**官方桌面版（<https://www.deepseek.com/harness/>）不需要这个插件。** 它是 GUI 应用，用桌面版自己的界面
-或 `dsh web` 即可。本插件是**终端 UI**，必须在真实 TTY 里运行；桌面版写入 PATH 的那个 `dsh` 启动器
-（`DeepSeek Harness.exe` + `ELECTRON_RUN_AS_NODE`）是 GUI 子系统进程、**不提供 TTY**，所以
-`dsh --profile tui` 在它下面必然失败。想在终端里用，请装 npm 的 CLI 再跑：
+该样例可以直接复现：
 
 ```bash
-npm i -g @deepseek-ai/dsh        # 真正的 console 运行时
-dsh --profile tui                # 在真实终端或 SSH 会话里
+npm run screenshots:slow
 ```
 
-**本插件在桌面版下不会启用、也不会报错**：它经 `ctx.logger` 记一行「此处不启用」就保持惰性（不取锁、不挂定时器、不查更新），不会让桌面版出现「插件失败」或崩溃。若你确实需要硬失败（例如脚本要断言某个终端 profile 真能起来），在 profile 行里加 `requireTerminal: true`。
+对应数据保存在：
 
-完整诊断、桌面版缺陷报告的两个问题（TTY 不可用 / 两个内部包没有 0.2.0 发布版）、我们的惰性策略与
-**可直接贴给上游的英文 issue 文本**见 [`docs/desktop.md`](docs/desktop.md) 与
-[`docs/upstream-desktop-report.md`](docs/upstream-desktop-report.md)。
+```text
+docs/screenshots/slow-link.json
+```
 
-## 环境要求
+目标不是做一个网络 benchmark。
 
-- Node.js ≥ 22.19
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（本仓库默认开发线是 `0.2.0-rc.2`——上游 `latest`/`next` 与桌面版基线都在它上面；CI 覆盖 `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` 四条 dsh 线加一条 Windows 腿：`0.2.0-rc.2` 与 `0.1.7-rc.2` 跑全套探针，另两条 rc.1 跑 typecheck 与单元套件；非默认腿由 `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装。**`0.1.5` 及更早的线自 0.8.0 起不再支持**（`dshReleases` 里保留 `incompatible` 的明确表态，装不上请升到 `0.1.7-rc` 或 `0.2.0-rc`；`0.1.5` 那条线需要的是 `<0.1.6` 的旧代 API）。`0.1.3-alpha.1` 只在 GitHub 有 tag、npm 未发布，无法本地装包验证）
-- pnpm（`dsh plugin` 通过 pnpm 管理 profile 依赖）
-- 支持 ANSI 的终端（推荐 SSH 直连；Windows 用 PowerShell / Windows Terminal）
-- Windows：安装、排障与 `/doctor` 的读法见 [docs/windows.md](docs/windows.md)。Host 与显示端之间的本地通道使用命名管道
-  `\\.\pipe\dsh-tui-<DSH_HOME 摘要 8 位>-<会话名>-<会话摘要 8 位>`（Windows 只能监听命名管道，
-  不能监听 `.sock` 文件；名字里同时带 DSH_HOME 与会话 id 的摘要，所以不同 home、不同会话都不会撞名，
-  结束进程即自动回收）。Host 的 stderr 记录在 `%USERPROFILE%\.dsh\tui-socks\<会话名>-<摘要>.err`，
-  会话锁仍在 `%USERPROFILE%\.dsh\tui-locks\`。
+目标是确保：
 
-## 部署指南
+> **链路越差，界面可以降级；任务本身不能跟着失去可用性。**
 
-推荐安装就是文首那条 `dsh plugin --profile tui add dsh-ssh-tui@latest`。CLI 会从 npm 拉包、写入 profile 依赖，并把本插件加入 `dsh.profile.bundles`（因为包内声明了 `dsh.bundle`）。
+---
 
-可选：把 SuperGrok 订阅接进 dsh（独立插件，不依赖本 TUI）：
+## 核心能力
+
+### Terminal-native workspace
+
+- 纯 ANSI 渲染；
+- Markdown、标题、列表、引用、代码块；
+- 工具卡片与 git 风格 diff；
+- reasoning 折叠与实时查看；
+- plan / approval / ask-user-question；
+- 子代理独立状态卡；
+- 会话 token、速度、额度与活动状态；
+- `/model`、`/mode`、`/submodel` 等 Harness 能力直接进入终端。
+
+### Session continuity
+
+- `--resume` 历史会话选择；
+- SSH / terminal 断开后重新 attach；
+- 一个 session 只允许一个写 Host；
+- 新窗口接管时旧显示端有明确退出语义；
+- Host 异常退出后可以从 Harness 日志恢复。
+
+### Terminal capability handling
+
+- truecolor / 256 / 8 / no-color；
+- Windows Terminal / ConPTY；
+- OSC 52 clipboard 能力判断；
+- mouse / hyperlink / terminal title 能力控制；
+- UTF-8 不可用时 ASCII fallback；
+- `DSH_TUI_LINE_MODE=1` 纯行模式，可用于 `tee`、日志和屏幕阅读器。
+
+### Safety and diagnostics
+
+- `/doctor`：检查 profile、依赖和 Harness 组合；
+- `/diag`：检查当前 Host、显示通道和 terminal capability；
+- `/approval auto`：自动处理明确安全或明确危险的操作；
+- 无法确定的动作仍回到用户审批；
+- Host / terminal 不满足运行条件时尽量 fail-safe，而不是破坏宿主。
+
+---
+
+## SSH 断了之后
+
+如果只是空闲状态断开，Host 会退出，之后从持久化会话恢复即可。
+
+如果模型正在：
+
+- reasoning；
+- 回复；
+- 调工具；
+- 运行子代理；
+
+TUI 可以保留 Host，并允许重新接入。
+
+```bash
+dsh --profile tui --resume
+```
+
+或者指定会话：
+
+```bash
+dsh --profile tui --resume <session-id>
+```
+
+默认策略下，断线会避免无人值守地继续执行需要用户交互的工作。
+
+如果明确希望当前回合在 SSH 断开后继续：
+
+```text
+/disconnect continue
+```
+
+重新连接后再 attach 即可。
+
+完整生命周期、锁、接管、链路探测与 idle-exit 规则：
+
+[Remote Operations](docs/remote-ops.md)
+
+---
+
+## Windows
+
+Windows 不是“顺便能跑”的平台。
+
+本项目对 Windows 单独处理：
+
+- ConPTY 输入与终端能力；
+- Host / display 生命周期；
+- Windows Terminal 与传统控制台差异；
+- UTF-8 / ASCII fallback；
+- named pipe display transport；
+- terminal close / reconnect；
+- Windows CI 与真实终端探针。
+
+安装方式与 Linux 相同：
+
+```powershell
+npm i -g @deepseek-ai/dsh
+dsh plugin --profile tui add dsh-ssh-tui@latest
+dsh --profile tui
+```
+
+完整说明：
+
+[在 Windows 上使用](docs/windows.md)
+
+---
+
+## 官方 Harness Desktop
+
+官方 Desktop 是 GUI 应用，本身**不需要这个 TUI**。
+
+Desktop 内部的 Harness Host 和真正的 console runtime 也不是一回事。
+
+当前 Desktop 启动链没有为终端插件提供真实 TTY，因此：
+
+```text
+Desktop Host
+    │
+    ├── Harness services
+    │
+    └── no real terminal
+```
+
+在这种环境中，`dsh-ssh-tui` 会识别缺少 terminal capability，并保持惰性：
+
+- 不创建显示 Host；
+- 不获取 TUI session lock；
+- 不挂终端相关 timer；
+- 不启动 update check；
+- 不应该因为插件无法绘制 TUI 而让 Desktop Host 一起失败。
+
+如果你希望使用终端界面，请安装真正的 CLI，并从真实终端启动：
+
+```bash
+npm i -g @deepseek-ai/dsh
+dsh --profile tui
+```
+
+Desktop / no-TTY Host 的诊断与上游问题记录：
+
+- [Desktop compatibility](docs/desktop.md)
+- [Upstream desktop report](docs/upstream-desktop-report.md)
+
+> Desktop-safe 不等于“把 TUI 嵌进 Desktop GUI”。  
+> 前者是 Host compatibility；后者需要宿主提供合适的 display transport。
+
+---
+
+## Host、Display、Terminal
+
+项目目前遵循一个简单原则：
+
+```text
+             ┌──────────────┐
+             │ Harness Host │
+             └──────┬───────┘
+                    │
+              session / events
+                    │
+             ┌──────▼───────┐
+             │   TUI Host   │
+             └──────┬───────┘
+                    │
+             display transport
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+   real TTY / SSH           stdio relay
+        │
+        ▼
+ terminal capability
+```
+
+这带来几个约束：
+
+1. **Host 的生命周期不应由某一个显示窗口决定。**
+2. **没有 TTY 不等于 Harness Host 不合法。**
+3. **终端能力必须检测或明确声明，不能凭平台名称猜。**
+4. **掉线、resize、terminal close 都是正常生命周期事件，而不是异常世界。**
+5. **兼容性需要可测试，而不是依赖“在作者机器上能跑”。**
+
+维护者侧的生命周期与平台设计：
+
+- [Platform notes](docs/platform.md)
+- [Terminal capability matrix](docs/terminals.md)
+
+---
+
+## 适合谁
+
+推荐使用 `dsh-ssh-tui`，如果你经常：
+
+- SSH 到服务器上写代码；
+- 通过公司跳板机工作；
+- 使用远程开发机 / 测试机；
+- 网络延迟高或连接偶尔中断；
+- 需要 Windows Terminal / ConPTY；
+- 希望 Harness 更新后仍有明确兼容边界；
+- 更在意 session continuity 和终端可靠性，而不是浏览器级视觉能力。
+
+如果只跑一次任务并获取最终文本：
+
+```bash
+dsh --profile headless "..."
+```
+
+通常更加简单。
+
+如果需要浏览器富交互，则继续使用 Harness Web / Desktop。
+
+它们解决的是不同问题。
+
+---
+
+## 常用命令
+
+```bash
+# 启动
+dsh --profile tui
+
+# 恢复 / 接入会话
+dsh --profile tui --resume
+
+# 更新
+dsh plugin --profile tui add dsh-ssh-tui@latest
+
+# 卸载
+dsh plugin --profile tui remove dsh-ssh-tui
+```
+
+TUI 内：
+
+```text
+/doctor
+/diag
+/model
+/mode
+/submodel
+/status
+/disconnect
+/approval
+```
+
+---
+
+## 排障
+
+优先运行：
+
+```text
+/doctor
+```
+
+检查 profile / Harness / plugin 组合。
+
+当前会话、Host、显示端或 terminal capability 有问题：
+
+```text
+/diag
+```
+
+Windows：
+
+[docs/windows.md](docs/windows.md)
+
+SSH、掉线、Host 生命周期：
+
+[docs/remote-ops.md](docs/remote-ops.md)
+
+Desktop：
+
+[docs/desktop.md](docs/desktop.md)
+
+终端能力：
+
+[docs/terminals.md](docs/terminals.md)
+
+底层平台设计：
+
+[docs/platform.md](docs/platform.md)
+
+提交 issue 时，建议同时附上 `/doctor` 与 `/diag` 输出。
+
+---
+
+## 可选：SuperGrok / X Premium
+
+如果已经有 SuperGrok / X Premium，可以使用独立插件：
+
+[dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)
+
+安装到当前 TUI profile：
 
 ```bash
 dsh plugin --profile tui add dsh-llm-xai-oauth@latest
-dsh plugin --profile headless add dsh-llm-xai-oauth@latest
 ```
 
-SuperGrok 的 access token 大约 1 小时过期。TUI 打开时会刷新即将过期的 token，`/usage` 遇到 401 也会再刷一次。机器长时间不开 dsh 时，请另开刷新进程，否则一打开就是 401：
+它和本 TUI 独立：headless、Web 或其它 profile 也可以使用。
 
-```bash
-npx dsh-llm-xai-oauth daemon --install
-```
+---
 
-说明见 [dsh-llm-xai-oauth](https://github.com/cyjyyd/dsh-llm-xai-oauth)。
-
-先确认链路再开 TUI（无 TTY 时 TUI 会直接退出）：
-
-```bash
-dsh --profile headless "Reply with exactly: tui-install-ok. Do not use tools."
-dsh --profile tui          # 必须在真实终端 / SSH 会话里
-```
-
-### SSH 断了之后
-
-合盖、跳板 idle、换网会拆掉当前 TTY。TUI 把 SIGHUP / stdin 关闭 / 写 TTY 失败
-当成挂断：放下显示器并 flush 日志。**空闲断线不保活**（Host 退出，下次从日志
-`--resume`）；模型思考 / 回复 / 工具 / 子代理等忙碌状态则 **Host 留下**。
-重新 SSH 后同一条命令会优先接入那个进程（选择器标「可接入」），不要再开第二份 Host：
-
-Windows 上也一样保活，但走的路不同：宿主由系统 PowerShell 的 `Start-Process -WindowStyle Hidden`
-拉起，因此有**自己的隐形控制台**（既不随用户的窗口关闭，也不会让工具调用闪窗）。唯一的例外是
-机器上找不到 PowerShell：那时回退成直接子进程，关窗会连带结束正在跑的回合（会话不坏，
-`--resume` 从日志重建），**并且启动横幅下面会有一行提示**说明这一点。见 [docs/platform.md](docs/platform.md) 的《四种死法》。
-
-```bash
-dsh --profile tui --resume                 # 选择器（活进程优先接入）
-dsh --profile tui --resume <session-id>    # 有活进程则接入，否则从日志恢复
-```
-
-选择器里每个活着的会话只标两个词：**可接入**（一键接入）或**已占用**（别的窗口在用）。
-后面跟的是 Host 的 pid。被标成「已占用」时 `--resume <session-id>` 会被拒绝而不是把对方踢掉——
-要接管就在**选择器里**选中它，再按 `y` / Enter 确认（那个窗口随即退出）。
-
-**断线残留不会挡住你**：SSH 被切断时服务端常常还不知道（sshd 要等 TCP keepalive 才发现，可能几小时），
-那个窗口的 launcher 仍然连着显示通道，锁里写的还是 `attached`。所以 Host 会反过来向**终端本身**要答案
-（经 relay 做一次光标往返，见 `scripts/tui-cut-probe.mjs`）：终端答不上来就说明那个窗口已经没了，
-选择器直接标「可接入」，一键接入；`--resume <session-id>` 也直接接入。
-只有终端确认还活着时才需要上面的接管确认。这个判断在**首帧之前**完成，所以列表不会先显示「已占用」
-再改口。
-
-同一 `sessionId` 不能同时开第二份 Host（会抢 jsonl 和审批）。锁在
-`$DSH_HOME/tui-locks/`，显示通道在 `$DSH_HOME/tui-socks/`。进程死后残留锁会在
-下次启动时核对 pid，已死则自动从日志接管。调试可设 `DSH_TUI_NO_SESSION_LOCK=1`。
-
-一个会话同时只有一块屏幕：新窗口接入时 Host 会通知旧窗口「你已被接管」（`FRAME_REPLACED`），
-旧窗口退出，不会两个窗口互相抢显示。
-
-链路探测（`CSI 6n`，终端回 `CSI row;col R`）做了三层防护：Host 收到 HELLO 之前就先测（不把
-整屏重绘的时间算成链路）；每次重问前等链路安静**一整个应答窗口**（350ms，超时后放宽到
-800ms），这样「上一个请求的回复」必然已经落地并被丢掉；采样取中位数，并丢掉比中位数快 4
-倍以上的（那是别人请求的回复，相对判定所以 `ssh localhost` 的 2ms 链路照样算得出来）。
-代价是每次接入多约 0.4–0.6 秒探测时间，换来的是 50ms 链路不再出现 2ms / 1900ms 的跳变。
-
-**链路会一直重测，不是只测一次**：接入 8 秒后补测一次，之后每 20 秒一次（变化超过 50ms 时
-5 秒后再确认一次），footer 芯片与绘制档位取**最近三次的中位数**——单次抖动（或接入那一刻正好
-在抖）不会把芯片和绘制预算钉在最慢一档，真正的变化两次就能定下来。终端完全不答 DSR 时退避到
-10 分钟一次。见 `scripts/tui-rtt-probe.mjs`（CI 的 0.1.7 腿）。
-
-这些回复也不可能再进输入框：relay 整条 stdin 管道常驻过滤（含跨 read 拆分的），Host 键
-处理前再过滤一次；连 Host 启动那几百毫秒里敲的键也会被暂存、接入后补发，不再被丢掉。
-`DSH_TUI_DEBUG=1` 时会打印每次采样与丢弃原因。
-
-忙碌时默认断线会暂停当前轮次（取消），接上后再发一句才会继续。`/disconnect continue` 或
-`ssh-tui.disconnect: continue`（也可用 `DSH_TUI_DISCONNECT=continue`）则不取消，
-Host 在后台跑完这一轮；审批和提问等接上后再弹。空闲断线直接退出，不占后台。
-留下的 Host 持有该会话的内核写锁（`session.lock`），而 Web 端打开同一会话时正是被这把锁挡下的
-（`resume failed for session … is already owned by an active write handle`）。所以它**跑完留下来的那一轮后最多再等 1 分钟**
-（`DSH_TUI_IDLE_EXIT_MS`，或 settings.yaml 的 `ssh-tui.idleExit`，毫秒；设 `0`/`off` 恢复旧行为）
-
-按键可改：`ssh-tui.keys`（动作 `pageUp` / `pageDown` / `toggleCard` / `copy` / `cancel`，如 `keys: { pageUp: ctrl+b }`）。
-冲突或未知的名字**不会静默生效**：启动时提示，且该键保持默认或变成无操作。
-纯行模式：`DSH_TUI_LINE_MODE=1`（或 `ssh-tui.lineMode: true`）——不画帧，逐事件追加纯文本行，
-适合屏幕阅读器、`tee` 与录屏；代价是全屏交互（鼠标拖选、卡片展开、`/find` 高亮）不可用。
-就自行退出并让出锁：这段时间够原窗口重连接入，之后 `--resume` 重新打开已落盘的日志。
-完全没有显示器且一直空闲的兜底仍由 `DSH_TUI_DETACHED_IDLE_MS`（默认 6 小时）负责。可选：用 tmux 包一层。
-常驻与接管的可复制配方（tmux / screen / systemd --user / 长任务）见 [`docs/remote-ops.md`](docs/remote-ops.md)；重连后转录里的「已重连 N 次 · 断开 Xs」与「离开 …」两行的语义也在那里。
-
-启动时若 npm 上有更新，会弹出选单（类似 Codex / Claude Code 首启）：**现在更新 / 稍后 / 跳过此版本**。选「现在更新」安装的是刚才查到的那个版本号（`dsh plugin --profile tui add dsh-ssh-tui@<版本>`），不写 `@latest`：pnpm 对 `@latest` 会再解析一次，刚发布、还在 `minimumReleaseAge` 窗口里的版本会被静默跳过、装成旧的还显示成功。完成后提示退出再启动。`DSH_TUI_NO_UPDATE_CHECK=1` 可关掉。`/status` 里也能看到当前插件版本、链路芯片、额度窗口，以及子代理模型是否与父路由同族。
-
-仓库内也可：`node scripts/smoke-headless.mjs`（`bash scripts/smoke-headless.sh` 等价；记录出口摘要，不打印 token）。
-
-### 方式一：从 git clone 安装
+## Development
 
 ```bash
 git clone https://github.com/cyjyyd/dsh-ssh-tui.git
 cd dsh-ssh-tui
-node scripts/install.mjs           # 默认安装到 tui profile（bash scripts/install.sh 等价）
-```
 
-Windows 没有 bash，用同一条 `node scripts/install.mjs`；完整的 Windows 步骤、
-「装不上先看什么」和 `/doctor` 的读法见 [docs/windows.md](docs/windows.md)。
-
-安装到其它 profile（例如自定义 `work` profile）：
-
-```bash
-node scripts/install.mjs work
-```
-
-脚本会依次：安装依赖 → 构建 `lib/` → 通过 `dsh plugin --profile <name> add link:<repo>`
-把插件链接进 profile，自动把 `dsh-ssh-tui` 加入该 profile 的 `dsh.profile.bundles`，
-最后把 `/mode` 需要的 preset 名单行写进该 profile 的 `cordis.patch.yml`（见下节）。
-
-### `/mode` 的 preset 名单（agent-presets 行）
-
-`dsh-base` 的终端 profile 不组合 preset 名单（只有 Web 端的 `dsh-web-app` 组合包会），
-而 DSH STORE 只接受「附加式、插件自有 id、不出现 `@deepseek-ai/*` 名字」的 Bundle Patch，
-所以插件自己的 patch 不能挂载官方行 —— 名单行归 profile 的用户层。名单不只是
-`/mode` 的菜单：`ask_user_question`、`present`、PTC 的呈现层、`subagent` 的模型选择
-这些工具行都由 preset 提供，缺席时它们都不在 Agent 的工具目录里。
-
-三种修复方式（幂等，选一即可）：
-
-1. **运行中的应用内修复**：`/mode fix` 写入下面这段并提示重启。npm 安装和
-   「现在更新」走的是 `dsh plugin add`，不会执行仓库脚本，所以这是最通用的一条。
-2. 仓库安装：`node scripts/profile-rows.mjs [profile]`（默认 `tui`；
-   `bash scripts/ensure-profile-rows.sh` 是它的薄封装，两者等价）。
-3. 手动在该 profile 的 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里加入：
-
-```yaml
-- insert:
-    - id: agent-presets
-      name: '@deepseek-ai/dsh-agent-presets'
-      config:
-        default: standard
-```
-
-脚本会一并挂载 `code-runtime`（PTC 模式需要的 TypeScript 运行时）和
-`subagent-model-selection-settings`（宿主侧子代理委派设置），并跳过已经组合了名单的
-profile（例如同时装了 `@deepseek-ai/dsh-web-app` 的 profile）。改完重启 TUI 生效。
-反过来，已经写了这段的 profile 之后再装 `dsh-web-app` 会让名单行出现两次（第二次挂载
-会以 `service "agentPresets" has been registered` 失败），先把 profile 补丁里的这段删掉。
-
-名单缺席时，TUI 启动会打一行提示（中文界面：「未挂载 agent-presets 名单…」），
-`/mode` 会打印补丁路径和 `/mode fix` 修复入口，`node scripts/verify.mjs`（`scripts/verify.sh` 等价）也会给出提示。
-另外，preset 的 scope 身份按模块实例判定：一个 dsh 安装树里若存在两份
-`@deepseek-ai/dsh-scope`（npm 嵌套安装的 checkout 可能如此），名单挂载会以
-`refusing to compose an unscoped context` 失败；全局安装（`npm i -g`）不受影响。
-
-### 方式二：手动安装
-
-```bash
-cd dsh-ssh-tui
-npm install --no-audit --no-fund
+npm install
 npm run build
-dsh plugin --profile tui add "link:$(pwd)"
+npm test
 ```
 
-Windows（PowerShell）不用 bash，直接跑 Node 脚本（`scripts/*.sh` 只是转去调用它们的薄封装）：
+真实终端、断线与平台行为由额外 probe 覆盖。
 
-```powershell
-cd dsh-ssh-tui
-node scripts/install.mjs            # 装依赖、构建、链接进 tui profile、挂上 /mode 需要的行
-node scripts/verify.mjs             # 检查组合是否生效
-```
-
-不想用脚本时，三条命令等价：
-
-```powershell
-cd dsh-ssh-tui
-npm install --no-audit --no-fund
-npm run build
-dsh plugin --profile tui add "link:$((Get-Location).Path)"
-```
-
-### 方式三：指定其它 profile
-
-```bash
-dsh plugin --profile work add dsh-ssh-tui
-# 或仓库脚本（bash scripts/install-npm.sh 等价）
-node scripts/install-npm.mjs work
-```
-
-### 智能路由模式（dsh-routing-suite）
-
-需要“智能路由模式”时，安装 `dsh-routing-suite` 并注册其 preset：
-
-```bash
-node scripts/install-routing-suite.mjs          # 默认 tui profile
-node scripts/install-routing-suite.mjs work     # 其它 profile（bash scripts/install-routing-suite.sh 等价）
-```
-
-脚本会执行 `dsh plugin --profile <name> add dsh-routing-suite`，并把包内的
-`preset/routing-suite` 复制到 `$DSH_HOME/.agent-presets/routing-suite`，
-这样 TUI 的 `/mode` 菜单才能选择“智能路由模式”。该插件需要 `webServer`
-服务，脚本会在 profile 的 `cordis.patch.yml` 中挂载一个仅监听
-`127.0.0.1` 随机端口的 `dsh-host-webserver`，不会对外开放端口。
-
-## 启动与命令行参数
-
-```bash
-dsh --profile tui                          # 直接进入主界面（新建会话）
-dsh --profile tui --resume                 # 打开历史会话选择器
-dsh --profile tui resume                   # 同上（选择器）
-dsh --profile tui --resume <session-id>    # 直接恢复指定会话
-dsh --profile tui resume <session-id>      # 等价写法
-dsh --profile tui --new                    # 显式新建会话（默认即新建，供脚本使用）
-dsh --profile tui --model deepseek-v4-flash
-dsh --profile tui --provider <id>
-dsh --profile tui --no-color
-```
-
-选择器操作：一页固定 9 条，空筛选时 `1-9` 对应屏幕上每一项，`0` 新建。`↑`/`↓`（或 `Ctrl+P`/`Ctrl+N`）移动高亮，`Enter` 恢复当前项。输入文字（或 `/` / `Ctrl+F`）按标题、会话 ID、工作目录筛选；`PgUp`/`PgDn` 翻页，`Esc` 先退出筛选再取消。历史列表本身不截断。**读取是懒加载的**：首批固定 9 条，全部拿到标题后才上屏（屏幕上不会出现先显示会话 id、过一会儿又变成标题的行）；更早的会话只有你去够的时候才读——在最后一条继续按 `↓`/`PgDn`，或按 `End`，或输入筛选（筛选会自己往更早的历史里找）。标签缓存在 `$DSH_HOME/tui-session-index.json`。新建/恢复会立刻画出启动屏，前端不再等插件加载完才拉 Host。恢复历史会话时跳过 token chunk，首屏只排可见尾部。
-
-## 交互与快捷键
-
-| 键 | 作用 |
-| --- | --- |
-| `Enter` | 发送；运行中则插入指示；空输入且已选中卡片时展开/收起，选中的是回复则打开全文（`Esc` 返回）。工具正文超出窗口也单独全览 |
-| `1..9` / `Enter` | 回答 `ask_user_question` 提问：`1..9` 直接选，`Enter` 取当前高亮项（默认第一项），`Esc` 才取消 |
-| `↑` / `↓` | 空输入且会话里已有卡片时：在当前屏幕顺序的最新一条（**回复或卡片**）开始往上走，标记 `▶` 只出现在选中的那一条；没有卡片时（纯问答、或刚 `/clear`）仍是有输入时的历史召回——那种会话用 `Alt+4` 或 `Ctrl+N`/`Ctrl+P` 选回复。有输入：历史（↓ 越过最新一条会回到当前草稿） |
-| `Ctrl+R` | 展开最新一条卡片；已选中时全部展开或全部收起（选中的回复不会被抢走焦点，打开覆盖层时该键交给覆盖层） |
-| `Ctrl+T` | 折叠输入框（只影响显示） |
-| `Alt+1` / `2` / `3` / `4` | 跳到最新思考 / 计划 / 子代理 / 回复（回复会被选中，可直接 `/copy`） |
-| `/find [类] 关键字` | 搜索并跳到该条完整消息（反色高亮），命中的那条同时成为选中项。类：`思考` `计划` `子代理` `回复` `提示词`。`Ctrl+/` 或 `Alt+/` 打开 |
-| `Ctrl+G` / `Alt+N` | 下一条搜索结果；`Alt+P` 上一条 |
-| `/copy` | 把选中的卡片或回复按**原文**写入本机剪贴板（无选中则最近一条回复；支持 OSC 52 的终端/tmux）。复制后保留选中，连按两次拿到的是同一条。在「全文」覆盖层里按复制键（`Ctrl+Shift+C`）复制的是**屏幕上那份正文**——工具卡是工具全文、改动卡是那份 diff、回复是原文；覆盖层底部会回显「已复制 …（全文）」 |
-| `/retryauth [on\|off]` | "提供商侧鉴权失败"（HTTP 401/403，且本机凭据已配）时要不要自动重试一次；默认关。判断口诀与排查三步见 [`docs/remote-ops.md`](docs/remote-ops.md) 4.8 |
-| `/theme [名称]` | 配色:默认 / `catppuccin` / `gruvbox` / `mono`(完全不发颜色,靠加粗/暗淡/下划线区分)。只打 `/theme` 打开**选择器**:↑/↓ 即时预览、Enter 应用、Esc 还原;选择会记住,`DSH_TUI_THEME` 可单次覆盖 |
-| `/cleanup` | 清理**从未有过用户输入**的会话(启动后直接退出留下的空壳;它们会出现在别的 profile 的会话菜单里)。`/cleanup --dry-run` 只报告不删 |
-| 问答对话框 | ↑/↓ 移动高亮，`●` 标出 Enter 将提交的那一项；多选时 Space（或数字/字母）勾选，勾选行显示 `✓`，Enter 提交勾选集合（未勾选则提交高亮项），Esc 取消 |
-| 鼠标左键 | 点击卡片标题展开/收起；点 markdown 链接则复制 URL；**拖过回复**按屏幕所见复制（不含选中标记 `▶`） |
-| `PgUp` / `PgDn`、滚轮 | 转录回看 |
-| `Esc` | 取消选择 → 回底部 → 取消当前轮次 |
-| `Ctrl+C` | 中断当前轮次；空闲连按两次退出 |
-| `Ctrl+D` | 退出 |
-| `Ctrl+L` | 重绘整个画面 |
-
-`/mode` 切换官方 preset：标准 (`standard`)、PTC (`ptc`；dsh 0.1.1 上仍是 `code`)、极简 (`minimal`)、创造 (`cordis`)，以及本地安装的其它模式（如 `routing-suite`）。
-官方 preset 的名字跟 `/language` 走（中文下显示“标准模式 / 极简模式 / PTC 模式 / 创造模式”，
-英文下显示 Standard / Minimal / PTC / Cordis）；`$DSH_HOME/.agent-presets` 里自己写的
-preset 保留它 `preset.yml` 里的名字不翻译。`/mode <id|名字>` 直接切，比如
-`/mode minimal`、`/mode 极简模式`；当前会话已经跑过一轮时只记住选择，下次启动生效。
-名单没挂载时启动会打一行提示，`/mode` 会打印 profile 补丁路径和 `/mode fix` 修复入口（见「`/mode` 的 preset 名单」）。
-
-斜杠命令：`/help`、`/find`、`/copy`、`/model`、`/effort`、`/provider`、`/language`（`/lang`）、`/view`、`/disconnect`、`/approval`（`auto` / `off` / `status`）、`/submodel`、`/subeffort`、`/mode`、
-`/status`、`/diag`、`/subagents`、`/usage`（`/balance`、`/quota` 同义）、`/setup`、`/clear`，
-界面语言：`/language` 打开选择器，或 `/language zh` / `/language en` 直接切。优先 `DSH_TUI_LANG`，其次 `$DSH_HOME/settings.yaml` 的 `ssh-tui.language`，再跟 `LANG`/`LC_MESSAGES`。未知和 `C` locale 默认中文。
-工作区视图：`/view` 在 **详细**（默认，看见思考和单条工具）和 **极简** 之间切换，写入
-`ssh-tui.view`。极简对齐 Codex：藏思考，按「回复 → 已调用 N 个工具 → 已编辑 N 个文件 →
-下一段回复」交错绘制；合并卡头部带 git 红绿增删行数（`-13 +24`），Enter 展开条目（编辑
-展开后画 diff），状态球只有全失败才红；进行中的计划仍钉在输入框上方。这和 `/mode`
-（agent preset）不是一回事。
-以及 harness 自带命令（`/goal`、`/plan`、`/compact` 等）。底栏第二行（身份行）在剩余额度
-后面用 1 列 Braille 圆环显示当前模型窗口占用（来自 DSH `contextPressure`，与提供商无关），
-绿 / 黄 / 红对应正常 / 80% / 95%。占用到约 80%/95% 会提示；空闲且占用到约 72% 时
-自动跑 `/compact`，避免等回合中途再压才撞窗。
-`/compact` 进行中会显示「压缩上下文」卡片和底栏转圈，结束时写出回收的 token 数。
-模型请求失败会显示重试进度；会话标题由模型生成后写到窗口标题。harness 命令若声明
-支持图片附件，会在命令列表和补全提示中标注“可附图”。
-
-`/model` 只换**当前提供商**的模型和思考强度。已经在 SuperGrok 时，直接选
-`grok-4.6` / `grok-4.5`（`grok-4.6` 含 `xhigh`）。要换 DeepSeek / OpenCode /
-其它路由用 `/provider`：先选提供商，再选模型，**下一步请求生效，不用重启**。
-每个提供商上次的模型和思考强度会分开记住。`/setup` 只新增或更新当前这条
-API Key 提供商，不会冲掉其它路由。SuperGrok / X Premium 走本机 OAuth，不需要填 Key。
-
-**一个网关就是一个提供商。** `llm-pi-ai` 把线路协议记在 provider 上（一条 route 只能
-一种协议），所以目录跨协议的网关在 `settings.yaml` 里本来会拆成 `command-code` /
-`command-code-completions` / `command-code-messages` 这样的兄弟行。`/provider`、
-`/model`、`/submodel` 把它们**当成一家**列出：模型列表取各行并集，选中后自动落到
-真正能发该协议的那一行（依据网关自己公布的 `supported_endpoints`；公布不了就沿用
-它已经配置在的那行），而记住你上次选择的键是网关注 id——所以下次打开仍然只有一行。
-Command Code 与 OpenCode Go 都是这种网关。
-
-子代理默认跟随父会话的提供方，并尽量选同一家的轻量模型：按父会话所选模型名
-近似匹配，`flash` 结尾的优先——DeepSeek 用 `deepseek-v4-flash`，xAI 用
-`grok-4.5`。`/model` 或 `/provider` 换提供商（OAuth / API Key 都一样）时会
-**自动落盘**子代理模型（不弹窗；想手动改再用 `/submodel`）：
-
-- `/submodel [model-id]`：打开子代理模型选择器；带参数时直接指定模型；
-- `/subeffort`：选择子代理思考强度，或恢复为“跟随提供商默认”；
-- `/subagents`：列出活动子代理；`/subagents kill <session-id> [更多 id...]`
-  可释放指定的 continuable 子代理（harness 0.1.1 新增的定向回收能力）。
-
-中断的流式输出会保留已生成的部分，并显示 `⚠ 已中断` 标记；团队协作类会话事件
-（`team/*`）也会以系统消息形式显示在转录区。
-
-子代理不再把子会话内容平铺进主转录：每个子代理一张卡片，默认折叠，只显示
-`子代理 spawn [id] 运行中 · Ns · 最近活动`。`Enter` / 鼠标点击展开该子代理自己的
-用户消息、工具调用和结果；没有选中卡片时 `Ctrl+R` 展开最新一条，选中后才全部展开/收起。运行中的卡片带旋转
-动画，状态栏和窗口标题显示 `⠋ 子代理 N`。
-
-计划条只钉**最新一条未完成的计划**。同一轮次里模型再开新计划时，旧计划归档进
-工作区随转录上滚，底栏换成新计划。任务全部完成后计划条会说「计划任务已全部完成」，
-不再误报「计划模式已关闭」。一轮结束时若待办仍是进行中/待处理，计划条改成「本轮未收尾」并停止转圈，
-同时自动追问模型补一次 `todo_write`（同一列表只问一次，不改会话里的旧状态）。
-打开 `/` 命令选单或批准/提问对话框时，计划条让出底栏。
-`exit_plan_mode` 按 markdown 渲染。`ask_user_question` 仍弹对话框，并留下折叠的
-`提问用户` 卡片。`/goal` 是折叠的 `目标` 卡片。`/find 思考 padAnsi` 或 `Alt+1..4`
-可跳到对应类别的最新卡片。
-
-`/usage`（`/balance` 同义，旧名 `/quota` 仍可用）按**当前提供商**查额度或余额：
-
-- **DeepSeek 官方**：`GET {baseURL}/user/balance`（文档接口），显示可用/赠送/充值余额；
-- **OpenAI Completions 兼容网关**：按配置的 base URL 探测 `/user/balance`、`/dashboard/billing/credit_grants` 等；
-- **SuperGrok**：`GET cli-chat-proxy.grok.com/v1/billing`，显示本周剩余%；
-- **OpenCode Go**：官方 `/v1/usage`，滚动 5 小时 / 本周 / 本月剩余%；
-- **Command Code**：官方 `/alpha/billing/credits`，滚动 5 小时 / 本周剩余% + 月度额度余额（USD）；
-- **OpenCode Zen**：按量计费、没有固定额度，提示到 `https://opencode.ai/zen`。
-
-OpenCode Go / Command Code / SuperGrok 启动和运行中都静默查询，底栏显示套餐名 + 剩余条 + 百分比；窄屏先丢掉套餐名，只留条和百分比。DeepSeek 官方和可查询的 OpenAI 兼容网关把剩余余额画进底栏（`余额 86.42 CNY`）。跨过 50% / 25% / 10% / 5% 才往工作区打 ⚠。`/usage` 或 `/balance` 仍打印完整结果。查询默认每 **10 步**一次；小时窗口接近阈值时改 4 步。
-
-## 配置
-
-### 模型默认值（`$DSH_HOME/settings.yaml`）
-
-```yaml
-agent-default-model:
-  provider: opencode-go
-  model: deepseek-v4-pro
-  reasoningEffort: max
-agent-presets:
-  default: standard
-ssh-tui-subagent:
-  model: deepseek-v4-flash
-  # provider 可省略：省略时子代理跟随父会话提供方
-  # reasoningEffort 可省略：省略时跟随提供商/模型默认
-ssh-tui:
-  language: zh   # 或 en；/language 写入这里。DSH_TUI_LANG 优先
-  view: detailed # 或 compact；/view 写入这里
-```
-
-`/model`、`/mode`、`/submodel` 与 `/subeffort` 的修改会写回这里，
-web 端与 TUI 共用同一份设置。`/model` 换提供商后**下一步请求生效**，不必重启。
-每个提供商上次的模型和思考强度记在 `ssh-tui-routes` 里，切回 SuperGrok / 官方 / Go 时会预填。
-`/setup` 只更新当前这条提供商（模型列表会合并），不会删掉其它路由的 Key 和模型。
-
-### 会话自己的路由（`$DSH_HOME/tui-session-routes.json`）
-
-上面那份是**软件级默认值**：新会话从这里起步。而每个会话实际用过的路由（父会话的提供商/模型/强度，
-加上子代理那条——包括钉死到别的提供商的情况）会单独记在 `tui-session-routes.json` 里，
-`--resume` 时**自动按记录恢复**，并在转录区打一行说明：
-
-```
-已按本会话记录恢复路由：xai/grok-4.6 (xhigh) · 子代理 deepseek-official/deepseek-v4-flash
-```
-
-这就是跨提供商子代理需要会话级存储的原因：同一个软件默认值下，A 会话可能让自己的子代理跑在
-DeepSeek 上、B 会话跑在 xAI 上；只记软件级默认值的话，resume 之后两个会话会互相污染。
-规则：
-
-- **新会话**不受影响，仍从 `settings.yaml` 的默认值起步；
-- **resume** 时记录优先于默认值，但 **CLI 显式给的 `--provider` / `--model` 仍然最高**——
-  那是这次启动的明确要求；
-- 恢复的子代理路由**只作用于当前会话**，不会写回 `ssh-tui-subagent`（否则一次 resume 会改掉
-  以后所有新会话的默认子代理）；
-- 记录在路由定下来时写（`/model`、`/provider`、`/submodel`、`/subeffort`、`/setup`）以及每轮开始时
-  （这样 preset 或手改 settings.yaml 换掉的模型也能被记住）；没变化就不写；
-- 只保留最近 200 个会话的记录，老的自然淘汰；文件坏了就当作没有记录，退回默认值。
-- 记录里的**提供商已被删掉/改名**时：整条会话记录作废，回退到应用级默认（模型、强度、子代理一起回退），
-  并在启动时说明从哪家退下来的；只有**子代理单独钉死的那家**不可用时，父路由照旧、子代理退回应用级设置。
-  连默认提供商都不可用时会打一行错误：报出是哪家、列出可用的提供商，并指向 `/setup` 与 `/provider`。
-  判断"可用"取宽松口径（内建四家 + 适配器列表 + 已配置的 `llm-pi-ai` 档案）：误判成可用只是报一条
-  Harness 自己的错误，误判成不可用则会悄悄丢掉会话路由。
-
-对 OpenCode 和其他第三方提供商，`/model` 会先调用提供商的端点
-（`GET {baseURL}/models`）获取实时模型列表；端点不可达时回退到已配置的
-模型列表。若选中的模型尚未写入提供商配置，会自动追加到
-`llm-pi-ai.providers.<id>.models`，保证 Harness 可以正常调用。
-
-首次配置向导的自定义/OpenCode 提供商步骤中，输入模型 ID 前可按
-`Ctrl+F` 直接从端点拉取模型列表，免去手动输入。拉完按回车打开**勾选列表**：
-模板模型默认勾上，端点列出的只是候选，不会替你全写进配置；勾了多个时再问一次
-「本次会话用哪个模型」。想直接手写模型 ID 列表，输入并回车即可跳过这两步。
-
-向导会尽量自动填好上下文窗口：先读端点 `/models` 的容量字段，查不到再按模型名
-去内置 pi-ai 目录匹配（会剥离提供商写进模型名的思考档位后缀 `-high` / `-low` /
-`-thinking`，以及 `vendor/` 前缀、`:free` 标签、日期戳），命中后逐模型写入
-`contextWindow`。只有仍有模型查不到容量时，才多出一个「路由默认上下文窗口」步骤，
-并把推导值预填好（取本路由已探明窗口的最小值，避免超声明）——直接回车采用，也可
-输入其它数字；全部命中时该步骤自动跳过，不需要任何输入。保存的是路由级
-`defaultContextWindow`，之后用 `/model` 新加的模型会继承它；而且 `/model` 追加
-模型时本身也会先查一遍目录，命中就直接写入该模型的 `contextWindow`。
-
-### profile 用户层
-
-每个 profile 的 `cordis.patch.yml` 是用户覆盖层，可覆盖插件 patch 的任何行；
-`--patch <file>` 可临时叠加。
-
-## 验证
-
-```bash
-node scripts/verify.mjs             # 检查 profile 组合与 CLI 语法（bash scripts/verify.sh 等价）
-npm test                            # 单元 + 集成（含屏幕网格护栏、重连接管、选择器首帧）
-python3 scripts/pty-acceptance.py   # 真 PTY：模拟 40ms SSH 链路 + 滞留的光标回复
-node scripts/tui-probe.mjs          # 真 PTY：真 dsh --profile tui 走一遍启动/缩放//diag/打字//exit
-```
-
-或手动：
-
-```bash
-dsh --profile tui --dump-config | grep -A12 'id: ssh-tui'
-dsh --profile tui --help
-```
-
-`pty-acceptance.py` 用真 PTY 跑一遍接入：终端像 SSH 客户端那样隔一个 RTT 才回
-`CSI 6n`，并且有两条「上一个 launcher 发出、仍在路上」的滞留回复（一条已在队列里，一条
-落在探测窗口中间），按键在探测还没结束时就敲下去。脚本检查输入是否原样（且只送一次）
-送达 Host、测得的 RTT 是否接近模拟值、屏幕上有没有被回显的 `^[[17;1R`。第一个参数可改
-模拟延迟（秒）：`python3 scripts/pty-acceptance.py 0.12`。
-
-`tui-probe.mjs` 直接用真 PTY 驱动 `dsh --profile tui`：等启动横幅与空闲状态、缩放窗口后
-断言刚才那一帧不是已结束的选择器的重绘、跑 `/diag` 并检查判定链、打字是否上屏、`/exit`
-是否把终端（含备用屏）交还。`npm test` 里的屏幕级用例用 `@xterm/headless` 断言**屏幕网格**
-（残留行、越界寻址、光标越界、缩放风暴、选择器交还备用屏、footer 链路芯片），探针补的是
-只在真宿主上才存在的部分。跑探针请用一次性 home，避免碰到真实会话：
-
-```bash
-H=$(mktemp -d); mkdir -p "$H/sessions" "$H/tui-locks" "$H/tui-socks"
-ln -s ~/.dsh/profiles "$H/profiles"; cp ~/.dsh/settings.yaml ~/.dsh/.credentials.yaml "$H/"
-PROBE_HOME=$H node scripts/tui-probe.mjs           # 自建会话，退出时删掉
-PROBE_HOME=$H node scripts/tui-probe.mjs --session <id>   # 只读式驱动已存在会话，绝不删除
-```
-
-探针拒绝在 `sessions/`、`tui-locks/`、`tui-socks/` 分居两处（含符号链接）的 home 上运行——
-那种布局会让 Host 持有真实会话的写锁却对用户的选择器不可见（2026-09-11 事故形态）。
-
-## 卸载
-
-```bash
-node scripts/uninstall.mjs          # 默认 tui profile（bash scripts/uninstall.sh 等价）
-node scripts/uninstall.mjs work     # 指定 profile
-```
-
-卸载只移除 profile 中的插件依赖与 bundle 层，不会删除会话数据。
-
-## 隐私与上传安全
-
-- 所有会话、凭据、设置都保存在 `$DSH_HOME`（默认 `~/.dsh`），**不落在本仓库**；
-- `.gitignore` 已排除 `node_modules/`、`lib/`、`.env*`、`*.key`、`session*.jsonl*`、
-  `sessions/`、日志与临时文件；
-- 上传前请自查：`find . -type f | grep -Ei 'credential|\.env|\.key|session'`；
-- 插件本身不收集、不上传任何数据；会话日志仅按需读写于本机 `$DSH_HOME`；
-- 首次配置可能会在 shell rc（`.bashrc` / `.zshrc` 等）写入 `env.sh` 引用以便启动环境覆盖生效；
-  若不希望改动 rc，可设置 `DSH_TUI_NO_RC_HOOK=1` 跳过。
-
-## 开发与目录结构
+项目的目标不是让模拟测试代替终端，而是让：
 
 ```text
-src/index.ts        插件入口：启动选择器、会话创建/恢复、session lock
-src/startup.ts      命令行参数解析（--resume / --new / --model ...）
-src/picker.ts       启动历史会话选择器（可见页 9 条，列表不截断，可筛选）
-src/session-list.ts 历史会话扫描与标签（共享给启动选择器）
-src/session-lock.ts 同会话防双开
-src/update-check.ts npm 最新版提示（不自动升级）
-src/tui.ts          终端渲染、交互、标题/铃声（SshTui；叶子函数再导出）
-src/paint.ts        增量绘制、SSH 节拍、选择器窗口
-src/term-text.ts    宽度/折行/markdown
-src/footer.ts       底栏、占用环、/status
-src/stats.ts        会话统计账本（回合/步数、LLM 与工具耗时、TTFT、decode 计数、用量去重）
-src/rows.ts         转录行操作与可见窗口（内存上限、工具卡合并、计划行、滚动切片；行数组仍在 tui.ts）
-src/dialogs.ts      对话框状态机（问题列表/确认/查看覆盖层的按键规则）
-src/commands.ts     斜杠命令目录与补全建议
-src/plan.ts         计划条、待办、/find
-src/tool-present.ts 工具卡、diff
-src/auto-approval.ts 规则初审
-src/approval-reviewer.ts AI 复核提示词与 JSON 解析
-src/i18n/           中英界面字典（/language、DSH_TUI_LANG）
-cordis.patch.yml    dsh bundle patch（仅 insert ssh-tui-startup / ssh-tui）
-scripts/            安装 / 卸载 / 验证脚本
+unit / contract tests
+        +
+real terminal probes
+        +
+cross-platform CI
 ```
 
-```bash
-npm install
-npm run typecheck
-npm run build
-```
+共同定义“支持”。
 
-改到环境变量、子进程、路径或终端能力时，先读 [docs/platform.md](docs/platform.md)：平台判断要写成可注入的纯函数并在用例里
-显式跑 Windows 分支（`tests/platform-guards.test.mjs` 会静态拦住新的裸名 `spawn`），真实 Windows 由 CI 的
-`test-windows` 腿覆盖。
+---
 
-## 常见问题（QA）
+## Documentation
 
-按现象查；每条只讲怎么办，不讲版本历史。
+| 文档 | 内容 |
+|---|---|
+| [windows.md](docs/windows.md) | Windows 安装、终端与排障 |
+| [remote-ops.md](docs/remote-ops.md) | SSH、断线、attach、Host 生命周期 |
+| [desktop.md](docs/desktop.md) | 官方 Harness Desktop / no-TTY Host |
+| [platform.md](docs/platform.md) | 平台生命周期设计与维护者约束 |
+| [terminals.md](docs/terminals.md) | Terminal capability 与兼容矩阵 |
+| [upstream-desktop-report.md](docs/upstream-desktop-report.md) | 可复现的上游 Desktop 问题记录 |
 
-### 启动与安装
+---
 
-- **`dsh-ssh-tui: both stdin and stdout must be TTYs`**：必须在真实终端 / SSH 会话里启动；管道、CI、`&` 后台都不行。
-- **Windows 安装、脚本与 `/doctor` 的读法**：[docs/windows.md](docs/windows.md) 有 30 秒安装、
-  「装不上先看什么」的对照表，以及 `/doctor` 报告里 `●` / `⚠` / `✖` 各代表什么。
-- **Windows 报 `host display socket did not appear`**：升级到最新版：
-  `dsh plugin --profile tui add dsh-ssh-tui@latest`。仍失败请附 `/diag` 输出提 issue。
-- **Windows 上应用内更新报 `spawn dsh ENOENT`**：旧的更新器直接 `spawn dsh`，而 Windows 上装的是 `dsh.cmd` 垫片；
-  在命令行跑一次 `dsh plugin --profile tui add dsh-ssh-tui@latest`，之后应用内更新正常（它装的是查到的版本号，不再写 `@latest`）。
-- **pnpm 拒绝 git 依赖的构建脚本**：把 pnpm 打印的 key 加进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`，再重装。
-- **升级后 `/mode` 报「服务不可用」、preset 工具消失**：敲 `/doctor`。它逐项判定部署组合（补丁能否解析、
-  名单与 code-runtime 是否组合、有没有行被挂载两次、dsh 版本是否在兼容表内、是否装着两份 `@deepseek-ai/dsh-scope`），
-  每项给「结论 + 证据 + 修复命令」；`/doctor --fix` 会补齐 patch、写前留 `.bak-<时间戳>` 备份，重启 TUI 生效。
-- **提示「会话已在 pid 运行 / 可接入」**：那个 Host 还活着，用 `dsh --profile tui --resume` 接入。
-  **不要**再开第二个窗口；只有 pid 确实已死时才清 `$DSH_HOME/tui-locks/` 再从日志恢复。
+## Project philosophy
 
-### 会话与锁
+这个项目最初是为 SSH、跳板机和弱网环境做的。
 
-- **Web 端打不开同一会话（`already owned by an active write handle`）**：SSH 断开时仍在跑轮的 Host 会持有写锁，
-  轮次结束后最多 1 分钟自动退出并放锁（`DSH_TUI_IDLE_EXIT_MS` / `ssh-tui.idleExit` 可调）；也可以直接 `--resume` 接入它继续。
-- **`--resume` 第一次报 `write EPIPE`、第二次才接上**：launcher 会自动等待并重试一次。若持续失败，
-  用 `/diag` 看显示通道与锁的判定链（含"残留 socket 文件"这一常见来源）。
-- **历史会话太多、认不出哪条是哪个**：在 `--resume` 选择器里按标题 / session id / 工作目录筛选（`/` 或 `Ctrl+F`），
-  更早的历史会在筛选或翻到末尾时按需读取；计数行会显示还有多少条未加载。
+这些环境迫使它很早就面对一些桌面应用容易忽略的问题：
 
-### 显示与终端
+- 如果窗口消失，谁拥有 session？
+- 如果网络断了，正在运行的任务怎么办？
+- 如果没有 TTY，插件应该怎么退出？
+- 如果 Windows 和 POSIX 的进程生命周期不同，谁负责 Host？
+- 如果终端说自己支持某种能力，但实际上不支持，谁承担后果？
+- 如果 Harness 明天换一个 Host，UI 是否必须全部重写？
 
-- **Windows 下完全没有颜色（只有黑白）**：0.7.0 在 Windows 上把"未设置 `TERM`"误判为无终端。指定色深即可恢复：
-  `set DSH_TUI_COLOR_DEPTH=8`（或 `256` / `truecolor`），也可以先看 `/diag` 的**配色**一行确认判定结果。
-- **颜色不对，或 diff 整块一个颜色、看不清字**：显式指定色深 `DSH_TUI_COLOR_DEPTH=truecolor|256|8|none`。
-  `256` 下 diff 是深灰底 + 绿/红字；`none` 完全没有颜色，但 `+`/`-`、`●`、`⚠`、`✖` 仍在，状态不只靠颜色表达。
-- **中文 / emoji 挤压相邻字符**：换一款覆盖这些字形的等宽字体（如 Noto Sans Mono CJK）。程序按 2 格预算这些符号
-  并请求文本字形；字体缺字时终端会回退到彩色 emoji 字形，视觉上仍可能偏宽。
-- **弱网下画面跟不上**：`DSH_TUI_PAINT_MS` 控制发画间隔（40–1000 ms，越小越快也越费流量）；
-- `DSH_TUI_THEME`：这次启动用哪套配色（覆盖设置里的选择）。
-- `DSH_TUI_AMBIGUOUS_WIDTH=1|2`：`①` 这类东亚歧义宽度字符按几格算（默认按 locale 判断，见 [`docs/terminals.md`](docs/terminals.md)）。
-- `DSH_TUI_NO_GLYPH_PROBE=1`：跳过开机的字符宽度实测（正常使用不需要；给断言启动字节的探针与不喜欢光标查询的串口终端）。
-  不设时按测得的 RTT 自动取 80 / 160 / 250 / 400 ms；链路每 20 秒重测（刚变化过就 5 秒后再测一次），
-  取最近三次的中位数，所以接入那一刻的抖动不会把绘制档位钉在最慢一档。
-- **模型“只思考一下就说完成”**：这是**上游返回了空回合**——有些网关把 Gemini/Claude 的 thought 部分映射成
-  `reasoning_content`，然后以 `finish_reason: stop` 收尾却没有任何正文，harness 如实组装成“只含思考的助手消息”，
-  回合就合法结束了。TUI 现在会显式写一行「上游只返回了思考…这不是真正的完成（finish_reason: stop）；按 Enter 或再输入一句即可继续」，
-  不再让你以为它答完了。实测某网关（`google-ai-pro` / `gemini-3.8-flash-high`）约 **29%** 的回合如此（同会话其它回合正常）。
-- **要给屏幕阅读器或日志用**：`DSH_TUI_LINE_MODE=1` 启动纯行模式——只追加纯文本行、不发光标控制，可直接 `tee` 存档。
-- **标题栏 / 铃声不生效**：终端需支持 OSC 0 与 BEL；`DSH_TUI_NO_BELL=1` 可关闭铃声。
-- **深色终端下整行底色太抢眼**：`DSH_TUI_COLOR_DEPTH=none` 去掉底色，diff 仍用 `+`/`-` 区分。
+因此现在更准确的定义不是：
 
-- **框线、圆点显示成乱码**：控制台代码页不是 UTF-8。界面会自动改画 ASCII（横线 `-`、状态点 `*`、
-  警告 `!`），`/diag` 的「终端」一行会注明；想要原字形就 `chcp 65001` 或改用 Windows Terminal。
-  `DSH_TUI_ASCII=1` 强制 ASCII，`=0` 强制 Unicode。详见 [docs/windows.md](docs/windows.md)。
-- **终端兼容性**：每个终端允许发什么、承诺什么（Windows Terminal / conhost / GNOME / XFCE / Konsole /
-  xterm / tmux / screen / Linux 控制台）见 [docs/terminals.md](docs/terminals.md)；
-  判定依据写在 `/diag` 的「终端」一行，判定错了用 `DSH_TUI_TERM_CAPS` 覆盖。
+> 一个 SSH 专用 TUI。
 
-- **文件权限**：`env.sh`/`env.cmd`（含 API Key）、`.credentials.yaml`、SuperGrok token、锁与套接字目录
-  在 POSIX 上是 `0600`/`0700`，在 Windows 上是**只授权当前用户**的 ACL（`icacls` 去掉继承）。
-  `DSH_HOME` 放在共享目录时这一点尤其重要。
+而是：
 
-### 状态栏与额度
+> **一个把 SSH 当作最严苛真实环境之一来设计的 DeepSeek Harness terminal frontend。**
 
-- **额度条显示 `░░░░░░░░ ?%`**：**还没拿到读数**（接口慢或不通），不是 0%。TUI 每 15 秒重试一次，拿到后自动替换成
-  真实数值与窗口；一直不变成数值时用 `/quota` 看具体报错。
-- **没有额度条**：只有 SuperGrok / OpenCode Go / Command Code 有额度；DeepSeek 显示的是余额行，Zen 是计量制。
-- **`5Hr` / `1Wk` / `1Mo` 是什么**：该数值所属的额度窗口。默认显示**最小窗口**（5 小时 → 周 → 月），
-  `/quota` 列出全部窗口、剩余比例与重置时间。告警仍按"最紧的那个窗口"触发。
-- **状态栏模型名没有提供商前缀**：状态行只显示模型名（`provider/model` 会截断成模型名），完整路由在顶栏与 `/status`；
-  `sub:` 子代理同样只显示模型名；只有钉到别的提供商时才补 `提供商/` 前缀并变色。
-- **看不到子代理模型 / 想换子代理**：`/submodel` 选模型、`/subeffort` 选思考档位，`/status` 查看当前值。
-- **没有 `tok/s`**：该轮没有可统计的模型 token；只有首字耗时时显示 `首字 1.2s`。
-- **底栏一直显示「压缩中」，`/compact` 还说已有压缩在进行**：Host 在压缩过程中退出，日志里只剩
-  `compaction/start` 没有 `end`，恢复会话时那张卡片会一直停在"运行中"。重新启动（`--resume` 同一会话）
-  即可：重放会把这类没有结束事件的压缩结算成「压缩被中断」，底栏随之恢复，`/compact` 也能再用。
-  升级到 0.7.2 之前遇到时，重启同样有效（旧卡片不会写回日志）。
-- **计划条只提醒一次"补待办"**：有意如此——一条待办列表只问一次，避免每轮结束都开一个新回合。
-  想再次触发，先把列表全部标成完成，再新开一列待办。
+SSH-first.
 
-### 断线与代理
+Host-aware.
 
-- **SSH 断了会怎样**：空闲则落盘后退出；忙碌（思考 / 回复 / 工具 / 子代理）默认取消当轮、保留 Host，
-  回来 `dsh --profile tui --resume` 接入；`/disconnect continue` 则让它在后台跑完当前轮。**不要**再开第二个 Host。
-- **重连后多出一行提示、闪出 `^[[17;1R` 之类的字符、链路芯片变空心**：升级到最新版；自动重试期间保持 raw 模式
-  并丢弃排队字节，这些字符不会再被回显。
-- **模型请求要走公司 / 本机代理**：给 dsh 进程加 `--use-env-proxy`（不要用 `NODE_OPTIONS`），并用 `NO_PROXY`
-  按域名分流——国内直连更快的域名放进去，本地 / 内网地址务必保留在列表里。做法与回退见
-  [docs/remote-ops.md §4.7](docs/remote-ops.md)。
+Reconnectable.
 
-### 排障入口
+Compatibility-tested.
 
-- **要给支持者一份可读的排障信息**：在会话里敲 **`/diag`**（只读本地信息、不外传）：版本、平台、会话 id、
-  `DSH_HOME`、显示通道与可连接性、Host 的 pid / 锁状态、链路 RTT、日志格式与大小，最后是**判定链**
-  （例如"会接入后台 Host（pid N），不要另起第二个窗口"）。部署组合问题用 **`/doctor`**。报 issue 时贴这两段即可。
+---
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT

@@ -32,6 +32,7 @@ import {
   runDisplayRelay,
   sessionSockPath,
 } from '../lib/display-sock.js'
+import { GLYPH_PROBE_TEXT } from '../lib/glyph-measure.js'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -409,6 +410,41 @@ function fakeHost(server, onFrame, t) {
   return state
 }
 
+// A lone Escape is typing, and the pump's hold is not the last one it meets: the
+// relay splits the same stream into size reports, whose prefix is a bare `ESC`
+// as well. That second filter must have a deadline of its own — without one it
+// held the key until the *next* read, so Esc alone never reached the Host (no
+// dialog cancelled, no turn interrupted) and the key after it arrived glued to
+// it as an Alt chord.
+test('a lone Escape reaches the Host on its own, not glued to the next key', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-lone-escape')
+  const server = createServer(() => {})
+  const host = fakeHost(server, undefined, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+
+  const terminal = scriptedTerminal({ replyDelayMs: 5 })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: false,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true, 'the relay must hand over with a HELLO')
+
+  terminal.stdin.write('\x1b')
+  for (let wait = 0; wait < 300 && host.stdin.length === 0; wait += 1) await delay(10)
+  assert.deepEqual(host.stdin, ['\x1b'], 'the Escape key is handed over by the hold deadline')
+
+  terminal.stdin.write('a')
+  for (let wait = 0; wait < 300 && host.stdin.length < 2; wait += 1) await delay(10)
+  assert.deepEqual(host.stdin, ['\x1b', 'a'], 'and the next keystroke is not read as an Alt chord')
+
+  host.socket.write(encodeFrame(FRAME_GOODBYE))
+  assert.equal((await relay).reason, 'goodbye')
+})
+
 test('the relay filters replies end to end and never loses a keystroke', { timeout: 10_000 }, async t => {
   const { path } = await listenOn(t, 'relay-filter')
   const server = createServer(() => {})
@@ -540,6 +576,85 @@ test('a replaced relay leaves its terminal untouched', { timeout: 10_000 }, asyn
   assert.equal(written.includes('\x1b[?1049l'), false, 'no alt-screen exit on a replaced relay')
   assert.equal(written.includes('\x1b[2J'), false, 'no screen clear on a replaced relay')
   assert.equal(written.includes('\x1b[?1000l'), false, 'no mouse-mode reset on a replaced relay')
+})
+
+// The glyph probe owns the terminal for one round trip, and the Host's frame
+// waits in the relay for it. A relay that is replaced inside that window must
+// drop what it held, not flush it: the frame belongs to a window the user has
+// left, and on a dead SSH link it sits in the buffer until that link comes back
+// and paints over the session that took over.
+test('a replaced relay drops the frame it held for the glyph probe', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-replaced-while-held')
+  const server = createServer(() => {})
+  const host = fakeHost(server, undefined, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  // The timing probes are answered, slowly enough that the glyph probe's own
+  // window is a comfortable one; the glyph probe itself is left unanswered, so
+  // the hold stays open while the frames below arrive.
+  const terminal = scriptedTerminal({
+    onRequest: (_count, stdin) => {
+      if (terminal.stdout.text.includes(GLYPH_PROBE_TEXT)) return
+      setTimeout(() => stdin.write('\x1b[17;1R'), 60)
+    },
+  })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: false,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true, 'the relay must hand over with a HELLO')
+
+  host.socket.write(encodeFrame(FRAME_STDOUT, Buffer.from('probe-held-frame')))
+  await delay(40)
+  assert.equal(
+    terminal.stdout.text.includes('probe-held-frame'),
+    false,
+    'the frame really is held while the probe owns the terminal',
+  )
+  host.socket.write(encodeFrame(FRAME_REPLACED))
+  assert.equal((await relay).reason, 'replaced')
+  // The probe's own `finally` has run by now (the wait is awaited by `finish`),
+  // so a flush would already be visible.
+  assert.equal(
+    terminal.stdout.text.includes('probe-held-frame'),
+    false,
+    'a replaced relay writes nothing, held frames included',
+  )
+})
+
+// The mirror of the case above, one filter earlier: the Escape the relay is
+// still holding when it is replaced. `finish` settles the relay and then waits a
+// round trip before it cleans up, so the hold deadline fires inside a window
+// where the socket is still open — and a key typed on a link that has been taken
+// over belongs to nobody.
+test('a replaced relay drops the key it was still holding', { timeout: 10_000 }, async t => {
+  const { path } = await listenOn(t, 'relay-replaced-holding-key')
+  const server = createServer(() => {})
+  const host = fakeHost(server, undefined, t)
+  await new Promise(resolve => server.listen(path, resolve))
+  t.after(() => server.close())
+  // A deliberately slow link: the hand-back grace is `rtt * 2 + 40` (capped at
+  // 400 ms), and the hold deadline below has to land inside it for this test to
+  // have anything to catch.
+  const terminal = scriptedTerminal({ replyDelayMs: 150 })
+  const relay = runDisplayRelay(path, {
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    signals: new EventEmitter(),
+    ssh: false,
+  })
+  for (let wait = 0; wait < 300 && !host.sawHello; wait += 1) await delay(10)
+  assert.equal(host.sawHello, true, 'the relay must hand over with a HELLO')
+
+  terminal.stdin.write('\x1b')
+  host.socket.write(encodeFrame(FRAME_REPLACED))
+  assert.equal((await relay).reason, 'replaced')
+  // The relay resolves only after the grace window and `cleanup`, and the hold
+  // deadline is well inside that: a flush would already have been delivered.
+  assert.deepEqual(host.stdin, [], 'the held key goes with the link, not back onto it')
 })
 
 // Two SSH windows on one session used to kick each other off the display in a

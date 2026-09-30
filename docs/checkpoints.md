@@ -2,6 +2,8 @@
 
 每个批次（C 批为每个功能）留下一个可独立复核的检查点：**一条命令 + 一张人工核对清单 + 该批次所有 mutation 记录**。
 命令都从仓库根目录执行，全部不消耗模型额度（`tui-mock-probe` 使用合成 profile 与脚本化模型）。
+> **工作约定（2026-10-01 起）**：开工前先 `git pull --ff-only` —— 远端是权威副本，人在这台机器之外
+> （Windows 实机、桌面版）也会改它；本地领先不代表远端还是上次那个样子。
 
 一键复核全部证据：
 
@@ -358,3 +360,25 @@ ssh-tui:
   七步 `verify-batch --batch C` 全绿；等用户逐项复核。
 - C-3 纯行模式（可访问性）—— 待开工
 - C-4 键位可配置 —— 待开工
+
+## D 批 · 桌面兼容与管道宿主（本轮）
+
+一句话：桌面版那条路（Electron-as-Node 启动器无 console）早已按"插件保持惰性、不弄坏宿主"处理
+（`docs/desktop.md`）；本轮补的是**另一条路**——宿主自己会开终端控件时，怎么把这个 TUI 当子进程用。
+
+一键复核：
+
+```bash
+node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs   # 真 profile、全程无 PTY
+node --test tests/stdio-pipe-e2e.test.mjs tests/display-mode.test.mjs
+```
+
+| 项 | 人工核对 | 自动证据 |
+|---|---|---|
+| D-1 管道宿主可用 | 任何"能喂字节 + 解 ANSI"的宿主（xterm.js 面板、GUI 里嵌的终端）按 `docs/display-mode.md` 起 `DSH_TUI_DISPLAY=stdio`：应看到完整画面、按键有反应、`/exit` 正常退出；宿主不回答 `CSI 6n` 时也能跑，只是接入慢约 0.7s | `tests/stdio-pipe-e2e.test.mjs`（真 relay + 真 Host，两端都是管道：attach、初始尺寸、按键、goodbye）、`scripts/tui-stdio-probe.mjs`（CI Linux/Windows 两条腿） |
+| D-2 面板尺寸 | 宿主发 `CSI 8 ; rows ; cols t`：画面按新宽度重画（分隔线长度跟着变），且这串字节**不会**出现在输入框里 | `tests/display-mode.test.mjs`（含跨读暂存）、`tui-stdio-probe.mjs` 的 120 列断言 |
+| D-3 曾经不可用 | 修前：管道上 attach 直接 `TypeError: stdin.setRawMode is not a function`（`display-sock.ts` 未加 `?.`）——整个模式从一开始就起不来 | `tui-stdio-probe.mjs` 修前失败即此异常 |
+
+**mutation**：① `stdin.setRawMode?.(true)` 还原为未加 `?.` → 管道 e2e 红（TypeError）；② 尺寸报告不从输入里剔除 → `display-mode` 单位测试 2 红 + 探针"不许画成按键"红；③ 报告组下标写回 `match[2]/match[3]`（差一位）→ 尺寸测试 4 红。
+
+**同时修掉的两类残留**（用户已验收 ①，②等复现）：① 渲染缓存把"活尾巴"（等待卡/流式缓冲/无回复突发）收进最后一行条目 → 每帧重放出冻结在旧秒数的"处理中"；② 光标探针的两处痕迹：探针行自己不清（`①—…“”·•Ⅰ` 留在提示符前）、回答在归还终端后被 tty 回显成 `^[[25;1R`。另外极简视图单文件编辑卡不再重复自己的标题、失败行补回状态球。
