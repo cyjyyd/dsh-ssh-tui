@@ -29,7 +29,17 @@ function fixture(rows, { compact = false } = {}) {
   return tui
 }
 
-const frame = tui => tui.captureFrame(90, 30).join('\n')
+/**
+ * The transcript part of the frame.
+ *
+ * Comparing whole frames compares the chrome too, and the chrome carries a
+ * measured round-trip time and a clock — a Windows runner and a Linux one
+ * disagree on it for reasons that have nothing to do with this cache.
+ */
+const CHROME = /(DeepSeek Harness — SSH TUI|^\s*[─]+\s*$|SSH |空闲 |输入 \/help|^>\s*$|目录:)/u
+const frame = tui => tui.captureFrame(90, 30)
+  .filter(line => line.trim() !== '' && !CHROME.test(line))
+  .join('\n')
 
 const tool = (overrides = {}) => ({
   kind: 'tool',
