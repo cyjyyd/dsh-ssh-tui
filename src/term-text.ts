@@ -308,6 +308,85 @@ export function mapAsciiChrome(text: string): string {
  * Overflow into the input box is handled by clipping/padding painted rows to
  * the measured column count, not by inflating glyph width.
  */
+/**
+ * East-Asian Ambiguous families that a CJK-configured terminal draws two cells
+ * wide, and that this TUI therefore budgets two cells for.
+ *
+ * The reported bug was `①`-`⑩`: the model writes them, the terminal draws them
+ * from a CJK font in the space of two cells, and every row holding one came out
+ * a cell short — the same class of failure as the emoji glyphs above, with one
+ * important difference. Emoji can be *pinned* ({@link pinEmojiCells} asks for the
+ * text presentation and reserves the second cell) because they have variation
+ * selectors; these characters have none, so the only lever is to budget what the
+ * terminal will actually spend.
+ *
+ * What is deliberately **not** in this table matters as much. Box drawing (`─`),
+ * geometric ornaments (`●`, `▸`) and the chrome glyphs `❯` / `✓` are ambiguous
+ * too, but they were measured against a real terminal in the earlier emoji pass
+ * and they come from the monospace font at one cell; counting them as two is
+ * what once painted half-width rules and parked the cursor past the text. They
+ * stay one cell until a measurement says otherwise.
+ */
+const AMBIGUOUS_WIDE_RANGES: readonly (readonly [number, number])[] = [
+  [0x2460, 0x24ff],   // Enclosed Alphanumerics: ① ⑩ ⑳ ⑴ ⒈ ⓐ ⓿
+  [0x2776, 0x2793],   // Dingbat circled digits: ❶ ➀ ➊ ➓
+  [0x2160, 0x217f],   // Roman numerals: Ⅰ Ⅱ ⅰ ⅻ
+  [0x1f100, 0x1f1ff], // Enclosed Alphanumeric Supplement, incl. regional indicators
+  [0x1f200, 0x1f2ff], // Enclosed Ideographic Supplement
+  // Punctuation that a CJK font sets **full width**, and that a Chinese
+  // transcript is full of: an em dash, an ellipsis and curly quotes are 全角 in
+  // GB2312/GBK. A real session carries `—` tens of thousands of times, so
+  // budgeting one cell for it is not a corner case — it is every line.
+  [0x00b7, 0x00b7],   // · middle dot
+  [0x2013, 0x2014],   // – — dashes
+  [0x2018, 0x201d],   // ‘ ’ “ ” quotes
+  [0x2022, 0x2022],   // • bullet
+  [0x2025, 0x2026],   // ‥ … ellipsis
+  [0x2039, 0x203a],   // ‹ › guillemets
+]
+
+/** Cached decision for {@link ambiguousWidthIsTwo}, keyed on the override. */
+let ambiguousCache: { key: string; value: boolean } | undefined
+
+/**
+ * Whether ambiguous glyphs in {@link AMBIGUOUS_WIDE_RANGES} are drawn two cells
+ * wide here.
+ *
+ * `DSH_TUI_AMBIGUOUS_WIDTH=1|2` answers outright. Otherwise the locale decides,
+ * and only when there really is a terminal: a zh/ja/ko locale means the terminal
+ * is very likely using a CJK font, where these glyphs are full width. The UI
+ * language is deliberately *not* consulted — a Chinese reader on a Western
+ * terminal has narrow glyphs, and typing in Chinese does not change the font
+ * metrics.
+ * @param env - the environment to read (tests pass their own).
+ * @param onTerminal - whether the output is a terminal at all; a pipe or a test
+ *   harness has no font metrics, so there the narrow default applies.
+ * @returns true when those glyphs should be budgeted two cells.
+ */
+export function ambiguousWidthIsTwo(
+  env: NodeJS.ProcessEnv = process.env,
+  onTerminal = process.stdout?.isTTY === true,
+): boolean {
+  const override = String(env.DSH_TUI_AMBIGUOUS_WIDTH ?? '').trim()
+  const key = `${override}|${onTerminal ? 'tty' : 'pipe'}`
+  if (ambiguousCache?.key === key) return ambiguousCache.value
+  let value: boolean
+  if (override === '1') value = false
+  else if (override === '2') value = true
+  else {
+    // The locale is evidence about the *terminal* — which font it is configured
+    // to use — so it only counts when there is one. A pipe, a log, or a test
+    // harness has no font metrics to speak of, and reading the locale there made
+    // geometry depend on whose machine ran the tests (a zh laptop said two
+    // cells, a CI runner said one).
+    const raw = `${env.LC_ALL ?? ''} ${env.LC_CTYPE ?? ''} ${env.LANG ?? ''}`.toLowerCase()
+    value = onTerminal
+      && (/(?:^|[^a-z])(?:zh|ja|ko)[_@.-]/u.test(raw) || /(?:^|\s)(?:zh|ja|ko)(?:\s|$)/u.test(raw))
+  }
+  ambiguousCache = { key, value }
+  return value
+}
+
 export function displayWidth(text: string): number {
   let width = 0
   for (const char of mapAsciiChrome(text)) {
@@ -329,7 +408,9 @@ export function displayWidth(text: string): number {
     if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) {
       continue
     }
+    const ambiguousWide = ambiguousWidthIsTwo() && AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end)
     const wide =
+      ambiguousWide ||
       (cp >= 0x1100 && cp <= 0x115f) ||
       cp === 0x2329 || cp === 0x232a ||
       (cp >= 0x2e80 && cp <= 0xa4cf) ||
@@ -1211,6 +1292,9 @@ function backwardSliceByWidth(text: string, end: number, maxWidth: number): { st
  * caret in the middle of later text. Fold the *current line* (between the
  * surrounding newlines) and keep `\n` out of the visible slice.
  */
+/** The character that marks a folded edge of the input row. */
+const FOLD_MARKER = '…'
+
 export function foldInputView(input: string, cursor: number, maxWidth: number): InputView {
   const width = Math.max(1, maxWidth)
   const safeCursor = Math.max(0, Math.min(cursor, input.length))
@@ -1229,15 +1313,15 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
     // One-row fold: keep a blank cell for the caret when the line fills
     // the row, otherwise CSI lands on the last glyph.
     if (cursorOffset >= width && width > 1) {
-      let budget = width - 1
+      let budget = Math.max(1, width - 1)
       const probe = backwardSliceByWidth(line, lineCursor, budget)
       const left = probe.start > 0
-      if (left) budget = Math.max(1, width - 2)
+      if (left) budget = Math.max(1, width - displayWidth(FOLD_MARKER) - 1)
       const clipped = backwardSliceByWidth(line, lineCursor, budget)
       const beforeText = line.slice(clipped.start, lineCursor)
       return {
-        text: `${left ? '…' : ''}${beforeText}`,
-        cursorOffset: (left ? 1 : 0) + displayWidth(beforeText),
+        text: `${left ? FOLD_MARKER : ''}${beforeText}`,
+        cursorOffset: (left ? displayWidth(FOLD_MARKER) : 0) + displayWidth(beforeText),
         folded: true,
       }
     }
@@ -1247,7 +1331,11 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
   const after = totalWidth - cursorOffset
   const leftFolded = before > 0
   const rightFolded = after > 0
-  const markers = (leftFolded ? 1 : 0) + (rightFolded ? 1 : 0)
+  // The marker's own width, not a hardcoded cell: `…` is full width on a CJK
+  // terminal, and counting it as one made the folded row overrun its budget and
+  // put the caret a column off.
+  const markerWidth = displayWidth(FOLD_MARKER)
+  const markers = (leftFolded ? markerWidth : 0) + (rightFolded ? markerWidth : 0)
   // Leave one cell for the caret so it never sits on the last glyph
   // (DEC auto-margin would otherwise punch the caret through that cell).
   const available = Math.max(1, width - markers - 1)
@@ -1260,8 +1348,8 @@ export function foldInputView(input: string, cursor: number, maxWidth: number): 
   const afterSlice = forwardSliceByWidth(line.slice(lineCursor), afterBudget)
   const beforeText = line.slice(beforeSlice.start, lineCursor)
   return {
-    text: `${leftFolded ? '…' : ''}${beforeText}${afterSlice.text}${rightFolded ? '…' : ''}`,
-    cursorOffset: (leftFolded ? 1 : 0) + displayWidth(beforeText),
+    text: `${leftFolded ? FOLD_MARKER : ''}${beforeText}${afterSlice.text}${rightFolded ? FOLD_MARKER : ''}`,
+    cursorOffset: (leftFolded ? markerWidth : 0) + displayWidth(beforeText),
     folded: true,
   }
 }

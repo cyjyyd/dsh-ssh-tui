@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale, t } from '../lib/i18n/index.js'
 import { filterCatalogPresets, mergeProviderEntries } from '../lib/provider-catalog.js'
-import { quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
-import { mapAsciiChrome, pinEmojiCells, resetAsciiChrome, stripAnsi } from '../lib/term-text.js'
+import { hostChildEnv, quietTerminalInput, restoreTerminalInput } from '../lib/display-sock.js'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
+import { ambiguousWidthIsTwo, mapAsciiChrome, padToWidth, pinEmojiCells, resetAsciiChrome, stripAnsi } from '../lib/term-text.js'
 
 /** A terminal with every capability, so a test asserts the full sequence set
  *  instead of inheriting whatever TERM the runner happens to have. */
@@ -13,137 +13,137 @@ const fullTerminal = () => terminalCapabilities({ env: { TERM: 'xterm-256color',
 setLocale('zh')
 
 import {
-  askSummary,
-  clipAnsiToWidth,
-  composePaintOutput,
-  describeProviderRoute,
-  displayWidth,
-  padAnsiToWidth,
-  cursorVisualPosition,
-  foldInputView,
-  formatOpenCodeGoUsage,
-  formatAccountBalance,
-  formatQuotaSnapshot,
-  formatQuotaStatusLine,
-  formatStatusReport,
-  joinUrl,
-  parseDeepSeekBalance,
-  parseOpenAiCompatibleBalance,
-  parseSuperGrokBilling,
-  parseOpenCodeGoQuota,
-  remainingPercentFromUsed,
-  crossedQuotaThresholds,
-  quotaAlertText,
-  quotaRefreshEveryTurns,
-  quotaRefreshEverySteps,
-  preferredQuotaWindow,
-  shortModelName,
-  shortQuotaPlanName,
-  quotaWindowTag,
-  tightestQuotaWindow,
-  friendlyJsonLines,
-  hrefAtColumn,
-  isEscapePrefix,
-  osc52Clipboard,
-  osc8Enabled,
-  paintedLinkHits,
-  openCodeSourceFor,
-  parseExitStatus,
-  parseFindQuery,
-  parsePlanTodos,
+  CONTEXT_IDLE_COMPACT_RATIO,
+  CONTEXT_RING_EMPTY,
+  SshTui,
   applyTurnEndToPlan,
-  planCloseNudgeText,
-  planDockNote,
-  planIsLive,
-  planTitleFromMarkdown,
-  matchTranscriptRows,
-  presentToolCall,
-  promptInjectionSources,
-  promptInjectionTitle,
-  isPromptInjectionMessage,
-  providerUsesLocalOAuth,
+  askSummary,
+  buildSubagentHeader,
+  buildToolHeader,
+  canMergeToolCall,
+  captureHangupSignals,
+  clipAnsiToWidth,
+  clipSubagentActivity,
+  commandAcceptsAttachments,
+  compactEditPath,
+  compactToolBursts,
+  compactToolGroups,
+  compactionHeaderText,
+  composePaintOutput,
+  contextPressureView,
+  countDiffAddDel,
+  countDiffLines,
+  countOutputLines,
+  crossedQuotaThresholds,
+  cursorVisualPosition,
+  describeProviderRoute,
+  describeSubagentFailure,
   detectSshSession,
-  formatLinkQualityChip,
-  formatQuotaBar,
+  diffStatToken,
+  displayWidth,
+  dropFooterQuotaPlanName,
+  findCursorPositionReply,
+  fitFooterStatsLine,
+  fitFooterStatusLine,
+  fmtElapsedCompact,
+  foldInputView,
   footerActivity,
   footerIdentityParts,
   footerStatsGroups,
   footerSubagentForeign,
-  paintFooterSubagentChip,
-  formatTokensPerSecond,
-  fitFooterStatsLine,
-  fitFooterStatusLine,
-  dropFooterQuotaPlanName,
-  formatFooterQuota,
-  subagentRouteLabel,
-  formatFooterBalance,
+  forEachSessionEvent,
+  formatAccountBalance,
   formatCompactCommandError,
   formatContextPressureChip,
   formatContextPressureRing,
   formatContextPressureStatusLine,
-  parseContextPressure,
-  contextPressureView,
-  shouldIdleAutoCompact,
-  CONTEXT_IDLE_COMPACT_RATIO,
-  CONTEXT_RING_EMPTY,
-  buildToolHeader,
-  toolBodyFitsWorkspace,
-  toolStateColor,
-  wrappedToolBodyLineCount,
-  linkQualityOf,
-  providerShortCode,
-  paintIntervalForRtt,
-  parseCursorPositionReply,
-  findCursorPositionReply,
-  probeTerminalRttMs,
-  resolvePaintIntervalMs,
-  isHangupErrno,
-  waitUntilIdleOrTimeout,
-  captureHangupSignals,
+  formatFooterBalance,
+  formatFooterQuota,
+  formatLinkQualityChip,
+  formatOpenCodeGoUsage,
+  formatQuotaBar,
+  formatQuotaSnapshot,
+  formatQuotaStatusLine,
+  formatStatusReport,
+  formatTokensPerSecond,
+  friendlyJsonLines,
+  hrefAtColumn,
   ignoreFurtherHangupSignals,
+  inspectPersistenceSession,
+  isEscapePrefix,
+  isHangupErrno,
+  isPromptInjectionMessage,
+  isTokenDeltaChunk,
+  joinUrl,
+  linkQualityOf,
+  listPersistenceHeaders,
+  matchTranscriptRows,
+  openCodeSourceFor,
+  osc52Clipboard,
+  osc8Enabled,
+  padAnsiToWidth,
+  paintFooterSubagentChip,
+  paintIntervalForRtt,
+  paintedLinkHits,
+  parseContextPressure,
+  parseCursorPositionReply,
+  parseDeepSeekBalance,
+  parseDisconnectPolicy,
+  parseEffortArg,
+  parseExitStatus,
+  parseFindQuery,
+  parseOpenAiCompatibleBalance,
+  parseOpenCodeGoQuota,
+  parsePlanTodos,
+  parseSuperGrokBilling,
+  parseWorkspaceView,
+  pickerWindowStart,
+  planCloseNudgeText,
+  planDockNote,
+  planIsLive,
+  planTitleFromMarkdown,
+  preferredQuotaWindow,
+  presentToolCall,
+  probeTerminalRttMs,
+  promptInjectionSources,
+  promptInjectionTitle,
+  providerShortCode,
+  providerUsesLocalOAuth,
+  quotaAlertText,
+  quotaRefreshEverySteps,
+  quotaRefreshEveryTurns,
+  quotaWindowTag,
+  remainingPercentFromUsed,
   renderMarkdownLines,
   renderToolDiff,
   repeatToWidth,
-  SshTui,
-  commandAcceptsAttachments,
-  forEachSessionEvent,
-  inspectPersistenceSession,
-  isTokenDeltaChunk,
-  listPersistenceHeaders,
+  resolvePaintIntervalMs,
+  shortModelName,
+  shortQuotaPlanName,
+  shouldIdleAutoCompact,
   streamChunkOf,
   streamFirstTokenTime,
   streamFrameAttemptId,
   streamFrameOwner,
-  writeBootSplash,
-  fmtElapsedCompact,
-  waitCardCopy,
-  waitSummaryFromReasoning,
-  wrapWaitDetails,
-  parseWorkspaceView,
-  parseDisconnectPolicy,
-  parseEffortArg,
-  canMergeToolCall,
-  countOutputLines,
-  pickerWindowStart,
-  compactToolGroups,
-  compactEditPath,
-  compactToolBursts,
-  countDiffLines,
-  countDiffAddDel,
-  diffStatToken,
-  compactionHeaderText,
-  buildSubagentHeader,
-  clipSubagentActivity,
   subagentChipSummary,
-  describeSubagentFailure,
   subagentDisplayName,
   subagentInspectLines,
+  subagentRouteLabel,
   subagentRowFromSpawnTool,
+  tightestQuotaWindow,
   todoProgressLabel,
   todoSummary,
+  toolBodyFitsWorkspace,
   toolBodyLines,
+  toolStateColor,
   truncateToWidth,
   visibleWidth,
+  waitCardCopy,
+  waitSummaryFromReasoning,
+  waitUntilIdleOrTimeout,
+  wrapWaitDetails,
+  wrappedToolBodyLineCount,
+  writeBootSplash,
 } from '../lib/tui.js'
 import {
   canonicalProviderId,
@@ -180,6 +180,13 @@ test('truncateToWidth never splits a surrogate pair', () => {
 })
 
 test('displayWidth matches glibc wcwidth for CJK vs ambiguous TUI glyphs', () => {
+  // Pinned: whether ambiguous glyphs are one or two cells is a *policy* (locale
+  // or `DSH_TUI_AMBIGUOUS_WIDTH`), and a test that read the ambient locale would
+  // pass here and fail on a Western CI runner. This case covers the narrow side;
+  // the CJK side has its own case below.
+  const previous = process.env.DSH_TUI_AMBIGUOUS_WIDTH
+  process.env.DSH_TUI_AMBIGUOUS_WIDTH = '1'
+  try {
   assert.equal(displayWidth('计划'), 4)
   assert.equal(displayWidth('─'), 1)
   assert.equal(displayWidth('●'), 1)
@@ -190,6 +197,61 @@ test('displayWidth matches glibc wcwidth for CJK vs ambiguous TUI glyphs', () =>
   assert.equal(repeatToWidth('─', 8), '────────')
   assert.equal(displayWidth(repeatToWidth('─', 80)), 80)
   assert.equal(displayWidth('❯ hello'), 7)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_TUI_AMBIGUOUS_WIDTH
+    else process.env.DSH_TUI_AMBIGUOUS_WIDTH = previous
+  }
+})
+
+test('encircled and lettered glyphs follow the terminal, not the wcwidth default', () => {
+  // Two ways in, and both are asserted on their own terms:
+  //  * a zh/ja/ko locale *and* a terminal ⇒ the CJK table,
+  //  * no terminal (a pipe, a log, a test harness) ⇒ narrow, whatever the locale
+  //    says, because nothing here has font metrics to speak of.
+  const cjk = { LANG: 'zh_CN.UTF-8', LC_ALL: '', LC_CTYPE: '' }
+  assert.equal(ambiguousWidthIsTwo(cjk, true), true, 'a CJK terminal uses full-width glyphs')
+  assert.equal(ambiguousWidthIsTwo(cjk, false), false, 'a pipe has no font metrics')
+  assert.equal(ambiguousWidthIsTwo({ LANG: 'en_US.UTF-8' }, true), false)
+  assert.equal(ambiguousWidthIsTwo({ ...cjk, DSH_TUI_AMBIGUOUS_WIDTH: '1' }, true), false, 'the override wins')
+  assert.equal(ambiguousWidthIsTwo({ LANG: 'en_US.UTF-8', DSH_TUI_AMBIGUOUS_WIDTH: '2' }, true), true)
+
+  // The process that *paints* is the detached Host, and its stdout is the relay
+  // socket — so it must not be asked to work this out for itself. The window,
+  // which owns the terminal, decides and hands the answer over.
+  const hostEnv = hostChildEnv({ ...cjk, PATH: '/usr/bin' }, true)
+  assert.equal(hostEnv.DSH_TUI_AMBIGUOUS_WIDTH, '2', 'the window tells the Host which table to use')
+  assert.equal(hostChildEnv({ ...cjk, DSH_TUI_AMBIGUOUS_WIDTH: '1' }, true).DSH_TUI_AMBIGUOUS_WIDTH, '1', 'an explicit value still wins')
+
+  const previous = process.env.DSH_TUI_AMBIGUOUS_WIDTH
+  try {
+    // The override is how the CJK table is exercised from a test runner: it needs
+    // no terminal to apply.
+    process.env.DSH_TUI_AMBIGUOUS_WIDTH = '2'
+    for (const glyph of ['①', '⑩', '⑳', '⑴', '⒈', 'ⓐ', '❶', '➀', 'Ⅰ']) {
+      assert.equal(displayWidth(glyph), 2, `${glyph} is full width on a CJK terminal`)
+    }
+    // Punctuation is the bulk of it in a Chinese transcript: an em dash, an
+    // ellipsis and curly quotes are 全角 in GB2312/GBK, and one session carried
+    // `—` 31,855 times. Budgeting those as one cell shortens every such line.
+    for (const glyph of ['—', '–', '…', '“', '”', '‘', '’', '·', '•', '›']) {
+      assert.equal(displayWidth(glyph), 2, `${glyph} is full width on a CJK terminal`)
+    }
+    // Chrome and box drawing stay one cell: they were measured against a real
+    // terminal in the earlier emoji pass, and treating them as two is what once
+    // painted half-width rules and parked the cursor a cell past the text.
+    for (const glyph of ['─', '●', '❯', '▸', '✓', '✗', '★', '⠋']) {
+      assert.equal(displayWidth(glyph), 1, `${glyph} must stay one cell`)
+    }
+    // Padding and folding both follow the same budget, which is what keeps a row
+    // aligned: a full-width marker used to overrun the folded row's column count.
+    assert.equal(displayWidth(padToWidth('①', 4)), 4)
+    const folded = foldInputView('abcdefghijklmnopqrstuvwxyz0123456789', 20, 16)
+    assert.equal(folded.folded, true)
+    assert.ok(displayWidth(folded.text) <= 16, `folded row fits its budget: ${displayWidth(folded.text)}`)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_TUI_AMBIGUOUS_WIDTH
+    else process.env.DSH_TUI_AMBIGUOUS_WIDTH = previous
+  }
 })
 
 test('displayWidth budgets BMP emoji symbols two cells', () => {
@@ -209,7 +271,11 @@ test('displayWidth budgets BMP emoji symbols two cells', () => {
   assert.equal(displayWidth('✓'), 1)
   assert.equal(displayWidth('✗'), 1)
   assert.equal(displayWidth('→'), 1)
+  // `·` is ambiguous punctuation: one cell on a Western terminal, full width on
+  // a CJK one. Pin the narrow side here; the CJK side is asserted below.
+  process.env.DSH_TUI_AMBIGUOUS_WIDTH = '1'
   assert.equal(displayWidth('·'), 1)
+  delete process.env.DSH_TUI_AMBIGUOUS_WIDTH
   assert.equal(displayWidth('#️⃣'), 2)
   assert.equal(displayWidth('✔ 计划'), 7)
 })

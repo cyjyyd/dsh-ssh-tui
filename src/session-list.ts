@@ -25,6 +25,78 @@ import {
   sessionIndexPath,
   type SessionIndexEntry,
 } from './session-index.js'
+import { hasUnfinishedTurn, isUserMessageEvent, sessionHasReply } from './session-blank.js'
+
+
+
+
+function labelFromEvents(events: readonly unknown[]): string | undefined {
+  const titleEvent = [...events].reverse()
+    .find(event => (event as { type?: string }).type === 'session/title')
+  const title = titleEvent === undefined
+    ? undefined
+    : (titleEvent as unknown as { data?: { title?: string } }).data?.title
+  if (title !== undefined && title !== '') return title
+  const firstUserMessage = events.find(event => isUserMessageEvent(event)) as
+    | { data?: { content?: readonly unknown[] } }
+    | undefined
+  if (firstUserMessage === undefined) return undefined
+  const text = Array.from(
+    (firstUserMessage.data?.content ?? [])
+      .map((block) => {
+        const candidate = block as { type: string; text?: unknown }
+        return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
+      })
+      .join(' ')
+      .replace(/\s+/gu, ' ')
+      .trim(),
+  )
+    .slice(0, 80)
+    .join('')
+  return text === '' ? undefined : text
+}
+
+function isBlankSession(hasUserInput: boolean, hasReply: boolean, unfinishedTurn = false): boolean {
+  return !hasUserInput && !hasReply && !unfinishedTurn
+}
+
+/** Delete one session's on-disk artifacts (log directory), best effort. */
+/**
+ * Delete one session's artifacts by id.
+ *
+ * `false` means the persistence layer could not locate it (already gone, or a
+ * service that does not expose `locate`) — never an error worth surfacing, since
+ * the only caller is tidying up on the way out.
+ * @param persistence - the session persistence service.
+ * @param id - the session id.
+ * @returns true when a directory was found and removed.
+ */
+export async function pruneSessionById(persistence: object | undefined, id: string): Promise<boolean> {
+  if (persistence === undefined) return false
+  try {
+    const location = persistenceLocate(persistence, { id })
+    if (location?.path === undefined || location.path === '') return false
+    await rm(dirname(location.path), { recursive: true, force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function pruneSessionArtifacts(
+  persistence: object,
+  meta: object,
+): Promise<void> {
+  try {
+    const location = persistenceLocate(persistence, meta)
+    if (location?.path !== undefined && location.path !== '') {
+      await rm(dirname(location.path), { recursive: true, force: true })
+    }
+  } catch {
+    // Best effort: a stuck artifact only means the row lingers once more.
+  }
+}
+
 
 /** Last path segment for the footer chip (`\root\genshin\srv` → `srv`). */
 export function sessionCwdLabel(cwd: string): string {
@@ -126,93 +198,6 @@ export function formatSessionTime(timestamp: number): string {
  * made a live mid-turn session look blank — and a blank verdict deletes the
  * session's directory and stops its Host.
  */
-function isUserMessageEvent(event: unknown): boolean {
-  return (event as { type?: string }).type === 'user/message'
-}
-
-/** A turn that started and never ended: the session is mid-work, never blank. */
-function hasUnfinishedTurn(events: readonly unknown[]): boolean {
-  let open = 0
-  for (const event of events) {
-    const type = (event as { type?: string }).type
-    if (type === 'turn/start') open += 1
-    else if (type === 'turn/end') open -= 1
-  }
-  return open > 0
-}
-
-/**
- * Whether the session ever produced a model reply. A failed agent request
- * counts: the error state is the reply, and the user may want to keep or
- * inspect it.
- */
-function sessionHasReply(events: readonly unknown[]): boolean {
-  return events.some(event => {
-    const candidate = event as {
-      type?: string
-      data?: { reason?: { kind?: string } }
-    }
-    if (candidate.type === 'assistant/message' || candidate.type === 'agent/error') return true
-    if (candidate.type === 'turn/end') return candidate.data?.reason?.kind === 'error'
-    return false
-  })
-}
-
-/**
- * The persisted generated title, else the user's first input (trimmed to one
- * short line). `undefined` means the log carries no name of its own and the
- * caller's fallback (usually the id) has to stand in.
- */
-function labelFromEvents(events: readonly unknown[]): string | undefined {
-  const titleEvent = [...events].reverse()
-    .find(event => (event as { type?: string }).type === 'session/title')
-  const title = titleEvent === undefined
-    ? undefined
-    : (titleEvent as unknown as { data?: { title?: string } }).data?.title
-  if (title !== undefined && title !== '') return title
-  const firstUserMessage = events.find(event => isUserMessageEvent(event)) as
-    | { data?: { content?: readonly unknown[] } }
-    | undefined
-  if (firstUserMessage === undefined) return undefined
-  const text = Array.from(
-    (firstUserMessage.data?.content ?? [])
-      .map((block) => {
-        const candidate = block as { type: string; text?: unknown }
-        return candidate.type === 'text' && typeof candidate.text === 'string' ? candidate.text : ''
-      })
-      .join(' ')
-      .replace(/\s+/gu, ' ')
-      .trim(),
-  )
-    .slice(0, 80)
-    .join('')
-  return text === '' ? undefined : text
-}
-
-/**
- * A blank session never saw user input nor a model reply — a boot that died
- * before doing anything. Such sessions are deleted (never listed as
- * resumable) so crashed launches stop littering the picker with raw ids.
- */
-function isBlankSession(hasUserInput: boolean, hasReply: boolean, unfinishedTurn = false): boolean {
-  return !hasUserInput && !hasReply && !unfinishedTurn
-}
-
-/** Delete one session's on-disk artifacts (log directory), best effort. */
-async function pruneSessionArtifacts(
-  persistence: object,
-  meta: object,
-): Promise<void> {
-  try {
-    const location = persistenceLocate(persistence, meta)
-    if (location?.path !== undefined && location.path !== '') {
-      await rm(dirname(location.path), { recursive: true, force: true })
-    }
-  } catch {
-    // Best effort: a stuck artifact only means the row lingers once more.
-  }
-}
-
 /** Upper bound on one inspection batch, so the picker never fans out unbounded. */
 const INSPECT_BATCH_SIZE = 30
 
@@ -306,6 +291,8 @@ class ResumableSessionSource {
   private indexDirty = false
   private readonly inspected: InspectedSession[] = []
   private readonly blankLiveIds = new Set<string>()
+  /** How many blank sessions this source has already deleted. */
+  prunedCount = 0
   private readonly extraLive = new Map<string, InspectedSession>()
 
   private constructor(
@@ -315,12 +302,14 @@ class ResumableSessionSource {
     private readonly hosts: Awaited<ReturnType<typeof listAttachableHosts>>,
     private readonly index: Map<string, SessionIndexEntry>,
     private readonly indexPath: string,
+    /** Count blank sessions without deleting them (`/cleanup --dry-run`). */
+    private readonly dryRun = false,
   ) {}
 
   static async open(
     persistence: object,
     currentId: string,
-    options: { listHosts?: typeof listAttachableHosts; indexPath?: string } = {},
+    options: { listHosts?: typeof listAttachableHosts; indexPath?: string; dryRun?: boolean } = {},
   ): Promise<ResumableSessionSource> {
     const listHosts = options.listHosts ?? listAttachableHosts
     const indexPath = options.indexPath
@@ -343,7 +332,7 @@ class ResumableSessionSource {
     const indexSizeBefore = index.size
     pruneSessionIndex(index, keepIds)
     const source = new ResumableSessionSource(
-      persistence, currentId, candidates, hosts, index, indexPath,
+      persistence, currentId, candidates, hosts, index, indexPath, options.dryRun === true,
     )
     source.indexDirty = index.size !== indexSizeBefore
     return source
@@ -451,7 +440,8 @@ class ResumableSessionSource {
       && isBlankSession(item.hasUserInput, item.hasReply, item.hasUnfinishedTurn === true)) {
       this.index.delete(String(meta.id))
       this.indexDirty = true
-      void pruneSessionArtifacts(this.persistence, meta)
+      this.prunedCount += 1
+      if (!this.dryRun) void pruneSessionArtifacts(this.persistence, meta)
       return undefined
     }
     if (stat.size > 0) {
@@ -642,6 +632,39 @@ export async function openResumableSessionPager(
       await source.flushIndex()
       return sessions
     },
+  }
+}
+
+/**
+ * Delete every session that never saw user input, and report what happened.
+ *
+ * The picker prunes these as it resolves them, but only for the surface that
+ * looks at them: a launch that died before doing anything kept showing up in
+ * *other* profiles' menus (the web session list reads the same artifacts without
+ * this filter). So the same rule is offered as an explicit sweep, which is also
+ * what `/cleanup` runs.
+ * @param persistence - the session persistence service.
+ * @param currentId - the live session, never a candidate for deletion.
+ * @param options - `listHosts` for test injection.
+ * @returns how many were deleted, how many were kept, and how many could not be
+ *   read (an unreadable log is kept: it might be a live writer).
+ */
+export async function pruneBlankSessions(
+  persistence: object,
+  currentId: string,
+  options: { listHosts?: typeof listAttachableHosts; dryRun?: boolean } = {},
+): Promise<{ pruned: number; kept: number; unreadable: number }> {
+  const source = await ResumableSessionSource.open(persistence, currentId, options)
+  const total = source.remaining
+  await source.take(Number.POSITIVE_INFINITY)
+  const sessions = await source.listing()
+  await source.flushIndex()
+  const unreadable = sessions.filter(session => session.unreadable === true).length
+  return {
+    // Under `dryRun` this is the count that *would* be deleted.
+    pruned: source.prunedCount,
+    kept: Math.max(0, total - source.prunedCount - unreadable),
+    unreadable,
   }
 }
 

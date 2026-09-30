@@ -18,6 +18,15 @@ export interface ConfirmDialog {
 }
 
 export interface QuestionDialog {
+  /**
+   * Called whenever the highlighted option moves.
+   *
+   * The theme picker uses it to paint the candidate palette immediately, so the
+   * choice is a preview rather than a list of names — the reader sees the
+   * transcript in the palette before committing to it. Nothing else sets it, and
+   * a dialog without it behaves exactly as before.
+   */
+  onCursor?: (cursor: number) => void
   kind: 'questions'
   question: AskUserQuestionItem
   index: number
@@ -173,6 +182,7 @@ export function moveQuestionCursor(dialog: QuestionDialog, delta: number): boole
     ? (delta >= 0 ? visible[0] : visible[visible.length - 1])
     : visible[Math.max(0, Math.min(visible.length - 1, at + delta))]
   dialog.cursor = next ?? dialog.cursor
+  dialog.onCursor?.(dialog.cursor)
   if (dialog.question.multiSelect !== true) {
     dialog.selected.clear()
     dialog.selected.add(dialog.cursor)

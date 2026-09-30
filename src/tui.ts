@@ -65,6 +65,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd } from './session-list.js'
+import { pruneBlankSessions } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
@@ -998,6 +999,13 @@ export interface TuiController {
   dispose(): Promise<void>
   handleHangup(): Promise<void>
   disconnectPolicy(): DisconnectPolicyName
+  /**
+   * Whether the reader ever typed into this session.
+   *
+   * The launch path uses it on the way out: a fresh session nothing was typed
+   * into is deleted rather than left for other profiles' menus to list.
+   */
+  sessionHadUserInput(): boolean
 }
 
 /**
@@ -1480,6 +1488,14 @@ export class SshTui {
    * send the same thing again after a provider-side auth failure. Cleared when
    * the retry fires, which is what bounds it to one attempt per user message.
    */
+  /**
+   * Whether this session ever saw the reader's input.
+   *
+   * A fresh launch creates a session before anything is typed; quitting straight
+   * away leaves an artifact the TUI hides but other profiles' menus list. On the
+   * way out, a session that never saw input is deleted (see `session-blank.ts`).
+   */
+  private sawUserInput = false
   private lastUserText = ''
   /** Set on every turn/start; a retry consumes it. */
   private authRetryArmed = false
@@ -5878,6 +5894,9 @@ export class SshTui {
         this.hostApprovalPolicy = String((event.data as { policy?: unknown }).policy ?? '')
         if (this.hostApprovalPolicy === 'never') this.warnApprovalMismatch()
         break
+      case 'user/message':
+        this.sawUserInput = true
+        break
       case 'turn/start':
         this.stalledWarningShown = false
         this.turnSawOutput = false
@@ -7466,6 +7485,7 @@ export class SshTui {
     reject: (error: unknown) => void,
     preselected?: number,
     matchKeys?: readonly string[],
+    onCursor?: (cursor: number) => void,
   ): QuestionDialog {
     // A list opens with its first option already chosen: Enter then answers that
     // default for a single- and a multi-select question alike, instead of
@@ -7483,6 +7503,7 @@ export class SshTui {
       selected: new Set(initial >= 0 ? [initial] : []),
       cursor: initial >= 0 ? initial : 0,
       ...(matchKeys === undefined ? {} : { matchKeys }),
+      ...(onCursor === undefined ? {} : { onCursor }),
       resolve: (selection) => {
         this.settleQuestion(dialog, () => resolve(selection))
       },
@@ -7501,9 +7522,10 @@ export class SshTui {
     total = 1,
     preselected?: number,
     matchKeys?: readonly string[],
+    onCursor?: (cursor: number) => void,
   ): Promise<DialogAnswer> {
     return new Promise<DialogAnswer>((resolve, reject) => {
-      this.openQuestion(question, index, total, resolve, reject, preselected, matchKeys)
+      this.openQuestion(question, index, total, resolve, reject, preselected, matchKeys, onCursor)
     })
   }
 
@@ -8990,6 +9012,48 @@ export class SshTui {
     return false
   }
 
+  /** Whether anything the reader typed reached this session (used on exit). */
+  sessionHadUserInput(): boolean {
+    return this.sawUserInput
+  }
+
+  /**
+   * `/cleanup [--dry-run]` — delete sessions that never saw user input.
+   *
+   * Every fresh start creates a session, so quitting without typing leaves an
+   * artifact behind. The picker hides those, but the web session list reads the
+   * same files without that filter, which is how an unused session still shows
+   * up in another profile's menu. This walks the whole history once and deletes
+   * the blank ones (the listing prunes as it resolves, which is the same rule the
+   * picker applies).
+   */
+  private async runCleanupCommand(arg: string): Promise<void> {
+    const dryRun = arg.trim() === '--dry-run'
+    if (arg.trim() !== '' && !dryRun) {
+      this.pushRow({ kind: 'error', text: t('cleanup.usage') })
+      this.markDirty()
+      return
+    }
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) {
+      this.pushRow({ kind: 'error', text: t('cleanup.unavailable') })
+      this.markDirty()
+      return
+    }
+    this.pushRow({ kind: 'system', text: t(dryRun ? 'cleanup.scanning' : 'cleanup.working') })
+    this.markDirty()
+    const result = await pruneBlankSessions(persistence, String(this.agent.session.id), { dryRun })
+    this.pushRow({
+      kind: 'system',
+      text: t(dryRun ? 'cleanup.dryRun' : 'cleanup.done', {
+        pruned: String(result.pruned),
+        kept: String(result.kept),
+        unreadable: String(result.unreadable),
+      }),
+    })
+    this.markDirty()
+  }
+
   /** The theme saved in the `ssh-tui` settings section, if any. */
   private readThemeName(): string | undefined {
     const raw = readSettingsSection(this.ctx, UI_LOCALE_NAMESPACE)
@@ -9010,15 +9074,40 @@ export class SshTui {
   private async runThemeCommand(arg: string): Promise<void> {
     const wanted = arg.trim().toLowerCase()
     if (wanted === '') {
-      const current = this.theme.name
-      this.pushRow({
-        kind: 'system',
-        text: [
-          t('theme.current', { name: current }),
-          ...themeNames().map(name => `  ${name === current ? '●' : '○'} /theme ${name}`),
-          t('theme.hint'),
-        ].join('\n'),
-      })
+      // A picker, not a list: ↑/↓ paints the candidate palette straight away, so
+      // the reader judges it on their own transcript (and their own terminal)
+      // before committing. Esc restores what they had — the same browse-preview-
+      // revert flow Crush's theme picker offers, and the reason `onCursor` exists.
+      const names = themeNames()
+      const before = this.theme
+      const apply = (name: string): void => {
+        this.theme = setActiveTheme(name)
+        // Every cached line carries a token from the old palette: repaint from
+        // scratch rather than diffing against colours that no longer apply.
+        this.forceFullPaint = true
+        this.markDirty()
+      }
+      let picked: string | undefined
+      try {
+        const answer = await this.askQuestion({
+          id: 'theme-pick',
+          question: t('theme.pick'),
+          options: names.map(name => ({ label: name, description: themeByName(name)?.name === before.name ? t('theme.currentTag') : '' })),
+        }, 0, 1, Math.max(0, names.indexOf(before.name)), undefined, cursor => {
+          const name = names[cursor]
+          if (name !== undefined) apply(name)
+        })
+        picked = answer.selected[0]
+      } catch {
+        apply(before.name)
+        this.pushRow({ kind: 'system', text: t('theme.cancelled', { name: before.name }) })
+        this.markDirty()
+        return
+      }
+      const next = themeByName(picked) ?? before
+      apply(next.name)
+      await this.mergeUiSettings({ theme: next.name })
+      this.pushRow({ kind: 'system', text: t('theme.switched', { name: next.name }) })
       this.markDirty()
       return
     }
@@ -11273,6 +11362,7 @@ export class SshTui {
     this.history.push(text)
     this.historyIndex = this.history.length
     this.historyDraft = ''
+    this.sawUserInput = true
     this.lastUserText = text
     this.input = ''
     this.cursor = 0
@@ -11424,6 +11514,12 @@ export class SshTui {
           } else {
             this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) })
           }
+          this.markDirty()
+        })
+        break
+      case 'cleanup':
+        void this.runCleanupCommand(arg).catch((error: unknown) => {
+          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'cleanup', error: errorChain(error) }) })
           this.markDirty()
         })
         break
@@ -11895,6 +11991,9 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     },
     disconnectPolicy(): DisconnectPolicyName {
       return controller?.currentDisconnectPolicy() ?? 'pause'
+    },
+    sessionHadUserInput(): boolean {
+      return controller?.sessionHadUserInput() ?? false
     },
   }
 }

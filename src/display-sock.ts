@@ -44,6 +44,7 @@ import {
   usesSigwinch,
 } from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
+import { ambiguousWidthIsTwo } from './term-text.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -1153,6 +1154,33 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
   }
 }
 
+/**
+ * The environment a detached Host is started with.
+ *
+ * Notable entries: the marker that tells the child it *is* the Host, and the
+ * ambiguous-width decision. The Host paints, but its own stdout is the relay
+ * socket, so it cannot look at a TTY to know how wide the window's terminal
+ * draws `①` or `—`; this process has that terminal, so it decides and hands the
+ * answer over. An explicit value in the environment still wins.
+ * @param env - the parent environment (a test passes its own).
+ * @param onTerminal - whether *this* process owns a terminal; it is the evidence
+ *   the width table is chosen from, and a test harness is not a terminal.
+ * @returns the child environment.
+ */
+export function hostChildEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  onTerminal = process.stdout?.isTTY === true,
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    [TUI_HOST_ENV]: '1',
+    DSH_HOME: resolveDshHome(),
+    ...(env.DSH_TUI_AMBIGUOUS_WIDTH === undefined
+      ? { DSH_TUI_AMBIGUOUS_WIDTH: ambiguousWidthIsTwo(env, onTerminal) ? '2' : '1' }
+      : {}),
+  }
+}
+
 /** Test seam for {@link spawnDetachedHost}; production passes nothing. */
 export interface SpawnHostOptions {
   /**
@@ -1267,7 +1295,7 @@ export function spawnDetachedHost(
   // session's working directory before it listens, so an unset, blank or
   // relative home would otherwise resolve differently there and the two
   // processes would compute different channel names.
-  const env = { ...process.env, [TUI_HOST_ENV]: '1', DSH_HOME: resolveDshHome() }
+  const env = hostChildEnv()
   const argv = hostArgvForSession(sessionId)
   // Without the stderr log there is nowhere to redirect the Host's stderr, and
   // leaving it un-redirected would hand it this process's stdio; the direct

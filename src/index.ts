@@ -66,7 +66,7 @@ import {
 } from './attach.js'
 import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
-import { enterSessionCwd } from './session-list.js'
+import { enterSessionCwd, pruneSessionById } from './session-list.js'
 import {
   BUILTIN_ROUTABLE_PROVIDERS,
   providerIsRoutable,
@@ -743,6 +743,14 @@ export function apply(ctx: Context, config: Config): void {
       pickerAbort.abort()
       await controller?.dispose()
       await handle?.dispose()
+      // A launch that never saw the reader's input leaves nothing worth keeping:
+      // the picker hides such sessions, but other profiles' menus (the web one)
+      // list the same artifacts, so quitting straight away used to litter them.
+      // Only our own fresh session is ever a candidate — a resume belongs to
+      // whoever typed in it, and a session with input or a reply is kept.
+      if (controller !== undefined && !controller.sessionHadUserInput() && config.resume !== true) {
+        await pruneSessionById(ctx.get('sessionPersistence'), String(config.sessionId))
+      }
       await dropSessionLock()
     }
   }, 'ssh-tui')

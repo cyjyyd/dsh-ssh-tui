@@ -21,6 +21,7 @@ export const LOCAL_COMMANDS = [
   { name: 'disconnect', key: 'cmd.disconnect' },
   { name: 'retryauth', key: 'cmd.retryauth' },
   { name: 'theme', key: 'cmd.theme' },
+  { name: 'cleanup', key: 'cmd.cleanup' },
   { name: 'notify', key: 'cmd.notify' },
   { name: 'approval', key: 'cmd.approval' },
   { name: 'view', key: 'cmd.view' },
