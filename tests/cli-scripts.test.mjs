@@ -6,10 +6,13 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { dshHome, profileFromArgs, resolveDsh } from '../scripts/cli.mjs'
+import { mountProfileRows } from '../scripts/profile-rows.mjs'
 
 const REPO = join(import.meta.dirname, '..')
 
@@ -43,6 +46,37 @@ test('the dsh CLI resolves to an entry script, not a bare name, in this checkout
   assert.equal(found.shell, false)
   assert.equal(found.prefix.length, 1)
   assert.equal(found.prefix[0].endsWith(join('@deepseek-ai', 'dsh', 'lib', 'bin.js')), true)
+})
+
+test('the row mounter takes the dsh home from the environment when not told', async t => {
+  // `install.mjs` never passed `home`, so the last step of the documented install
+  // died on `join(undefined, …)` — *after* the profile had already been linked,
+  // which leaves a half-installed profile. The default has to be the home the
+  // caller's environment names; a throwaway one here, so the test writes nothing
+  // outside its own temp tree.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-rows-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const profileFile = join(home, 'profiles', 'tui', 'cordis.patch.yml')
+  await mkdir(join(home, 'profiles', 'tui'), { recursive: true })
+  await writeFile(profileFile, '[]\n')
+
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const result = mountProfileRows({
+      profile: 'tui',
+      // A profile that composes nothing yet is what makes it mount; no dsh runs.
+      cli: join(home, 'nonexistent', 'dsh', 'lib', 'bin.js'),
+      log: () => {},
+      run: () => ({ stdout: '[]', stderr: '', status: 0 }),
+    })
+    assert.equal(result, 'mounted')
+    const text = await readFile(profileFile, 'utf8')
+    assert.match(text, /dsh-ssh-tui/, 'the rows land in the home DSH_HOME names')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
 })
 
 test('every bash install script delegates to its Node twin', () => {
