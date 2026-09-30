@@ -32,7 +32,9 @@
  */
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { readdir, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import process from 'node:process'
 
 const require = createRequire(import.meta.url)
@@ -115,6 +117,11 @@ const child = spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sess
     COLUMNS: String(WIDTH),
     LINES: String(HEIGHT),
     DSH_TUI_NO_UPDATE_CHECK: '1',
+    // The plugin's own account of the attach, the link and the exit, on stderr.
+    // Only the failing run prints it, and without it a red run here says "the
+    // process did not go" — a frame dump cannot tell a Host that never sent its
+    // goodbye from a launcher that re-attached over one.
+    DSH_TUI_DEBUG: '1',
     // No capability overrides: the empty value is the spelling for "none", where
     // `{}` is not a token the parser knows (it lands in `/diag` as rejected). The
     // table then comes from the TERM/COLORTERM declared above, so it is the same
@@ -221,11 +228,39 @@ try {
   }
 }
 
+/**
+ * What the Host process said while this run was going.
+ *
+ * The Host is a separate process and the launcher spawns it with its stderr on a
+ * file under the profile's `tui-socks`, so anything that is really *its* story —
+ * a refused lock, a shutdown that never finished, a crash — is invisible in the
+ * child's own output. That is the first thing a red run needs.
+ */
+async function hostStderr(home) {
+  try {
+    const dir = join(home, 'tui-socks')
+    const parts = []
+    for (const name of (await readdir(dir)).filter(entry => entry.endsWith('.err'))) {
+      const text = await readFile(join(dir, name), 'utf8')
+      if (text.trim() !== '') parts.push(`--- ${name} ---\n${text.slice(-4_000)}`)
+    }
+    return parts.join('\n')
+  } catch {
+    // No home, no Host, nothing to report.
+    return ''
+  }
+}
+
 if (failures.length > 0) {
   console.log(`\n--- stdout tail (${output.length} bytes, ${answered} probe answers) ---`)
   console.log(JSON.stringify(output.slice(-2_000)))
   console.log('--- stderr tail ---')
   console.log(JSON.stringify(errors.slice(-2_000)))
+  const host = await hostStderr(home)
+  if (host !== '') {
+    console.log('--- host stderr (tui-socks/*.err) ---')
+    console.log(host)
+  }
   console.log(`\nFAIL: ${failures.length} assertion(s): ${failures.join('; ')}`)
   process.exit(1)
 }

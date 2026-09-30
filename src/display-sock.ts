@@ -1562,9 +1562,23 @@ export async function runDisplayRelay(
       pending.push(seed)
       pendingBytes += seed.length
     }
+    /**
+     * Say out loud what settled the relay, under `DSH_TUI_DEBUG=1`.
+     *
+     * The reason decides whether the launcher exits or re-attaches
+     * (`attach.ts`), and nothing on either side of the socket prints it: a red
+     * probe shows frames and a process that never went, with no way to tell "the
+     * Host said goodbye and the launcher ignored it" from "the link broke before
+     * the goodbye arrived". One line each way is what makes that readable, and
+     * it is off unless the variable is set.
+     */
+    const note = (message: string): void => {
+      if (process.env.DSH_TUI_DEBUG === '1') process.stderr.write(`dsh-ssh-tui: display relay ${message}\n`)
+    }
     const finish = (reason: RelayResult['reason']): void => {
       if (settled) return
       settled = true
+      note(`settling: ${reason}`)
       void releaseTerminal().then(() => {
         cleanup()
         resolve({ reason })
@@ -1574,6 +1588,7 @@ export async function runDisplayRelay(
     const fail = (error: unknown): void => {
       if (settled) return
       settled = true
+      note(`failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`)
       void releaseTerminal().then(() => {
         cleanup()
         reject(error)
