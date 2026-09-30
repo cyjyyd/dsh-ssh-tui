@@ -4535,6 +4535,13 @@ export class SshTui {
         }
       }
     }
+    // Close the last row's cache entry here, and only here: everything below
+    // belongs to no row. Flushing after the live tail instead stored the tail in
+    // the last row's entry, so every later frame replayed a copy of the wait card
+    // at the elapsed time of the frame that stored it — a "processing" line
+    // frozen at 0s next to the live one, and a new copy each time another row
+    // became the last one.
+    flushPending()
 
     if (this.streaming !== undefined) {
       if (!compact && this.showReasoning && this.streaming.reasoning !== '') {
@@ -4871,7 +4878,6 @@ export class SshTui {
     const inputDivider = this.styleLine('system', repeatToWidth('─', width))
     const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
     const available = Math.max(0, height - reserved - dialogLines.length)
-    flushPending()
     const window = windowTranscript({
       lines: display,
       refs: displayRefs,
