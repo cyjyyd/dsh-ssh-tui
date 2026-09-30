@@ -76,13 +76,17 @@ const RTT_QUIET_MARGIN_MS = 25
 export const RTT_OUTLIER_RATIO = 0.25
 
 /** Remove every complete cursor reply from `text`. */
-export function stripCursorReplies(text: string): { text: string; replies: number } {
+export function stripCursorReplies(text: string): { text: string; replies: number; last?: string } {
   let replies = 0
-  const cleaned = text.replace(CURSOR_REPLY, () => {
+  let last: string | undefined
+  const cleaned = text.replace(CURSOR_REPLY, (match: string) => {
     replies += 1
+    // The text is kept, not just counted: a caller that asked *where* the cursor
+    // is needs the coordinates, and a reply is otherwise dropped here for good.
+    last = match
     return ''
   })
-  return { text: cleaned, replies }
+  return last === undefined ? { text: cleaned, replies } : { text: cleaned, replies, last }
 }
 
 /** The trailing run of `text` that a reply could still grow out of. */
@@ -104,8 +108,13 @@ function cursorReplyTail(text: string): string {
 export class TerminalInputFilter {
   private held = ''
 
+  /** The most recent cursor reply this filter swallowed, if any. */
+  lastReply: string | undefined
+
   push(text: string): { forward: string; replies: number } {
-    const { text: cleaned, replies } = stripCursorReplies(this.held + text)
+    const stripped = stripCursorReplies(this.held + text)
+    const { text: cleaned, replies } = stripped
+    if (stripped.last !== undefined) this.lastReply = stripped.last
     this.held = ''
     const tail = cursorReplyTail(cleaned)
     if (tail === '') return { forward: cleaned, replies }
@@ -200,6 +209,13 @@ interface ReplyWaiter {
   started: number
   settle: (rttMs: number | undefined) => void
   timer: NodeJS.Timeout
+  /**
+   * Set by {@link TerminalInputPump.askPosition}: this waiter wants the reply's
+   * coordinates rather than its duration. The elapsed time still settles the
+   * timing bookkeeping, so a position request is indistinguishable from a
+   * round-trip request for anything else in the pump.
+   */
+  position?: (reply: string | undefined) => void
 }
 
 /**
@@ -487,6 +503,61 @@ export class TerminalInputPump {
       this.slowestSampleMs = elapsed
     }
     waiter.settle(elapsed)
+    waiter.position?.(this.filter.lastReply)
+  }
+
+  /**
+   * Ask the terminal for its cursor after printing `probe`, and report where it
+   * says the cursor ended up.
+   *
+   * This is the measurement half of the pump: `measure()` answers "how long did
+   * the round trip take", this answers "how far did the cursor move". Replies are
+   * swallowed by the same filter that swallows them for the timing probe — which
+   * matters, because a reply nobody consumes is echoed on screen as literal
+   * `^[[1;5R` text, and that is exactly what a hand-rolled version of this did.
+   * @param probe - the text to print before asking (cleared afterwards).
+   * @param timeoutMs - how long to wait for the answer.
+   * @returns the coordinates the terminal reported, or undefined when it stayed
+   *   silent.
+   */
+  async askPosition(probe: string, timeoutMs = RTT_SAMPLE_TIMEOUT_MS): Promise<{ row: number; column: number } | undefined> {
+    return await new Promise<{ row: number; column: number } | undefined>(resolve => {
+      let settled = false
+      const settleOnce = (value: { row: number; column: number } | undefined): void => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+      const waiter: ReplyWaiter = {
+        started: Date.now(),
+        settle: () => {},
+        position: reply => {
+          if (reply === undefined) {
+            settleOnce(undefined)
+            return
+          }
+          const match = /\x1b\[(\d+);(\d+)R/u.exec(reply)
+          settleOnce(match === null
+            ? undefined
+            : { row: Number(match[1]), column: Number(match[2]) })
+        },
+        timer: setTimeout(() => {
+          const index = this.waiters.indexOf(waiter)
+          if (index !== -1) this.waiters.splice(index, 1)
+          settleOnce(undefined)
+        }, timeoutMs),
+      }
+      this.waiters.push(waiter)
+      this.lastRequestAt = Date.now()
+      try {
+        this.options.stdout.write(`\r\u001b[2K${probe}${CURSOR_POSITION_REQUEST}`)
+      } catch {
+        const index = this.waiters.indexOf(waiter)
+        if (index !== -1) this.waiters.splice(index, 1)
+        clearTimeout(waiter.timer)
+        settleOnce(undefined)
+      }
+    })
   }
 
   private scheduleHold(): void {

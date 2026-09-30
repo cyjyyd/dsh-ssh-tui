@@ -68,8 +68,6 @@ import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd, pruneSessionById } from './session-list.js'
 import { DISPLAY_MODE_ENV, requestedDisplayMode } from './display-mode.js'
-import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
-import { setAmbiguousWidthMeasured } from './term-text.js'
 import {
   BUILTIN_ROUTABLE_PROVIDERS,
   providerIsRoutable,
@@ -423,17 +421,14 @@ export function apply(ctx: Context, config: Config): void {
         // goes to this process (the splash and the picker draw here) and to the
         // Host through its environment, because the Host paints every later frame
         // with a socket for stdout and cannot measure anything itself.
-        // The boot probe writes a line of glyphs before the splash, which is
-        // invisible in use but not to a harness asserting the exact bytes of a
-        // boot. This switch is for those (and for a serial terminal that dislikes
-        // a cursor request): the width then falls back to the locale, exactly as
-        // it did before the measurement existed.
-        const measured = process.env.DSH_TUI_NO_GLYPH_PROBE === '1'
-          ? undefined
-          : await measureAmbiguousGlyphWidth()
-        if (measured !== undefined) setAmbiguousWidthMeasured(measured.wide)
+        // The measurement does NOT happen here. A raw cursor probe at boot wrote
+        // before the screen was ours and left a reply nobody consumed, which the
+        // terminal echoed as literal `^[[1;5R` text while the TUI was starting —
+        // the display relay measures instead (it owns a pump that swallows
+        // replies) and hands the verdict to the painting process as a frame, so a
+        // Host that is already running adopts it too.
         writeBootSplash(resume ? t('boot.resume') : t('boot.host'), config.color !== false)
-        await spawnHostAndRelay(String(sessionId), true, { ambiguousWide: measured?.wide })
+        await spawnHostAndRelay(String(sessionId), true)
         return
       }
       writeBootSplash(resume ? t('boot.resume') : t('boot.starting'), config.color !== false)

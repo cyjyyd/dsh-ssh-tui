@@ -242,32 +242,34 @@ import type {
 } from './transcript-types.js'
 import {
   clipAnsiToWidth,
-  hrefAtColumn,
-  osc52Clipboard,
-  paintedLinkHits,
   cursorVisualPosition,
   displayWidth,
-  foldInputView,
   fmtElapsedCompact,
+  foldInputView,
   highlightAnsiNeedle,
-  searchContains,
+  hrefAtColumn,
   lastCodePoints,
+  osc52Clipboard,
   padToWidth,
-  sliceCodePoints,
   paintSegmentedLine,
+  paintedLinkHits,
   renderMarkdownLines,
   repeatToWidth,
   sanitizeTerminalText,
+  searchContains,
+  setAmbiguousWidthMeasured,
+  setAmbiguousWidthReserve,
   shimmerText,
+  sliceCodePoints,
   stripAnsi,
   truncate,
   truncateToWidth,
+  type InputView,
+  type TextSegment,
   waitCardCopy,
   wrap,
   wrapSegmented,
   wrapWaitDetails,
-  type InputView,
-  type TextSegment,
 } from './term-text.js'
 import {
   clampSelection,
@@ -2915,6 +2917,15 @@ export class SshTui {
       },
       onRtt: (rttMs) => {
         this.applyProbedRtt(rttMs)
+      },
+      onMetrics: metrics => {
+        // The relay measured the terminal this session is displayed on. Adopt it
+        // and repaint from scratch: every cached line was measured with the old
+        // table, so a diff against them would compare different widths.
+        setAmbiguousWidthMeasured(metrics.wide)
+        setAmbiguousWidthReserve(metrics.reserve)
+        this.forceFullPaint = true
+        this.markDirty()
       },
       onDetach: (info) => {
         this.handleDisplayDetach(info)

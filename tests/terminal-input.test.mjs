@@ -117,7 +117,8 @@ test('the filter holds a partial reply but releases it as typing', () => {
 })
 
 test('stripCursorReplies reports what it removed', () => {
-  assert.deepEqual(stripCursorReplies('x\x1b[1;2Ry'), { text: 'xy', replies: 1 })
+  assert.deepEqual(stripCursorReplies('x\x1b[1;2Ry'), { text: 'xy', replies: 1, last: '\x1b[1;2R' },
+    'the reply text is kept now: a position request needs the coordinates, and the filter is what finds them')
   assert.deepEqual(stripCursorReplies('plain'), { text: 'plain', replies: 0 })
 })
 

@@ -44,7 +44,8 @@ import {
   usesSigwinch,
 } from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
-import { ambiguousWidthIsTwo } from './term-text.js'
+import { ambiguousWidthIsTwo, setAmbiguousWidthMeasured, setAmbiguousWidthReserve } from './term-text.js'
+import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -61,6 +62,15 @@ export const FRAME_PROBE_REPLY = 9
 export const FRAME_QUERY = 10
 /** Host → prober: the answer to {@link FRAME_QUERY}. */
 export const FRAME_QUERY_REPLY = 11
+/**
+ * Relay → host: what this terminal does with the ambiguous glyphs.
+ *
+ * Payload: one byte, bit 0 = the terminal advances two cells, bit 1 = the second
+ * cell has to be reserved by us with a space. Sent right after HELLO, because the
+ * Host decides every width in the session and it is the relay — not the Host —
+ * that owns the terminal to measure on.
+ */
+export const FRAME_METRICS = 12
 
 /**
  * What a relay's own terminal round trip said.
@@ -460,6 +470,18 @@ export function decodeProbeReply(payload: Buffer): TerminalVerdict {
   return value === 1 ? 'live' : value === 2 ? 'silent' : 'unknown'
 }
 
+/** Encode {@link FRAME_METRICS}. */
+export function encodeMetrics(metrics: { wide: boolean; reserve: boolean }): Buffer {
+  return encodeFrame(FRAME_METRICS, Buffer.from([(metrics.wide ? 1 : 0) | (metrics.reserve ? 2 : 0)]))
+}
+
+/** Decode {@link FRAME_METRICS}; undefined when the payload is not one byte. */
+export function decodeMetrics(payload: Buffer): { wide: boolean; reserve: boolean } | undefined {
+  if (payload.length < 1) return undefined
+  const flags = payload[0] ?? 0
+  return { wide: (flags & 1) !== 0, reserve: (flags & 2) !== 0 }
+}
+
 export function encodeQuery(): Buffer {
   return encodeFrame(FRAME_QUERY)
 }
@@ -499,6 +521,8 @@ export interface DisplayHostHandlers {
   onStdin(bytes: Buffer): void
   onResize(columns: number, rows: number): void
   onRtt?(rttMs: number | undefined): void
+  /** The relay measured this terminal's ambiguous glyphs; adopt the verdict. */
+  onMetrics?(metrics: { wide: boolean; reserve: boolean }): void
   onDetach(info?: { replaced?: boolean }): void
   onAttach(): void
 }
@@ -659,6 +683,9 @@ export class DisplayHost {
         else if (frame.type === FRAME_RESIZE) {
           const size = decodeResize(frame.payload)
           if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
+        } else if (frame.type === FRAME_METRICS) {
+          const metrics = decodeMetrics(frame.payload)
+          if (metrics !== undefined) this.handlers.onMetrics?.(metrics)
         } else if (frame.type === FRAME_RTT) {
           this.handlers.onRtt?.(decodeRtt(frame.payload))
         } else if (frame.type === FRAME_PROBE_REPLY) {
@@ -1688,6 +1715,27 @@ export async function runDisplayRelay(
             encodeRtt(rtt),
           ]))
           live = true
+          // Measure what this terminal does with `①` and friends, now that the
+          // pump is running and the reply will be swallowed rather than echoed.
+          // `DSH_TUI_NO_GLYPH_PROBE=1` keeps the write out of the stream entirely
+          // for a harness that asserts the exact bytes of an attach.
+          // The Host decides every width in the session, so the verdict travels
+          // as a frame; it is sent after HELLO, because the Host ignores
+          // everything that arrives before the claim.
+          const measureGlyphs = process.env.DSH_TUI_NO_GLYPH_PROBE === '1'
+            ? Promise.resolve(undefined)
+            : measureAmbiguousGlyphWidth({ pump, timeoutMs: DISPLAY_PROBE_TIMEOUT_MS })
+          void measureGlyphs.then(measured => {
+            if (settled || measured === undefined) return
+            const reserve = measured.wide === false
+            setAmbiguousWidthReserve(reserve)
+            setAmbiguousWidthMeasured(measured.wide)
+            try {
+              socket.write(encodeMetrics({ wide: measured.wide, reserve }))
+            } catch {
+              // The link is gone; the Host keeps the locale default.
+            }
+          })
           scheduleRttRecheck(options.rttFirstRecheckMs ?? RTT_RECHECK_FIRST_MS)
           if (options.announce === true) {
             try {

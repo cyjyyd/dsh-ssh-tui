@@ -27,7 +27,7 @@
  */
 import process from 'node:process'
 
-import { findCursorPositionReply } from './paint.js'
+import { TerminalInputPump } from './terminal-input.js'
 
 /**
  * The glyphs the probe prints.
@@ -51,23 +51,20 @@ export interface GlyphWidthMeasurement {
   cells: number
 }
 
-/** The cursor request the probe ends with. */
-const CURSOR_REQUEST = '\u001b[6n'
-
-/** The sequence that returns the cursor to column 1 and clears the line. */
-const CLEAR_LINE = '\r\u001b[2K'
-
 /**
  * Measure the ambiguous-glyph width on a real terminal.
  *
  * Returns `undefined` — never a guess — when there is no terminal, when it does
  * not answer, or when the answer matches neither expectation (a font with mixed
- * metrics: the caller then keeps its locale-based default rather than inventing
- * a table from one sample).
+ * metrics: the caller then keeps its locale-based default rather than inventing a
+ * table from one sample).
  *
- * The probe line is cleared afterwards, so this may run while a boot splash is on
- * screen. It must not run while the TUI owns the screen: the caller decides when.
- * @param options - the streams, the probe text, and the reply budget.
+ * The round trip goes through {@link TerminalInputPump.askPosition}, which
+ * swallows the reply. That is not an implementation detail: a cursor reply that
+ * nobody consumes is echoed on screen as literal `^[[1;5R` text, and a
+ * hand-rolled version of this probe did exactly that at boot.
+ * @param options - the streams (or a pump already running on them), the probe
+ *   text, and the reply budget.
  * @returns what the terminal said, or undefined.
  */
 export async function measureAmbiguousGlyphWidth(options: {
@@ -75,51 +72,30 @@ export async function measureAmbiguousGlyphWidth(options: {
   stdout?: NodeJS.WriteStream
   probe?: string
   timeoutMs?: number
+  pump?: TerminalInputPump
 } = {}): Promise<GlyphWidthMeasurement | undefined> {
   const stdin = options.stdin ?? process.stdin
   const stdout = options.stdout ?? process.stdout
   const probe = options.probe ?? GLYPH_PROBE_TEXT
   if (probe === '') return undefined
-  if (stdin.isTTY !== true || stdout.isTTY !== true) return undefined
+  if (options.pump === undefined && (stdin.isTTY !== true || stdout.isTTY !== true)) return undefined
 
   const count = [...probe].length
   const timeoutMs = options.timeoutMs ?? GLYPH_PROBE_TIMEOUT_MS
-
-  return await new Promise<GlyphWidthMeasurement | undefined>(resolve => {
-    let settled = false
-    const onData = (chunk: Buffer | string): void => {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-      const reply = findCursorPositionReply(text)
-      if (reply === undefined) return
-      // The probe began at column 1 (the line was cleared first), so the column
-      // it reports is one past the last cell the glyphs occupied.
-      const cells = Math.max(0, reply.column - 1)
-      if (cells === count) settle({ wide: false, cells })
-      else if (cells === count * 2) settle({ wide: true, cells })
-      // A mixed-metric font: report nothing, so the caller keeps its default.
-      else settle(undefined)
-    }
-    const cleanup = (): void => {
-      stdin.removeListener('data', onData)
-      try {
-        stdout.write(CLEAR_LINE)
-      } catch {
-        // The probe line is not worth a crash on the way out.
-      }
-    }
-    const settle = (result: GlyphWidthMeasurement | undefined): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      cleanup()
-      resolve(result)
-    }
-    const timer = setTimeout(() => settle(undefined), timeoutMs)
-    try {
-      stdin.on('data', onData)
-      stdout.write(`${CLEAR_LINE}${probe}${CURSOR_REQUEST}`)
-    } catch {
-      settle(undefined)
-    }
-  })
+  const own = options.pump === undefined
+  const pump = options.pump ?? new TerminalInputPump({ stdin, stdout, onInput: () => {} })
+  if (own) pump.start()
+  try {
+    const reply = await pump.askPosition(probe, timeoutMs)
+    if (reply === undefined) return undefined
+    // The probe began at column 1 (the line was cleared first), so the column it
+    // reports is one past the last cell the glyphs occupied.
+    const cells = Math.max(0, reply.column - 1)
+    if (cells === count) return { wide: false, cells }
+    if (cells === count * 2) return { wide: true, cells }
+    // A mixed-metric font: report nothing so the caller keeps its default.
+    return undefined
+  } finally {
+    if (own) pump.stop()
+  }
 }
