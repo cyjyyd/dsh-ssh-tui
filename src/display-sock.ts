@@ -46,6 +46,7 @@ import {
 import { terminalCapabilities } from './terminal-caps.js'
 import { ambiguousWidthIsTwo, setAmbiguousWidthMeasured, setAmbiguousWidthReserve } from './term-text.js'
 import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
+import type { GlyphWidthMeasurement } from './glyph-measure.js'
 
 export const FRAME_STDIN = 1
 export const FRAME_STDOUT = 2
@@ -119,6 +120,21 @@ const DISPLAY_HELLO_GRACE_MS = 6_000
  * for a slow link), so this only has to cover those plus the socket hop.
  */
 const DISPLAY_PROBE_TIMEOUT_MS = 3_000
+
+/**
+ * How long the glyph probe may hold the Host's output waiting for an answer.
+ *
+ * The timing measurement immediately before it already says what a round trip
+ * costs on this link, so the glyph probe does not need a fixed generous window:
+ * two round trips plus a margin covers a terminal that answers late, and a
+ * terminal that answers nothing costs the attach this budget once rather than
+ * the full {@link DISPLAY_PROBE_TIMEOUT_MS}.
+ * @param rttMs - the round trip just measured, if the terminal answered.
+ */
+function glyphProbeTimeoutMs(rttMs: number | undefined): number {
+  if (rttMs === undefined || !Number.isFinite(rttMs) || rttMs <= 0) return 200
+  return Math.min(DISPLAY_PROBE_TIMEOUT_MS, Math.max(120, Math.ceil(rttMs * 2 + 80)))
+}
 
 /**
  * The link is measured again this soon after an attach, then on the slower
@@ -1514,6 +1530,26 @@ export async function runDisplayRelay(
     let replaced = false
     const pending: Buffer[] = []
     let pendingBytes = 0
+    // The Host's output while the glyph probe owns the terminal. Writing a frame
+    // between the probe's print and its erase is what puts the erase on the
+    // frame's row and leaves the glyphs on the screen the shell comes back to.
+    let holdingOutput = false
+    let heldOutput: Buffer[] = []
+    let heldOutputBytes = 0
+    const heldOutputLimit = 256 * 1024
+    const flushHeldOutput = (): void => {
+      const held = heldOutput
+      heldOutput = []
+      heldOutputBytes = 0
+      for (const payload of held) {
+        try {
+          stdout.write(payload)
+        } catch {
+          finish('signal')
+          return
+        }
+      }
+    }
     if (options.seed !== undefined && options.seed !== '') {
       const seed = Buffer.from(options.seed, 'utf8')
       pending.push(seed)
@@ -1522,15 +1558,32 @@ export async function runDisplayRelay(
     const finish = (reason: RelayResult['reason']): void => {
       if (settled) return
       settled = true
-      cleanup()
-      resolve({ reason })
+      void releaseTerminal().then(() => {
+        cleanup()
+        resolve({ reason })
+      })
     }
     /** Reject like `finish`, but restore the terminal first. */
     const fail = (error: unknown): void => {
       if (settled) return
       settled = true
-      cleanup()
-      reject(error)
+      void releaseTerminal().then(() => {
+        cleanup()
+        reject(error)
+      })
+    }
+    /**
+     * One more round trip in raw mode before the shell gets the TTY back.
+     *
+     * A reply to a probe we have already given up on would otherwise be echoed
+     * by the tty as `^[[25;1R` text at the user's prompt — the leaked escape
+     * sequence readers report after leaving a session over a slow link.
+     */
+    const releaseTerminal = async (): Promise<void> => {
+      const grace = reportedRtt === undefined
+        ? 0
+        : Math.min(400, Math.max(60, Math.ceil(reportedRtt * 2 + 40)))
+      await pump.handBack(grace)
     }
     const cleanup = (): void => {
       if (rttTimer !== undefined) clearTimeout(rttTimer)
@@ -1640,6 +1693,9 @@ export async function runDisplayRelay(
      * user typed meanwhile to the Host as usual.
      */
     const recheckRtt = async (): Promise<void> => {
+      // Never probe a terminal we have already given back: the request would be
+      // answered by the shell's tty in cooked mode, which echoes it as text.
+      if (settled) return
       const measured = await pump.measure()
       if (settled) return
       if (measured === undefined) {
@@ -1752,20 +1808,41 @@ export async function runDisplayRelay(
           // The Host decides every width in the session, so the verdict travels
           // as a frame; it is sent after HELLO, because the Host ignores
           // everything that arrives before the claim.
-          const measureGlyphs = process.env.DSH_TUI_NO_GLYPH_PROBE === '1'
-            ? Promise.resolve(undefined)
-            : measureAmbiguousGlyphWidth({ pump, timeoutMs: DISPLAY_PROBE_TIMEOUT_MS })
-          void measureGlyphs.then(measured => {
-            if (settled || measured === undefined) return
-            const reserve = measured.wide === false
-            setAmbiguousWidthReserve(reserve)
-            setAmbiguousWidthMeasured(measured.wide)
+          //
+          // The probe prints the glyphs and then asks where the cursor ended up:
+          // both writes belong to the terminal, and nothing else may land between
+          // them. On a slow SSH link the answer takes longer than the Host takes
+          // to paint its first frame, so the frame used to arrive inside that
+          // window — the erase then wiped a row of it, and the glyphs stayed on
+          // the screen for the shell to show again on the way out. Hold the
+          // Host's output for the round trip instead; it is one frame, and the
+          // boot splash is what the user is looking at.
+          // A terminal that never answered the timing probe will not answer this
+          // one either: asking would only cost the reply budget at every attach.
+          if (terminalAnswered && process.env.DSH_TUI_NO_GLYPH_PROBE !== '1') {
+            holdingOutput = true
+            let measured: GlyphWidthMeasurement | undefined
             try {
-              socket.write(encodeMetrics({ wide: measured.wide, reserve }))
-            } catch {
-              // The link is gone; the Host keeps the locale default.
+              measured = await measureAmbiguousGlyphWidth({
+                pump,
+                timeoutMs: glyphProbeTimeoutMs(rtt ?? reportedRtt),
+              })
+            } finally {
+              holdingOutput = false
+              flushHeldOutput()
             }
-          })
+            if (settled) return
+            if (measured !== undefined) {
+              const reserve = measured.wide === false
+              setAmbiguousWidthReserve(reserve)
+              setAmbiguousWidthMeasured(measured.wide)
+              try {
+                socket.write(encodeMetrics({ wide: measured.wide, reserve }))
+              } catch {
+                // The link is gone; the Host keeps the locale default.
+              }
+            }
+          }
           scheduleRttRecheck(options.rttFirstRecheckMs ?? RTT_RECHECK_FIRST_MS)
           if (options.announce === true) {
             try {
@@ -1802,6 +1879,18 @@ export async function runDisplayRelay(
       }
       for (const frame of frames) {
         if (frame.type === FRAME_STDOUT) {
+          if (holdingOutput) {
+            // Bound the hold: a Host that streams into a probe that never comes
+            // back must not be able to grow this without bound.
+            if (heldOutputBytes + frame.payload.length > heldOutputLimit) {
+              holdingOutput = false
+              flushHeldOutput()
+            } else {
+              heldOutput.push(frame.payload)
+              heldOutputBytes += frame.payload.length
+              continue
+            }
+          }
           try {
             stdout.write(frame.payload)
           } catch {
