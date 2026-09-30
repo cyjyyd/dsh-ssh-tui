@@ -99,7 +99,7 @@ export interface AttacherDeps {
   /** Stop capturing and return the typing ('' when unsupported). */
   endCapture?(): string
   inspectLiveHost(sessionId: string): Promise<LiveHost | undefined>
-  spawnHost(sessionId: string): SpawnedDisplayHost
+  spawnHost(sessionId: string, options?: { ambiguousWide?: boolean }): SpawnedDisplayHost
   waitForDisplaySock(spawned: SpawnedDisplayHost): Promise<void>
   /**
    * One already-formatted status line for stderr. `transient` marks a line the
@@ -144,7 +144,7 @@ export interface Attacher {
     options?: { announce?: boolean; seed?: string },
   ): Promise<void>
   /** Attach to a live Host on this session, or spawn a fresh one and attach. */
-  attachOrSpawn(sessionId: string, recover?: boolean): Promise<void>
+  attachOrSpawn(sessionId: string, recover?: boolean, options?: { ambiguousWide?: boolean }): Promise<void>
   /** Recoveries recorded in the current burst window (tests). */
   readonly recoveries: number
 }
@@ -165,7 +165,11 @@ export function createAttacher(deps: AttacherDeps): Attacher {
     return true
   }
 
-  const spawnHostAndRelay = async (sessionId: string, recover: boolean): Promise<void> => {
+  const spawnHostAndRelay = async (
+    sessionId: string,
+    recover: boolean,
+    options: { ambiguousWide?: boolean } = {},
+  ): Promise<void> => {
     const live = deps.locksDisabled?.() === true ? undefined : await deps.inspectLiveHost(sessionId)
     if (live?.kind === 'attachable') {
       // The user asked for this session and is waiting: say so.
@@ -175,7 +179,7 @@ export function createAttacher(deps: AttacherDeps): Attacher {
     if (live?.kind === 'zombie') {
       throw new Error(deps.messages.zombie(sessionId, live.pid))
     }
-    const spawned = deps.spawnHost(sessionId)
+    const spawned = deps.spawnHost(sessionId, options)
     // The Host boots with the TTY in cooked mode: quiet it first so a reply
     // still in flight cannot be echoed over the boot splash, and keep whatever
     // the user types meanwhile instead of dropping it.
@@ -298,7 +302,7 @@ export function createAttacher(deps: AttacherDeps): Attacher {
 
   return {
     attachExisting,
-    attachOrSpawn: async (sessionId, recover = true) => {
+    attachOrSpawn: async (sessionId, recover = true, options = {}) => {
       // A session another window is holding is not taken over by asking: this
       // path is what a script or a `--resume=<id>` launch reaches, and there is
       // nobody to confirm with. Attaching anyway silently kicked the window the
@@ -310,7 +314,7 @@ export function createAttacher(deps: AttacherDeps): Attacher {
       if (live?.kind === 'attachable' && live.state === 'attached') {
         throw new Error(deps.messages.attached(sessionId, live.pid))
       }
-      await spawnHostAndRelay(sessionId, recover)
+      await spawnHostAndRelay(sessionId, recover, options)
     },
     get recoveries(): number {
       return recoveryWindow.length

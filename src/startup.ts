@@ -13,6 +13,7 @@ import { CONFIGURED_AGENT_IDENTITIES_KEY } from '@deepseek-ai/dsh-agent-loop'
 import type { LauncherAgentIdentity } from '@deepseek-ai/dsh-agent-loop'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { detachFromSshSession } from './display-sock.js'
+import { parseDisplayMode, type DisplayMode } from './display-mode.js'
 
 /** Service key under which the parsed TUI launch options are provided. */
 export const SSH_TUI_STARTUP_SERVICE = 'sshTuiStartup'
@@ -34,6 +35,11 @@ export interface SshTuiStartup {
   readonly provider?: string
   /** ANSI color opt-out supplied at launch. */
   readonly noColor?: boolean
+  /**
+   * Where the bytes go: `stdio` when the parent speaks the display protocol on
+   * stdin/stdout (a GUI, a web terminal, a harness) instead of owning a TTY.
+   */
+  readonly display?: DisplayMode
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -60,6 +66,10 @@ export function apply(ctx: Context): void {
     .argument('[session]', 'session id to resume (with the resume mode)')
     .option('--resume [session]', 'resume a persisted session (empty = session picker)')
     .option('--new', 'start a fresh session without the history picker')
+    .option(
+      '--display <mode>',
+      'where the TUI paints: tty (default) or stdio, for a parent that speaks the display protocol on stdin/stdout',
+    )
     .option('--model <model>', 'override the default model id')
     .option('--provider <provider>', 'override the default provider route')
     .option('--no-color', 'disable ANSI colors')
@@ -73,6 +83,7 @@ export function apply(ctx: Context): void {
       model?: string
       provider?: string
       color?: boolean
+      display?: string
     },
   ) => {
     if (mode !== undefined && mode !== 'resume') {
@@ -94,6 +105,10 @@ export function apply(ctx: Context): void {
       program.error('dsh --profile tui: --new cannot be combined with a resume session id or mode')
       return
     }
+    if (options.display !== undefined && parseDisplayMode(options.display) === undefined) {
+      program.error(`dsh --profile tui: unknown --display value "${options.display}" (expected tty or stdio)`)
+      return
+    }
     const resumeId = flagId !== '' ? flagId : positionalId
     const picker = resumeId === '' && (mode === 'resume' || flagValue !== undefined)
     const resume = resumeId !== ''
@@ -109,6 +124,7 @@ export function apply(ctx: Context): void {
       model: options.model?.trim() || undefined,
       provider: options.provider?.trim() || undefined,
       noColor: options.color === false,
+      ...(parseDisplayMode(options.display) === undefined ? {} : { display: parseDisplayMode(options.display) as DisplayMode }),
     } satisfies SshTuiStartup)
     ctx.provide(
       'tuiGoodbyeMessage',

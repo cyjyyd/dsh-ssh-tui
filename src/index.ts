@@ -67,6 +67,9 @@ import {
 import { createLauncherExit } from './launcher-exit.js'
 import { installRouteMemory, latestRememberedRoute, parseRouteMemory, ROUTE_MEMORY_NAMESPACE } from './route-memory.js'
 import { enterSessionCwd, pruneSessionById } from './session-list.js'
+import { DISPLAY_MODE_ENV, requestedDisplayMode } from './display-mode.js'
+import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
+import { setAmbiguousWidthMeasured } from './term-text.js'
 import {
   BUILTIN_ROUTABLE_PROVIDERS,
   providerIsRoutable,
@@ -237,7 +240,24 @@ export function apply(ctx: Context, config: Config): void {
     stdoutIsTty: process.stdout.isTTY === true,
     desktop,
   })
-  if (availability !== 'terminal' && availability !== 'host-relay') {
+  // `DSH_TUI_DISPLAY=stdio` (or the `--display stdio` sugar) is a parent saying
+  // "I speak the display protocol on these pipes": no TTY is needed, because the
+  // relay's three requirements — bytes in, bytes out, a size — all travel as
+  // frames. See `docs/display-mode.md`.
+  const displayRequest = requestedDisplayMode()
+  const relayOverStdio = displayRequest.mode === 'stdio'
+  if (relayOverStdio && displayRequest.invalid === undefined) {
+    if (availability !== 'terminal' && availability !== 'host-relay') {
+      process.stderr.write('dsh-ssh-tui: display mode "stdio" — the parent relays stdin/stdout\n')
+    }
+  }
+  if (displayRequest.invalid !== undefined) {
+    // A typo must not read as "the plugin is inert for no reason".
+    process.stderr.write(
+      `dsh-ssh-tui: unknown ${DISPLAY_MODE_ENV} value "${displayRequest.invalid}" (expected tty or stdio)\n`,
+    )
+  }
+  if (!relayOverStdio && availability !== 'terminal' && availability !== 'host-relay') {
     if (config.requireTerminal === true) throw new Error(requiredTerminalError(desktop))
     // `ctx.logger(name)` when the host has one (the desktop shows it in its logs),
     // stderr as the fallback. Never fatal, and never more than one line.
@@ -358,7 +378,7 @@ export function apply(ctx: Context, config: Config): void {
           : live.lock.state
         return { kind: live.kind, sock: live.sock, pid: live.lock.pid, state }
       },
-      spawnHost: sessionId => spawnDetachedHost(sessionId),
+      spawnHost: (sessionId: string, options?: { ambiguousWide?: boolean }) => spawnDetachedHost(sessionId, process.platform, options ?? {}),
       waitForDisplaySock: async spawned => {
         await waitForDisplaySock(spawned.sock, HOST_START_TIMEOUT_MS, spawned.pid, spawned.errFile, spawned.exitWatch)
       },
@@ -397,8 +417,16 @@ export function apply(ctx: Context, config: Config): void {
 
     const start = async (sessionId: SessionId, resume: boolean): Promise<void> => {
       if (!hostProcess) {
+        // Measure the real terminal before the first frame: whether `①` and the
+        // rest of the ambiguous block advance one cell or two is a property of
+        // the font, and this process is the one holding the terminal. The answer
+        // goes to this process (the splash and the picker draw here) and to the
+        // Host through its environment, because the Host paints every later frame
+        // with a socket for stdout and cannot measure anything itself.
+        const measured = await measureAmbiguousGlyphWidth()
+        if (measured !== undefined) setAmbiguousWidthMeasured(measured.wide)
         writeBootSplash(resume ? t('boot.resume') : t('boot.host'), config.color !== false)
-        await spawnHostAndRelay(String(sessionId))
+        await spawnHostAndRelay(String(sessionId), true, { ambiguousWide: measured?.wide })
         return
       }
       writeBootSplash(resume ? t('boot.resume') : t('boot.starting'), config.color !== false)

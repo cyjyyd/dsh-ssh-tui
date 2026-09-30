@@ -1170,19 +1170,30 @@ export function restoreTerminalInput(stdin: NodeJS.ReadStream = process.stdin): 
 export function hostChildEnv(
   env: NodeJS.ProcessEnv = process.env,
   onTerminal = process.stdout?.isTTY === true,
+  measuredAmbiguousWide?: boolean,
 ): NodeJS.ProcessEnv {
+  const ambiguous = measuredAmbiguousWide === undefined
+    ? (ambiguousWidthIsTwo(env, onTerminal) ? '2' : '1')
+    : (measuredAmbiguousWide ? '2' : '1')
   return {
     ...env,
     [TUI_HOST_ENV]: '1',
     DSH_HOME: resolveDshHome(),
     ...(env.DSH_TUI_AMBIGUOUS_WIDTH === undefined
-      ? { DSH_TUI_AMBIGUOUS_WIDTH: ambiguousWidthIsTwo(env, onTerminal) ? '2' : '1' }
+      ? { DSH_TUI_AMBIGUOUS_WIDTH: ambiguous }
       : {}),
   }
 }
 
 /** Test seam for {@link spawnDetachedHost}; production passes nothing. */
 export interface SpawnHostOptions {
+  /**
+   * What the launcher measured for the ambiguous glyphs, when it measured.
+   *
+   * The Host paints every frame with a socket for stdout, so it cannot ask the
+   * terminal anything; the answer travels in its environment instead.
+   */
+  ambiguousWide?: boolean
   /**
    * Start the Host through this command instead of resolving the real one, or
    * `null` to spawn it directly even where a bootstrap exists.
@@ -1295,7 +1306,7 @@ export function spawnDetachedHost(
   // session's working directory before it listens, so an unset, blank or
   // relative home would otherwise resolve differently there and the two
   // processes would compute different channel names.
-  const env = hostChildEnv()
+  const env = hostChildEnv(process.env, process.stdout?.isTTY === true, options.ambiguousWide)
   const argv = hostArgvForSession(sessionId)
   // Without the stderr log there is nowhere to redirect the Host's stderr, and
   // leaving it un-redirected would hand it this process's stdio; the direct

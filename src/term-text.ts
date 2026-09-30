@@ -345,8 +345,89 @@ const AMBIGUOUS_WIDE_RANGES: readonly (readonly [number, number])[] = [
   [0x2039, 0x203a],   // ‹ › guillemets
 ]
 
-/** Cached decision for {@link ambiguousWidthIsTwo}, keyed on the override. */
+/** Cached decision for {@link ambiguousWidthIsTwo}, keyed on the inputs. */
 let ambiguousCache: { key: string; value: boolean } | undefined
+
+/**
+ * What a measurement of the real terminal said, when there was one.
+ *
+ * The locale is only a guess about which font the terminal is configured with,
+ * and a guess is what produced three rounds of "① is misaligned" reports: the
+ * terminal either advances two cells for it or it does not, and that is
+ * measurable (`CSI 6n` after the glyph). The launcher measures once at boot, in
+ * the process that owns the terminal, and sets this. `undefined` means nobody
+ * measured — a pipe, a dumb terminal, or a launch that never got that far — and
+ * the locale decides as before.
+ */
+let ambiguousMeasured: boolean | undefined
+
+/**
+ * Whether the second cell must be *reserved* with a space.
+ *
+ * An ambiguous glyph can be drawn wider than the single cell it advances — the
+ * same failure the emoji symbols have, and the one behind "`①` collides with the
+ * character after it". Emoji can be pinned by asking for the text presentation
+ * with VS15; `①` has no variation sequence, so the only half of that trick
+ * available is the reserving space: print the glyph, then a space, and the next
+ * character starts on a clean cell while the layout still spends two.
+ *
+ * Set from the measurement, because the two cases need opposite treatment:
+ * a terminal that advances two cells spends them itself (`wide`), while one that
+ * advances one cell needs the space (`reserve`).
+ */
+let ambiguousReserve = false
+
+/**
+ * Record what the terminal's own answer said about these glyphs.
+ *
+ * Called by the launcher after measuring; also the escape hatch for a caller
+ * that knows better than the locale (a relay that has already measured for its
+ * own accounting, or a test).
+ * @param wide - true when the terminal advances two cells, false for one, or
+ *   undefined to fall back to the locale.
+ */
+export function setAmbiguousWidthMeasured(wide: boolean | undefined): void {
+  ambiguousMeasured = wide
+  // A terminal that advances one cell for a glyph drawn wider than a cell is
+  // exactly the collision case; reserve the second cell so the next character is
+  // not painted on top of it.
+  ambiguousReserve = wide === false
+  ambiguousCache = undefined
+}
+
+/**
+ * Force the reserve behaviour, for a caller that measured the same terminal for
+ * its own accounting (a relay) or a test.
+ * @param reserve - whether to spend a space after each ambiguous glyph.
+ */
+export function setAmbiguousWidthReserve(reserve: boolean): void {
+  ambiguousReserve = reserve
+  ambiguousCache = undefined
+}
+
+/** Whether the second cell is currently reserved with a space. */
+export function ambiguousWidthReserved(): boolean {
+  return ambiguousReserve
+}
+
+/**
+ * Cells one character costs in this TUI's layout.
+ *
+ * The reserve case still costs two: the glyph advances one cell and the reserving
+ * space takes the next, so the layout must budget both or every row holding one
+ * comes up short. Non-ambiguous characters are unchanged.
+ * @param cp - the code point.
+ * @returns 0, 1 or 2 cells.
+ */
+export function ambiguousCellCost(cp: number): number {
+  if (!ambiguousReserve) return 0
+  return AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end) ? 2 : 0
+}
+
+/** What the last measurement decided, for diagnostics and tests. */
+export function ambiguousWidthMeasured(): boolean | undefined {
+  return ambiguousMeasured
+}
 
 /**
  * Whether ambiguous glyphs in {@link AMBIGUOUS_WIDE_RANGES} are drawn two cells
@@ -368,11 +449,14 @@ export function ambiguousWidthIsTwo(
   onTerminal = process.stdout?.isTTY === true,
 ): boolean {
   const override = String(env.DSH_TUI_AMBIGUOUS_WIDTH ?? '').trim()
-  const key = `${override}|${onTerminal ? 'tty' : 'pipe'}`
+  const key = `${override}|${onTerminal ? 'tty' : 'pipe'}|${String(ambiguousMeasured)}`
   if (ambiguousCache?.key === key) return ambiguousCache.value
   let value: boolean
+  // Order matters: an explicit setting, then what the terminal actually said,
+  // then the locale — the guess of last resort.
   if (override === '1') value = false
   else if (override === '2') value = true
+  else if (ambiguousMeasured !== undefined) value = ambiguousMeasured
   else {
     // The locale is evidence about the *terminal* — which font it is configured
     // to use — so it only counts when there is one. A pipe, a log, or a test
@@ -389,7 +473,20 @@ export function ambiguousWidthIsTwo(
 
 export function displayWidth(text: string): number {
   let width = 0
-  for (const char of mapAsciiChrome(text)) {
+  const measured = mapAsciiChrome(text)
+  for (let index = 0; index < measured.length;) {
+    const char = measured[index] ?? ''
+    if (char === '') break
+    // A reserved glyph plus our own space is ONE two-cell unit: the pin adds the
+    // space so the terminal spends the second cell, and counting it again here
+    // would make every padded row one cell short.
+    if (char !== ' ' && ambiguousCellCost(char.codePointAt(0) ?? 0) === 2) {
+      width += 2
+      index += char.length
+      if (measured[index] === ' ') index += 1
+      continue
+    }
+    index += char.length
     if (char === '\t') {
       // Tabs are expanded to spaces before rendering; keep the width
       // calculation consistent with `sanitizeTerminalText()`.
@@ -408,9 +505,12 @@ export function displayWidth(text: string): number {
     if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) {
       continue
     }
+    // NOTE: `index` has already advanced past this character above; the branches
+    // below only decide how many cells it cost.
     const ambiguousWide = ambiguousWidthIsTwo() && AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end)
     const wide =
       ambiguousWide ||
+      ambiguousCellCost(cp) === 2 ||
       (cp >= 0x1100 && cp <= 0x115f) ||
       cp === 0x2329 || cp === 0x232a ||
       (cp >= 0x2e80 && cp <= 0xa4cf) ||
@@ -464,6 +564,14 @@ export function pinEmojiCells(text: string): string {
     const char = String.fromCodePoint(cp)
     index += char.length
     out += char
+    // An ambiguous glyph on a terminal that advances it one cell while drawing it
+    // wider: reserve the second cell so the next character is not painted on top
+    // of it. Skipped when the glyph is already followed by a space (the run may
+    // have been pinned once and be repainted), so pinning stays idempotent.
+    if (ambiguousCellCost(cp) === 2) {
+      if (!/^[ ]/u.test(text.slice(index))) out += ' '
+      continue
+    }
     if (!EMOJI_SYMBOLS.has(cp) || EMOJI_PRESENTATION_SYMBOLS.has(cp)) continue
     const selector = text.codePointAt(index)
     if (selector === 0xfe0e || selector === 0xfe0f) index += 1
@@ -500,7 +608,10 @@ export function padAnsiToWidth(text: string, width: number): string {
 
 /** Visible width of an ANSI-styled line, ignoring CSI / OSC sequences. */
 export function visibleWidth(text: string): number {
-  let used = 0
+  // Strip the escapes, then ask the one width function: summing per character
+  // here would count a reserved glyph's space twice (see `displayWidth`), and
+  // two width notions in one renderer is how rows drift apart.
+  let plain = ''
   let index = 0
   while (index < text.length) {
     if (text.charCodeAt(index) === 0x1b) {
@@ -510,10 +621,10 @@ export function visibleWidth(text: string): number {
     const cp = text.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    used += displayWidth(char)
+    plain += char
     index += char.length
   }
-  return used
+  return displayWidth(plain)
 }
 
 /** Advance past one ESC sequence starting at `index`. */
