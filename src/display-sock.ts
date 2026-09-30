@@ -44,6 +44,7 @@ import {
   usesSigwinch,
 } from './platform.js'
 import { terminalCapabilities } from './terminal-caps.js'
+import { createParentResizeFilter } from './display-mode.js'
 import { ambiguousWidthIsTwo, setAmbiguousWidthMeasured, setAmbiguousWidthReserve } from './term-text.js'
 import { measureAmbiguousGlyphWidth } from './glyph-measure.js'
 import type { GlyphWidthMeasurement } from './glyph-measure.js'
@@ -1596,7 +1597,7 @@ export async function runDisplayRelay(
       signals.removeListener('SIGHUP', onLocalHangup)
       signals.removeListener('SIGTERM', onLocalHangup)
       try {
-        stdin.setRawMode(false)
+        stdin.setRawMode?.(false)
       } catch {
         // ignore
       }
@@ -1637,7 +1638,8 @@ export async function runDisplayRelay(
      * on the floor: the probe owned the only stdin listener and the forwarder
      * was attached afterwards. Hold them (bounded) and flush on HELLO.
      */
-    const deliver = (text: string): void => {
+    const parentResize = createParentResizeFilter()
+    const forwardInput = (text: string): void => {
       if (text === '') return
       const bytes = Buffer.from(text, 'utf8')
       if (!live) {
@@ -1653,6 +1655,19 @@ export async function runDisplayRelay(
       } catch {
         finish('host-closed')
       }
+    }
+    const deliver = (text: string): void => {
+      // A pipe parent has no `resize` event to fire and no SIGWINCH to raise:
+      // `CSI 8 ; rows ; cols t` on the input pipe is how it says the panel is
+      // now a different size. Those bytes are not typing, and the rest of the
+      // read is.
+      const { forward, sizes } = parentResize.push(text)
+      for (const reported of sizes) {
+        size.columns = reported.columns
+        size.rows = reported.rows
+        sendResize()
+      }
+      forwardInput(forward)
     }
     const pump = new TerminalInputPump({
       stdin,
@@ -1763,7 +1778,10 @@ export async function runDisplayRelay(
     socket.on('connect', () => {
       void (async () => {
         try {
-          stdin.setRawMode(true)
+          // Optional: a pipe parent (`DSH_TUI_DISPLAY=stdio`) has no line
+          // discipline to put in raw mode, and calling it unguarded threw here —
+          // before the relay could say hello, which made the mode unusable.
+          stdin.setRawMode?.(true)
           stdin.resume()
           // Subscribed before the first await: an EOF that lands during the
           // probe (SSH dropped while the TTY was quiet) used to be missed

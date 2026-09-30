@@ -11,6 +11,18 @@
 它必须在真实 TTY 里跑。桌面版的 PATH 启动器不提供 TTY，所以 `dsh --profile tui` 这类终端配置在桌面版下
 **架构上不可用**——这不是插件的 bug，也不是用户终端的 bug。
 
+## 但"宿主自己会开终端控件"是另一条路（2026-10-01 补）
+
+上面说的是**桌面版自己**当宿主、且它没有 console 的情形。若宿主愿意在自己的界面里放一个终端控件
+（PTY 面板 / xterm.js / GUI 里嵌的终端），它可以把这个插件当子进程用：声明 `DSH_TUI_DISPLAY=stdio`，
+插件就不再要求 TTY——画面走 stdout、按键走 stdin、面板尺寸由宿主用 `CSI 8 ; rows ; cols t` 报告。
+协议、父进程的五个必备动作、最小示例与限制写在 [`docs/display-mode.md`](display-mode.md)；
+可执行规格是 `tests/stdio-pipe-e2e.test.mjs`（两端都是管道）与 `scripts/tui-stdio-probe.mjs`
+（真 profile、完全不用 PTY 的端到端，CI 的 Linux 与 Windows 两条腿都跑）。
+
+这条路的**边界**同样要记住：它能跑，是因为宿主提供了终端。若宿主就是那个 Electron-as-Node 启动器，
+它连这条通道也开不出来——那种情况走下面"用户可以怎么做"的第一行。
+
 ## 策略：没有终端时，插件**保持惰性**，绝不弄坏宿主
 
 > 2026-09-29 起生效（`0.8.x`）。这是本节最重要的一条：**插件不应该有能力让宿主崩掉。**

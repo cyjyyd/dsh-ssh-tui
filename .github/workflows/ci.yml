@@ -85,6 +85,16 @@ jobs:
           node scripts/probe-home.mjs --probe
       - name: Terminal-capability probe
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      # The desktop shape: no PTY anywhere. A parent that puts bytes on a pipe (a
+      # PTY panel, an embedder's own terminal widget, a GUI that shells out) hosts
+      # the TUI by declaring `DSH_TUI_DISPLAY=stdio`; this boots the same
+      # throwaway profile with pipes and checks that it paints, takes a
+      # keystroke, repaints when the parent reports a new size
+      # (`CSI 8 ; rows ; cols t`, since a pipe fires no `resize`), and exits
+      # cleanly. It is also the only probe that would run on a machine with no
+      # terminal at all, which is why it runs on both legs.
+      - name: Stdio pipe probe (no PTY, desktop shape)
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
       # "Is a window really on this session?" is a question the lock cannot
       # answer: a cut SSH link leaves the launcher connected for as long as sshd
       # takes to notice. This drives the real PTY, answers the relay's cursor
@@ -162,3 +172,9 @@ jobs:
       # win32 platform, so this leg is the only one that can run them.
       - name: Terminal-capability probe (incl. Windows profiles)
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      # The desktop shape, on the platform whose desktop build is the one users
+      # run: no PTY, no ConPTY, just pipes. Also the cheapest check that this
+      # plugin's painting path is not quietly relying on a console — the desktop
+      # launcher is an Electron-as-Node process with none.
+      - name: Stdio pipe probe (no PTY, desktop shape)
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
