@@ -363,6 +363,13 @@ export function composePaintFrame(options: PaintOptions & {
     out += `\x1b[?7l${rows}\x1b[?7h`
   }
   out += '\x1b[0m'
+  // Wrap a multi-row frame in a synchronized update (DEC 2026). A frame that
+  // repaints the visible transcript — which every token does, because the window
+  // is anchored to the bottom and one new line shifts all of it — is otherwise
+  // applied row by row, and on a slow link the reader sees the rows land in
+  // sequence: tearing that looks exactly like the flicker this TUI exists to
+  // avoid. Terminals that do not know the sequence ignore it.
+  if (painted.length > 2) out = `\x1b[?2026h${out}\x1b[?2026l`
   if (options.hideCursor !== true) {
     const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
     // Column `width + 1` (and writing into the last cell then parking past

@@ -1540,6 +1540,25 @@ export class SshTui {
   }
 
   /**
+   * Whether a row's rendering depends on the clock.
+   *
+   * A running card draws a spinner and an elapsed time, and a streaming row is
+   * being appended to: their *fields* may not change between two frames while
+   * their lines must. Such a row gets a tick in its cache key, so it re-renders
+   * every frame and becomes cacheable again once it settles. A frozen spinner was
+   * the alternative — and, once the same card was also drawn live elsewhere, the
+   * duplicate a reader actually reported.
+   */
+  private static isLiveRow(row: Row): boolean {
+    const loose = row as unknown as Record<string, unknown>
+    if (String(loose.kind ?? '').startsWith('streaming')) return true
+    if (loose.status === 'running') return true
+    if (loose.endedAt === undefined && loose.startedAt !== undefined) return true
+    const flipUntil = loose.flipUntil
+    return typeof flipUntil === 'number' && flipUntil > Date.now()
+  }
+
+  /**
    * Fingerprint of everything one row's rendering reads.
    *
    * Written by hand rather than hashing the object: the rendering reads a known
@@ -4216,17 +4235,32 @@ export class SshTui {
       pendingFinish = undefined
       finish?.()
     }
+    // Two of the row body's inputs come from *other* rows: whether this is still
+    // in the "leading" stretch of a compact view (which flips once an assistant
+    // or user row has been painted) and whether the row is folded into a tool
+    // burst rendered by the reply above it. Leaving them out of the cache key is
+    // what put a second copy of a running card on screen — the stale entry
+    // replayed lines for a row that now renders inside its reply's burst.
+    let leadingPhase = skipMiddle
+    // One tick per frame, shared by every live row: coarse enough not to churn a
+    // key mid-frame, fine enough that a spinner or an elapsed time moves.
+    const liveTick = Math.floor(Date.now() / 200)
     for (let rowIndex = 0; rowIndex < this.rows.length; rowIndex += 1) {
       flushPending()
       const cachedRow = this.rows[rowIndex]
+      const inBurst = compact && cachedRow !== undefined && compactBurstByReply.has(cachedRow as Extract<Row, { kind: 'assistant' }>)
       let cacheKey: string | undefined
       if (cachedRow !== undefined && !skipMiddle) {
-        cacheKey = `${displayBase}|${rowIndex === 4 ? 'fold' : ''}|${SshTui.rowKey(cachedRow)}`
+        const live = SshTui.isLiveRow(cachedRow)
+        cacheKey = `${displayBase}|${rowIndex === 4 ? 'fold' : ''}|${leadingPhase ? 'lead' : '-'}|${inBurst ? 'burst' : '-'}|${live ? `t${liveTick}` : 'settled'}|${SshTui.rowKey(cachedRow)}`
         const entry = this.displayRowCache.get(cachedRow)
         if (SshTui.rowRendersEqual(cachedRow, entry, cacheKey)) {
           for (const line of entry.lines) display.push(line)
           for (const ref of entry.refs) displayRefs.push(ref as Row | CollapsibleBlock | undefined)
           for (const gutter of entry.gutters) displayGutters.push(gutter)
+          // The body flips this flag when it paints an assistant/user row; the
+          // replay has to do the same or the next row's key would lie.
+          if (compact && (cachedRow.kind === 'assistant' || cachedRow.kind === 'user')) leadingPhase = true
           continue
         }
       }
