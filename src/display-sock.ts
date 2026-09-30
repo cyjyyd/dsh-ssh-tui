@@ -1172,15 +1172,30 @@ export function hostChildEnv(
   onTerminal = process.stdout?.isTTY === true,
   measuredAmbiguousWide?: boolean,
 ): NodeJS.ProcessEnv {
-  const ambiguous = measuredAmbiguousWide === undefined
-    ? (ambiguousWidthIsTwo(env, onTerminal) ? '2' : '1')
-    : (measuredAmbiguousWide ? '2' : '1')
+  // Two facts travel, because they are two facts: how many cells the terminal
+  // *advances* for these glyphs, and whether the second one has to be spent by
+  // us with a reserving space (the glyph drawn wider than its cell). Sending only
+  // the advance would leave the Host painting the collision the measurement was
+  // taken to fix.
+  const envValue = env.DSH_TUI_AMBIGUOUS_WIDTH
+  const measured = measuredAmbiguousWide === undefined
+    ? undefined
+    : (measuredAmbiguousWide
+        ? { width: '2', reserve: '0' }
+        : { width: '1', reserve: '1' })
+  const fallback = measured === undefined
+    ? { width: ambiguousWidthIsTwo(env, onTerminal) ? '2' : '1', reserve: '0' }
+    : measured
   return {
     ...env,
     [TUI_HOST_ENV]: '1',
     DSH_HOME: resolveDshHome(),
-    ...(env.DSH_TUI_AMBIGUOUS_WIDTH === undefined
-      ? { DSH_TUI_AMBIGUOUS_WIDTH: ambiguous }
+    // An explicit setting is the reader's, and is left alone in both directions.
+    ...(envValue === undefined
+      ? {
+          DSH_TUI_AMBIGUOUS_WIDTH: fallback.width,
+          DSH_TUI_AMBIGUOUS_RESERVE: fallback.reserve,
+        }
       : {}),
   }
 }

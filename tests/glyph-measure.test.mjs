@@ -96,14 +96,29 @@ test('a one-cell advance reserves the second cell, and the width contract holds'
   assert.equal(ambiguousWidthMeasured(), undefined)
 })
 
-test('the launcher hands its measurement to the painting process', () => {
-  // The Host paints with a socket for stdout, so it cannot measure; the answer
-  // travels in its environment. An explicit value still wins.
+test('the launcher hands both facts to the painting process', () => {
+  // The Host paints with a socket for stdout, so it cannot measure anything: the
+  // verdict travels in its environment. Both halves go — how many cells the
+  // terminal *advances*, and whether we must *reserve* the second one. Sending
+  // only the first would leave the Host painting the collision that the
+  // measurement was taken to fix.
   const narrow = hostChildEnv({ LANG: 'zh_CN.UTF-8' }, true, false)
-  assert.equal(narrow.DSH_TUI_AMBIGUOUS_WIDTH, '2',
-    'a one-cell advance still budgets two cells, because the space spends the second')
+  assert.equal(narrow.DSH_TUI_AMBIGUOUS_WIDTH, '1', 'the terminal advances one cell')
+  assert.equal(narrow.DSH_TUI_AMBIGUOUS_RESERVE, '1', 'and the second cell is ours to spend')
+
   const wide = hostChildEnv({ LANG: 'zh_CN.UTF-8' }, true, true)
-  assert.equal(wide.DSH_TUI_AMBIGUOUS_WIDTH, '2')
-  assert.equal(hostChildEnv({ LANG: 'en_US.UTF-8' }, true, true).DSH_TUI_AMBIGUOUS_WIDTH, '2')
-  assert.equal(hostChildEnv({ LANG: 'en_US.UTF-8', DSH_TUI_AMBIGUOUS_WIDTH: '1' }, true, true).DSH_TUI_AMBIGUOUS_WIDTH, '1')
+  assert.equal(wide.DSH_TUI_AMBIGUOUS_WIDTH, '2', 'the terminal spends both cells itself')
+  assert.equal(wide.DSH_TUI_AMBIGUOUS_RESERVE, '0')
+
+  // No measurement: the locale decides the advance, and nothing is reserved.
+  const guessed = hostChildEnv({ LANG: 'zh_CN.UTF-8' }, true, undefined)
+  assert.deepEqual([guessed.DSH_TUI_AMBIGUOUS_WIDTH, guessed.DSH_TUI_AMBIGUOUS_RESERVE], ['2', '0'])
+  const western = hostChildEnv({ LANG: 'en_US.UTF-8' }, true, undefined)
+  assert.deepEqual([western.DSH_TUI_AMBIGUOUS_WIDTH, western.DSH_TUI_AMBIGUOUS_RESERVE], ['1', '0'],
+    'and the locale cache must not hand back the previous answer')
+
+  // An explicit setting is the reader's, and is left alone in both directions.
+  const forced = hostChildEnv({ DSH_TUI_AMBIGUOUS_WIDTH: '1' }, true, false)
+  assert.equal(forced.DSH_TUI_AMBIGUOUS_WIDTH, '1')
+  assert.equal(forced.DSH_TUI_AMBIGUOUS_RESERVE, undefined, 'nothing is imposed on top of it')
 })

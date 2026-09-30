@@ -375,7 +375,21 @@ let ambiguousMeasured: boolean | undefined
  * a terminal that advances two cells spends them itself (`wide`), while one that
  * advances one cell needs the space (`reserve`).
  */
-let ambiguousReserve = false
+let ambiguousReserve: boolean | undefined
+
+/**
+ * The reserve setting from the environment, when a parent passed one.
+ *
+ * The Host cannot measure, so its launcher hands the verdict over in the
+ * environment alongside the advance: `DSH_TUI_AMBIGUOUS_WIDTH` says how many
+ * cells the terminal spends, `DSH_TUI_AMBIGUOUS_RESERVE` says whether the second
+ * one has to be spent by us. Reading it lazily keeps this module free of a
+ * startup order: the value is a property of the deployment, not of the call.
+ */
+function reserveFromEnv(): boolean {
+  const raw = String(process.env.DSH_TUI_AMBIGUOUS_RESERVE ?? '').trim()
+  return raw === '1' || raw === 'true'
+}
 
 /**
  * Record what the terminal's own answer said about these glyphs.
@@ -407,7 +421,7 @@ export function setAmbiguousWidthReserve(reserve: boolean): void {
 
 /** Whether the second cell is currently reserved with a space. */
 export function ambiguousWidthReserved(): boolean {
-  return ambiguousReserve
+  return ambiguousReserve ?? reserveFromEnv()
 }
 
 /**
@@ -420,7 +434,7 @@ export function ambiguousWidthReserved(): boolean {
  * @returns 0, 1 or 2 cells.
  */
 export function ambiguousCellCost(cp: number): number {
-  if (!ambiguousReserve) return 0
+  if (!ambiguousWidthReserved()) return 0
   return AMBIGUOUS_WIDE_RANGES.some(([start, end]) => cp >= start && cp <= end) ? 2 : 0
 }
 
@@ -449,7 +463,11 @@ export function ambiguousWidthIsTwo(
   onTerminal = process.stdout?.isTTY === true,
 ): boolean {
   const override = String(env.DSH_TUI_AMBIGUOUS_WIDTH ?? '').trim()
-  const key = `${override}|${onTerminal ? 'tty' : 'pipe'}|${String(ambiguousMeasured)}`
+  const locale = `${env.LC_ALL ?? ''} ${env.LC_CTYPE ?? ''} ${env.LANG ?? ''}`
+  // The locale is part of the key: it is an input to the answer, and a process
+  // that resolves it twice with different environments (a test, or a launcher
+  // that passes a scrubbed env) must not get the first answer back.
+  const key = `${override}|${locale}|${onTerminal ? 'tty' : 'pipe'}|${String(ambiguousMeasured)}`
   if (ambiguousCache?.key === key) return ambiguousCache.value
   let value: boolean
   // Order matters: an explicit setting, then what the terminal actually said,
