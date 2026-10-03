@@ -393,6 +393,16 @@ export function composePaintFrame(options: PaintOptions & {
   const deferred: number[] = []
   let rows = ''
   let used = out.length
+  // Where the caret belongs when this frame is done (the composer's own caret). A
+  // terminal draws an IME composition *where the caret is*, and writing a row parks
+  // the caret at the end of that row's text — so a frame that repaints the live
+  // region above the input box left the pre-edit flashing at the end of the
+  // processing row (Windows Terminal, reported twice). While the composer owns the
+  // caret, every row that is not the caret's own row hands it straight back. The
+  // moves cost a few bytes each and are what keeps the composition in one place.
+  const caretRow = Math.min(height, Math.max(1, options.cursorRow))
+  const caretColumn = Math.min(width, Math.max(1, options.cursorColumn))
+  const caret = options.hideCursor === true ? '' : `\x1b[${caretRow};${caretColumn}H`
   for (const index of order) {
     // Pin first, then pad: the padder measures with `visibleWidth`, which does
     // not know that a symbol like ⚠ will gain a variation selector and a
@@ -406,7 +416,7 @@ export function composePaintFrame(options: PaintOptions & {
       deferred.push(index)
       continue
     }
-    rows += row
+    rows += index + 1 === caretRow ? row : row + caret
     used += row.length
     painted.push(index)
   }
@@ -437,13 +447,11 @@ export function composePaintFrame(options: PaintOptions & {
   // avoid. Terminals that do not know the sequence ignore it.
   if (painted.length > 2) out = `\x1b[?2026h${out}\x1b[?2026l`
   if (options.hideCursor !== true) {
-    const cursorRow = Math.min(height, Math.max(1, options.cursorRow))
     // Column `width + 1` (and writing into the last cell then parking past
     // it) trips DEC auto-margin: the hardware cursor wraps onto the next
     // row and the caret punches through the last glyph. Keep the caret on
     // this row, in a real cell.
-    const cursorColumn = Math.min(width, Math.max(1, options.cursorColumn))
-    out += `\x1b[${cursorRow};${cursorColumn}H\x1b[?25h`
+    out += `${caret}\x1b[?25h`
   }
   return {
     output: out,
