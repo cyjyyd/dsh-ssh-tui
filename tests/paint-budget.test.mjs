@@ -16,7 +16,7 @@ import {
   FRAME_BYTE_BUDGETS,
 } from '../lib/paint.js'
 import { screen } from './screen.mjs'
-import { ctxWithCredentials, withSshSession } from './wait.mjs'
+import { ctxWithCredentials, waitFor, withSshSession } from './wait.mjs'
 
 const WIDTH = 40
 const HEIGHT = 20
@@ -345,9 +345,16 @@ test('a wire that is behind is not asked for another frame', async () => {
   const behind = frames()
   assert.ok(behind < 20, `a backed-up wire must skip frames: ${behind} of 20`)
   // …and when it drains, the size it had been holding lands.
+  //
+  // Waited for rather than slept on: this is the one assertion in the file that asks
+  // for something to *happen*, and a fixed 300 ms read the old state on a slow leg —
+  // exactly the race `tests/wait.mjs` exists to stop (it failed on the Windows runner
+  // while passing here). The pacing it waits on is bounded by the paint interval.
   tui.displayHost = { attached: true, pendingBytes: () => 0 }
-  await new Promise(resolve => setTimeout(resolve, 300))
-  assert.ok(frames() > behind, 'the held frame is painted once there is room')
+  await waitFor(() => frames() > behind, {
+    describe: 'the held frame to be painted once the wire drained',
+    timeoutMs: 5_000,
+  })
   assert.equal(tui.lastPaintWidth, width, 'at the size the drag ended on')
 })
 

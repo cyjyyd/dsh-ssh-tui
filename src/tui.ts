@@ -1161,6 +1161,18 @@ function formatShortDuration(ageMs: number): string {
  */
 const FEEDBACK_TTL_MS = 6_000
 
+/**
+ * `DSH_TUI_FEEDBACK_MS` — how long that is, in milliseconds.
+ *
+ * `0` is the pre-0.8.2 behaviour and a legitimate preference: keep an acknowledgement
+ * or a warning until the reader submits something. Anything unreadable or negative
+ * falls back to the default rather than to a surprise.
+ */
+export function resolveFeedbackTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number.parseInt(String(env.DSH_TUI_FEEDBACK_MS ?? '').trim(), 10)
+  return Number.isFinite(raw) && raw >= 0 ? raw : FEEDBACK_TTL_MS
+}
+
 const PLUGIN_VERSION = ((): string => {
   try {
     const require = createRequire(import.meta.url)
@@ -2339,7 +2351,7 @@ export class SshTui {
    * telemetry it replaced. They now expire on their own (and a submit still clears
    * them at once).
    */
-  private feedbackTtlMs = FEEDBACK_TTL_MS
+  private feedbackTtlMs = resolveFeedbackTtlMs(process.env)
   private feedbackTimer: ReturnType<typeof setTimeout> | undefined
   /**
    * Cursor-position replies removed from the relay's stdin stream. A launcher
@@ -4790,6 +4802,7 @@ export class SshTui {
    * moment: the row is the session's again once the sentence has been readable.
    */
   private expireFeedback(now: number = Date.now()): void {
+    if (this.feedbackTtlMs <= 0) return
     const stale = (feedback: { at: number; holds?: 'queue' } | undefined): boolean =>
       feedback !== undefined && feedback.holds === undefined && now - feedback.at >= this.feedbackTtlMs
     if (stale(this.footerEcho)) this.footerEcho = undefined
@@ -4806,6 +4819,8 @@ export class SshTui {
    */
   private armFeedbackExpiry(): void {
     if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
+    // `0` means "no clock": nothing to arm, and a 0 ms timer would expire it at once.
+    if (this.feedbackTtlMs <= 0) return
     if (this.notice?.holds === 'queue' && this.footerEcho === undefined) return
     this.feedbackTimer = setTimeout(() => {
       this.feedbackTimer = undefined

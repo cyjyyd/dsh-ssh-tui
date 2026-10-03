@@ -474,3 +474,22 @@ test('the live thinking card keeps the reader’s expansion for the whole turn',
   stream({ type: 'reasoning-delta', index: 0, text: '新回合的思考' })
   assert.equal(tui.streamingReasoning?.expanded, false, 'and the reader’s choice does not survive it')
 })
+
+test('DSH_TUI_FEEDBACK_MS pins the clock, and 0 restores the older rule', async () => {
+  // The expiry is a default, not a law: a reader can ask for the pre-0.8.2 behaviour
+  // ("keep it until I type"), and a probe that compares rows across seconds needs the
+  // chip to still be there.
+  const { tui } = fixture()
+  tui.feedbackTtlMs = 0
+  tui.runCommand('/theme mono')
+  await tick(30)
+  assert.match(String(tui.currentFooterEcho()), /配色已切换|mono/u, 'the acknowledgement is there')
+  await tick(120)
+  assert.match(String(tui.currentFooterEcho()), /配色已切换|mono/u, 'and 0 means no clock at all')
+
+  tui.input = 'x'
+  tui.cursor = 1
+  tui.handleChar('\r')
+  await tick(20)
+  assert.equal(tui.currentFooterEcho(), undefined, 'the submit still clears it')
+})

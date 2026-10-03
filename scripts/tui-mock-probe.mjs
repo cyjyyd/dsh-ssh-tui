@@ -502,6 +502,12 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     SSH_CONNECTION: '10.0.0.2 55555 10.0.0.1 22',
     SSH_TTY: '/dev/pts/9',
     DEEPSEEK_BASE_URL: mock.baseURL,
+    // The width sweep below compares the status row at the first and last geometry,
+    // eight seconds apart. An acknowledgement that expires in the meantime changes the
+    // row for a reason this probe is not about (measured: `160 → … → 160 did not come
+    // back to the same row` on CI the day the expiry shipped), so the clock is pinned
+    // off for the run.
+    DSH_TUI_FEEDBACK_MS: '0',
     DEEPSEEK_API_KEY: 'sk-tui-mock-probe',
     // The probe asserts reverse video, so the run has to be a colour terminal:
     // inheriting NO_COLOR — or a `DSH_TUI_COLOR_DEPTH=none` from the caller —
