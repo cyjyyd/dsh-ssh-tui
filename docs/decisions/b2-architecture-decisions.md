@@ -723,13 +723,19 @@ B2 final audit 修掉的那条（`plan-row` 包着一行 system 文本）之所�
 
 ### 20.4 未验证项（发布前人工门槛）
 
-- **fresh-home 真 PTY 首启走查**：`scripts/tui-setup-probe.mjs` 已就位（含两段式探测窗口：先给向导
-  整个窗口，只有窗口在**没有**向导的情况下关闭才判定"这台机器已配置"）。本沙箱内**未能**跑通：
-  - 本机的 pnpm store 在 workspace 之外、只读，`dsh plugin add` 因此无法建出未配置的 home
-    （`ERR_SQLITE_ERROR: unable to open database file`；把 `XDG_*` 指进 workspace 后可以建成，
-    见审计报告 §5）；建成的那份 home 上向导**没有**自动打开，原因未查清（同一次会话里产品侧的
-    Screen、输入、Esc 路径都有 in-process 证据）。**这条要在有可写 store 的机器上补跑**，
-    命令：`node scripts/probe-home.mjs --keep` 建 home，再 `PROBE_HOME=<home> node scripts/tui-setup-probe.mjs`。
+- **fresh-home 真 PTY 首启走查 —— 已查清、已修、已在本机通过（2026-10-03，0.8.2-rc.1）。**
+  审计当时只看到"向导不出现"，没看到原因；真因是一条**产品缺陷**，与 home 或探针无关：
+  前端拉起后台 Host 时**永远**带 `--resume=<id>`（`hostArgvForSession`，连它自己刚铸的新 id 也带），
+  而首启判定把 `resume` 读成"这台机器配置过"，于是 `maybeRunOnboarding` 对新机器直接返回 ——
+  **全新安装永远不会出现向导，也没有任何提示**。判定现在只看凭据（`stored`）。
+  证据链：Host 侧 trace 打印 `{"at":"enter","resume":true,"envKey":0}` → `{"verdict":"skip"}`，
+  而同一进程的 `startup.provide` 显示 `resume:false`（前端）与 `resume:true`（Host 的 argv 被改写）。
+  修后在本机真 PTY 上：未配置 home → 向导**自动出现**、列表步按键只重画正文、字段步打字只重画 1 行、
+  resize 后字段与按键仍在、Esc 交还工作区；再写入凭据重启 → **不再出现向导**（两项都 PASS）。
+  跑法：`node scripts/probe-home.mjs --keep --unconfigured` 建 home，再
+  `PROBE_HOME=<home> node scripts/tui-setup-probe.mjs`。
+  顺带修掉的探针问题：`probe-home.mjs` 现在为探针 home 写入**占位凭据**（否则工作区类探针会一头撞进
+  向导 —— 它们此前只是被这条缺陷"顺带"放行），`--unconfigured` 保留未配置路径。
 - **Windows / ConPTY 实机**：本机无法覆盖。它是**发布前人工验证项**，清单见
   [`docs/release.md`](../release.md) 的"发布前人工门槛"一节；CI 的 `test-windows` 腿只覆盖
   ConPTY 上的探针（boot / drop / busy-drop / term / stdio），不覆盖人手输入法、鼠标选择与真实
