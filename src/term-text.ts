@@ -101,6 +101,9 @@ const WAIT_DETAIL_MAX_LINES = 3
  */
 export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_DETAIL_MAX_LINES): string[] {
   const prefixWidth = displayWidth(WAIT_DETAIL_PREFIX)
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   const contentWidth = Math.max(1, width - prefixWidth)
   const rows: string[] = []
   let current = ''
@@ -116,7 +119,7 @@ export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_D
       let cut = 0
       let used = 0
       for (const char of rest) {
-        const charWidth = displayWidth(char)
+        const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
         if (used + charWidth > contentWidth) break
         used += charWidth
         cut += char.length
@@ -145,7 +148,7 @@ export function wrapWaitDetails(detail: string, width: number, maxLines = WAIT_D
     let cut = 0
     let used = 0
     for (const char of last) {
-      const charWidth = displayWidth(char)
+      const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
       if (used + charWidth > limit) break
       used += charWidth
       cut += char.length
@@ -271,6 +274,19 @@ function asciiChromeActive(): boolean {
 }
 
 /**
+ * Whether chrome is being drawn in ASCII, for renderers that pick the glyph run
+ * themselves.
+ *
+ * `pinEmojiCells` translates them anyway; asking is for the case where the
+ * *shape* differs rather than just the character — a metre whose filled cell is
+ * `#` reads as `##..`, not as `#..#`, so the renderer wants to know before it
+ * counts and pads.
+ */
+export function asciiChromeEnabled(): boolean {
+  return asciiChromeActive()
+}
+
+/**
  * Rewrite one string's chrome into ASCII when the terminal cannot decode UTF-8.
  *
  * Only the glyphs in {@link ASCII_CHROME} move; CJK text is left byte for byte,
@@ -385,11 +401,23 @@ let ambiguousReserve: boolean | undefined
  * a profile of a 2000-row frame put ~75% of the samples there, and it is why
  * rendering in a long session felt slow. The policy cannot change during a frame,
  * so it is resolved once and read as plain booleans afterwards; the setters below
- * and `ambiguousPolicy()`'s own cheap key check are what invalidate it.
+ * and the key built at the top of `ambiguousPolicy` are what invalidate it.
+ *
+ * The key is rebuilt per call rather than cached per frame. Three attempts at
+ * making that cheaper — by object identity, by a frame counter, and by comparing
+ * the fields one at a time — were each rejected by the suite, and the reason is
+ * worth keeping: the environment is *mutated in place* by callers (`process.env.X
+ * = …` in a test, a relay handing over a measurement), so all three report
+ * "unchanged" for an environment that has changed. What made the original
+ * expensive was never the comparison — it was that the comparison ran once per
+ * character. The loops below resolve the policy once per string and pass it down
+ * as {@link charCellWidth}'s argument, and that is where the 56%-of-samples
+ * profile entry actually went: the same calls with the same key, but one per
+ * string instead of one per cell.
  */
 let ambiguousPolicyCache: { key: string; wide: boolean; reserve: boolean } | undefined
 
-/** The three inputs the policy depends on, as one cheap-to-compare string. */
+/** The inputs the policy depends on, as one cheap-to-compare string. */
 function ambiguousPolicyKey(env: NodeJS.ProcessEnv, onTerminal: boolean): string {
   return `${env.DSH_TUI_AMBIGUOUS_WIDTH ?? ''}|${env.DSH_TUI_AMBIGUOUS_RESERVE ?? ''}|`
     + `${env.LC_ALL ?? ''}|${env.LC_CTYPE ?? ''}|${env.LANG ?? ''}|`
@@ -538,13 +566,79 @@ export function ambiguousWidthIsTwo(
   return ambiguousPolicy(env, onTerminal).wide
 }
 
+/**
+ * Cells one *code unit* costs at its position, given a resolved policy.
+ *
+ * The per-character core of {@link displayWidth}, split out for the
+ * callers that walk a string themselves (clipping, truncation, wrapping): they
+ * resolve {@link ambiguousPolicy} once per string and then ask this per
+ * character, instead of paying `displayWidth`'s policy lookup and ASCII mapping
+ * for every character of every row. A profile of a window drag put 56% of the
+ * samples in that lookup, because the clipping loops are O(n²) in a way nothing
+ * about their shape advertises: `clipAnsiToWidth` calls this for each character,
+ * and `truncateToWidth` re-measures the whole remainder inside its loop.
+ *
+ * ASCII is answered from its code point before any table lookup: it is the
+ * overwhelming majority of every row, and it can never be ambiguous or wide.
+ * @param cp - the code point.
+ * @param policy - the resolved policy, as returned by {@link ambiguousPolicy}.
+ * @returns 0, 1 or 2 cells.
+ */
+export function charCellWidth(cp: number, policy: { wide: boolean; reserve: boolean }): number {
+  if (cp === 0x09) {
+    // Tabs are expanded to spaces before rendering; keep the width calculation
+    // consistent with `sanitizeTerminalText()`.
+    return 4
+  }
+  if (cp < 0x7f) return cp <= 0x1f ? 0 : 1
+  if (cp <= 0x9f) return 0
+  if (cp === 0x00ad || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2060 && cp <= 0x2064) || cp === 0xfeff) {
+    return 0
+  }
+  // VS15 / VS16 select text or emoji presentation for the base glyph; the base
+  // already carries the width.
+  if (cp === 0xfe0e || cp === 0xfe0f) return 0
+  if (
+    ((policy.wide || policy.reserve) && inAmbiguousRange(cp))
+    || (cp >= 0x1100 && cp <= 0x115f)
+    || cp === 0x2329 || cp === 0x232a
+    || (cp >= 0x2e80 && cp <= 0xa4cf)
+    || (cp >= 0xac00 && cp <= 0xd7a3)
+    || (cp >= 0xf900 && cp <= 0xfaff)
+    || (cp >= 0xfe10 && cp <= 0xfe19)
+    || (cp >= 0xfe30 && cp <= 0xfe6f)
+    || (cp >= 0xff00 && cp <= 0xff60)
+    || (cp >= 0xffe0 && cp <= 0xffe6)
+    || (cp >= 0x1f300 && cp <= 0x1faff)
+    || (cp >= 0x20000 && cp <= 0x3fffd)
+    || (cp >= 0x203c && cp <= 0x2b55 && EMOJI_SYMBOLS.has(cp))
+  ) {
+    return 2
+  }
+  return 1
+}
+
+/**
+ * Cells one *unit* of a mapped string costs, given a resolved policy.
+ *
+ * A unit is whatever the loop that owns it iterates over. The chrome mapping can
+ * turn one code point into several (`▶` is painted as `> ` to keep its two
+ * cells), and a multi-character unit has to be measured as a whole — measuring
+ * its first code point as one cell is how a clipped row came up a cell short.
+ */
+function unitCellWidth(unit: string, policy: { wide: boolean; reserve: boolean }): number {
+  if (unit.length <= 1) return charCellWidth(unit.codePointAt(0) ?? 0, policy)
+  if (unit === '> ' || unit === '! ' || unit === 'x ') return 2
+  return unit.length
+}
+
 export function displayWidth(text: string): number {
   let width = 0
   const measured = mapAsciiChrome(text)
   // Resolved once per call rather than per character: this runs for every
   // character of every painted line, and the old lookup read `process.env` and
   // ran a regex each time (a profile of a 2000-row frame put ~75% of its samples
-  // there). Here it costs one string comparison for the whole line.
+  // there). Here it costs one comparison of the inputs for the whole line.
   const policy = ambiguousPolicy()
   for (let index = 0; index < measured.length;) {
     const char = measured[index] ?? ''
@@ -552,48 +646,17 @@ export function displayWidth(text: string): number {
     // A reserved glyph plus our own space is ONE two-cell unit: the pin adds the
     // space so the terminal spends the second cell, and counting it again here
     // would make every padded row one cell short.
-    if (char !== ' ' && policy.reserve && inAmbiguousRange(char.codePointAt(0) ?? 0)) {
-      width += 2
-      index += char.length
-      if (measured[index] === ' ') index += 1
-      continue
+    if (char !== ' ' && policy.reserve) {
+      const cp = char.codePointAt(0) ?? 0
+      if (cp > 0x7f && inAmbiguousRange(cp)) {
+        width += 2
+        index += char.length
+        if (measured[index] === ' ') index += 1
+        continue
+      }
     }
+    width += unitCellWidth(char, policy)
     index += char.length
-    if (char === '\t') {
-      // Tabs are expanded to spaces before rendering; keep the width
-      // calculation consistent with `sanitizeTerminalText()`.
-      width += 4
-      continue
-    }
-    const cp = char.codePointAt(0) ?? 0
-    if (cp === 0x00ad || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2060 && cp <= 0x2064) || cp === 0xfeff) {
-      continue
-    }
-    if (cp === 0xfe0e || cp === 0xfe0f) {
-      // VS15 / VS16 select text or emoji presentation for the base glyph; the
-      // base already carries the width.
-      continue
-    }
-    if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) {
-      continue
-    }
-    // NOTE: `index` has already advanced past this character above; the branches
-    // below only decide how many cells it cost.
-    const wide =
-      ((policy.wide || policy.reserve) && inAmbiguousRange(cp)) ||
-      (cp >= 0x1100 && cp <= 0x115f) ||
-      cp === 0x2329 || cp === 0x232a ||
-      (cp >= 0x2e80 && cp <= 0xa4cf) ||
-      (cp >= 0xac00 && cp <= 0xd7a3) ||
-      (cp >= 0xf900 && cp <= 0xfaff) ||
-      (cp >= 0xfe10 && cp <= 0xfe19) ||
-      (cp >= 0xfe30 && cp <= 0xfe6f) ||
-      (cp >= 0xff00 && cp <= 0xff60) ||
-      (cp >= 0xffe0 && cp <= 0xffe6) ||
-      (cp >= 0x1f300 && cp <= 0x1faff) ||
-      (cp >= 0x20000 && cp <= 0x3fffd) ||
-      (cp >= 0x203c && cp <= 0x2b55 && EMOJI_SYMBOLS.has(cp))
-    width += wide ? 2 : 1
   }
   return width
 }
@@ -758,6 +821,9 @@ export function firstCodePointLength(text: string): number {
 
 export function wrap(text: string, width: number): string[] {
   const limit = Math.max(1, width)
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   const lines: string[] = []
   for (const sourceLine of text.split('\n')) {
     if (sourceLine === '') {
@@ -769,7 +835,7 @@ export function wrap(text: string, width: number): string[] {
       let cut = 0
       let used = 0
       for (const char of rest) {
-        const charWidth = displayWidth(char)
+        const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
         if (charWidth > 0 && used + charWidth > limit) break
         used += charWidth
         cut += char.length
@@ -797,6 +863,9 @@ export interface TextSegment {
 /** Wrap plain text and report each output line's char range in the source. */
 export function wrapTracked(text: string, width: number): { line: string; start: number; end: number }[] {
   const limit = Math.max(1, width)
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   const out: { line: string; start: number; end: number }[] = []
   let base = 0
   for (const sourceLine of text.split('\n')) {
@@ -811,7 +880,7 @@ export function wrapTracked(text: string, width: number): { line: string; start:
       let cut = 0
       let used = 0
       for (const char of rest) {
-        const charWidth = displayWidth(char)
+        const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
         if (charWidth > 0 && used + charWidth > limit) break
         used += charWidth
         cut += char.length
@@ -995,6 +1064,9 @@ export function stripAnsi(text: string): string {
  */
 export function paintedLinkHits(line: string): PaintedLinkHit[] {
   const hits: PaintedLinkHit[] = []
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   let index = 0
   let col = 0
   let openHref: string | undefined
@@ -1009,7 +1081,7 @@ export function paintedLinkHits(line: string): PaintedLinkHit[] {
       const cp = line.codePointAt(index)
       if (cp === undefined) break
       const char = String.fromCodePoint(cp)
-      col += displayWidth(char)
+      col += unitCellWidth(mapAsciiChrome(char), policy)
       index += char.length
       continue
     }
@@ -1348,11 +1420,14 @@ export function truncateToWidth(text: string, width: number): string {
   if (width <= 0) return ''
   if (displayWidth(safe) <= width) return safe
   if (width === 1) return mapAsciiChrome('…')
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   const limit = width - 1
   let cut = 0
   let used = 0
   for (const char of safe) {
-    const charWidth = displayWidth(char)
+    const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
     if (used + charWidth > limit) break
     used += charWidth
     cut += char.length
@@ -1368,6 +1443,9 @@ export function truncateToWidth(text: string, width: number): string {
  */
 export function clipAnsiToWidth(text: string, width: number): string {
   if (width <= 0) return ''
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   let used = 0
   let out = ''
   let index = 0
@@ -1381,7 +1459,7 @@ export function clipAnsiToWidth(text: string, width: number): string {
     const cp = text.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    const charWidth = displayWidth(char)
+    const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
     if (used + charWidth > width) break
     out += char
     used += charWidth
@@ -1402,6 +1480,9 @@ export function clipAnsiToWidth(text: string, width: number): string {
  */
 export function truncateAnsiToWidth(text: string, width: number): string {
   if (width <= 0) return ''
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   if (visibleWidth(text) <= width) return text
   if (width === 1) return mapAsciiChrome('…')
   const limit = width - 1
@@ -1418,7 +1499,7 @@ export function truncateAnsiToWidth(text: string, width: number): string {
     const cp = text.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    const charWidth = displayWidth(char)
+    const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
     if (used + charWidth > limit) break
     out += char
     used += charWidth
@@ -1438,9 +1519,12 @@ export interface InputView {
 /** Slice up to `maxWidth` display columns from the beginning of `text`. */
 function forwardSliceByWidth(text: string, maxWidth: number): { text: string; width: number } {
   let cut = 0
+  // Resolved once per call: the per-character core below takes it as an
+  // argument, so a row costs one policy lookup instead of one per character.
+  const policy = ambiguousPolicy()
   let used = 0
   for (const char of text) {
-    const charWidth = displayWidth(char)
+    const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
     if (used + charWidth > maxWidth) break
     used += charWidth
     cut += char.length
@@ -1452,10 +1536,12 @@ function forwardSliceByWidth(text: string, maxWidth: number): { text: string; wi
 function backwardSliceByWidth(text: string, end: number, maxWidth: number): { start: number; width: number } {
   if (end <= 0 || maxWidth <= 0) return { start: end, width: 0 }
   const chars = Array.from(text.slice(0, end))
+  const policy = ambiguousPolicy()
   let used = 0
   let firstIncluded = chars.length
   for (let index = chars.length - 1; index >= 0; index--) {
-    const charWidth = displayWidth(chars[index] ?? '')
+    const char = chars[index] ?? ''
+    const charWidth = unitCellWidth(mapAsciiChrome(char), policy)
     if (used + charWidth > maxWidth) break
     used += charWidth
     firstIncluded = index

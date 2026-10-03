@@ -241,3 +241,29 @@ function sgrToBasicIndex(sgr: number): number {
 function sgrTo256(sgr: number): number {
   return sgrToBasicIndex(sgr)
 }
+
+/**
+ * Paint one run of text in one role's colour.
+ *
+ * The one helper the footer's whole colour grammar is built on — the meter
+ * primitives paint their filled cell with it and the status row paints the link's
+ * pips — so it lives here, beside `downgradeSgr`, rather than in a module of its
+ * own. Three rules it keeps:
+ *
+ * - it wraps *one* run, closes itself, and stops there;
+ * - re-opening the surrounding muted style is the *row owner's* job
+ *   (`muteFooterLine` in `tui.ts` reopens it after every reset), because doing it
+ *   here as well produced two identical `90m` sequences per accent and made the
+ *   output depend on which separator the caller passed;
+ * - a terminal with no colour left answers with the text unchanged, so the
+ *   `no-color` and `mono` paths need no branch of their own.
+ * @param text - the run to paint.
+ * @param token - SGR parameters for the role, as `theme.ts` emits them.
+ * @param depth - what the terminal can take.
+ * @returns the run, painted when there is colour to paint it with.
+ */
+export function accent(text: string, token: string, depth: ColorDepth): string {
+  const code = downgradeSgr(token, depth)
+  if (code === '' || text === '') return text
+  return `\x1b[${code}m${text}\x1b[0m`
+}

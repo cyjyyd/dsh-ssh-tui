@@ -77,6 +77,13 @@ jobs:
       - name: Annotate the failing tests
         if: failure()
         run: node scripts/ci-annotate-failures.mjs test-output.txt
+      # The static half of the B2 freeze (docs/plans/b2-architecture-plan.md): the
+      # representation invariants (unclassified / unknown destination / live source
+      # rows / duplicate primaries) and the retired legacy paths, as one command.
+      # The behavioural half is the suite above; a deleted path leaves no runtime
+      # signature, so "it is gone" needs a check the suite cannot be.
+      - name: B2 freeze audit (representation invariants + retired paths)
+        run: npm run freeze
       # End to end on a real PTY, against a profile this repo builds for itself:
       # a headless runner has no ~/.dsh, which is why this never ran here before.
       - name: End-to-end PTY probe (throwaway profile)
@@ -123,6 +130,11 @@ jobs:
       # install defect, not a probe one.
       - name: Busy-drop probe (window closed mid-turn)
         run: node scripts/tui-mock-probe.mjs --busy
+      # The status row on an ASCII console. The footer pass' meters are the newest
+      # place a UTF-8 cell could leak into a terminal that cannot decode one, and
+      # the probe asserts the row's glyph set over a real PTY.
+      - name: Terminal-capability probe (ASCII console)
+        run: DSH_TUI_ASCII=1 node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
       # The other half of that script: a scripted turn, then the copy paths a
       # reader actually takes — `/find` highlights the match, a drag over the
       # reply copies exactly what it covered, and the copy key takes the
@@ -151,6 +163,8 @@ jobs:
       - name: Annotate the failing tests
         if: failure()
         run: node scripts/ci-annotate-failures.mjs test-output.txt
+      - name: B2 freeze audit (representation invariants + retired paths)
+        run: npm run freeze
 
       # Windows is where "it worked on Linux" stopped being evidence: this drives
       # the real TUI in a ConPTY on a real Windows host, so a lifecycle that only
@@ -169,9 +183,15 @@ jobs:
       - name: Busy-drop probe (ConPTY window close)
         run: node scripts/tui-mock-probe.mjs --busy
       # The Windows-only terminal profiles (Windows Terminal, conhost) need a real
-      # win32 platform, so this leg is the only one that can run them.
+      # win32 platform, so this leg is the only one that can run them. The probe
+      # also asserts the status row itself — its glyph set, its width, and that
+      # the counters which left the default row really left it — in each console.
       - name: Terminal-capability probe (incl. Windows profiles)
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      # The footer pass' Windows matrix: every Windows terminal this project
+      # supports, painted through the same capability functions the TUI calls.
+      - name: Status-row capability matrix (Windows terminals)
+        run: node scripts/footer-windows-probe.mjs
       # The desktop shape, on the platform whose desktop build is the one users
       # run: no PTY, no ConPTY, just pipes. Also the cheapest check that this
       # plugin's painting path is not quietly relying on a console — the desktop

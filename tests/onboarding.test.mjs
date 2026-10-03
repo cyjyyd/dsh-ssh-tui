@@ -39,15 +39,26 @@ function wizardState(step, overrides = {}) {
     catalog: undefined,
     providerCursor: 0,
     saving: false,
+    // The wizard owns its field and its message row (B2.6): the composer is the
+    // workspace's and is never borrowed.
+    field: '',
+    fieldCursor: 0,
     resolve() {},
     ...overrides,
   }
 }
 
+/**
+ * The wizard parked on one step, drawn the way production opens it.
+ *
+ * It is a **Screen** now (B2.6): `openScreen({kind:'setup'})` is what `/setup` and
+ * the first-run path do, so a fixture that sets the state and opens the screen
+ * exercises the same renderer the user sees.
+ */
 function dialogFrame(step, overrides = {}) {
   const tui = makeTui()
   tui.onboarding = wizardState(step, overrides)
-  tui.dialog = { kind: 'onboarding' }
+  tui.openScreen({ kind: 'setup', title: '', lines: [], offset: 0 })
   return { tui, text: tui.captureFrame(100, 30).join('\n') }
 }
 
@@ -103,10 +114,10 @@ test('/setup API-key step prompts for the key and keeps it masked', () => {
   for (const locale of ['zh', 'en']) {
     setLocale(locale)
     const tui = makeTui()
-    tui.onboarding = wizardState('key')
-    tui.dialog = { kind: 'onboarding' }
-    tui.input = secret
-    tui.cursor = secret.length
+    // The wizard's *own* field: the composer is the workspace's draft and the
+    // migration exists so the wizard cannot read or write it (B2.6 §4/§5).
+    tui.onboarding = wizardState('key', { field: secret, fieldCursor: secret.length })
+    tui.openScreen({ kind: 'setup', title: '', lines: [], offset: 0 })
     const painted = tui.captureFrame(100, 30).join('\n')
 
     // The step must say which provider it is configuring and what to enter.

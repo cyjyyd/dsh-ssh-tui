@@ -102,6 +102,16 @@ const PROFILES = [
     // No bracketed paste: conhost only gained `?2004` in Windows 11 22H2.
     expect: { term: '', mouse: true, sgr: true, paste: false, alt: true, clipboardHint: true },
   },
+  {
+    name: 'Windows console (conhost, legacy codepage)',
+    win32Only: true,
+    // A console whose output code page is not UTF-8: `platform.ts` reads that
+    // from the environment and swaps the chrome for ASCII, which is the one
+    // Windows case where the new meters must draw `#`/`.`/`*`/`o` instead of
+    // `█`/`░`/`●`/`○`.
+    env: { SESSIONNAME: 'Console', DSH_TUI_ASCII: '1', DSH_TUI_NO_GLYPH_PROBE: '1' },
+    expect: { term: '', mouse: true, sgr: true, paste: false, alt: true, clipboardHint: true, asciiChrome: true },
+  },
 ]
 
 function plain(text) {
@@ -159,23 +169,25 @@ async function probeProfile(pty, { env: extra, name, expect }) {
   }
   try {
     await waitFor(text => text.includes('DeepSeek Harness'), 90_000, 'the boot banner')
-    // A fresh profile has no error row, so there would be nothing for
-    // `/copy error` to copy: `/diag` first, which the copy path accepts as a
-    // diagnostic row.
+    // A report is a Screen since B2.1 (AD-7): it leaves no row behind, so the copy
+    // path that replaced a `diag` row is gone — the copy *key* is now the only way
+    // to the report's text (which is also why the Screen carries it at all). What
+    // this probe really checks is the clipboard behaviour of each terminal profile,
+    // and that is the same key either way.
     term.write('/diag\r')
     await waitFor(text => /判定链|verdict chain/u.test(text), 30_000, 'the /diag report')
-    // The clipboard hint is what a user reads after `/copy` on a terminal that
-    // cannot write the clipboard; driving the command is the only way to prove
-    // it is wired rather than merely declared.
+    await new Promise(resolve => setTimeout(resolve, 500))
     const before = output.length
-    term.write('/copy error\r')
+    term.write('\x1b[99;6u')
     if (expect.clipboardHint) {
       await waitFor(text => text.slice(before).includes('OSC 52'), 20_000, 'the /copy explanation')
     } else {
-      // Nothing to wait for where the hint must *not* appear: give the command
-      // time to run, then assert its absence on the whole transcript.
+      // Nothing to wait for where the hint must *not* appear: give the frame time to
+      // arrive, then assert its absence on the whole transcript.
       await new Promise(resolve => setTimeout(resolve, 2_000))
     }
+    term.write('\x1b')
+    await new Promise(resolve => setTimeout(resolve, 500))
     term.write('/exit\r')
     await new Promise(resolve => { const t = setTimeout(resolve, 8_000); term.onExit(() => { clearTimeout(t); resolve() }) })
   } catch (error) {
@@ -189,6 +201,57 @@ async function probeProfile(pty, { env: extra, name, expect }) {
     try { term.kill() } catch { /* already gone */ }
   }
   return output
+}
+
+/**
+ * What the status row must look like in one terminal's bytes.
+ *
+ * The footer pass replaced the old telemetry dump with a row of meters, so the
+ * probe checks the row itself rather than only the mode switches around it. Rows
+ * are addressed absolutely (`CSI row;col H`) and never newline-separated, so the
+ * output is split on the addressing sequences: taking the last newline-delimited
+ * line would silently concatenate the transcript, both footer rows and the
+ * prompt into one string and assert against that.
+ */
+function checkStatusRow(profile, output) {
+  const problems = []
+  const want = (condition, message) => { if (!condition) problems.push(message) }
+  const painted = output
+    .split(/\x1b\[\d+;\d+H/u)
+    .map(plain)
+    // The status row is the one carrying the link chip and the group separator,
+    // in whichever glyph set that terminal decodes (`│` on UTF-8, `|` on an
+    // ASCII console — the same swap the rest of the chrome makes).
+    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  want(painted.length > 0, 'the status row never painted')
+  const row = painted.at(-1) ?? ''
+  // `DSH_TUI_ASCII=1` in the environment covers every profile at once, which is
+  // how the ASCII row is acceptance-tested on a POSIX PTY (the conhost profile
+  // that declares it natively only runs on the Windows leg).
+  const ascii = profile.expect.asciiChrome === true || process.env.DSH_TUI_ASCII === '1'
+  // The link chip leads with the label, then four pips. Which of the four are
+  // filled depends on whether this PTY answered the CSI-6n probe — a probe that
+  // missed its window reports "unknown", which is four hollow circles — so the
+  // row is checked for the *glyph set*, not for a particular measurement.
+  const mark = ascii ? '[*o]' : '[●○]'
+  want(
+    new RegExp(`(?:SSH|本机|本地|local)\\s+${mark}{4}\\s`, 'u').test(row),
+    `the link chip leads with four pips: ${JSON.stringify(row.slice(0, 120))}`,
+  )
+  want(
+    new RegExp(`${mark}{4}`, 'u').test(row),
+    `the pips use the ${ascii ? 'ASCII' : 'Unicode'} glyph set: ${JSON.stringify(row.slice(0, 120))}`,
+  )
+  if (ascii) {
+    // The ASCII console must not receive a single UTF-8 chrome glyph: the meters
+    // are the newest place one could leak from.
+    want(!/[●○█░]/u.test(row), `no UTF-8 chrome on an ASCII console: ${JSON.stringify(row.slice(0, 120))}`)
+  }
+  // The counters that left the default row really left it.
+  for (const gone of ['轮 ·', '缓存命中', 'cache hit']) {
+    want(!row.includes(gone), `"${gone}" is still on the status row: ${JSON.stringify(row.slice(0, 160))}`)
+  }
+  return problems
 }
 
 function checkProfile(profile, output) {
@@ -205,6 +268,7 @@ function checkProfile(profile, output) {
   if (profile.expect.mouse === false) {
     want(!has('\x1b[?1002h'), 'no drag reporting without a mouse')
   }
+  problems.push(...checkStatusRow(profile, output))
   // The /copy report always goes out; the explanation only where the clipboard
   // cannot work at all.
   want(plain(output).includes('OSC 52') === profile.expect.clipboardHint,

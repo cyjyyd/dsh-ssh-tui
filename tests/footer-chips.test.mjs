@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { setLocale } from '../lib/i18n/index.js'
 import {
   fitFooterChips, footerHealthChip, footerIdentityParts, footerStatsGroups, formatQuotaUnknown,
-  providerHasQuotaSurface,
+  providerHasQuotaSurface, runtimeStrip,
 } from '../lib/footer.js'
 import { formatLinkQualityChip } from '../lib/paint.js'
 import { profileFromArgv } from '../lib/preset-label.js'
@@ -15,6 +15,28 @@ import { FORMS_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
 import { formatQuotaBar } from '../lib/tui.js'
+
+/**
+ * A colourless TUI with nothing but the footer chrome on it.
+ *
+ * The module is imported here rather than at the top of the file for the same
+ * reason `footerTui` below does it: a `SshTui` reads settings and the profile when
+ * it is constructed, so the fixture controls those first.
+ */
+async function makeFooterTui() {
+  const { SshTui } = await import('../lib/tui.js')
+  const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'idle',
+    session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
+    cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.write = () => {}
+  return tui
+}
 
 /**
  * B-1: the status strip loses text before graphics, lowest priority first.
@@ -150,13 +172,15 @@ test('a missing roster puts the health chip on the strip, and clicking it opens 
   assert.ok(rowIndex > 0, `the strip carries the warning:\n${frame.map(stripAnsi).join('\n')}`)
 
   tui.handleMouseClick(rowIndex, 1)
-  // `/doctor` is asynchronous, so poll instead of assuming a fixed delay.
+  // `/doctor` is asynchronous, and since B2.1 its report is a Screen rather than a
+  // `diag` row: the report leaves no trace in the transcript by design (AD-7).
   const deadline = Date.now() + 3_000
-  while (Date.now() < deadline && !tui.rows.some(entry => entry.kind === 'diag')) {
+  while (Date.now() < deadline && tui.screen?.report !== 'doctor') {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
-  assert.ok(
-    tui.rows.some(entry => entry.kind === 'diag'),
+  assert.equal(
+    tui.screen?.report,
+    'doctor',
     'clicking the warning runs the report that explains it',
   )
 })
@@ -266,36 +290,36 @@ test('the quota bar is on screen before any reading, as an empty bar and a ?', (
   assert.equal(providerHasQuotaSurface('deepseek-official', llmPiAi), false, 'DeepSeek reports a balance')
   assert.equal(providerHasQuotaSurface('', llmPiAi), false)
 
-  const identity = footerIdentityParts({
-    running: false, planReview: false, waitingQuestion: false, compacting: false,
-    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'grok-4.6', provider: 'xai', parentModel: 'grok-4.6', subModel: 'grok-4.5',
-    quotaUnknown: true, foldedInput: false, multiLineInput: false, queued: 0,
-  })
-  assert.ok(identity.includes('░░░░░░░░ ?%'), identity.join(' · '))
-  // It sits where the reading will appear, before the subagent route.
-  assert.ok(
-    identity.indexOf('░░░░░░░░ ?%') < identity.findIndex(part => part.startsWith('sub:')),
-    identity.join(' · '),
-  )
-  // A provider without a quota surface keeps its row clean.
-  const noQuota = footerIdentityParts({
-    running: false, planReview: false, waitingQuestion: false, compacting: false,
-    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'deepseek-v4-flash', provider: 'deepseek-official',
-    parentModel: 'deepseek-v4-flash', subModel: 'deepseek-v4-flash',
-    foldedInput: false, multiLineInput: false, queued: 0,
-  })
-  assert.equal(noQuota.some(part => part.includes('?%')), false, noQuota.join(' · '))
+  // The placeholder is the quota chip's own unavailable form: a hollow bar and a
+  // question mark, in the slot the reading will occupy.
+  const row = stripAnsi(runtimeStrip({
+    link: { kind: 'ssh', intervalMs: 160, probed: true, rttMs: 31 },
+    activity: { kind: 'idle', text: '空闲' },
+    running: false,
+    quota: {},
+    color: false,
+  }, 120))
+  assert.equal(row, 'SSH ●●●● 31ms │ 空闲 │ ░░░░░░░░ ?%')
+  // A provider without a quota surface has no chip at all, so the row skips
+  // straight to the next live signal.
+  const noQuota = stripAnsi(runtimeStrip({
+    link: { kind: 'ssh', intervalMs: 160, probed: true, rttMs: 31 },
+    activity: { kind: 'idle', text: '空闲' },
+    running: false,
+    context: { percent: 25, usedTokens: 250_000, contextWindow: 1_000_000, level: 'ok' },
+    color: false,
+  }, 120))
+  assert.equal(noQuota.includes('?%'), false, noQuota)
+  assert.match(noQuota, /CTX/)
 })
 
 /** The boot frame of a quota-capable provider, before the first reading. */
 test('a booting TUI paints the placeholder where the reading will go', async () => {
   const settings = { get: () => ({ providers: { 'command-code': { apiKeyEnv: 'MISSING_KEY' } } }) }
   const tui = await footerTui({ color: true, provider: 'command-code', model: 'claude-sonnet-5', settings })
-  const identity = tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? ''
-  assert.match(identity, /[░]{8} \?%/u, `the bar is there from the first frame: ${JSON.stringify(identity)}`)
-  assert.equal(/\d+%/u.test(identity), false, `and no number is invented: ${JSON.stringify(identity)}`)
+  const row = statusRowOf(tui.captureFrame(110, 24).map(stripAnsi))
+  assert.match(row, /[░]{8} \?%/u, `the bar is there from the first frame: ${JSON.stringify(row)}`)
+  assert.equal(/\d+%/u.test(row), false, `and no number is invented: ${JSON.stringify(row)}`)
 })
 
 /**
@@ -312,7 +336,7 @@ test('a reading from the normal cadence cancels the waiting retry', async () => 
   // fails fast without touching the network, and nothing is invented for it.
   await tui.refreshQuota({ reason: 'start', announce: false }).catch(() => {})
   assert.equal(tui.quotaSnapshot, undefined)
-  assert.match(tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? '', /[░]{8} \?%/u)
+  assert.match(statusRowOf(tui.captureFrame(110, 24).map(stripAnsi)), /[░]{8} \?%/u)
 
   // A reading arrives through the normal cadence before the retry fires.
   let attempts = 0
@@ -329,8 +353,8 @@ test('a reading from the normal cadence cancels the waiting retry', async () => 
   // The armed retry must be gone: no second fetch after its interval.
   await new Promise(resolve => setTimeout(resolve, 250))
   assert.equal(attempts, 1, 'the retry stops once the footer has a reading')
-  const identity = tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? ''
-  assert.match(identity, /CC·GOAT 5Hr [█░]{8} 42%/u, `the reading replaced the placeholder: ${JSON.stringify(identity)}`)
+  const row = statusRowOf(tui.captureFrame(110, 24).map(stripAnsi))
+  assert.match(row, /5Hr [█░]{8} 42%/u, `the reading replaced the placeholder: ${JSON.stringify(row)}`)
 })
 
 /**
@@ -354,33 +378,35 @@ test('the retry picks up a reading that arrives after the boot attempt failed', 
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.ok(tui.quotaSnapshot !== undefined, 'the retry fetched the reading by itself')
-  assert.match(
-    tui.captureFrame(110, 24).map(stripAnsi).at(-1) ?? '',
-    /CC·GOAT 5Hr [█░]{8} 42%/u,
-  )
+  assert.match(statusRowOf(tui.captureFrame(110, 24).map(stripAnsi)), /5Hr [█░]{8} 42%/u)
 })
 
 const RING_RE = /[⣀⠉⠋⠛⠞⠟⠿⡿⣿]/u
 const BAR_RE = /[█░]{8} \d+%/u
 /**
- * The strip row, found by *position*: the identity line is always the last
- * painted row and the strip the one above it. Looking for the link chip's text
- * instead made the test pass in an SSH session and fail on CI, where there is no
- * SSH environment and the same chip reads `本机`/`Local`.
+ * The two footer rows, found by *position*: the identity row is always the last
+ * painted row and the status row the one above it. Looking for the link chip's
+ * text instead made the test pass in an SSH session and fail on CI, where there
+ * is no SSH environment and the same chip reads `本地`/`local`.
  */
-const stripRowOf = frame => frame.at(-2) ?? ''
+const statusRowOf = frame => frame.at(-2) ?? ''
+/** One row with the mute re-opens removed, so the accents can be read directly. */
+const accentsRaw = row => row.replaceAll('\x1b[90m', '')
+const identityRowOf = frame => frame.at(-1) ?? ''
 
 /**
- * B-1 moved the quota bar and the context ring one row up into the strip; a user
- * on a wide terminal read that as "额度条没了". Both are back on the identity
- * line, in the order they have always had: after the model, before the subagent
- * route. The strip owns the health chip, the link and the counters.
+ * The relocation this pass makes, asserted on a rendered frame.
+ *
+ * The capacity meters live on the *status* row, where a glance reads them next
+ * to the link and the activity; the identity row keeps the workspace metadata
+ * and nothing that is already gauged above it. The context ring is gone from
+ * both rows: a bar answers "how full", a ring only "roughly how full".
  */
-test('quota and the context ring live on the identity line, never the strip', async () => {
+test('quota and context are capacity meters on the status row, not the identity row', async () => {
   const tui = await footerTui({ color: true, provider: 'xai', model: 'grok-4.6' })
   tui.contextPressure = { percent: 25, usedTokens: 250_000, contextWindow: 1_000_000, level: 'ok' }
   // Two windows, and the *tightest* one is the coarser one: the footer must show
-  // the finest window (`5Hr`), short badge included, not `1Wk 12%`.
+  // the finest window (`5Hr`), not `1Wk 12%`.
   tui.quotaSnapshot = {
     provider: 'xai', plan: 'SuperGrok', source: 'supergrok',
     windows: [
@@ -388,24 +414,19 @@ test('quota and the context ring live on the identity line, never the strip', as
       { label: '滚动 5 小时', period: 'hourly', remainingPercent: 91 },
     ],
   }
-  // Wide enough for the badge *and* the tag: at 110 the fitter legitimately
-  // trades the badge for the window, which the helpers test covers.
-  const frame = tui.captureFrame(130, 24)
-  const plain = frame.map(stripAnsi)
-  const identity = plain.at(-1) ?? ''
-  const strip = stripRowOf(plain)
-  assert.match(identity, /grok-4\.6/u, `the model leads the identity line: ${JSON.stringify(identity)}`)
-  assert.match(identity, BAR_RE, `the quota bar is on the identity line: ${JSON.stringify(identity)}`)
-  assert.match(
-    identity,
-    /SuperGrok 5Hr [█░]{8} 91%/u,
-    `the finest window is the one shown: ${JSON.stringify(identity)}`,
-  )
-  assert.ok(identity.indexOf('grok-4.6') < identity.search(BAR_RE), 'quota sits after the model')
-  assert.match(identity, RING_RE, `the context ring is on the identity line: ${JSON.stringify(identity)}`)
-  assert.notEqual(strip, '', `the strip row exists: ${JSON.stringify(plain)}`)
-  assert.equal(BAR_RE.test(strip), false, `no quota bar on the strip: ${JSON.stringify(strip)}`)
-  assert.equal(RING_RE.test(strip), false, `no context ring on the strip: ${JSON.stringify(strip)}`)
+  const plain = tui.captureFrame(130, 24).map(stripAnsi)
+  const status = statusRowOf(plain)
+  const identity = identityRowOf(plain)
+  assert.match(status, BAR_RE, `the quota meter is on the status row: ${JSON.stringify(status)}`)
+  assert.match(status, /5Hr [█░]{8} 91%/u, `the finest window is the one shown: ${JSON.stringify(status)}`)
+  assert.match(status, /CTX [█░]{8} 25%/u, `the context meter is on the status row: ${JSON.stringify(status)}`)
+  assert.equal(status.includes('SuperGrok'), false, 'the plan badge is not on the default row')
+  // The row reads in priority order: link, activity, speed, quota, context.
+  assert.ok(status.indexOf('5Hr') < status.indexOf('CTX'), 'quota precedes context')
+  assert.equal(BAR_RE.test(identity), false, `no meter on the identity row: ${JSON.stringify(identity)}`)
+  assert.equal(RING_RE.test(identity), false, `no context ring either: ${JSON.stringify(identity)}`)
+  assert.equal(RING_RE.test(status), false, `the ring is not the context widget any more: ${JSON.stringify(status)}`)
+  assert.match(identity, /grok-4\.6|sub:/u, `the identity row keeps workspace metadata: ${JSON.stringify(identity)}`)
 })
 
 /**
@@ -433,11 +454,12 @@ test('a colour frame never shows an escape body where a style was meant', async 
 })
 
 /**
- * The strip reads as one row with the identity line below it: counters dim, only
- * the accents (link pips, ⚠) painted, and the link chip's own text keeping the
- * default foreground exactly as it did before the strip existed.
+ * The row reads as one muted run with three accents inside it: the link pips, the
+ * filled portion of each capacity meter, and each percentage. Everything else —
+ * labels, hollow cells, the session total, a settled tokens-per-second value —
+ * stays dim, so the eye lands on the readings rather than on the words.
  */
-test('the strip is muted like the identity line, accents excepted', async () => {
+test('the status row is muted, with the readings accented inside it', async () => {
   // The palette is stated: this sandbox runs with NO_COLOR/TERM=dumb, where a
   // muted SGR downgrades to nothing and there is no style to assert.
   const previousDepth = process.env.DSH_TUI_COLOR_DEPTH
@@ -454,39 +476,63 @@ test('the strip is muted like the identity line, accents excepted', async () => 
   tui.paintLink = 'ssh'
   tui.paintProbed = true
   tui.paintRttMs = 90
-  seedCounters(tui)
-  // Wide enough for every counter group: the point is the style, and a narrow
-  // row legitimately drops the last group before it can be styled.
-  const frame = tui.captureFrame(120, 24)
-  // Anchored: the header line also contains `SSH TUI`.
-  const strip = frame.at(-2) ?? ''
-  const identity = frame.at(-1) ?? ''
-  // The link chip leads and keeps the default foreground: the row starts with
-  // the chip itself, not with the mute the counters wear. The chip text comes
-  // from the same function the painter uses, so the wording (`SSH` / `本机` /
-  // `Local`) never enters the assertion.
-  const chip = formatLinkQualityChip(tui.paintLink, tui.paintIntervalMs, tui.paintRttMs, tui.paintProbed, true)
-  assert.ok(strip.startsWith(chip), `the link chip leads, unmuted: ${JSON.stringify(strip)}`)
-  assert.equal(/^\x1b\[90m/u.test(strip), false, `the row does not open muted: ${JSON.stringify(strip)}`)
-
-  // Each group, not just the row: a muted separator alone would satisfy a
-  // row-wide check while the counters themselves stayed at the default colour.
-  const groups = footerStatsGroups(statsRowOf(tui.statsTracker.snapshot()))
-  assert.ok(groups.length > 0, 'the tracker produced counter groups to style')
-  for (const group of groups) {
-    assert.ok(strip.includes(`\x1b[90m${group}`), `the counter group is muted: ${JSON.stringify(group)} in ${JSON.stringify(strip)}`)
+  tui.quotaSnapshot = {
+    provider: 'xai', plan: 'SuperGrok', source: 'supergrok',
+    windows: [{ label: '滚动 5 小时', period: 'hourly', remainingPercent: 82 }],
   }
-  assert.match(strip, /^(?:SSH|本地|local)\b/u, `the link text leads, unmuted: ${JSON.stringify(strip)}`)
-  assert.ok(identity.includes('\x1b[90m'), 'the identity line is muted too')
+  tui.contextPressure = { percent: 61, usedTokens: 610_000, contextWindow: 1_000_000, level: 'ok' }
+  seedCounters(tui)
+  const frame = tui.captureFrame(140, 24)
+  const status = frame.at(-2) ?? ''
+  const identity = frame.at(-1) ?? ''
+  assert.equal(/^\x1b\[90m/u.test(status), true, `the row opens muted: ${JSON.stringify(status)}`)
+  // The pips and each reading are accented; the text around them is not.
+  assert.match(accentsRaw(status), /\x1b\[2;32m●●●○\x1b\[0m/u, 'the pips carry the link accent')
+  // `muteFooterLine` re-opens the dim after every reset; `/x1b\[90m/` between the
+  // accent's reset and the next glyph is that, not part of the accent.
+  const accents = accentsRaw(status)
+  assert.match(accents, /5Hr \x1b\[2;32m███████\x1b\[0m░ \x1b\[2;32m82%\x1b\[0m/u, 'the quota reading is accented')
+  assert.match(accents, /CTX \x1b\[2;32m█████\x1b\[0m░░░ \x1b\[2;32m61%\x1b\[0m/u, 'the context reading is accented')
+  assert.equal(/\x1b\[2;32m(?:SSH|CTX|5Hr)/u.test(accents), false, 'the labels are not accented')
+  assert.ok(identity.includes('\x1b[90m'), 'the identity row is muted too')
 })
 
-test('narrowing keeps the warning and drops the counter text', async t => {
+/**
+ * The session total is painted only when the *harness* published it.
+ *
+ * A total this plugin had to assemble from the billed parts is a different
+ * accounting — provider by provider, whether `inputTokens` already includes the
+ * cache counters differs — and two numbers that mean different things must not look
+ * alike on a row that has no space to explain them. `/status` prints both, labelled.
+ */
+test('the Tok chip is painted for a harness total and for nothing else', async () => {
+  const seed = async usage => {
+    const tui = await makeFooterTui()
+    const tracker = tui.statsTracker
+    const start = Date.now() - 30_000
+    tracker.noteStepStart(1, 1, start)
+    tracker.noteFirstToken(1, 1, start + 600)
+    tracker.recordUsage(1, 1, usage)
+    tracker.settleMessage({ turn: 1, step: 1, time: start + 4_000, firstTokenTime: start + 600, outputTokens: usage.outputTokens })
+    tracker.noteStepEnd(1, 1)
+    return tui.captureFrame(140, 24).map(stripAnsi).at(-2) ?? ''
+  }
+  const withTotal = await seed({ inputTokens: 46_000, outputTokens: 2_400, cacheReadTokens: 20_000, cacheWriteTokens: 6_000, totalTokens: 74_400 })
+  assert.match(withTotal, /Tok 74\.4K/u, `a harness total is painted: ${JSON.stringify(withTotal)}`)
+  const partsOnly = await seed({ inputTokens: 46_000, outputTokens: 2_400, cacheReadTokens: 20_000, cacheWriteTokens: 6_000 })
+  assert.equal(/Tok /u.test(partsOnly), false, `and an assembled one is not: ${JSON.stringify(partsOnly)}`)
+  // The rest of the row is unaffected, so this is a missing chip rather than a
+  // broken one.
+  assert.match(partsOnly, /SSH/u)
+  assert.match(partsOnly, /空闲/u)
+})
+
+test('narrowing keeps the broken-install warning on the row', async t => {
   const tui = await footerTui({ home: await missingRowsHome(t) })
-  // Give the strip a counter group to lose.
   tui.rows.push({ kind: 'assistant', text: 'x' })
   const wide = warningRowOf(tui, 80) ?? ''
   const narrow = warningRowOf(tui, 24) ?? ''
   assert.ok(narrow.includes('⚠'), `the warning survives 24 columns: ${JSON.stringify(narrow)}`)
   assert.ok(displayWidth(narrow) <= 24, 'and the row still fits')
-  assert.ok(displayWidth(narrow) <= displayWidth(wide), 'narrowing never widens the strip')
+  assert.ok(displayWidth(narrow) <= displayWidth(wide), 'narrowing never widens the row')
 })

@@ -306,10 +306,10 @@ test('the wizard picker decides the set and the session model, not the listing',
     catalog: undefined,
     providerCursor: 0,
     saving: false,
+    field: '',
+    fieldCursor: 0,
     resolve() {},
   }
-  tui.input = ''
-  tui.cursor = 0
   tui.handleOnboardingChar('\r')
   assert.equal(tui.onboarding.step, 'models-pick')
   // Only the template's pinned model is checked; the listing only offers more.
@@ -340,13 +340,16 @@ test('an empty pick is refused instead of silently configuring nothing', () => {
     catalog: undefined,
     providerCursor: 0,
     saving: false,
+    field: '',
+    fieldCursor: 0,
     resolve() {},
   }
-  tui.input = ''
-  tui.cursor = 0
   tui.handleOnboardingChar('\r')
   tui.handleOnboardingChar(' ') // uncheck the only candidate
   tui.handleOnboardingChar('\r')
   assert.equal(tui.onboarding.step, 'models-pick', 'the picker stays open')
-  assert.ok(tui.rows.some(row => row.kind === 'error'), 'and says why')
+  // A wizard validation failure is the setup Screen's own message (B2.6 §11): it used
+  // to be a transcript row, which is what made a one-shot flow leave history behind.
+  assert.equal(tui.onboarding.notice?.kind, 'error', 'and says why, on its own row')
+  assert.match(String(tui.onboarding.notice?.text), /模型/u)
 })

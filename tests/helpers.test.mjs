@@ -45,6 +45,7 @@ import {
   findCursorPositionReply,
   fitFooterStatsLine,
   fitFooterStatusLine,
+  runtimeStrip,
   fmtElapsedCompact,
   foldInputView,
   footerActivity,
@@ -831,10 +832,7 @@ test('/approval status reports the live mode instead of toggling it', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  const lastSystem = () => {
-    const row = tui.rows.findLast(item => item.kind === 'system')
-    return String(row?.text ?? '')
-  }
+  const lastSystem = () => lastFeedback(tui)
   tui.runCommand('/approval status')
   assert.ok(lastSystem().includes('自动审批关闭'))
   tui.runCommand('/approval auto')
@@ -871,8 +869,8 @@ test('/submodel reset follows the parent provider again', async () => {
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.equal(tui.subagentSelection.current.provider, undefined)
   assert.equal(tui.subagentSelection.current.model, 'deepseek-v4-flash')
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('跟随提供商')))
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('仅当前会话')))
+  assert.ok(feedbackText(tui).includes('跟随提供商'))
+  assert.ok(feedbackText(tui).includes('仅当前会话'))
 })
 
 test('picking the parent provider in /submodel unpins instead of lying', async () => {
@@ -1314,7 +1312,9 @@ test('footer status keeps one activity and drops identity from the right', () =>
     parentModel: 'grok-4.6', subModel: 'grok-4.5',
     quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
   })
-  assert.equal(activity.text, '子代理 2')
+  // `代理`, not `子代理 2`: the status row answers "what is happening" with the
+  // verb, and the count of children is the transcript's job.
+  assert.equal(activity.text, '代理')
   const identity = footerIdentityParts({
     running: true, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
@@ -1325,16 +1325,36 @@ test('footer status keeps one activity and drops identity from the right', () =>
     foldedInput: false, multiLineInput: false, queued: 1,
     cwdLabel: '目录:srv',
   })
-  assert.deepEqual(identity, ['[标准模式]', '目录:srv', 'grok-4.6 xhigh', `SuperGrok ${formatQuotaBar(82)} 82%`, `${formatContextPressureRing(80)} 400K/500K 80%`, 'sub:grok-4.5', '排队 1'])
-  // A row too narrow for everything drops the subagent route before the live
-  // quota/context chips: fit exactly up to the context chip and neither
-  // operational signal may disappear.
-  const contextPart = `${formatContextPressureRing(80)} 400K/500K 80%`
-  const uptoContext = identity.slice(0, identity.indexOf(contextPart) + 1)
-  const narrow = fitFooterStatusLine('空闲', identity, displayWidth(`空闲  ${uptoContext.join(' · ')}`))
+  // Quota and context left this row: they own capacity meters on the status row
+  // above, and a number painted twice is a number the reader checks twice. The
+  // preset is gone too — the header prints it permanently — and what is left is
+  // ordered by priority, so the right-most part is always the least load-bearing.
+  assert.deepEqual(identity, ['目录:srv', 'grok-4.6 xhigh', '排队 1', 'sub:grok-4.5'])
+  // The header paints the live route permanently, so the workspace row can drop
+  // it and spend those cells on the child route instead.
+  const withoutModel = footerIdentityParts({
+    running: true, planReview: false, waitingQuestion: false, compacting: false,
+    subagents: 2, tools: 3, planLeftOpen: false, planPending: false, planActive: true,
+    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
+    parentModel: 'grok-4.6', subModel: 'grok-4.5',
+    foldedInput: false, multiLineInput: false, queued: 1, cwdLabel: '目录:srv',
+  }, { omitModel: true })
+  assert.deepEqual(withoutModel, ['目录:srv', '排队 1', 'sub:grok-4.5'])
+  // 28 cells is not enough, and the parts are already in priority order, so the
+  // right-most ones go: the child route (configuration) first, then the state,
+  // and the working directory last.
+  const narrow = fitFooterStatusLine('子代理 2', withoutModel, 28)
+  assert.match(narrow, /^子代理 2/)
   assert.equal(narrow.includes('sub:'), false, narrow)
-  assert.equal(narrow.includes('82%'), true, narrow)
-  assert.equal(narrow.includes('400K/500K'), true, narrow)
+  assert.equal(narrow.includes('排队'), true, narrow)
+  assert.equal(narrow.includes('目录:srv'), true, narrow)
+  assert.ok(displayWidth(narrow) <= 28)
+  // Narrower still, and the state goes before the directory: the row is ordered
+  // by priority, so a shorter row loses the least load-bearing part first.
+  const tight = fitFooterStatusLine('子代理 2', withoutModel, 18)
+  assert.equal(tight.includes('排队'), false, tight)
+  assert.equal(tight.includes('目录:srv'), true, tight)
+  assert.ok(displayWidth(tight) <= 18)
   const withBalance = footerIdentityParts({
     running: false, planReview: false, waitingQuestion: false, compacting: false,
     subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
@@ -1346,6 +1366,9 @@ test('footer status keeps one activity and drops identity from the right', () =>
   // The subagent route keeps its effort suffix and never disappears just
   // because the child model matches the parent model.
   assert.equal(withBalance.includes('sub:deepseek-v4-flash(max)'), true, withBalance.join(' · '))
+  // The balance is a *reading*, and on a balance-only provider it is the row's
+  // only one: it outlives the configuration behind it.
+  assert.equal(withBalance.some(part => part.startsWith('余额')), true, withBalance.join(' · '))
   const line = fitFooterStatusLine('子代理 2', identity, 28)
   assert.match(line, /^子代理 2/)
   assert.equal(line.includes('排队'), false)
@@ -1490,49 +1513,27 @@ test('the footer quota shows the short badge and the finest window it has', () =
   assert.equal(quotaWindowTag(undefined), '')
   assert.equal(quotaWindowTag('unknown'), '')
 
-  // Widening one row must not lose the window: the badge goes first, the tag stays.
-  const identity = footerIdentityParts({
-    running: false, planReview: false, waitingQuestion: false, compacting: false,
-    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.5',
-    quotaCode: 'SuperGrok', quotaPercent: 82, quotaPeriod: 'hourly',
-    foldedInput: false, multiLineInput: false, queued: 0,
-  })
-  assert.ok(identity.includes('SuperGrok 5Hr ███████░ 82%'), identity.join(' · '))
-  const narrowed = [...identity]
-  assert.equal(dropFooterQuotaPlanName(narrowed), true)
-  assert.ok(narrowed.includes('5Hr ███████░ 82%'), narrowed.join(' · '))
-  assert.equal(narrowed.some(part => part.includes('SuperGrok')), false)
+  // Widening one row must not lose the window: the badge goes first, the tag
+  // stays. The default row no longer carries the badge at all — the quota chip
+  // leads with the window — but this is still the vocabulary `/quota` and any
+  // hand-composed quota group use.
+  const parts = [formatFooterQuota(82, 'SuperGrok', 'hourly')]
+  assert.deepEqual(parts, ['SuperGrok 5Hr ███████░ 82%'])
+  assert.equal(dropFooterQuotaPlanName(parts), true)
+  assert.deepEqual(parts, ['5Hr ███████░ 82%'])
+  assert.equal(parts.some(part => part.includes('SuperGrok')), false)
 })
 
-test('narrow footer drops the quota plan name before the remaining bar', () => {
-  const identity = footerIdentityParts({
-    running: false, planReview: false, waitingQuestion: false, compacting: false,
-    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'grok-4.6', effort: 'xhigh', preset: '标准模式', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.5',
-    quotaCode: 'SuperGrok', quotaPercent: 82, foldedInput: false, multiLineInput: false, queued: 0,
-  })
-  assert.equal(identity.includes(formatFooterQuota(82, 'SuperGrok')), true)
-  const rewritten = [...identity]
-  assert.equal(dropFooterQuotaPlanName(rewritten), true)
-  assert.equal(rewritten.includes(formatFooterQuota(82)), true)
-  assert.equal(rewritten.some(part => part.startsWith('SuperGrok ')), false)
-
-  const wide = fitFooterStatusLine('空闲', identity, 80)
-  assert.match(wide, /SuperGrok/)
-  assert.match(wide, /82%/)
-  // Full identity is 72 cells with the plan name, 62 without it — 64 is
-  // the window where shrinking the quota widget is enough.
-  const mid = fitFooterStatusLine('空闲', identity, 64)
-  assert.equal(mid.includes('SuperGrok'), false)
-  assert.match(mid, /82%/)
-  assert.match(mid, /[█░]{8}/)
-  assert.ok(displayWidth(mid) <= 64)
-  const tight = fitFooterStatusLine('空闲', identity, 18)
-  assert.equal(tight.includes('SuperGrok'), false)
-  assert.ok(displayWidth(tight) <= 18)
+test('the quota chip leads with its window, and keeps the number without the bar', () => {
+  const quota = { remainingPercent: 82, period: 'hourly' }
+  const link = { kind: 'ssh', intervalMs: 160, probed: true, rttMs: 31 }
+  const strip = (cols) => stripAnsi(runtimeStrip({
+    link, activity: { kind: 'idle', text: '空闲' }, running: false, quota, color: false,
+  }, cols))
+  assert.equal(strip(120), 'SSH ●●●● 31ms │ 空闲 │ 5Hr ███████░ 82%', 'the window tag leads the bar')
+  assert.equal(strip(120).includes('SuperGrok'), false, 'the plan badge is not on the default row')
+  assert.equal(strip(32), 'SSH ●●●● 31ms │ 空闲 │ 5Hr 82%', 'no room: the bar goes, the number and window stay')
+  assert.ok(displayWidth(strip(32)) <= 32)
 })
 
 test('formatQuotaBar is an 8-pip remaining bar', () => {
@@ -1557,22 +1558,20 @@ test('context pressure ring is one cell and fills clockwise', () => {
   const view = contextPressureView({ usedTokens: 400_000, contextWindow: 500_000 })
   assert.equal(view.level, 'warn')
   assert.equal(formatContextPressureChip(view), `${formatContextPressureRing(80)} 400K/500K 80%`)
-  const identity = footerIdentityParts({
-    running: false, planReview: false, waitingQuestion: false, compacting: false,
-    subagents: 0, tools: 0, planLeftOpen: false, planPending: false, planActive: false,
-    idleMs: 0, model: 'grok-4.6', provider: 'xai',
-    parentModel: 'grok-4.6', subModel: 'grok-4.6',
-    quotaCode: 'SuperGrok', quotaPercent: 82,
-    contextChip: formatContextPressureChip(view),
-    foldedInput: false, multiLineInput: false, queued: 0,
-  })
-  const quotaAt = identity.indexOf(formatFooterQuota(82, 'SuperGrok'))
-  const contextAt = identity.indexOf(formatContextPressureChip(view))
-  assert.ok(quotaAt >= 0)
-  assert.ok(contextAt === quotaAt + 1)
-  const fitted = fitFooterStatusLine('空闲', identity, 80)
-  assert.ok(fitted.includes(formatContextPressureRing(80)))
-  assert.ok(displayWidth(fitted) <= 80)
+  // The ring is still one cell and still belongs to the in-transcript context
+  // chip, but the status row replaced it with a capacity meter: a bar answers
+  // "how full" and a ring only answers "roughly how full", and the row has the
+  // cells for the honest one.
+  assert.equal(formatContextPressureChip(view), `${formatContextPressureRing(80)} 400K/500K 80%`)
+  const row = stripAnsi(runtimeStrip({
+    link: { kind: 'ssh', intervalMs: 160, probed: true, rttMs: 31 },
+    activity: { kind: 'idle', text: '空闲' },
+    running: false,
+    context: view,
+    color: false,
+  }, 200))
+  assert.equal(row, 'SSH ●●●● 31ms │ 空闲 │ CTX ██████░░ 80% · 400K/500K')
+  assert.equal(row.includes(formatContextPressureRing(80)), false, 'no ring on the status row')
 })
 
 test('context pressure uses DSH projectedTokens and a provider-agnostic window', () => {
@@ -2517,7 +2516,7 @@ test('a parent provider switch asks before it moves a pinned subagent route', as
   // Keeping the pin must not touch the provider *or* the model.
   assert.equal(tui.subagentSelection.current.provider, 'xai')
   assert.equal(tui.subagentSelection.current.model, 'grok-4.5')
-  assert.ok(tui.rows.some(row => row.kind === 'system' && row.text.includes('仍钉在')), JSON.stringify(tui.rows))
+  assert.ok(feedbackText(tui).includes('仍钉在'), feedbackText(tui))
 
   // Escaping the dialog keeps the pin too: only an explicit answer moves it.
   tui.askQuestion = async () => ({ selected: [] })
@@ -2831,8 +2830,8 @@ test('subagent chip omits log dumps and Enter opens the inspect overlay', () => 
 
   tui.toggleCard(card)
   assert.equal(card.expanded, false)
-  assert.equal(tui.dialog?.kind, 'inspect')
-  assert.equal(tui.dialog.subagentSessionId, 'child-a')
+  assert.equal(tui.screen?.kind, 'inspect')
+  assert.equal(tui.screen.subagentSessionId, 'child-a')
   const overlay = tui.captureFrame(48, 16)
   assert.ok(overlay.some(line => line.includes('子代理全文')))
   assert.ok(overlay.some(line => line.includes(subagentDisplayName(card))))
@@ -3354,8 +3353,8 @@ test('the launcher can say a recorded provider is gone', () => {
       { kind: 'error', text: '没有可路由的提供商：nope' },
     ],
   })
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('gone-relay')))
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('没有可路由')))
+  assert.ok(feedbackText(tui).includes('gone-relay'))
+  assert.ok(feedbackText(tui).includes('没有可路由'))
 })
 
 test('a user change hands the subagent route back to the settings', async () => {
@@ -3499,11 +3498,11 @@ test('a /find hit inside a child log is scrolled to and marked', () => {
     data: { message: { content: [{ type: 'text', text: 'needle-token: the answer' }] } },
   })
   tui.runCommand('/find needle-token')
-  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.screen?.kind, 'inspect')
   const frame = tui.captureFrame(90, 24).join('\n')
   // The overlay used to open at the top, so the reported hit was off screen.
   assert.ok(frame.includes('needle-token'), frame)
-  assert.ok(tui.dialog.offset > 0, `scrolled to the hit, not the top: ${tui.dialog.offset}`)
+  assert.ok(tui.screen.offset > 0, `scrolled to the hit, not the top: ${tui.screen.offset}`)
   // Monochrome marks it with the same `»` the transcript uses; a coloured
   // terminal paints the hit in reverse video. The suite runs under whatever
   // palette the environment asks for, so accept either marker here.
@@ -3514,9 +3513,9 @@ test('a /find hit inside a child log is scrolled to and marked', () => {
   const colored = tui.captureFrame(90, 24).join('\n')
   assert.ok(/\x1b\[7m[^\x1b]*needle-token/u.test(colored), colored)
   // A repaint keeps the reader's own scroll position.
-  tui.dialog.offset = 0
+  tui.screen.offset = 0
   tui.captureFrame(90, 24)
-  assert.equal(tui.dialog.offset, 0)
+  assert.equal(tui.screen.offset, 0)
 })
 
 /**
@@ -4019,7 +4018,7 @@ test('oversized tool bodies open a dedicated inspect overlay', () => {
   process.stdout.rows = 16
   tui.toggleCard(tool)
   assert.equal(tool.expanded, false)
-  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.screen?.kind, 'inspect')
   const overlay = tui.captureFrame(48, 16)
   assert.ok(overlay.some(line => line.includes('工具全文')))
   assert.ok(overlay.some(line => line.includes('BODY_LINE_0')))
@@ -4076,8 +4075,8 @@ test('a body the slow-link budget would cut opens in the overlay instead', () =>
   // it must show the rest, not expand a card that hides most of the diff.
   const slow = fixture(1200, false)
   slow.tui.toggleCard(slow.row)
-  assert.equal(slow.tui.dialog?.kind, 'inspect', 'Enter shows the full body')
-  const body = slow.tui.dialog.lines.map(line => line.text).join('\n')
+  assert.equal(slow.tui.screen?.kind, 'inspect', 'Enter shows the full body')
+  const body = slow.tui.screen.lines.map(line => line.text).join('\n')
   assert.match(body, /old line/u)
   assert.match(body, /new line/u)
   assert.match(body, /extra/u, 'the added line is in the overlay, not dropped')
@@ -4085,7 +4084,7 @@ test('a body the slow-link budget would cut opens in the overlay instead', () =>
   // collapsing half a body away.
   const open = fixture(1200, true)
   open.tui.toggleCard(open.row)
-  assert.equal(open.tui.dialog?.kind, 'inspect')
+  assert.equal(open.tui.screen?.kind, 'inspect')
   assert.equal(open.row.expanded, true)
 })
 
@@ -4180,9 +4179,9 @@ test('turn/end marks leftover todos as display-stale and asks once to close them
   assert.equal(followups[0].source.plugin, undefined)
   assert.equal(followups[0].source.form, 'notice')
   assert.ok(String(followups[0].source.summary).includes('补一次待办'))
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('补一次待办')))
+  assert.ok(feedbackText(tui).includes('补一次待办'))
   assert.equal(tui.rows.some(row => row.kind === 'user' && String(row.text).includes('todo_write')), false)
-  assert.equal(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('todo_write')), false)
+  assert.equal(errorText(tui).includes('todo_write'), false)
   const frame = tui.captureFrame(80, 24)
   assert.ok(frame.some(line => line.includes('本轮未收尾')))
   assert.equal(frame.some(line => line.includes('todo_write')), false)
@@ -4439,11 +4438,12 @@ test('plan mode and ask-user questions get their own collapsed cards', () => {
     }],
     agent,
   })
-  const question = tui.rows.findLast(row => row.kind === 'question')
-  assert.equal(question?.intent, 'plan-review')
-  assert.equal(question?.status, 'waiting')
-  assert.equal(question?.expanded, false)
-  assert.equal(tui.dialog?.kind, 'questions')
+  // Since B2.5 a plan review is the *plan artifact's* interaction, not an ordinary
+  // ask: it gets no question card (the artifact's own row and its review state say
+  // it), and the Surface is unchanged.
+  assert.equal(tui.rows.some(row => row.kind === 'question'), false, 'no second representation of the review')
+  assert.equal(tui.dialog?.kind, 'questions', 'the review Surface is up')
+  assert.equal(tui.rows.findLast(row => row.kind === 'plan')?.state, 'draft', 'the artifact carries its own state')
   void pending.catch(() => {})
 })
 
@@ -4496,7 +4496,7 @@ test('injected system reminders become a collapsed 提示词注入 card', () => 
   const frame = tui.captureFrame(80, 16)
   assert.ok(frame.some(line => line.includes('提示词注入:系统预设 AGENTS.MD')))
   assert.equal(frame.some(line => line.includes('(context)')), false)
-  assert.equal(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('powered by DeepSeek')), false)
+  assert.equal(errorText(tui).includes('powered by DeepSeek'), false)
 })
 
 /**
@@ -4590,7 +4590,7 @@ test('idle auto-compact fires at 72% of the routed window', async () => {
   tui.handleSessionEvent(agent.session, { type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [] } } })
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(executions, ['/compact'])
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('自动压缩')))
+  assert.ok(feedbackText(tui).includes('自动压缩'))
 })
 
 test('/compact while the agent is running is refused locally', () => {
@@ -4604,7 +4604,7 @@ test('/compact while the agent is running is refused locally', () => {
   const agent = { id: 'main-session', options: {}, status: 'running', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   tui.runCommand('/compact')
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('空闲')))
+  assert.ok(feedbackText(tui).includes('空闲'))
 })
 
 test('slash commands that call the model or rewrite the session surface progress', () => {
@@ -4620,7 +4620,7 @@ test('slash commands that call the model or rewrite the session surface progress
     type: 'command/done',
     data: { commandId: 'cmd-1', kind: 'error', text: 'Compaction is unavailable because the agent is not idle.' },
   })
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('空闲')))
+  assert.ok(feedbackText(tui).includes('空闲'))
   tui.handleSessionEvent(agent.session, {
     type: 'llm/retry',
     data: {
@@ -4859,7 +4859,7 @@ test('clicking the footer directory chip prints the full workspace path', () => 
   const chipRow = frame.findIndex(line => line.includes('目录:srv'))
   assert.ok(chipRow >= 0)
   tui.handleMouseClick(chipRow + 1)
-  assert.ok(tui.rows.some(row => row.kind === 'system' && row.text === '工作目录 /root/genshin/srv'))
+  assert.ok(lastFeedback(tui).includes('工作目录 /root/genshin/srv'), lastFeedback(tui))
 })
 
 test('describeProviderRoute labels DeepSeek, SuperGrok, and OpenCode routes', () => {
@@ -4881,6 +4881,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from '../lib/theme.js'
+import { errorText, feedbackText, lastFeedback } from './wait.mjs'
 
 test('parseSuperGrokAuthFile reads grok-bridge auth.json', () => {
   const now = 1_700_000_000_000
@@ -5023,7 +5024,13 @@ test('unowned live usage cannot inflate the totals', () => {
       chunk: { type: 'usage', usage: { inputTokens: 4_000, outputTokens: 900 } },
     },
   })
-  assert.deepEqual(tui.stats.usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.deepEqual(tui.stats.usage, {
+    inputTokens: 0, outputTokens: 0,
+    // No call reported a full-call total, so the session has none to show and
+    // the counter says as much rather than guessing one from the parts.
+    reportedTokens: 0, reportedSteps: 0, unreportedSteps: 0,
+    cacheReadTokens: 0, cacheWriteTokens: 0,
+  })
 })
 
 // `streamChunkOf` reports whether turn/step are real; the callers rely on it to

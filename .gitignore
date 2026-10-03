@@ -36,3 +36,4 @@ docs/screenshots/*.pango
 
 # local publish credentials (never copy into the tree)
 .config/
+.probe-home/

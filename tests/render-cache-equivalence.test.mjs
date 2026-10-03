@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import { pushRow } from './wait.mjs'
 
 /**
  * Updating a row in place must render exactly like building it in that state.
@@ -25,7 +26,7 @@ function fixture(rows, { compact = false } = {}) {
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   if (compact) tui.workspaceView = 'compact'
-  for (const row of rows) tui.pushRow(row)
+  for (const row of rows) pushRow(tui, row)
   return tui
 }
 

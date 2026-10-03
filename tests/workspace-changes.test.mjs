@@ -247,9 +247,9 @@ test('Enter on the open card asks the service for that file and shows its diff',
   tui.toggleCard(card)
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(asked, [[7, 0]], 'one file, so the only one is opened')
-  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.screen?.kind, 'inspect')
   assert.deepEqual(
-    tui.dialog.lines.map(line => [line.kind, line.text]),
+    tui.screen.lines.map(line => [line.kind, line.text]),
     [['diff-path', '@@ -1 +1 @@'], ['diff-del', '-old'], ['diff-add', '+new']],
   )
 })
@@ -261,5 +261,5 @@ test('a diff the service no longer has says so instead of opening an empty view'
   card.expanded = true
   tui.toggleCard(card)
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(tui.dialog.lines[0].text, '这份改动已经不在了（会话重启后不再保留）')
+  assert.equal(tui.screen.lines[0].text, '这份改动已经不在了（会话重启后不再保留）')
 })

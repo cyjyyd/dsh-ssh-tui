@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import { pushRow } from './wait.mjs'
 
 /**
  * A stale "processing" card that would not go away.
@@ -48,8 +49,8 @@ const count = (text, needle) => text.split(needle).length - 1
 
 test('the burst line follows its tools instead of freezing on a cached copy', () => {
   const tui = fixture()
-  tui.pushRow({ kind: 'assistant', text: '先跑一步。' })
-  tui.pushRow(tool(1))
+  pushRow(tui, { kind: 'assistant', text: '先跑一步。' })
+  pushRow(tui, tool(1))
   const running = frame(tui)
   assert.equal(count(running, '已调用'), 1, `one burst line:\n${running}`)
   assert.ok(/running…|运行中/u.test(running), `it says the tool is running:\n${running}`)
@@ -66,10 +67,10 @@ test('the burst line follows its tools instead of freezing on a cached copy', ()
 
 test('a second tool joins the same burst without leaving a stale count behind', () => {
   const tui = fixture()
-  tui.pushRow({ kind: 'assistant', text: '连着跑两步。' })
-  tui.pushRow(tool(1))
+  pushRow(tui, { kind: 'assistant', text: '连着跑两步。' })
+  pushRow(tui, tool(1))
   frame(tui)
-  tui.pushRow(tool(2))
+  pushRow(tui, tool(2))
   const both = frame(tui)
   assert.equal(count(both, '已调用'), 1, `one burst line, not one per tool:\n${both}`)
   assert.ok(both.includes('2'), `the count followed the burst:\n${both}`)
@@ -77,9 +78,9 @@ test('a second tool joins the same burst without leaving a stale count behind', 
 
 test('a tool finishing while another runs leaves one line with the live state', () => {
   const tui = fixture()
-  tui.pushRow({ kind: 'assistant', text: '两步。' })
-  tui.pushRow(tool(1))
-  tui.pushRow(tool(2))
+  pushRow(tui, { kind: 'assistant', text: '两步。' })
+  pushRow(tui, tool(1))
+  pushRow(tui, tool(2))
   frame(tui)
   const first = tui.rows.find(candidate => candidate.kind === 'tool' && candidate.callId === 'call-1')
   first.status = 'ok'

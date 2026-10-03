@@ -74,6 +74,8 @@ function wizardState(overrides) {
     catalog: undefined,
     providerCursor: 0,
     saving: false,
+    field: '',
+    fieldCursor: 0,
     resolve() {},
     ...overrides,
   }
@@ -98,7 +100,6 @@ test('other templates keep their existing declaration behavior', () => {
 test('the models step asks which fetched models to keep, and which one to run', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['deepseek/deepseek-v4.1-flash', 'claude-sonnet-5'] })
-  tui.input = ''
   tui.cursor = 0
   // Enter no longer swallows the whole listing: it opens the picker with the
   // template's models checked, and '2' adds the second fetched model.
@@ -116,7 +117,6 @@ test('the models step asks which fetched models to keep, and which one to run', 
 test('the models step still falls back to the template default when nothing was fetched', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: [] })
-  tui.input = ''
   tui.cursor = 0
   await answerModelsStep(tui)
   assert.deepEqual(tui.onboarding.models, ['deepseek-v4-flash'])
@@ -279,8 +279,8 @@ test('leaving the models step sizes hand-typed picks from the endpoint', async (
       baseUrl: '',
       models: [],
     })
-    tui.input = 'deepseek/deepseek-v4.1-flash'
-    tui.cursor = 0
+    tui.onboarding.field = 'deepseek/deepseek-v4.1-flash'
+    tui.onboarding.fieldCursor = tui.onboarding.field.length
     tui.handleOnboardingChar('\r')
     // A second Enter while the listing is in flight must not start another.
     tui.handleOnboardingChar('\r')
@@ -309,8 +309,8 @@ test('an unreachable gateway still leaves the models step for the route default'
     const llm = { discoverModels: async () => { throw new Error('offline') } }
     const { tui } = makeTui({ section: { providers: {} }, credentials: { set: async () => {} }, llm })
     tui.onboarding = wizardState({ models: [] })
-    tui.input = 'mystery-model'
-    tui.cursor = 0
+    tui.onboarding.field = 'mystery-model'
+    tui.onboarding.fieldCursor = tui.onboarding.field.length
     tui.handleOnboardingChar('\r')
 
     // Nothing was sized, so the wizard asks for the route window instead of

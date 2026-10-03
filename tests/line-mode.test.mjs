@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { appendRow, lineModeEnabled, lineModeLines } from '../lib/line-mode.js'
+import { feedbackText, pushRow, waitForError, waitForText } from './wait.mjs'
 
 /**
  * C-3: line mode turns events into log lines.
@@ -91,7 +92,7 @@ async function lineModeTui({ attach = true } = {}) {
 test('events produced before a display attaches are held, not lost', async () => {
   const { tui, written, attachDisplay } = await lineModeTui({ attach: false })
   tui.rows.length = 0
-  tui.pushRow({ kind: 'assistant', text: 'before the relay' })
+  pushRow(tui, { kind: 'assistant', text: 'before the relay' })
   assert.equal(written(), '', 'nothing is written where nothing can read it')
   attachDisplay()
   assert.ok(written().includes('before the relay'), `the held line is handed over: ${JSON.stringify(written())}`)
@@ -100,9 +101,9 @@ test('events produced before a display attaches are held, not lost', async () =>
 test('a row is appended once, in order, with no screen control at all', async () => {
   const { tui, written } = await lineModeTui()
   tui.rows.length = 0
-  tui.pushRow({ kind: 'assistant', text: 'first thing' })
-  tui.pushRow({ kind: 'system', text: 'a notice' })
-  tui.pushRow({ kind: 'error', text: 'a failure' })
+  pushRow(tui, { kind: 'assistant', text: 'first thing' })
+  pushRow(tui, { kind: 'system', text: 'a notice' })
+  pushRow(tui, { kind: 'error', text: 'a failure' })
   const out = written()
   assert.equal(out.includes('first thing'), true)
   assert.equal(out.includes('a notice'), true)
@@ -119,7 +120,7 @@ test('a row is appended once, in order, with no screen control at all', async ()
 test('the output carries no cursor addressing, alternate screen, or carriage return', async () => {
   const { tui, written } = await lineModeTui()
   tui.rows.length = 0
-  tui.pushRow({ kind: 'assistant', text: 'hello' })
+  pushRow(tui, { kind: 'assistant', text: 'hello' })
   tui.markDirty()
   const out = written()
   assert.equal(/\x1b\[\d+;\d+H/u.test(out), false, `no absolute addressing: ${JSON.stringify(out)}`)
@@ -131,7 +132,7 @@ test('the output carries no cursor addressing, alternate screen, or carriage ret
 test('painting stays off in line mode even when the screen is dirtied', async () => {
   const { tui } = await lineModeTui()
   tui.rows.length = 0
-  tui.pushRow({ kind: 'assistant', text: 'x' })
+  pushRow(tui, { kind: 'assistant', text: 'x' })
   const frame = tui.captureFrame(80, 24)
   assert.deepEqual(frame, [], 'a frame is never composed in line mode')
 })
@@ -148,7 +149,7 @@ test('painting stays off in line mode even when the screen is dirtied', async ()
  * Wait for a prompt to reach the log. A fixed sleep is a race on a loaded CI
  * runner; this polls the writer instead and only fails when nothing arrives.
  */
-async function waitForText(read, needle, timeoutMs = 1_000) {
+async function waitForFeedback(read, needle, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (read().includes(needle)) return true
@@ -175,7 +176,7 @@ test('a confirm prompt is written into the log, and y answers it', async () => {
     callId: 'c-line',
     agent: tui.agent,
   }, async () => { throw new Error('waterfall next() must not run') })
-  assert.ok(await waitForText(added, 'y = '), `the keys are in the log: ${JSON.stringify(added())}`)
+  assert.ok(await waitForFeedback(added, 'y = '), `the keys are in the log: ${JSON.stringify(added())}`)
   const shown = added()
   assert.match(shown, /bash/u, `the prompt names the tool: ${JSON.stringify(shown)}`)
   assert.match(shown, /y = /u, `the keys are in the log: ${JSON.stringify(shown)}`)
@@ -223,7 +224,7 @@ test('a question dialog lists its options in the log', async () => {
       ],
     }],
   })
-  assert.ok(await waitForText(added, 'green'), `the question is in the log: ${JSON.stringify(added())}`)
+  assert.ok(await waitForFeedback(added, 'green'), `the question is in the log: ${JSON.stringify(added())}`)
   const shown = added()
   assert.match(shown, /Which colour/u, `the question is in the log: ${JSON.stringify(shown)}`)
   assert.match(shown, /red/u)

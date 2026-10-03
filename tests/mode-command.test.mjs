@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { errorText, systemText, tick, waitForDialog, waitForError, waitForText } from './wait.mjs'
+import { errorText, feedbackText, systemText, tick, waitForDialog, waitForError, waitForFeedback, waitForText } from './wait.mjs'
 import { SshTui } from '../lib/tui.js'
 import { FORMS_HOST } from './host-line.mjs'
 
@@ -65,7 +65,7 @@ async function waitForPatch(path, pattern, tui, timeoutMs = 3_000) {
     const text = await readFile(path, 'utf8').catch(() => '')
     if (pattern.test(text)) return text
     if (Date.now() >= deadline) {
-      assert.fail(`timed out waiting for ${pattern} in ${path}; last content:\n${text}\n--- transcript ---\n${systemText(tui)}\n${errorText(tui)}`)
+      assert.fail(`timed out waiting for ${pattern} in ${path}; last content:\n${text}\n--- transcript ---\n${feedbackText(tui)}\n${feedbackText(tui)}`)
     }
     await new Promise(resolve => setTimeout(resolve, 25))
   }
@@ -87,8 +87,8 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     assert.equal(composed.length, 0)
 
     tui.runCommand('/mode')
-    await waitForText(tui, 'agentPresets 服务不可用')
-    const report = errorText(tui)
+    await waitForFeedback(tui, 'agentPresets 服务不可用')
+    const report = feedbackText(tui)
     assert.ok(report.includes('agentPresets 服务不可用'), report)
     assert.ok(report.includes('/mode fix'), report)
     assert.ok(report.includes('cordis.patch.yml'), report)
@@ -106,13 +106,17 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
     for (const name of OTHER_LINE_MODULES) {
       assert.equal(written.includes(name), false, `${name} belongs to the other line\n${written}`)
     }
-    assert.ok(systemText(tui).includes(patch), systemText(tui))
+    assert.ok(feedbackText(tui).includes(patch), feedbackText(tui))
 
-    // A second repair is a no-op, not a duplicate row.
+    // A second repair is a no-op: it still *says* so (the outcome is a local
+    // mutation record, kept in the transcript), but it writes no patch again.
     const before = tui.rows.length
     tui.runCommand('/mode fix')
     await tick(30)
-    assert.ok(tui.rows.length > before)
+    assert.ok(
+      feedbackText(tui).includes('无需修复') || tui.rows.length > before,
+      `the no-op must report itself: ${feedbackText(tui)}`,
+    )
     assert.equal(await readFile(patch, 'utf8'), written, 'a second repair is a no-op, not a duplicate row')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
@@ -122,7 +126,7 @@ test('a missing roster is reported at the patch and repaired by /mode fix', asyn
   setLocale('en')
   const en = fixture({ get: () => undefined })
   en.tui.runCommand('/mode')
-  await waitForText(en.tui, '/mode fix')
+  await waitForFeedback(en.tui, '/mode fix')
   assert.ok(errorText(en.tui).includes('/mode fix'))
   setLocale('zh')
 })
@@ -138,9 +142,11 @@ test('a failing /mode fix reports the path and the error instead of throwing', a
   try {
     const { tui } = fixture({ get: () => undefined })
     tui.runCommand('/mode fix')
-    await waitForError(tui, '写入')
-    assert.ok(errorText(tui).includes('写入'), errorText(tui))
-    assert.ok(errorText(tui).includes('cordis.patch.yml'), errorText(tui))
+    // Wait for the repair's own message, not for a word the boot notice also uses:
+    // the write is asynchronous, and `写入` appears in the boot line as well.
+    await waitForFeedback(tui, 'cordis.patch.yml')
+    assert.ok(feedbackText(tui).includes('写入'), feedbackText(tui))
+    assert.ok(feedbackText(tui).includes('cordis.patch.yml'), feedbackText(tui))
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
@@ -175,31 +181,31 @@ test('/mode switches by id and by the label the picker shows', async () => {
   setLocale('zh')
   const { tui, composed } = fixture()
   tui.runCommand('/mode minimal')
-  await waitForText(tui, '极简模式')
+  await waitForFeedback(tui, '极简模式')
   assert.deepEqual(composed, ['minimal'])
-  assert.ok(systemText(tui).includes('极简模式'), systemText(tui))
+  assert.ok(feedbackText(tui).includes('极简模式'), feedbackText(tui))
 
   // The localized label is what the user reads in the picker, so it is what
   // they can type back; a user-authored preset keeps its own name.
   tui.runCommand('/mode 智能路由模式')
-  await waitForText(tui, '智能路由模式')
+  await waitForFeedback(tui, '智能路由模式')
   assert.deepEqual(composed, ['minimal', 'routing-suite'])
-  assert.ok(systemText(tui).includes('智能路由模式'))
+  assert.ok(feedbackText(tui).includes('智能路由模式'))
   tui.runCommand('/mode PTC 模式')
-  await waitForError(tui, 'codeRuntime')
+  await waitForFeedback(tui, 'codeRuntime')
   assert.deepEqual(composed, ['minimal', 'routing-suite'], 'a broken preset must not compose')
-  assert.ok(errorText(tui).includes('codeRuntime'), errorText(tui))
+  assert.ok(feedbackText(tui).includes('codeRuntime'), feedbackText(tui))
   setLocale('zh')
 })
 
 test('an unknown mode lists the roster ids', async () => {
   const { tui, composed } = fixture()
   tui.runCommand('/mode nope')
-  await waitForError(tui, '可用')
+  await waitForFeedback(tui, '可用')
   assert.deepEqual(composed, [])
   // The list follows the picker's own order now (shipped by declared position,
   // then locally authored), so the assertion is about membership, not sequence.
-  const report = errorText(tui)
+  const report = feedbackText(tui)
   for (const id of ['standard', 'minimal', 'ptc', 'routing-suite']) {
     assert.ok(report.includes(id), `the report names ${id}: ${report}`)
   }
@@ -257,7 +263,7 @@ test('typing narrows the /mode list, and Enter answers the match', async () => {
   // First Enter applies the filter, second answers the highlighted match.
   tui.handleChar('\r')
   tui.handleChar('\r')
-  await waitForText(tui, '已切换')
+  await waitForFeedback(tui, '已切换')
   assert.deepEqual(composed, ['routing-suite'], 'the filtered match is what got composed')
 })
 

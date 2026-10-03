@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createConnection, createServer } from 'node:net'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import {
   captureTerminalInput,
   detachFromSshSession,
@@ -35,6 +37,7 @@ import {
   legacySessionSockPath,
   sessionSockLookupPaths,
   sessionSockPath,
+  runDisplayRelay,
   waitForDisplaySock,
 } from '../lib/display-sock.js'
 import { parseSessionLock } from '../lib/session-lock.js'
@@ -794,4 +797,139 @@ test('a query does not claim the display it is asking about', async () => {
   relay.destroy()
   await host.close()
   await rm(home, { recursive: true, force: true })
+})
+
+// --- the relay's own picture of the terminal --------------------------------
+//
+// A relay owns a terminal, so the geometry it reports has to be the geometry
+// *now*. It used to resolve `relayTerminalSize` once at attach and re-send that
+// snapshot from its debounced resize handler: every later resize reported the
+// old size, the Host saw no change, skipped the repaint, and the frame stayed at
+// the width the user had already left. Dragging a window did nothing at all.
+//
+// This drives the real relay over a real socket with a fake TTY, which is the
+// only place the wiring exists: `tui-probe.mjs` asserts that a resize produces
+// *bytes*, and bytes are exactly what a stale size still produces.
+
+/** A `stdout` that is a terminal as far as the relay is concerned. */
+function fakeStdout(columns, rows) {
+  const stream = new EventEmitter()
+  stream.columns = columns
+  stream.rows = rows
+  stream.isTTY = true
+  stream.written = []
+  stream.write = chunk => { stream.written.push(String(chunk)); return true }
+  return stream
+}
+
+/** A `stdin` the input pump can take over without a real TTY. */
+function fakeStdin() {
+  const stream = new PassThrough()
+  stream.isTTY = true
+  stream.setRawMode = () => stream
+  return stream
+}
+
+test('a resize reports the terminal\'s current size, not the one it attached with', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-resize-'))
+  const path = sessionSockPath('resize-probe', home, process.platform)
+  await mkdir(join(home, 'tui-socks'), { recursive: true })
+  const sizes = []
+  /** The accepted connection, so the test can end the relay deterministically. */
+  let connection
+  const server = createServer(socket => {
+    connection = socket
+    const reader = new FrameReader()
+    socket.on('data', chunk => {
+      for (const frame of reader.push(chunk)) {
+        if (frame.type !== FRAME_RESIZE) continue
+        const size = decodeResize(frame.payload)
+        if (size !== undefined) sizes.push(size)
+      }
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(path, resolve)
+  })
+
+  const stdout = fakeStdout(120, 30)
+  const stdin = fakeStdin()
+  // The relay never settles by itself here; the test ends it through the fake
+  // stdin, so a failing assertion cannot hang the file.
+  const relay = runDisplayRelay(path, {
+    stdin,
+    stdout,
+    signals: { on() {}, off() {}, removeListener() {} },
+    // No glyph/RTT probing: this test is about the geometry frames, and the
+    // poll is driven by the test rather than by a one-second wait.
+    ssh: false,
+    // Slower than the resize steps below, so a poll cannot interleave with them;
+    // it still has to notice the last change within the wait below.
+    sizeRecheckMs: 300,
+  }).catch(() => 'closed')
+
+  const waitUntil = async (predicate, timeoutMs, what) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error(`timed out waiting for ${what}; saw ${JSON.stringify(sizes)}`)
+  }
+  try {
+    // The relay measures the link before it says hello, and a fake terminal
+    // never answers a cursor probe: wait for the handshake rather than assuming
+    // a duration, so the test is about the size and not about that timeout.
+    await waitUntil(() => sizes.length >= 1, 6_000, 'the handshake resize')
+    const geometry = size => `${size.columns}x${size.rows}`
+    /** The geometries in order, with consecutive repeats collapsed. */
+    const transitions = (list) => list.map(geometry).filter((value, index, all) => value !== all[index - 1])
+    assert.deepEqual(
+      [sizes[0].columns, sizes[0].rows],
+      [120, 30],
+      'the handshake carries the size the relay attached with',
+    )
+    const steps = [[88, 24], [64, 20], [160, 50]]
+    for (const [columns, rows] of steps) {
+      stdout.columns = columns
+      stdout.rows = rows
+      stdout.emit('resize')
+      await waitUntil(
+        () => transitions(sizes).includes(`${columns}x${rows}`),
+        1_500,
+        `the ${columns}x${rows} resize`,
+      )
+      await new Promise(resolve => setTimeout(resolve, 80))
+    }
+    assert.deepEqual(
+      sizes.at(-1),
+      { columns: 160, rows: 50 },
+      `the last resize must report the size the terminal is now, got ${JSON.stringify(sizes)}`,
+    )
+    assert.deepEqual(
+      transitions(sizes),
+      ['120x30', '88x24', '64x20', '160x50'],
+      'every resize must report the size in force when it fired, and never an older one',
+    )
+
+    // The backstop: a terminal that moved without an event saying so (a missed
+    // SIGWINCH, a window dragged between monitors) still has to reach the Host.
+    // A Host composing rows for the wrong width is not a cosmetic bug — the
+    // columns it no longer fills keep their old glyphs, which is the "half the
+    // screen is stale" shape — so the relay re-reads its own terminal on a slow
+    // poll and speaks only when the geometry actually moved.
+    stdout.columns = 132
+    stdout.rows = 44
+    await waitUntil(() => transitions(sizes).includes('132x44'), 3_000, 'the polled size')
+    assert.deepEqual(sizes.at(-1), { columns: 132, rows: 44 }, 'the poll reported the new geometry')
+  } finally {
+    // Ending the *host* side is what settles the relay (`host-closed`); closing
+    // stdin would leave it waiting for a goodbye that never comes.
+    connection?.destroy()
+    stdin.destroy()
+    await Promise.race([relay, new Promise(resolve => setTimeout(resolve, 2_000))])
+    await new Promise(resolve => server.close(resolve))
+    await rm(home, { recursive: true, force: true })
+  }
 })

@@ -5,7 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { SessionStatsTracker, emptySessionStats, statsRowOf } from '../lib/stats.js'
+import { SessionStatsTracker, emptySessionStats, sessionTokenTotal, statsRowOf } from '../lib/stats.js'
 
 test('a step reported twice is counted once, and a changed report replaces it', () => {
   const stats = new SessionStatsTracker()
@@ -21,16 +21,38 @@ test('a step reported twice is counted once, and a changed report replaces it', 
   stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10 })
   assert.deepEqual(stats.snapshot().usage, {
     inputTokens: 17, outputTokens: 55, cacheReadTokens: 0, cacheWriteTokens: 0,
+    // Neither report carried the harness's own full-call total, so the session
+    // has none to show: `sessionTokenTotal` falls back to the billed parts and
+    // says so, instead of inventing a total from counters the provider defines
+    // however it likes.
+    reportedTokens: 0, reportedSteps: 0, unreportedSteps: 2,
   })
+})
+
+test('a reported full-call total is preferred to the billed parts', () => {
+  const stats = new SessionStatsTracker()
+  stats.recordUsage(1, 1, { inputTokens: 10, outputTokens: 40, totalTokens: 60 })
+  stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10, totalTokens: 15 })
+  const usage = stats.snapshot().usage
+  assert.equal(usage.reportedTokens, 75)
+  assert.equal(usage.reportedSteps, 2)
+  assert.equal(usage.unreportedSteps, 0)
+  assert.deepEqual(sessionTokenTotal(usage), { tokens: 75, basis: 'harness' })
+  // A later report for the same step replaces its sample, total included.
+  stats.recordUsage(1, 2, { inputTokens: 6, outputTokens: 12, totalTokens: 18 })
+  assert.equal(stats.snapshot().usage.reportedTokens, 78)
+  assert.equal(stats.snapshot().usage.reportedSteps, 2)
 })
 
 test('missing cache counters count as zero, present ones are kept', () => {
   const stats = new SessionStatsTracker()
   stats.recordUsage(1, 1, { inputTokens: 1, outputTokens: 2 })
   stats.recordUsage(1, 2, { inputTokens: 3, outputTokens: 4, cacheReadTokens: 100, cacheWriteTokens: 7 })
-  assert.deepEqual(stats.snapshot().usage, {
-    inputTokens: 4, outputTokens: 6, cacheReadTokens: 100, cacheWriteTokens: 7,
-  })
+  const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = stats.snapshot().usage
+  assert.deepEqual(
+    { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+    { inputTokens: 4, outputTokens: 6, cacheReadTokens: 100, cacheWriteTokens: 7 },
+  )
 })
 
 test('turns count once per turn even when several steps run', () => {
@@ -156,6 +178,9 @@ test('the flat footer row mirrors the snapshot', () => {
     outputTokens: 8,
     cacheReadTokens: 9,
     cacheWriteTokens: 10,
+    // No `totalTokens` reached the usage sample, so the row's total is the
+    // billed parts — the same fallback `sessionTokenTotal` documents.
+    totalTokens: 34,
   })
   assert.deepEqual(statsRowOf(emptySessionStats()), {
     turns: 0,
@@ -170,6 +195,7 @@ test('the flat footer row mirrors the snapshot', () => {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    totalTokens: 0,
   })
 })
 

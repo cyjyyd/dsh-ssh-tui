@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import { downgradeSgr } from '../lib/color-depth.js'
 import { SshTui } from '../lib/tui.js'
+import { pushRow } from './wait.mjs'
 import {
   resolveTheme,
   themeByName,
@@ -172,7 +173,7 @@ function frameFor(themeName) {
       ['error', 'something failed'],
       ['diff-add', '+added line'],
       ['diff-del', '-removed line'],
-    ]) tui.pushRow({ kind, text })
+    ]) pushRow(tui, { kind, text })
     return tui.captureFrame(100, 30).join('\n')
   } finally {
     if (previousTheme === undefined) delete process.env.DSH_TUI_THEME

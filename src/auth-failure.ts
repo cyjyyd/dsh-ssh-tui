@@ -133,3 +133,38 @@ export function isReasoningReplayFailure(message: string): boolean {
   return /reasoning_text[^.]{0,80}must be passed back/iu.test(text)
     || /thinking mode must be passed back/iu.test(text)
 }
+
+/**
+ * A gateway that refused the request itself, without saying why.
+ *
+ * The sibling of the failure above, and the one a reader actually meets most: the
+ * same thinking-mode route answers a bare envelope with a trace id and nothing else.
+ * Measured in one long session (2026-10-03, command-code, `effort: max`):
+ *
+ *     13 of 14 failed turns were this shape, 12 of them bare
+ *     they arrived in runs — eight consecutive turns over twelve minutes, then the
+ *     same route, model and key answered normally again
+ *     the harness made 14 attempts and 0 retries (a 400 is outside its retryable set)
+ *
+ * Those three facts decide what the plugin may say and may do. It may say the
+ * request body was refused (not the credential) and that the known member of this
+ * family is the reasoning-replay defect. It may *not* claim that sending again will
+ * work: the envelope carries no reason, and a run that deep may equally be a request
+ * the API will keep refusing. What it must not do is retry on its own — the sibling's
+ * case below is deterministic, and this one re-sends a whole context to find out.
+ *
+ * The envelope is deliberately narrow: a 400 whose body names a field
+ * (`unknown field "summary"`) is a different fix and is not this.
+ * @param message - the failure text the host attached to the turn.
+ * @returns true when this is a bare 400 rejection.
+ */
+export function isRequestRejectedFailure(message: string): boolean {
+  const text = String(message ?? '')
+  if (text === '') return false
+  if (isReasoningReplayFailure(text)) return false
+  if (statusOf(text) !== 400) return false
+  if (!/invalid[_ ]request/i.test(text)) return false
+  // A body that names a field, a parameter or a type is diagnosable, so it is not
+  // this case: the notice exists because there is nothing else to go on.
+  return !/unknown (?:field|parameter)|unrecognized|missing (?:field|parameter)|json:/iu.test(text)
+}

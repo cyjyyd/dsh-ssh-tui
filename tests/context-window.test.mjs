@@ -107,6 +107,8 @@ function wizardState(overrides = {}) {
     catalog: undefined,
     providerCursor: 0,
     saving: false,
+    field: '',
+    fieldCursor: 0,
     resolve() {},
     ...overrides,
   }
@@ -136,8 +138,6 @@ async function answerModelsStep(tui, toggles = []) {
 test('an unsized pick asks for the route window, pre-filled from the catalog', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['gemini-3.8-flash-high', 'gemini-3.6-flash-high', 'gemini-claude-sonnet-4-6'] })
-  tui.input = ''
-  tui.cursor = 0
   // Keep all three: the picker opens on the first, '2' and '3' toggle the rest.
   await answerModelsStep(tui, ['2', '3'])
 
@@ -160,8 +160,6 @@ test('a fully sized pick goes straight to confirm', async () => {
     models: ['gemini-3.8-flash-high'],
     modelCapacity: new Map([['gemini-3.8-flash-high', { contextWindow: 1_048_576 }]]),
   })
-  tui.input = ''
-  tui.cursor = 0
   await answerModelsStep(tui)
   assert.equal(tui.onboarding.step, 'confirm')
   assert.equal(tui.onboarding.routeContextWindow, undefined)
@@ -170,16 +168,17 @@ test('a fully sized pick goes straight to confirm', async () => {
 test('the context step takes a typed override and rejects nonsense', async () => {
   const { tui } = makeTui()
   tui.onboarding = wizardState({ models: ['gemini-3.8-flash-high'] })
-  tui.input = ''
-  tui.cursor = 0
   await answerModelsStep(tui)
   assert.equal(await leaveModelsStep(tui), 'context')
 
-  tui.input = 'not-a-number'
+  // The wizard's own field (B2.6): typing here cannot touch the workspace draft.
+  tui.onboarding.field = 'not-a-number'
+  tui.onboarding.fieldCursor = 'not-a-number'.length
   tui.handleOnboardingChar('\r')
   assert.equal(tui.onboarding.step, 'context', 'an invalid value keeps the step open')
 
-  tui.input = '300000'
+  tui.onboarding.field = '300000'
+  tui.onboarding.fieldCursor = '300000'.length
   tui.handleOnboardingChar('\r')
   assert.equal(tui.onboarding.step, 'confirm')
   assert.equal(tui.onboarding.routeContextWindow, 300_000)

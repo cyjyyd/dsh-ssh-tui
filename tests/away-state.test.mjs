@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { setLocale } from '../lib/i18n/index.js'
 import { waitingMarkerPath } from '../lib/question-wait.js'
 import { SshTui } from '../lib/tui.js'
-import { allText, waitForDialog, waitForText } from './wait.mjs'
+import { allText, feedbackText, waitForDialog, waitForError, waitForFeedback, waitForText } from './wait.mjs'
 
 /**
  * What a gap in the link does to the things that wait for a human.
@@ -140,7 +140,7 @@ test('/notify smtp stores the command without the password', async () => {
     assert.equal(saved[0].notifySmtpUser, 'alice')
     assert.equal(saved[0].notifySmtpPassword, 's3cret', 'it is stored beside the command instead')
     assert.ok(
-      tui.rows.some(row => row.kind === 'system' && String(row.text).includes('mail.example.com:587')),
+      feedbackText(tui).includes('mail.example.com:587'),
       'the confirmation names the server',
     )
     assert.equal(
@@ -187,7 +187,7 @@ test('a question with nobody attached waits instead of resolving or half-drawing
 test('an unrecognized approval while detached rejects and records why', async () => {
   const tui = detachedTui()
   tui.runCommand('/approval auto')
-  await waitForText(tui, '自动审批')
+  await waitForFeedback(tui, '自动审批')
 
   tui.rows.push({
     kind: 'tool',
@@ -213,16 +213,16 @@ test('an unrecognized approval while detached rejects and records why', async ()
   assert.equal(outcome, 'rejected', 'a detached turn must finish instead of stalling toward the idle kill')
   assert.equal(tui.dialog, undefined, 'and nobody is prompted where there is no display')
   assert.ok(
-    allText(tui).includes('未识别且无显示器'),
-    `the rejection carries its reason so the model can adapt: ${allText(tui)}`,
+    feedbackText(tui).includes('未识别且无显示器'),
+    `the rejection carries its reason so the model can adapt: ${feedbackText(tui)}`,
   )
-  assert.ok(allText(tui).includes('python deploy.py'), 'and it names the command that was refused')
+  assert.ok(feedbackText(tui).includes('python deploy.py'), 'and it names the command that was refused')
 })
 
 test('a dangerous shape is refused by the rules with or without a display', async () => {
   const tui = detachedTui()
   tui.runCommand('/approval auto')
-  await waitForText(tui, '自动审批')
+  await waitForFeedback(tui, '自动审批')
 
   tui.rows.push({
     kind: 'tool',
@@ -240,7 +240,7 @@ test('a dangerous shape is refused by the rules with or without a display', asyn
     async () => { throw new Error('the waterfall must not run for a classified auto decision') },
   )
   assert.equal(outcome, 'rejected')
-  assert.ok(allText(tui).includes('危险形状'), `the rule table decides, not the display state: ${allText(tui)}`)
+  assert.ok(feedbackText(tui).includes('危险形状'), `the rule table decides, not the display state: ${feedbackText(tui)}`)
 })
 
 test('a queued question appears and is answerable once a display comes back', async () => {
@@ -277,7 +277,7 @@ test('a queued question appears and is answerable once a display comes back', as
 test('a rejection from the gap is visible in the transcript after reconnecting', async () => {
   const tui = detachedTui()
   tui.runCommand('/approval auto')
-  await waitForText(tui, '自动审批')
+  await waitForFeedback(tui, '自动审批')
 
   tui.rows.push({
     kind: 'tool',
@@ -403,7 +403,7 @@ test('a quiet gap gets no summary, only the reconnect line', async () => {
 test('approvals decided in the gap are summarised, including the detached refusals', async () => {
   const tui = detachedTui()
   tui.runCommand('/approval auto')
-  await waitForText(tui, '自动审批')
+  await waitForFeedback(tui, '自动审批')
   tui.displayHost = fakeDisplay()
   tui.attachRelayDisplay()
 

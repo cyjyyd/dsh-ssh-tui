@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
-import { allText } from './wait.mjs'
+import { allText, feedbackText } from './wait.mjs'
 
 /**
  * `/copy error`: the newest failure or diagnostic row, whole.
@@ -28,8 +28,8 @@ test('/copy error copies the newest error row, byte for byte', () => {
 
   tui.runCommand('/copy error')
   assert.equal(tui.copyYank, `启动失败：找不到 ${longPath}（exit code 3）`, 'the whole line, unwrapped')
-  assert.match(allText(tui), /已复制/u)
-  assert.match(allText(tui), /最近错误\/诊断/u)
+  assert.match(feedbackText(tui), /已复制/u)
+  assert.match(feedbackText(tui), /最近错误\/诊断/u)
 })
 
 test('/copy error prefers a diagnostic report over an older error', () => {
@@ -49,16 +49,29 @@ test('a boot notice is not a diagnostic: /copy error still finds nothing', () =>
   tui.rows.push({ kind: 'system', text: '未挂载 agent-presets 名单：/mode 无法切换模式。' })
   tui.runCommand('/copy error')
   assert.equal(tui.copyYank, '')
-  assert.match(allText(tui), /没有错误或诊断行/u)
+  assert.match(feedbackText(tui), /没有错误或诊断行/u)
 })
 
-test('a plain /copy still copies the focused card or the latest reply', () => {
+test('a plain /copy takes the latest reply, highlight or not', () => {
+  // The reply is the default *even with a card highlighted*: the old rule
+  // ("the focused card, else the reply") meant one click on a tool card left the
+  // reply unreachable, which is what "copy no longer copies the reply" was.
   const tui = fixture()
   tui.rows.push({ kind: 'error', text: '一个错误' })
+  const card = { kind: 'tool', callId: 'c1', name: 'bash', args: '{}', output: 'ok', title: 'bash', summary: 'ls', command: 'ls', expanded: false }
+  tui.rows.push(card)
   tui.rows.push({ kind: 'assistant', text: '最近回复正文' })
+  tui.focusedRow = card
 
   tui.runCommand('/copy')
-  assert.equal(tui.copyYank, '最近回复正文', 'the error row must not hijack a plain /copy')
+  assert.equal(tui.copyYank, '最近回复正文', 'the error row and the highlighted card must both be passed over')
+  assert.match(feedbackText(tui), /最近回复/u)
+
+  tui.runCommand('/copy reply')
+  assert.equal(tui.copyYank, '最近回复正文', 'and the explicit spelling does the same')
+
+  tui.runCommand('/copy highlight')
+  assert.equal(tui.copyYank, 'ls\nls\nok', 'while `highlight` is the card, whole')
 })
 
 test('nothing to copy says so instead of copying an empty string', () => {
@@ -66,7 +79,7 @@ test('nothing to copy says so instead of copying an empty string', () => {
   tui.rows.push({ kind: 'assistant', text: '只有回复' })
   tui.runCommand('/copy error')
   assert.equal(tui.copyYank, '', 'nothing was copied')
-  assert.match(allText(tui), /没有错误或诊断行/u)
+  assert.match(feedbackText(tui), /没有错误或诊断行/u)
 })
 
 test('an unknown target prints the usage instead of guessing', () => {
@@ -74,5 +87,5 @@ test('an unknown target prints the usage instead of guessing', () => {
   tui.rows.push({ kind: 'assistant', text: '正文' })
   tui.runCommand('/copy everything')
   assert.equal(tui.copyYank, '')
-  assert.match(allText(tui), /用法：\/copy/u)
+  assert.match(feedbackText(tui), /用法：\/copy/u)
 })

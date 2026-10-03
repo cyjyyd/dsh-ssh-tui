@@ -9,6 +9,7 @@
  * about and report the transcript when it never arrives, so a real failure is
  * not mistaken for a slow machine.
  */
+import { represent } from '../lib/representation.js'
 import assert from 'node:assert/strict'
 
 export const tick = (ms = 0) => new Promise(resolve => setTimeout(resolve, ms))
@@ -29,6 +30,87 @@ export async function waitFor(check, options = {}) {
     }
     await tick(intervalMs)
   }
+}
+
+/**
+ * Put a fixture row into a transcript.
+ *
+ * `pushRow` takes a classified representation (B2.3a), so a test cannot hand it a
+ * bare row — that is the point of the boundary. Fixtures say what they are: a row
+ * this test fabricated, `display`, never something the session log could rebuild.
+ */
+export const pushRow = (tui, row) => tui.pushRow(represent('fixture', row))
+
+/**
+ * Seed a real plan artifact from durable events (B2.5).
+ *
+ * A plan is a projection of the session log now, so a fixture that pushes a bare
+ * `plan` row no longer docks anything — the old rows were a second truth. This fires
+ * the events the Harness fires: the mode switch, the todo snapshot, and (when asked)
+ * the `exit_plan_mode` review with its result.
+ * @param tui - the TUI under test.
+ * @param agent - its agent (the session events are addressed to it).
+ * @param options - what to seed; `seq` starts a fresh block of sequence numbers.
+ * @returns the artifact id the fold produced.
+ */
+export function seedPlan(tui, agent, options = {}) {
+  const {
+    active = true,
+    todos = [{ content: '第 1 步', status: 'in_progress' }],
+    body,
+    review,
+  } = options
+  const base = (seedPlan.seq = (seedPlan.seq ?? 0) + 20)
+  const send = (type, seq, data) => tui.handleSessionEvent({ id: agent.id }, { type, seq, time: Date.now(), data })
+  send('plan/mode', base, { active })
+  send('todo/write', base + 1, { todos })
+  if (body !== undefined) {
+    send('tool/call', base + 2, { callId: `review-${base}`, name: 'exit_plan_mode', arguments: JSON.stringify({ plan: body }) })
+    if (review !== undefined) {
+      send('tool/result', base + 3, {
+        message: {
+          source: { callId: `review-${base}` },
+          content: [{ type: 'text', text: review.text ?? '' }],
+          isError: review.approved !== true,
+        },
+      })
+    }
+  }
+  return `plan@${base}`
+}
+
+/**
+ * Everything the reader can currently read as feedback.
+ *
+ * Before B2.3b a command's confirmation or failure was a transcript row, so a test
+ * asserted on `errorText`/`systemText`. The routing moved those messages to the
+ * footer echo and the notice row, and the *message* is what the tests are about —
+ * this reads all three sinks, so a case does not have to know which one the policy
+ * picked (and would fail if the message reached none of them).
+ */
+export const feedbackText = tui => [
+  ...tui.rows.map(row => String(row.text ?? '')),
+  tui.currentFooterEcho() ?? '',
+  tui.currentNotice() ?? '',
+].filter(text => text !== '').join('\n')
+
+/**
+ * The newest feedback message, whichever sink carries it.
+ *
+ * A command's outcome is routed to exactly one sink by the policy: a transcript row
+ * (durable or causal), the footer echo, or the notice row. A test asking "what did
+ * that command just say" should not have to know which — it asks here.
+ */
+export const lastFeedback = tui =>
+  tui.currentNotice() ?? tui.currentFooterEcho() ?? lastSystemText(tui)
+
+/** Wait until any sink shows the needle. */
+export function waitForFeedback(tui, needle, options = {}) {
+  return waitFor(() => feedbackText(tui).includes(needle), {
+    describe: `feedback containing ${JSON.stringify(needle)}`,
+    detail: () => feedbackText(tui),
+    ...options,
+  })
 }
 
 export const rowText = (tui, kind) =>
@@ -62,6 +144,35 @@ export function waitForDialog(tui, kind, options = {}) {
   return waitFor(() => tui.dialog?.kind === kind, {
     describe: `the ${kind} dialog`,
     detail: () => allText(tui),
+    ...options,
+  })
+}
+
+/**
+ * A Screen's body as plain text.
+ *
+ * Since B2.1 a report is a Screen, not a row: `/doctor`, `/diag`, `/status`,
+ * `/help` and `/subagents` paint into `tui.screen` and write nothing to the log.
+ * Reading them means reading the Screen.
+ */
+export const screenText = tui => [tui.screen?.title ?? '', ...(tui.screen?.lines ?? []).map(line => String(line.text))]
+  .filter(line => line !== '')
+  .join('\n')
+
+/** Wait until the Screen body contains the needle. */
+export function waitForScreen(tui, needle, options = {}) {
+  return waitFor(() => screenText(tui).includes(needle), {
+    describe: `a Screen containing ${JSON.stringify(needle)}`,
+    detail: () => screenText(tui) || '(no Screen)',
+    ...options,
+  })
+}
+
+/** Wait for a Screen's own confirmation (the doctor repair) to be asking. */
+export function waitForScreenConfirm(tui, options = {}) {
+  return waitFor(() => tui.screenSurface !== undefined, {
+    describe: 'the Screen confirmation',
+    detail: () => screenText(tui) || '(no Screen)',
     ...options,
   })
 }

@@ -29,6 +29,7 @@ import {
 } from './plan.js'
 import type { DiffDisplayLine, DisplayKind, Row, ToolDiffHunk } from './transcript-types.js'
 import { activeTheme, themeExtraToken, themeToken } from './theme.js'
+import { approvalProvenanceKey, approvalStateKey, type ToolApproval } from './approval-state.js'
 
 export const SHELL_TOOL_NAMES = new Set(['bash', 'pwsh'])
 export const DIFF_TOOL_NAMES = new Set(['edit', 'write', 'str_replace_editor'])
@@ -283,6 +284,28 @@ export const SUBAGENT_TOOL_NAMES = new Set(['subagent', 'subagent_fork', 'task']
  */
 export const HIDDEN_TOOL_NAMES = new Set(['get_goal'])
 
+/**
+ * Tools whose card is the *question* they asked, not a generic tool card (B2.4).
+ *
+ * `ask_user_question` is the only one: its durable representation is the question
+ * card built from the call's arguments, and drawing both was the duplicate this
+ * round removes. It is a separate set from {@link HIDDEN_TOOL_NAMES} on purpose —
+ * hidden means "no representation at all" (`get_goal`), while this means "the
+ * representation is drawn by the question projection". A tool card that never
+ * appears is a *different* decision from one whose content is shown elsewhere, and
+ * the audit has to be able to tell them apart.
+ */
+export const QUESTION_TOOL_NAMES = new Set(['ask_user_question'])
+
+/**
+ * Tools whose card is the *artifact* they act on, not a tool card of their own.
+ *
+ * `exit_plan_mode` is the plan review: the plan artifact carries the reviewed body,
+ * the review's outcome and the lifecycle lines, so a generic card beside all of that
+ * was a third representation of one event (B2.5 §15).
+ */
+export const PLAN_TOOL_NAMES = new Set(['exit_plan_mode'])
+
 const TOOL_TITLE_KEYS = [
   'edit', 'write', 'str_replace_editor', 'fetch', 'list_files', 'list', 'ls',
   'find', 'search', 'delete', 'rm', 'rename', 'mv', 'mkdir', 'skills', 'skill',
@@ -504,6 +527,16 @@ export function buildToolHeader(input: {
   spinner?: string
   flipping?: boolean
   diffStat?: { add: number; del: number }
+  /**
+   * The approval that guarded this call (B2.4), when one did.
+   *
+   * It rides on the title — right after the tool's own name — rather than at the
+   * end of the row: the tail is what a narrow terminal truncates first, and a card
+   * whose whole point is "this needed a decision" must not be the one card that
+   * loses it. It is also the only place the state is shown, since approval no
+   * longer writes a row of its own.
+   */
+  approval?: ToolApproval
 }): { plain: string; segments: TextSegment[] } {
   const running = input.status === undefined || input.status === 'running'
   const stateToken = input.status === 'ok' ? '' : `[${toolStateLabel(input.status)}]`
@@ -524,23 +557,32 @@ export function buildToolHeader(input: {
   const statText = statToken === '' ? '' : `  ${statToken}`
   const stateGap = stateToken === '' ? '' : '  '
   const tail = `${stateGap}${stateToken}${exit}${spinner}`
-  const plain = `${lead}${summaryText}${statText}${tail}`
+  const approvalChip = input.approval === undefined ? '' : approvalChipText(input.approval)
+  const approvalText = approvalChip === '' ? '' : `  ${approvalChip}`
+  const plain = `${lead}${approvalText}${summaryText}${statText}${tail}`
   const stateCode = toolStateColor(input.status)
   const dotIndex = lead.indexOf('●')
-  const stateIndex = stateToken === '' ? -1 : lead.length + summaryText.length + statText.length + stateGap.length
+  const stateIndex = stateToken === '' ? -1 : lead.length + approvalText.length + summaryText.length + statText.length + stateGap.length
   const segments: TextSegment[] = []
   if (flipping) {
     const markerIndex = prefix.length
     segments.push({ start: markerIndex, end: markerIndex + marker.length, sgr: themeExtraToken(activeTheme(), 'accent') })
   }
   if (dotIndex >= 0) segments.push({ start: dotIndex, end: dotIndex + '●'.length, sgr: stateCode })
+  if (approvalText.length > 0) {
+    segments.push({
+      start: lead.length,
+      end: lead.length + approvalText.length,
+      sgr: themeExtraToken(activeTheme(), input.approval?.state === 'rejected' ? 'accent' : 'tool-ok'),
+    })
+  }
   if (summaryText.length > 0) {
-    segments.push({ start: lead.length, end: lead.length + summaryText.length, sgr: themeToken(activeTheme(), 'system') })
+    segments.push({ start: lead.length + approvalText.length, end: lead.length + approvalText.length + summaryText.length, sgr: themeToken(activeTheme(), 'system') })
   }
   if (statToken !== '') {
     // Git diffstat colors: deletions red, additions green. The token sits
     // two cells after the summary, deletions before the joining space.
-    const statStart = lead.length + summaryText.length + 2
+    const statStart = lead.length + approvalText.length + summaryText.length + 2
     const delEnd = statToken.indexOf(' +')
     if (statToken.startsWith('-')) {
       segments.push({
@@ -557,11 +599,11 @@ export function buildToolHeader(input: {
   if (stateIndex >= 0) {
     segments.push({ start: stateIndex, end: stateIndex + stateToken.length + exit.length, sgr: stateCode })
   } else if (exit !== '') {
-    const exitIndex = lead.length + summaryText.length + statText.length
+    const exitIndex = lead.length + approvalText.length + summaryText.length + statText.length
     segments.push({ start: exitIndex, end: exitIndex + exit.length, sgr: stateCode })
   }
   if (spinner !== '') {
-    const spinnerStart = (stateIndex >= 0 ? stateIndex + stateToken.length + exit.length : lead.length + summaryText.length + statText.length + exit.length)
+    const spinnerStart = (stateIndex >= 0 ? stateIndex + stateToken.length + exit.length : lead.length + approvalText.length + summaryText.length + statText.length + exit.length)
     segments.push({
       start: spinnerStart,
       end: plain.length,
@@ -569,6 +611,21 @@ export function buildToolHeader(input: {
     })
   }
   return { plain, segments: segments.filter(segment => segment.end > segment.start) }
+}
+
+/**
+ * The title chip: the state, and — when the reader is being told something
+ * weaker — why they can trust it less.
+ *
+ * `live` and `durable` are the same fact at two moments (a person decided, and
+ * the log still says so), so they print the state alone. `policy` adds `auto`,
+ * and `inferred` says so: a resume that found only the Harness's refusal sentence
+ * in a tool result is a reading, and the card has to admit it.
+ */
+export function approvalChipText(approval: ToolApproval): string {
+  const state = t(approvalStateKey(approval.state))
+  const note = approvalProvenanceKey(approval)
+  return note === undefined ? state : `${state}·${t(note)}`
 }
 
 /** How many terminal rows a tool body occupies after wrapping. */

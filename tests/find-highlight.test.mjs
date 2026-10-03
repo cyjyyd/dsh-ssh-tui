@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { displayWidth, stripAnsi } from '../lib/term-text.js'
 import { SshTui } from '../lib/tui.js'
-import { allText } from './wait.mjs'
+import { allText, feedbackText } from './wait.mjs'
 
 /**
  * `/find` highlights the match, not the card.
@@ -125,7 +125,7 @@ test('a search with no hits highlights nothing and says so', t => {
   tui.runCommand('/find zzzz')
   const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
   assert.deepEqual(spans, [])
-  assert.match(allText(tui), /没有匹配|未找到|no match/iu)
+  assert.match(feedbackText(tui), /没有匹配|未找到|no match/iu)
 })
 
 test('stepping still reports the position and moves the highlight', t => {
@@ -138,7 +138,7 @@ test('stepping still reports the position and moves the highlight', t => {
   assert.equal(spans.length, 1, 'only the current hit is highlighted')
 
   tui.runCommand('/find deploy')
-  assert.match(allText(tui), /1\s*\/\s*2|2\s*\/\s*2/u, 'the step line reports index and total')
+  assert.match(feedbackText(tui), /1\s*\/\s*2|2\s*\/\s*2/u, 'the step line reports index and total')
 })
 
 test('the highlight follows the search, which is case-insensitive', t => {
@@ -164,7 +164,7 @@ test('a needle the wrap split is still pointed at', t => {
   const frame = tui.captureFrame(width, 30)
   const marked = frame.filter(line => line.includes('\x1b[7m'))
   assert.ok(marked.length >= 1, `the hit row is pointed at even when the wrap splits it:\n${frame.join('\n')}`)
-  assert.match(allText(tui), /1\/1/u, 'and the search did report the hit')
+  assert.match(feedbackText(tui), /1\/1/u, 'and the search did report the hit')
 })
 
 test('an emoji before the match does not shift the highlight', t => {

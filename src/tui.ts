@@ -52,6 +52,30 @@ import {
   type StreamChunkLike,
 } from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
+import type { FooterActivityKind } from './footer-budget.js'
+import {
+  auditQuestionPrimaries,
+  auditRepresentations,
+  formatRepresentationAudit,
+  isRepresentation,
+  represent,
+  REPRESENTATION_POLICY,
+  type Durability,
+  type Representation,
+  type RepresentationAudit,
+  type RepresentationMeta,
+  type RepresentationSource,
+} from './representation.js'
+import {
+  clampScreenOffset,
+  reportRowKind,
+  screenFromDialog,
+  screenLayout,
+  screenPositionText,
+  type ReportKind,
+  type ScreenState,
+} from './screen.js'
+import { screenRuntimeStrip } from './footer-budget.js'
 import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import {
@@ -72,7 +96,7 @@ import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type Doc
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
-import { classifyAuthFailure, isReasoningReplayFailure, type AuthFailure } from './auth-failure.js'
+import { classifyAuthFailure, isReasoningReplayFailure, isRequestRejectedFailure, type AuthFailure } from './auth-failure.js'
 import {
   activeTheme,
   resolveTheme,
@@ -106,7 +130,13 @@ import {
   ALL_ROSTER_ROWS,
   type RosterRow,
 } from './preset-rows.js'
-import { SessionStatsTracker, statsRowOf, type SessionStatsSnapshot } from './stats.js'
+import {
+  SessionStatsTracker,
+  sessionTokenTotal,
+  statsRowOf,
+  type SessionStatsRow,
+  type SessionStatsSnapshot,
+} from './stats.js'
 import {
   QUESTION_OPTION_KEYS,
   applyQuestionFilter,
@@ -116,6 +146,7 @@ import {
   visibleQuestionIndexes,
   confirmAnswer,
   inspectClosesOn,
+  type InspectDialog,
   moveQuestionCursor,
   optionsLength,
   questionOptionIndex,
@@ -123,10 +154,18 @@ import {
   questionOptionMarker,
   questionSubmit,
   selectQuestionOptionByKey,
+  windowInteractionLines,
+  PICKER_ROLE,
+  interactionRole,
+  stallsTask,
+  surfacePriority,
   type ConfirmDialog,
   type Dialog,
   type DialogAnswer,
+  type InteractionKind,
   type QuestionDialog,
+  type SurfaceRole,
+  isSurfaceDialog,
 } from './dialogs.js'
 import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
 import {
@@ -202,7 +241,24 @@ import {
   type SubagentSelectionRef,
 } from './subagent-model.js'
 import { resolveFreshSuperGrokToken } from './supergrok-token.js'
-import { copyTextFromRow, copyTextFromTranscript } from './copy-text.js'
+import { copyTextFromRow, copyTextFromTranscript, latestReplyText } from './copy-text.js'
+import {
+  artifactIsLive,
+  artifactProgress,
+  foldPlanArtifacts,
+  livePlanArtifact,
+  type PlanArtifact,
+  type PlanEvent,
+  type PlanState,
+} from './plan-projection.js'
+import {
+  approvalDetailText,
+  approvalStateFromOutcome,
+  inferredApprovalFromResult,
+  mergeApproval,
+  sameApproval,
+  type ToolApproval,
+} from './approval-state.js'
 import { displayToolName, subagentCourtesyName } from './job-label.js'
 import {
   clearWaitingMarker,
@@ -231,6 +287,13 @@ import {
   type AskUserQuestionRequest,
 } from '@deepseek-ai/dsh-user-questions'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import {
+  durableQuestionRecords,
+  answerSummaryText,
+  questionViewOf,
+  type DurableQuestionRecord,
+} from './question-state.js'
+import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions'
 
 import type {
   CollapsibleBlock,
@@ -267,6 +330,7 @@ import {
   truncateToWidth,
   type InputView,
   type TextSegment,
+  visibleWidth,
   waitCardCopy,
   wrap,
   wrapSegmented,
@@ -296,6 +360,7 @@ import {
   isEscapePrefix,
   isHangupErrno,
   linkQualityOf,
+  linkRedrawBudgetMs,
   parseCursorPositionReply,
   PICKER_WINDOW,
   pickerWindowStart,
@@ -304,6 +369,7 @@ import {
   resolvePaintIntervalMs,
   toolBodyLineLimit,
   waitUntilIdleOrTimeout,
+  type PaintCadenceSource,
   type PaintLinkKind,
   RTT_HISTORY,
   medianRtt,
@@ -324,8 +390,10 @@ import {
   paintFooterSubagentChip,
   footerStatsGroups,
   formatContextPressureChip,
+  runtimeStrip,
   providerHasQuotaSurface,
   formatStatusReport,
+  planRouteBadge,
   shortQuotaPlanName,
   formatTokens,
   parseContextPressure,
@@ -336,6 +404,7 @@ import {
   type FooterChip,
   type FooterStatsInput,
   type FooterStatusInput,
+  type FooterStripInput,
 } from './footer.js'
 import {
   COMMAND_CODE_CREDITS_URL,
@@ -401,6 +470,7 @@ import {
   subagentInspectLines,
   subagentRowFromSpawnTool,
   todoItemKind,
+  askQuestions,
   todoProgressLabel,
   TODO_STATUS_MARK,
   type CardCategory,
@@ -419,6 +489,8 @@ import {
   diffStatToken,
   formatModelList,
   HIDDEN_TOOL_NAMES,
+  PLAN_TOOL_NAMES,
+  QUESTION_TOOL_NAMES,
   parseExitStatus,
   planReviewOf,
   presentToolCall,
@@ -472,6 +544,7 @@ export {
   findCursorPositionReply,
   isHangupErrno,
   linkQualityOf,
+  linkRedrawBudgetMs,
   linkSignalPips,
   paintIntervalForRtt,
   paintLinkLabel,
@@ -512,8 +585,11 @@ export {
   formatQuotaBar,
   formatQuotaUnknown,
   formatStatusReport,
+  formatStatusThroughput,
+  formatStatusStats,
   providerHasQuotaSurface,
   quotaWindowTag,
+  runtimeStrip,
   shortModelName,
   shortQuotaPlanName,
   formatTokens,
@@ -976,6 +1052,24 @@ interface OnboardingState {
   providerCursor: number
   /** True while the wizard's async save is in flight; input is ignored. */
   saving: boolean
+  /**
+   * The wizard's **own** field, and its caret.
+   *
+   * It used to borrow the composer's (`setField`), which meant opening `/setup`
+   * cleared the draft the reader had typed and typing in the wizard wrote into it
+   * — the workspace's text, owned by a screen that is not the workspace (B2.6 §4).
+   */
+  field: string
+  fieldCursor: number
+  /**
+   * The wizard's own message row: validation, a fetch result, a save error.
+   *
+   * These were transcript rows; a setup screen owns its own surface, and the
+   * framed flow leaves no history behind (B2.6 §12/§13).
+   */
+  notice?: { kind: 'system' | 'error'; text: string }
+  /** True once the wizard has run to completion, so `close` knows what happened. */
+  saved?: boolean
   resolve(saved: boolean): void
 }
 
@@ -1078,8 +1172,87 @@ const LINE_MODE_INSPECT_LINES = 80
  * fills they lighten live in `styleLine` (`diff-add` / `diff-del`).
  */
 const STALL_WARNING_MS = 60000
+/**
+ * A resize this quiet is treated as *the* size, and its frame is painted.
+ *
+ * It is also the floor on the drag's frame rate: a frame that is cheap both to
+ * compose and to deliver repaints as often as this. Forty milliseconds is bought
+ * against the *felt* latency rather than against the frame count — on an SSH link
+ * the reader is looking at the last frame that reached them, so what they
+ * experience while dragging is "how long after I stop moving does the screen
+ * agree with the window", and this window is the one knob in that path that is
+ * not already fixed by the link, the compose, or the relay's own debounce. A
+ * frame that is expensive to compose or to deliver paces itself instead (see
+ * {@link resizeBudgetMs}).
+ *
+ * Dragging a window edge emits a resize event every few milliseconds, and each
+ * one used to get a synchronous full repaint: with a long transcript that is
+ * ~100 ms of rendering per event, so a two-second drag queued seconds of work
+ * and the screen trailed the pointer. Nothing about an intermediate geometry is
+ * worth a frame — the reader cannot use it and the next event invalidates it —
+ * so a burst collapses to the size the window ends on. This is the same rule the
+ * paint path already applies to a burst of streaming tokens.
+ */
+const RESIZE_SETTLE_MS = 40
+/**
+ * The ceiling on how long a drag may go unpainted.
+ *
+ * Without it, a slow drag would leave the chrome (dividers, footer) at the old
+ * width for as long as the pointer keeps moving. The real figure is derived from
+ * what a frame costs on *this* session — see {@link resizeBudgetMs}.
+ */
+const RESIZE_MAX_WAIT_MS = 400
+/**
+ * The smallest gap between two resize frames, on a wire that is keeping up.
+ *
+ * Not a rate limit — the backlog check is that — but a floor on *self* interference:
+ * a terminal can emit resize events in bursts of several within a millisecond, and
+ * composing one frame per event there would spend the whole burst on geometries the
+ * next event already invalidates. Sixteen milliseconds is one display frame at
+ * 60 Hz: below the interval at which a reader can tell two updates apart, and far
+ * below the terminal's own redraw of the reflowed grid.
+ */
+const RESIZE_MIN_INTERVAL_MS = 16
+/**
+ * How much transcript a resize frame is allowed to re-render.
+ *
+ * A resize changes the width, and a width is part of every row's render
+ * fingerprint: **every** row of the transcript is re-wrapped and re-clipped,
+ * every frame. Measured on this machine, one resize frame of a 2400-row session
+ * cost 43 ms of synchronous rendering — 75 ms at 5000 rows — and that time is
+ * the event loop, so it is also the delay on the reader's next keystroke and on
+ * the next resize event. Ten resize events at 8 ms therefore took 947 ms even
+ * though only twenty frames were painted, which is exactly what "the screen
+ * trails the pointer, and the input box only answers after the reflow" is from
+ * the inside.
+ *
+ * The window shows about {@link RESERVED_BOTTOM_LINES} rows' worth of
+ * transcript; the other two thousand are being re-rendered for a reader who
+ * cannot see them. So during a drag only the tail is rendered, through the
+ * mechanism `--resume` already uses for the same reason (`paintTailBudget`).
+ * Measured with a 120-row tail above: 2403 rows 43.3 → 2.4 ms, 5000 rows
+ * 75.0 → 2.6 ms — about a 30× cut in event-loop blocking, with the frame's byte
+ * count unchanged.
+ *
+ * The tail is not the truth for long: the first frame after the drag ends
+ * clears the budget and repaints the whole transcript at the settled width
+ * (one frame, once). While the pointer is moving, an older row's geometry is
+ * worthless anyway — the next event invalidates it — and the reader is looking
+ * at the bottom of the screen.
+ */
+const RESIZE_TAIL_MIN_ROWS = 120
 /** Bytes already queued for the terminal before a frame is skipped instead. */
 const STDOUT_BACKLOG_BYTES = 32 * 1024
+/**
+ * The most a drag frame may sit in the queue before the next one is skipped.
+ *
+ * The drag path's threshold is "one frame behind", computed from the frame it
+ * just composed ({@link SshTui.resizeWireBehind}). This is only the floor under
+ * that: frames of a few hundred bytes are *always* under it, and a drag whose
+ * every event queued one would spend the burst painting geometries the queue
+ * cannot deliver in time.
+ */
+const RESIZE_FRAME_QUEUE_FLOOR_BYTES = 2 * 1024
 const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
 /**
  * How long a leftover Host that has finished its work waits, with no display,
@@ -1109,7 +1282,87 @@ const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
  */
 const QUOTA_RETRY_MS = 15_000
 
+/**
+ * The events `@deepseek-ai/dsh-user-questions` folds into its question projection.
+ *
+ * `request/header` decides whether the calls that follow are *timed* (only those
+ * are tracked at all); `tool/call` opens one, `tool/result` settles it, and a late
+ * reply to a continued question settles it as a `user/message`.
+ */
+/**
+ * The wizard's nine steps, in the order it asks them.
+ *
+ * Declared here rather than derived from a counter so the step indicator and the
+ * screen's own tests have one source: the *order* is the product decision (B2.6 §3
+ * keeps it unchanged), and this is where it is written down.
+ */
+const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick', 'model-default', 'context', 'confirm'] as const
+
+/** The steps that show a text field (the others are pickers or the confirmation). */
+const SETUP_FIELD_STEPS: ReadonlySet<string> = new Set(['provider', 'id', 'base-url', 'key', 'models', 'context'])
+
+/**
+ * The durable event types the plan projection reads (B2.5).
+ *
+ * `tool/call`/`tool/result` are here for the `exit_plan_mode` review; the recorder
+ * filters those to the one tool, so an ordinary tool call never enters the plan log.
+ */
+const PLAN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'plan/mode',
+  'todo/write',
+  'command/run',
+  'command/done',
+  'tool/call',
+  'tool/result',
+])
+
+const QUESTION_FOLD_EVENTS: ReadonlySet<string> = new Set([
+  'request/header',
+  'tool/call',
+  'tool/result',
+  'user/message',
+])
+
 const RESERVED_BOTTOM_LINES = 3 // input line + stats line + status line
+
+/**
+ * Transcript rows the live region leaves alone.
+ *
+ * The live region takes rows of its own (see `paint`), and a turn can produce
+ * more of them than the screen has: a long streamed reply, an expanded thinking
+ * body, a wait card with details. Without a floor the region would eat the whole
+ * content area and the reader would lose the history they were reading, so it is
+ * capped here and clipped from its own front instead.
+ */
+const MIN_TRANSCRIPT_ROWS = 3
+
+/**
+ * The composer's shape as a Screen sees it: there is no composer.
+ *
+ * `footerFacts` takes the input view because the *footer* text depends on whether
+ * the field is folded or multi-line; a Screen's strip does not read those fields at
+ * all, and passing the real composer's shape would claim a Screen shows a composer
+ * it does not have.
+ */
+const SCREEN_INPUT: InputView = { text: '', cursorOffset: 0, folded: false }
+
+/**
+ * A plain printable key: what a reader types when they think there is a composer.
+ *
+ * Escapes and control bytes are excluded on purpose — those are the Screen's own keys
+ * (scroll, close, copy), and the copy key arrives as a CSI sequence.
+ */
+const PRINTABLE = /^[^\u0000-\u001f\u007f\u001b]+$/u
+
+/**
+ * The activity kinds that already *are* a wait.
+ *
+ * The Screen strip's first group is the activity row, which names a wait the
+ * session is in; the second group is the work waiting behind the Screen. When the
+ * first already says `等待回答`, repeating it in the second says nothing and spends
+ * the widest group on a duplicate — so the second group is skipped instead.
+ */
+const WAIT_ACTIVITY_KINDS: ReadonlySet<string> = new Set(['waiting', 'approval', 'plan-review'])
 
 function dshHomeDir(): string {
   return resolveDshHome()
@@ -1442,16 +1695,242 @@ export class SshTui {
   private historyDraft = ''
   private status = 'idle'
   private dialog: Dialog | undefined
-  private readonly dialogQueue: Dialog[] = []
+  /**
+   * What the open dialog *means*, which its shape cannot say: `/model` and
+   * `ask_user_question` are both `questions` dialogs, and only one of them means
+   * the agent is waiting for a person. Declared by whoever opens the dialog.
+   */
+  private dialogRole: SurfaceRole = PICKER_ROLE
+  private readonly dialogQueue: { dialog: Dialog; role: SurfaceRole }[] = []
   private onboardingCompletion: Promise<boolean> | undefined
   private dirty = true
   private disposed = false
   private exiting = false
   private hangingUp = false
-  private readonly onDirectResize = (): void => {
+  /** How long the last frame took to compose, for the resize pacing below. */
+  private lastPaintCostMs = 0
+  private resizeLastEventAt = 0
+  private resizeLastPaintAt = 0
+  private resizePaintTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Whether a resize frame is currently rendering only the transcript's tail
+   * (see {@link narrowToResizeTail}), so the drag's last geometry can be painted
+   * whole.
+   */
+  private resizeTailNarrowed = false
+
+  /**
+   * A resize arrived: paint the size the window is *at*, not every size it
+   * passed through.
+   *
+   * Dragging an edge emits an event every few milliseconds, and each one used to
+   * get a synchronous full repaint — on a long transcript that is ~100 ms of
+   * rendering per event, so a drag queued seconds of work and the screen trailed
+   * the pointer. Nothing about an intermediate geometry is worth a frame: the
+   * reader cannot use it and the next event invalidates it. Painting the *first*
+   * event of a burst is no better, because that geometry is stale by the time the
+   * frame is composed and it costs the frame that is actually wanted.
+   *
+   * So the frame has a deadline, recomputed on every event:
+   *
+   * - {@link RESIZE_SETTLE_MS} after the newest event (the size has stopped
+   *   moving, so this is the geometry the user is looking at), and
+   * - at the latest one {@link resizeBudgetMs} after the last frame, so a drag
+   *   that never pauses still shows the chrome following the pointer.
+   *
+   * Whichever comes first wins, and the frame is composed from the terminal's
+   * size at the moment it runs — so a newer geometry can never be painted after
+   * an older one; the older one is simply never painted.
+   */
+  private requestResizePaint(now = Date.now()): void {
+    if (this.resizeLastEventAt === 0) this.resizeLastPaintAt = now
+    this.resizeLastEventAt = now
+    // The geometry is read from the terminal at paint time (`screenColumns`), so
+    // marking the frame dirty is what carries it; nothing here remembers a size.
     this.forceFullPaint = true
     this.dirty = true
-    this.paint()
+    this.narrowToResizeTail()
+    // The pointer follows the window edge, and the terminal reflows its own grid
+    // the instant it moves: anything this row does later than that reads as lag.
+    // So the answer to an intermediate geometry is a frame, not a wait — unless the
+    // previous frame is still on the wire, which is the one case where composing
+    // another would only queue a stale one behind it. The wait that remains is
+    // then a *drain* deadline, and it is short because it is measuring the wire
+    // rather than guessing the link.
+    if (!this.resizeWireBehind() && now - this.resizeLastPaintAt >= RESIZE_MIN_INTERVAL_MS) {
+      this.resizeLastPaintAt = now
+      this.render()
+      // A deferred frame (an unattached display, a stall) is still owed.
+      if (this.dirty) this.armResizePaint(RESIZE_SETTLE_MS)
+      return
+    }
+    const deadline = Math.min(
+      this.resizeLastEventAt + RESIZE_SETTLE_MS,
+      this.resizeLastPaintAt + this.resizeBudgetMs(),
+    )
+    this.armResizePaint(deadline - now)
+  }
+
+  /**
+   * Whether the previous *drag* frame is still on its way to the terminal.
+   *
+   * A drag frame is not a token batch: the reader is moving the edge and watching
+   * for the screen to agree with it, so a frame composed now would be superseded
+   * before it landed. What matters is the *queue*, not the pipe's absolute
+   * capacity — measured on a byte-rate-limited consumer, a drag toward a wider
+   * window is the case that hurts, because a frame's size is proportional to the
+   * width: every frame is bigger than the last while the terminal drains at a
+   * fixed rate, the backlog compounds, and the screen keeps moving for tens of
+   * milliseconds after the pointer has stopped (30–44 ms measured, against 0–10 ms
+   * for the shrinking direction).
+   *
+   * So the threshold is one frame, not a fixed 32 KB. That constant is right for
+   * the cadence path, where the question is "is this link slow"; here the question
+   * is "would this frame be a stale geometry queued behind a live one", and the
+   * answer is yes as soon as the last one has not been accepted — however small
+   * both frames are. The named constant stays as the floor, so a long session's
+   * frames can queue a little rather than starving the drag of feedback.
+   */
+  private resizeWireBehind(): boolean {
+    const pending = this.pendingBytes()
+    if (pending === undefined) return false
+    return pending > Math.max(RESIZE_FRAME_QUEUE_FLOOR_BYTES, this.lastFrameBytes)
+  }
+
+  /** Bytes the last frame carried, whoever owns the wire (see above). */
+  private lastFrameBytes = 0
+
+  private pendingBytes(): number | undefined {
+    const relayed = this.displayHost?.pendingBytes?.()
+    if (relayed !== undefined) return relayed
+    if (this.displayHost?.attached === true || this.displayDetached) return undefined
+    try {
+      return process.stdout.writableLength
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Cap what a resize frame re-renders, and remember that the frame is a
+   * compromise so the drag's last geometry can be painted whole.
+   *
+   * Both matters, and they are different matters: the cap is what keeps the
+   * event loop free while the pointer moves (see
+   * {@link RESIZE_TAIL_MIN_ROWS}), and the remembered flag is what stops the
+   * compromise from *becoming* the screen — the moment the drag pauses, the
+   * transcript is painted in full again at the settled width.
+   *
+   * A scroll position is left alone: a reader who has scrolled back is looking
+   * at rows the tail does not contain, and moving the view under them would be a
+   * bigger lie than a slower frame. `paintTailBudget` already refuses to fold
+   * anything while `scrollOffset > 0` for the same reason.
+   */
+  private narrowToResizeTail(): void {
+    // A scrolled-back reader is looking at rows the tail does not contain.
+    if (this.scrollOffset > 0) return
+    if (this.paintTailBudget > 0) {
+      this.resizeTailNarrowed = true
+      return
+    }
+    const rows = Math.max(RESIZE_TAIL_MIN_ROWS, this.screenRows() * 3)
+    if (this.rows.length <= rows + 8) return
+    this.paintTailBudget = rows
+    this.resizeTailNarrowed = true
+  }
+
+  /**
+   * Undo {@link narrowToResizeTail}: the drag has settled, so the frame that is
+   * about to be painted must be the whole transcript at the final width.
+   */
+  private widenPastResizeTail(now = Date.now()): boolean {
+    if (!this.resizeTailNarrowed) return true
+    if (now - this.resizeLastEventAt < RESIZE_SETTLE_MS) return false
+    this.resizeTailNarrowed = false
+    if (this.paintTailBudget === 0) return true
+    this.paintTailBudget = 0
+    this.forceFullPaint = true
+    this.dirty = true
+    return true
+  }
+
+  /**
+   * The longest a resize frame may wait when the wire cannot take another one yet.
+   *
+   * This is a *ceiling*, not a rate: the normal case paints at once (see
+   * {@link requestResizePaint}), and this only decides how often a link that is
+   * genuinely behind is asked again — the previous frame has not drained, so the
+   * next one would be a stale geometry queued behind a live one. Two costs feed it:
+   *
+   * - **composing** a frame — measured (`lastPaintCostMs`): a short transcript is a
+   *   few milliseconds and a long one is a hundred, and repainting faster than that
+   *   starves the event loop that has to receive the next resize;
+   * - **delivering** one on a link whose speed is unknown (see
+   *   {@link linkRedrawBudgetMs}: only an unprobed link falls back to a slow
+   *   budget, because there the interval in force is a number nobody measured).
+   *
+   * A probed link does not need the second term: the backlog check above already
+   * says whether it is keeping up, and pacing it from the round trip as well would
+   * put the artificial delay back that this function exists to avoid.
+   */
+  private resizeBudgetMs(): number {
+    const unknownLink = this.paintLink === 'ssh' && this.paintCadence === 'unprobed'
+    return Math.min(RESIZE_MAX_WAIT_MS, Math.max(
+      RESIZE_SETTLE_MS,
+      this.lastPaintCostMs * 2,
+      unknownLink ? linkRedrawBudgetMs(this.paintLink, this.paintCadence, this.paintIntervalMs) : 0,
+    ))
+  }
+
+  /**
+   * Whether a resize is holding the frame.
+   *
+   * While a deadline is armed the burst is collapsing, and the cadence timer must
+   * not paint on its own: it fires on the paint interval, which is *shorter* than
+   * the budget a heavy session needs, so leaving both flushers live put the frame
+   * count back near one per event — the cost this exists to remove. Content that
+   * changes mid-drag waits at most one budget.
+   */
+  private resizeBurstOpen(): boolean {
+    return this.resizePaintTimer !== undefined
+  }
+
+  /** (Re)arm the frame's deadline. Every event pushes it out. */
+  private armResizePaint(delayMs: number): void {
+    if (this.resizePaintTimer !== undefined) clearTimeout(this.resizePaintTimer)
+    this.resizePaintTimer = setTimeout(() => {
+      this.resizePaintTimer = undefined
+      if (this.exiting) return
+      // A pause in the drag is the one moment the whole transcript is worth
+      // rendering: the width has stopped moving, so the rows being folded away
+      // are about to become what the reader is looking at again.
+      const quiet = this.widenPastResizeTail()
+      this.forceFullPaint = true
+      this.dirty = true
+      this.resizeLastPaintAt = Date.now()
+      this.render()
+      if (this.dirty) {
+        // Deferred (a backlogged stdout, an unattached display): the frame is
+        // still owed, and only this timer is holding it.
+        this.armResizePaint(RESIZE_SETTLE_MS)
+        return
+      }
+      // A drag that is still moving fires this deadline *before* it is quiet —
+      // the deadline is `min(lastEvent + settle, lastPaint + budget)` — and the
+      // fold has to be lifted once the pointer really stops, not at whatever
+      // moment the last frame happened to be due. Nothing else is watching: the
+      // cadence timer stands down while a burst is open (`resizeBurstOpen`), so
+      // without this the transcript would stay folded with no event left to
+      // notice it.
+      if (this.resizeTailNarrowed && !quiet) {
+        this.armResizePaint(RESIZE_SETTLE_MS)
+      }
+    }, Math.max(0, delayMs))
+    this.resizePaintTimer.unref?.()
+  }
+
+  private readonly onDirectResize = (): void => {
+    this.requestResizePaint()
   }
   private readonly headlessDisplay: boolean
   private disconnectPolicy: DisconnectPolicyName
@@ -1522,6 +2001,7 @@ export class SshTui {
    */
   private displayRowCache = new WeakMap<Row, { key: string; lines: string[]; refs: unknown[]; gutters: number[] }>()
 
+
   /** Fingerprint of the state that affects *every* row's rendering. */
   private displayBaseKey(width: number): string {
     return [
@@ -1532,7 +2012,18 @@ export class SshTui {
       this.searchHits.length,
       this.theme.name,
       this.colorDepth,
-      this.focusedRow === null ? '' : String((this.focusedRow as Row).kind ?? 'block'),
+      // Which card is focused, not which *kind* of card: two tool cards in a row are
+      // the common case, and a kind-only key replayed the old card's cached lines —
+      // including its selection highlight — so the highlight stayed on the card the
+      // reader had just left and never reached the one they moved to. The focused
+      // row's position is the identity here (the synthetic live block is not a row,
+      // so it gets its own token), and a shift in that position only makes the cache
+      // more conservative.
+      this.focusedRow === null
+        ? ''
+        : String(this.rows.indexOf(this.focusedRow as Row)) === '-1'
+          ? 'block'
+          : String(this.rows.indexOf(this.focusedRow as Row)),
       String(this.paintTailBudget),
       this.pendingReveal === undefined ? '' : String(this.pendingReveal),
       asciiFallbackEnabled() ? 'ascii' : 'utf8',
@@ -1674,9 +2165,28 @@ export class SshTui {
   private liveStreamOwner: { attemptId: unknown; turn: number; step: number } | undefined
   /** Live events parked while the (yielding) history replay holds the floor. */
   private replayQueue: Array<{ session: { id: SessionId }; event: SessionEvent }> | undefined
+  /**
+   * True while the durable log is still being read into the transcript.
+   *
+   * Frames are not composed during it (see `paint`): a window anchored to a session
+   * that is still growing is the rolling resume this flag exists to prevent.
+   */
+  private loadingHistory = false
   /** A relay claimed the display while a hangup was still cancelling/flushing. */
   private reattachedDuringHangup = false
   private scrollOffset = 0
+  /**
+   * How many rows `/clear` hid, as a count from the front of `rows`.
+   *
+   * A *view* boundary, not a deletion (AD-4): the rows stay, the session log is
+   * untouched, and a resume shows everything again because this number is Host-local
+   * and never written anywhere. A count is the stable expression here — every new row
+   * is appended at the end, and an update to an old row mutates it in place, so a row
+   * cannot cross the boundary by being updated. When the transcript trims its oldest
+   * rows the count is decremented with them, which keeps the boundary on the same
+   * semantic row.
+   */
+  private clearedRows = 0
   private readonly clickableRows = new Map<number, CollapsibleBlock>()
   /**
    * The transcript as painted, for free-form selection. Only the lines that came
@@ -1692,6 +2202,88 @@ export class SshTui {
   }[] = []
   /** Screen row (1-based) of the first transcript line in the last frame. */
   private transcriptTopScreenY = 1
+  /**
+   * The footer echo: the last thing this Host confirmed to the reader.
+   *
+   * Host-local and deliberately not history (AD-13): "theme switched" is an
+   * acknowledgement, not a fact about the session. It lives in the footer's own row
+   * as the lowest-priority chip, is replaced by the next echo, and is cleared by the
+   * next submit — the reader has moved on, and the acknowledgement has done its job.
+   * A detach keeps it (the Host never died); a resume does not restore it (it was
+   * never in the log).
+   */
+  private footerEcho: { text: string } | undefined
+  /**
+   * The ephemeral notice: feedback that needs reading now, and is not history.
+   *
+   * A failed command, an operational warning — messages with too much in them for a
+   * footer chip. It takes the telemetry row for its lifetime: no geometry change, no
+   * content hidden, always visible. It does not steal input, and the next notice
+   * replaces it while the next submit clears it. No NotificationManager: one field,
+   * one row.
+   */
+  private notice: { text: string } | undefined
+
+  /**
+   * The Screen that is up, if any. At most one, and never a dialog.
+   *
+   * A Screen replaces the workspace rather than borrowing rows from it, so it is
+   * deliberately *not* part of `dialog`/`dialogQueue`: a queued question cannot
+   * open behind a report, and a report cannot swallow a question. Nothing else in
+   * this class needs to know which Screen it is — `paintScreen` renders whatever
+   * state is here, and every key gate reads this one field (B2.1).
+   */
+  private screen: ScreenState | undefined
+  /**
+   * A Screen's own action Surface (the doctor confirmation).
+   *
+   * It exists so the channel stays separated in both directions: while a Screen is
+   * up, a confirmation it needs must not enter the workspace queue, and a
+   * workspace Surface that arrives meanwhile must not be consumed by the Screen
+   * (AD-3). At most one, resolved by the Screen that opened it.
+   */
+  private screenSurface: ConfirmDialog | undefined
+  /** Resolver for `screenSurface`, so closing it always settles its promise. */
+  private screenSurfaceResolve: ((value: 'y' | 'n' | 'cancel') => void) | undefined
+  /**
+   * Whether the next Screen frame must establish the whole picture.
+   *
+   * True when a Screen opens and after a reattach: the terminal is empty or holds
+   * an unrelated frame, and one full paint is both cheaper and less surprising than
+   * a partial one against unknown contents. Every later frame is incremental.
+   */
+  private screenNeedsFullPaint = true
+  /** The strip's last painted text, so an unchanged strip is not re-sent. */
+  private lastScreenStrip = ''
+
+  /**
+   * The rows the transient layer covers, 1-based and inclusive of `top`..`top+rows-1`.
+   *
+   * The layer is drawn over the transcript, so anything the frame registers as
+   * clickable or selectable below this line is a target the reader cannot see.
+   * The mouse handlers already refuse to start while a surface owns the keyboard;
+   * this makes the maps themselves honest, so a later change cannot introduce
+   * click-through by forgetting that gate. B1.2 widened what the layer carries —
+   * a question and a control-plane picker both land here — but not what it means:
+   * covered rows are hidden, never re-defined, and the composer's boundary is
+   * always below the last of them.
+   */
+  private interactionRegion: { top: number; rows: number } | undefined
+  /**
+   * The rows the live tail covers, 1-based, same convention as the layer above.
+   *
+   * The tail is a *projection* of runtime state (streaming text, the wait card),
+   * not history: it is drawn over the bottom of the window and owns no source row.
+   * Rows under it are hidden, so — exactly like the interaction layer — nothing
+   * behind them may stay a click, drop or link target.
+   */
+  private liveTailRegion: { top: number; rows: number } | undefined
+  /**
+   * The interaction row that must stay visible when the layer has to window
+   * itself (the highlighted option): on a short terminal the list is scrolled to
+   * the selection instead of being clipped at the bottom.
+   */
+  private dialogFocusLine: number | undefined
   /** Where a drag started; the run it belongs to decides what can be selected. */
   private mouseAnchor: SelectionPoint | undefined
   /**
@@ -1715,6 +2307,17 @@ export class SshTui {
     return this.paintedLinkHitsByRow
   }
   private streamingReasoning: { kind: 'streaming-reasoning'; expanded: boolean } | undefined
+  /**
+   * The reader's expansion choice for the live thinking card, for this turn.
+   *
+   * A turn thinks in phases: think, call a tool, think again. Each phase used to
+   * start a fresh collapsed card, so a reader who had just expanded the card being
+   * written watched it fold itself shut at the next phase — "the thinking card
+   * cannot be expanded" as the reader experiences it, even though each individual
+   * card could be. The choice is the reader's, it belongs to the turn, and
+   * `turn/start` is the only thing that resets it.
+   */
+  private reasoningExpandedChoice: boolean | undefined
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
   /**
@@ -1764,7 +2367,13 @@ export class SshTui {
    * mean touching the filesystem on every repaint.
    */
   private rosterMissing = false
-  /** Screen row of the health chip in the status strip, for click-to-doctor. */
+  /**
+   * Screen row of the install warning, for click-to-doctor.
+   *
+   * It is a chip on the status row like any other — that row is the last line of
+   * the frame, so its index is the frame's last row — and clicking anywhere on it
+   * opens the report that explains it.
+   */
   private healthChipRow: number | undefined
   /** How much colour this terminal can take (see `color-depth`). */
   private readonly colorDepth: ColorDepth
@@ -1786,6 +2395,44 @@ export class SshTui {
   /** Approvals refused because nobody could confirm them (a subset of denials). */
   private detachedDeniedCount = 0
   /** Questions waiting for a display right now — their cards do not exist yet. */
+  /**
+   * The questions each `ask_user_question` call recorded, and the cards drawn for
+   * them.
+   *
+   * Keyed by call *and* question id: one call carries a batch, and two calls may
+   * reuse a question id. The card is the presentation only — the Session's
+   * projection is what says whether a question is still answerable and what it was
+   * answered with, so a replayed session draws the same card a lived one did.
+   */
+  private readonly askedByCall = new Map<string, readonly AskUserQuestionItem[]>()
+  private readonly questionCards = new Map<string, Extract<Row, { kind: 'question' }>>()
+  /**
+   * Every plan-relevant durable event of this session, in order (B2.5).
+   *
+   * The plan artifact is a *projection* of these, so nothing here is plan state: the
+   * fold decides, and the transcript row, the dock and the review Surface all read
+   * the result. `live` marks the events that arrived from the running Host, because
+   * only they can carry an unanswered review (a resumed process never finishes one).
+   */
+  private planEvents: PlanEvent[] = []
+  /** The folded artifacts. Recomputed whenever `planEvents` grows. */
+  private planArtifacts: PlanArtifact[] = []
+  /** The state last *said* in the transcript per artifact, so a transition is one row. */
+  private readonly planAnnounced = new Map<string, PlanState>()
+  /**
+   * The approvals the Session log has recorded, by the Harness's own `id`.
+   *
+   * `approval/asked` states the request (and the tool call it guards),
+   * `approval/decided` states the outcome, and the two are joined here so a
+   * decision that arrives before its row exists — or a row that arrives after both
+   * — still lands on the same card. Nothing is written back: the log is the
+   * Harness's, and this plugin keeps no approval history of its own (B2.4).
+   */
+  private readonly approvalAsked = new Map<string, { callId?: string; toolName: string; reason?: string }>()
+  /** Approvals resolved before their tool card existed, waiting for it. */
+  private readonly pendingApprovalByCall = new Map<string, ToolApproval>()
+  /** Cards that exist only because a live request opened them (no durable call id). */
+  private liveQuestionSeq = 0
   private queuedQuestions = 0
   /** When the current detached wait began, so the reconnect can say how long. */
   private questionWaitSince: number | undefined
@@ -1800,6 +2447,13 @@ export class SshTui {
    */
   private sshSession = false
   private paintProbed = false
+  /**
+   * Where {@link paintIntervalMs} came from: a measured round trip, an explicit
+   * `DSH_TUI_PAINT_MS`, or a local TTY's constant. Only the *unprobed SSH* case is
+   * an unknown link, and only that case falls back to
+   * {@link RESIZE_UNKNOWN_LINK_BUDGET_MS}.
+   */
+  private paintCadence: PaintCadenceSource = 'unprobed'
   private paintRttMs: number | undefined
   /** The last few measured round-trips; the chip and the budget use their median. */
   private paintRttHistory: number[] = []
@@ -1881,32 +2535,32 @@ export class SshTui {
     this.paintIntervalMs = resolvePaintIntervalMs(config.paintIntervalMs, process.env, {
       ssh: this.paintLink === 'ssh',
     })
-    this.pushRow({ kind: 'brand-logo' })
-    this.pushRow({ kind: 'system', text: t('boot.banner') })
-    this.pushRow({ kind: 'system', text: t('boot.help') })
+    this.pushRow(represent('boot', { kind: 'brand-logo' }))
+    this.pushRow(represent('boot', { kind: 'system', text: t('boot.banner') }))
+    this.pushRow(represent('boot', { kind: 'system', text: t('boot.help') }))
     // The roster is a profile-layer row, so an install that predates it (or an
     // in-app update, which only runs `dsh plugin add`) boots without one. Say
     // so at boot: the banner's localized default hides the missing service, and
     // the loss is not only `/mode` — the preset-owned tools are absent too.
     const keyReport = keymapReport(this.keymap)
     if (keyReport !== undefined) {
-      this.pushRow({ kind: 'system', text: t('keys.report', { report: keyReport }) })
+      this.pushRow(represent('boot', { kind: 'system', text: t('keys.report', { report: keyReport }) }))
     }
     this.refreshRosterHealth()
     if (this.rosterMissing) {
       // The missing thing differs by host line: a roster the profile can mount,
       // or the agent-plane rows a 0.1.7 terminal profile owns. The advice has to
       // match what `/mode fix` will actually write.
-      this.pushRow({
+      this.pushRow(represent('boot', {
         kind: 'system',
         text: t(this.settingsGeneration === 'forms' ? 'mode.bootFormsMissing' : 'mode.bootMissing'),
-      })
+      }))
     }
     if (config.cwdNotice !== undefined && config.cwdNotice !== '') {
-      this.pushRow({ kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice })
+      this.pushRow(represent('boot', { kind: /进入|Entered/u.test(config.cwdNotice) ? 'system' : 'error', text: config.cwdNotice }))
     }
     if (config.restoredRoute !== undefined) {
-      this.pushRow({ kind: 'system', text: sessionRouteNotice(config.restoredRoute) })
+      this.pushRow(represent('session-route', { kind: 'system', text: sessionRouteNotice(config.restoredRoute) }))
     }
     // Windows only, and only on the fallback path: with no PowerShell there is
     // no hidden console, so the Host is a direct child and closing the window
@@ -1914,10 +2568,10 @@ export class SshTui {
     // out by closing the window mid-turn. A bootstrapped Windows Host and every
     // POSIX Host keep running, so neither says anything.
     if (isTuiHostProcess() && !hostHasOwnConsole()) {
-      this.pushRow({ kind: 'system', text: t('boot.directHost') })
+      this.pushRow(represent('boot', { kind: 'system', text: t('boot.directHost') }))
     }
     for (const notice of config.launchNotices ?? []) {
-      this.pushRow({ kind: notice.kind, text: notice.text })
+      this.pushRow(represent('boot', { kind: notice.kind, text: notice.text }))
     }
   }
 
@@ -1928,7 +2582,7 @@ export class SshTui {
     this.bindAgentEvents()
     void this.ensureDisplayHost().catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: t('boot.displayFailed', { error: errorChain(error) }) })
+      this.pushRow(represent('boot', { kind: 'error', text: t('boot.displayFailed', { error: errorChain(error) }) }))
       this.markDirty()
     })
     if (this.headlessDisplay) {
@@ -2012,12 +2666,12 @@ export class SshTui {
     }).catch(() => {})
     void this.maybeRunOnboarding().catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: t('onboard.checkFailed', { error: errorChain(error) }) })
+      this.pushRow(represent('boot', { kind: 'error', text: t('onboard.checkFailed', { error: errorChain(error) }) }))
       this.markDirty()
     })
     void this.syncSubagentToProvider(this.currentProviderId()).catch((error: unknown) => {
       if (this.disposed) return
-      this.pushRow({ kind: 'error', text: t('onboard.syncSubFailed', { error: errorChain(error) }) })
+      this.pushRow(represent('boot', { kind: 'error', text: t('onboard.syncSubFailed', { error: errorChain(error) }) }))
       this.markDirty()
     })
     void this.refreshQuota({ reason: 'start', announce: false }).catch(() => {
@@ -2048,25 +2702,25 @@ export class SshTui {
       const picked = answer.selected[0]
       if (picked === t('update.skip')) {
         await this.persistSkippedUpdate(info.latest)
-        this.pushRow({ kind: 'system', text: t('update.skipDesc', { latest: info.latest }) })
+        this.pushRow(represent('update-feedback', { kind: 'system', text: t('update.skipDesc', { latest: info.latest }) }))
         this.markDirty()
         return
       }
       if (picked !== t('update.now')) return
-      this.pushRow({ kind: 'system', text: t('update.installing', { latest: info.latest }) })
+      this.pushRow(represent('update-feedback', { kind: 'system', text: t('update.installing', { latest: info.latest }) }))
       this.markDirty()
       const result = await installPluginLatest(info.profile, info.latest)
       if (this.disposed) return
       if (result.ok) {
-        this.pushRow({ kind: 'system', text: t('update.installed', { latest: info.latest, profile: info.profile }) })
+        this.pushRow(represent('update-feedback', { kind: 'system', text: t('update.installed', { latest: info.latest, profile: info.profile }) }))
       } else {
-        this.pushRow({ kind: 'error', text: t('update.failed', { error: result.output === '' ? info.command : result.output }) })
-        this.pushRow({ kind: 'system', text: t('update.manual', { command: info.command }) })
+        this.pushRow(represent('update-error', { kind: 'error', text: t('update.failed', { error: result.output === '' ? info.command : result.output }) }))
+        this.pushRow(represent('update-feedback', { kind: 'system', text: t('update.manual', { command: info.command }) }))
       }
       this.markDirty()
     } catch {
       if (this.disposed) return
-      this.pushRow({ kind: 'system', text: info.notice })
+      this.pushRow(represent('update-feedback', { kind: 'system', text: info.notice }))
       this.markDirty()
     }
   }
@@ -2353,6 +3007,11 @@ export class SshTui {
       if (this.agent.status === 'running' && !this.dirty && now - this.lastPaintAt >= 1000) {
         this.dirty = true
       }
+      // A collapsing resize burst paints from its own schedule (see
+      // `requestResizePaint`); the cadence timer picking the frame up as well
+      // would undo the collapse.
+      if (this.dirty && this.resizeBurstOpen()) return
+      this.widenPastResizeTail(now)
       if (this.dirty) {
         this.lastPaintAt = now
         this.render()
@@ -2365,16 +3024,19 @@ export class SshTui {
     const envOverride = Number.parseInt(process.env.DSH_TUI_PAINT_MS ?? '', 10)
     if (Number.isFinite(envOverride) && envOverride > 0) {
       this.paintProbed = false
+      this.paintCadence = 'configured'
       this.markDirty()
       return
     }
     if (this.paintLink !== 'ssh') {
+      this.paintCadence = 'local'
       this.markDirty()
       return
     }
     const rtt = await probeTerminalRttMs()
     if (this.disposed) return
     this.paintProbed = rtt !== undefined
+    this.paintCadence = rtt === undefined ? 'unprobed' : 'measured'
     this.paintRttMs = rtt
     this.paintIntervalMs = resolvePaintIntervalMs(undefined, {}, { ssh: true, rttMs: rtt })
     this.markDirty()
@@ -2390,12 +3052,14 @@ export class SshTui {
     const parked: Array<{ session: { id: SessionId }; event: SessionEvent }> = []
     this.replayQueue = parked
     this.replaying = true
+    this.loadingHistory = true
     try {
       await forEachSessionEventAsync(this.agent.session, (event) => {
         this.applySessionEvent(this.agent.session, event)
       }, REPLAY_YIELD_EVERY, () => this.disposed)
     } finally {
       this.replaying = false
+      this.loadingHistory = false
       this.replayQueue = undefined
       // Replay synthesizes chips from parent spawn tools; it never sees
       // `subagent/start`, so those descriptions must not sit in the live queue
@@ -2452,10 +3116,12 @@ export class SshTui {
     const credentials = this.ctx.get('credentials')
     const provider = this.currentProviderId()
     if (providerUsesLocalOAuth(provider)) {
-      this.pushRow({
+      // Workspace feedback *about* setup — not the wizard's own surface, which is the
+      // setup Screen (B2.6 §12). These rows are the command plane's.
+      this.pushRow(represent('command-status', {
         kind: 'system',
         text: t('onboard.oauthHint', { kind: describeProviderRoute(provider).kind, provider }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -2482,22 +3148,33 @@ export class SshTui {
     }
     if (envKey !== undefined && envKey !== '') {
       if (stored || existsSync(DSH_ENV_FILE) || this.resume) {
-        this.pushRow({
+        this.pushRow(represent('command-status', {
           kind: 'system',
           text: t('onboard.envInUse', { env: envRef }),
-        })
+        }))
         this.markDirty()
         return
       }
-      this.pushRow({
+      this.pushRow(represent('runtime-warning', {
         kind: 'system',
         text: t('onboard.envStale', { env: envRef }),
-      })
+      }))
       await this.runOnboarding()
       return
     }
-    if (stored || this.resume) return
-    this.pushRow({ kind: 'system', text: t('onboard.needSetup') })
+    // Nothing is configured and no key is in the environment: this is a first run,
+    // and the wizard is the only thing that can make the session usable at all.
+    //
+    // `this.resume` used to be part of this test, meaning "a resumed session was set
+    // up before". It never means that: the frontend spawns the Host — and the Host is
+    // the only process that paints this — with `--resume=<id>` even for an id it
+    // minted a second earlier (`hostArgvForSession`), so the flag is true on *every*
+    // boot and this guard returned before the wizard could ever open. A fresh install
+    // got an empty workspace, a provider that cannot answer, and no hint that
+    // `/setup` exists. The launch flag is not evidence of configuration; the
+    // credential store is, and that is what `stored` reads.
+    if (stored) return
+    this.pushRow(represent('command-status', { kind: 'system', text: t('onboard.needSetup') }))
     await this.runOnboarding()
   }
 
@@ -2520,6 +3197,8 @@ export class SshTui {
         catalog: undefined,
         providerCursor: 0,
         saving: false,
+        field: '',
+        fieldCursor: 0,
         resolve: (saved) => {
           this.onboardingCompletion = undefined
           resolve(saved)
@@ -2535,9 +3214,10 @@ export class SshTui {
           this.markDirty()
         }
       })
-      this.input = ''
-      this.cursor = 0
-      this.dialog = { kind: 'onboarding' }
+      // A Screen, not a dialog: it replaces the workspace instead of squeezing rows
+      // out of it, it never enters the dialog queue, and nothing about it is painted
+      // into the transcript (B2.6 §1/§2).
+      this.openScreen({ kind: 'setup', title: t('onboard.title'), lines: [], offset: 0 })
       this.markDirty()
     })
     return this.onboardingCompletion
@@ -2547,9 +3227,9 @@ export class SshTui {
     const state = this.onboarding
     if (state === undefined || state.saving) return
     this.onboarding = undefined
-    if (this.dialog?.kind === 'onboarding') this.dialog = undefined
-    this.input = ''
-    this.cursor = 0
+    if (this.screen?.kind === 'setup') this.closeScreen()
+    // The composer is the workspace's: the wizard never wrote to it, so there is
+    // nothing to clear (B2.6 §5 — this used to wipe the reader's draft).
     state.resolve(false)
     this.showNextDialog()
     this.markDirty()
@@ -2621,6 +3301,8 @@ export class SshTui {
     const dialog = this.dialog
     const queued = this.dialogQueue.splice(0)
     this.dialog = undefined
+    this.dialogRole = PICKER_ROLE
+    this.releaseBorrowedText()
     if (dialog !== undefined) {
       if (dialog.kind === 'confirm') {
         dialog.resolve('cancel')
@@ -2631,10 +3313,10 @@ export class SshTui {
       }
     }
     for (const pending of queued) {
-      if (pending.kind === 'confirm') {
-        pending.resolve('cancel')
-      } else if (pending.kind === 'questions') {
-        pending.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
+      if (pending.dialog.kind === 'confirm') {
+        pending.dialog.resolve('cancel')
+      } else if (pending.dialog.kind === 'questions') {
+        pending.dialog.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
       }
     }
     this.commandAbort?.abort()
@@ -2676,7 +3358,7 @@ export class SshTui {
         windowsTerminal: (process.env.WT_SESSION ?? '') !== '',
       },
     })
-    this.pushRow({ kind: 'diag', text: formatDiag(snapshot).join('\n') })
+    this.openReport('diag', formatDiag(snapshot))
     this.markDirty()
   }
 
@@ -2734,8 +3416,12 @@ export class SshTui {
   private async runDoctorCommand(arg: string, fixRequested: boolean): Promise<void> {
     const profile = profileFromArgv()
     const facts = await this.collectDoctorFacts(profile)
-    this.pushRow({ kind: 'diag', text: formatDoctorReport(facts, doctorChecks(facts)).join('\n') })
-    this.markDirty()
+    // The report is the Screen; `--fix` then runs *inside* it, so the reader keeps
+    // the checks in front of them while answering the confirmation (AD-3, §4 of the
+    // B2.1 brief). The repair result replaces the hint row rather than pushing a row
+    // behind the Screen: the reader is looking at this screen, and an action nobody
+    // can see the outcome of is the one thing worse than no action.
+    this.openReport('doctor', formatDoctorReport(facts, doctorChecks(facts)))
     if (!fixRequested) return
     await this.repairProfilePatch(rowsToRepair(facts), facts)
   }
@@ -2746,10 +3432,10 @@ export class SshTui {
     const row = ALL_ROSTER_ROWS.find(candidate =>
       candidate.id === name || (candidate.name ?? '').toLowerCase() === name)
     if (row === undefined) {
-      this.pushRow({
+      this.pushRow(represent('command-misuse', {
         kind: 'error',
         text: t('doctor.fix.unknownRow', { row: arg.trim(), rows: ALL_ROSTER_ROWS.map(candidate => candidate.id).join(', ') }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -2772,7 +3458,7 @@ export class SshTui {
     const added = roster?.added ?? []
     const removed = duplicates?.removed ?? []
     if (added.length === 0 && removed.length === 0) {
-      this.pushRow({ kind: 'system', text: t('doctor.fix.none') })
+      this.pushRow(represent('doctor-result', { kind: 'system', text: t('doctor.fix.none') }))
       this.markDirty()
       return
     }
@@ -2780,16 +3466,15 @@ export class SshTui {
       ...added.map(id => `+${id}`),
       ...removed.map(entry => `-${entry.id} (line ${entry.line})`),
     ].join(' ')
-    const answer = await new Promise<'y' | 'n' | 'cancel'>(resolve => {
-      this.openConfirm(
-        t('doctor.fix.confirm', { changes }),
-        t('doctor.fix.confirmHint', { path: facts.patchPath }),
-        resolve,
-      )
-    })
+    const prompt = t('doctor.fix.confirm', { changes })
+    const hint = t('doctor.fix.confirmHint', { path: facts.patchPath })
+    // Whichever channel owns the screen answers this: inside the doctor Screen it
+    // is the Screen's own Surface (never the workspace queue), and `/fix` outside a
+    // Screen keeps the ordinary confirmation it always had.
+    const answer = await (this.askScreenConfirm(prompt, hint)
+      ?? new Promise<'y' | 'n' | 'cancel'>(resolve => { this.openConfirm(prompt, hint, resolve) }))
     if (answer !== 'y') {
-      this.pushRow({ kind: 'system', text: t('doctor.fix.cancelled') })
-      this.markDirty()
+      this.reportActionResult('doctor', t('doctor.fix.cancelled'))
       return
     }
     try {
@@ -2801,22 +3486,57 @@ export class SshTui {
       } else {
         await ensureRosterRows(facts.dshHome, facts.profile, rows)
       }
-      this.pushRow({
-        kind: 'system',
-        text: [
-          t('doctor.fix.applied', {
-            added: added.join(', ') || '—',
-            removed: removed.map(entry => entry.id).join(', ') || '—',
-            path: facts.patchPath,
-          }),
-          ...(backup === undefined ? [] : [t('doctor.fix.backup', { path: backup })]),
-          t('doctor.fix.restart', { profile: facts.profile }),
-        ].join('\n'),
-      })
+      const done = [
+        t('doctor.fix.applied', {
+          added: added.join(', ') || '—',
+          removed: removed.map(entry => entry.id).join(', ') || '—',
+          path: facts.patchPath,
+        }),
+        ...(backup === undefined ? [] : [t('doctor.fix.backup', { path: backup })]),
+        t('doctor.fix.restart', { profile: facts.profile }),
+      ]
+      // The result replaces the Screen's hint row and is appended to its body, so
+      // the reader sees what changed on the screen they were reading. One row is
+      // still written to the transcript: a repair edits the user's install, and
+      // that is a durable fact about the session, not a report.
+      const { screen } = this.resultChannel()
+      if (screen !== undefined) {
+        screen.lines = [...screen.lines, ...done.map(text => ({ kind: 'system' as const, text }))]
+        screen.notice = done[0] ?? t('doctor.fix.applied', { added: '', removed: '', path: facts.patchPath })
+      }
+      this.pushRow(represent('doctor-result', { kind: 'system', text: done.join('\n') }))
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('doctor.fix.failed', { error: errorChain(error) }) })
+      this.pushRow(represent('doctor-result', { kind: 'error', text: t('doctor.fix.failed', { error: errorChain(error) }) }))
     }
     this.markDirty()
+  }
+
+  /**
+   * Where an action's outcome is reported: the Screen that asked, or a row.
+   *
+   * A Screen's own action is answered *on the Screen* — the reader is looking at it,
+   * and the row it would otherwise push lands behind their own view. With no Screen
+   * up (the same code path serves `/fix`), the answer is an ordinary row.
+   */
+  private resultChannel(): { screen: ScreenState | undefined; push: (text: string) => void } {
+    return {
+      screen: this.screen,
+      push: (text: string) => {
+        this.pushRow(represent('doctor-result', { kind: 'system', text }))
+        this.markDirty()
+      },
+    }
+  }
+
+  /** Report a Screen action's outcome, or fall back to a row. */
+  private reportActionResult(_report: ReportKind, text: string): void {
+    const { screen, push } = this.resultChannel()
+    if (screen !== undefined) {
+      screen.notice = text
+      this.markDirty()
+      return
+    }
+    push(text)
   }
 
   /** Human-facing exit with goodbye and flush; called from key handling. */
@@ -3061,11 +3781,7 @@ export class SshTui {
           this.attachRelayDisplay()
           return
         }
-        if (changed) {
-          this.forceFullPaint = true
-          this.dirty = true
-          this.paint()
-        }
+        if (changed) this.requestResizePaint()
       },
       onRtt: (rttMs) => {
         this.applyProbedRtt(rttMs)
@@ -3122,10 +3838,10 @@ export class SshTui {
       parts.push(t('attach.questionWaited', { waited: formatShortDuration(Date.now() - this.questionWaitSince) }))
     }
     if (parts.length === 0) return
-    this.pushRow({
+    this.pushRow(represent('away-summary', {
       kind: 'system',
       text: t('attach.awaySummary', { away: formatShortDuration(awayMs), parts: parts.join(' · ') }),
-    })
+    }))
   }
 
   /** Say the user was away, and what happened while they were. */
@@ -3134,10 +3850,10 @@ export class SshTui {
     this.displayDrops += 1
     const away = Date.now() - this.detachedAt
     this.detachedAt = undefined
-    this.pushRow({
+    this.pushRow(represent('attach-notice', {
       kind: 'system',
       text: t('attach.reconnected', { count: this.displayDrops, away: formatShortDuration(away) }),
-    })
+    }))
     this.pushAwaySummary(away)
   }
 
@@ -3256,12 +3972,121 @@ export class SshTui {
     return findToolRowByCallId(this.rows, callId)
   }
 
+  /**
+   * The approval state of one tool call (B2.4).
+   *
+   * Approval has no row of its own: it is a field of the card for the call it
+   * guarded. A decision can arrive before the card does (a `tool/result`-only
+   * fragment, a resumed log read out of order), so an unresolved call id is kept
+   * until its row appears rather than dropped.
+   * @param callId - the tool call the approval belongs to.
+   * @param next - the fact being applied, or undefined to read it back.
+   * @returns the field after the merge.
+   */
+  private setToolApproval(callId: string, next: ToolApproval): ToolApproval {
+    const row = this.findToolRowByCallId(callId)
+    if (row === undefined) {
+      const merged = mergeApproval(this.pendingApprovalByCall.get(callId), next)
+      this.pendingApprovalByCall.set(callId, merged)
+      return merged
+    }
+    const merged = mergeApproval(row.approval, next)
+    if (!sameApproval(row.approval, merged)) {
+      row.approval = merged
+      this.markDirty()
+    }
+    return merged
+  }
+
+  /**
+   * The weakest approval reading there is, and the only one allowed to be weak.
+   *
+   * A log from before the Harness recorded its audit pair still says *something*
+   * about a refused tool: the tool never ran, and the reason is the Harness's own
+   * sentence for an approval that came back rejected or cancelled. That is a
+   * reading, not a decision, so it is filed as `inferred` — and it can only ever
+   * produce `rejected`/`unknown`, never `approved`: a tool that ran proves nothing,
+   * because a tool nobody had to approve runs too.
+   *
+   * Anything already known from a stronger source wins, which is also what keeps a
+   * live decision from being rewritten by the sentence it produced.
+   * @param row - the card that just settled.
+   * @param message - the tool result's message.
+   * @param error - the result's error, when it has one.
+   */
+  private inferApprovalFromResult(
+    row: Extract<Row, { kind: 'tool' }>,
+    message: { content?: readonly { type: string; text?: string }[]; isError?: boolean },
+  ): void {
+    if (row.approval !== undefined) return
+    const state = inferredApprovalFromResult(collectText(message.content ?? []))
+    if (state === undefined) return
+    // A refusal the audit pair can *prove* was an approval is read from the pair
+    // instead; this branch exists only for the logs that predate it.
+    if ([...this.approvalAsked.values()].some(asked => asked.callId === row.callId)) return
+    this.setToolApproval(row.callId, { state, provenance: 'inferred' })
+  }
+
+  /** Hand a card the approval that was resolved before the card existed. */
+  private adoptPendingApproval(row: Extract<Row, { kind: 'tool' }>): void {
+    const pending = this.pendingApprovalByCall.get(row.callId)
+    if (pending === undefined || row.approval !== undefined) return
+    row.approval = pending
+  }
+
   private findMergeableToolRow(next: { name: string; args: string }): Extract<Row, { kind: 'tool' }> | undefined {
     return findMergeableToolRow(this.rows, next)
   }
 
   /** Append one transcript row, bounding memory on long sessions. */
-  private pushRow(row: Row): void {
+  /**
+   * The only way a line enters the transcript.
+   *
+   * It takes a `Representation` — a row *plus* the policy that produced it — and not
+   * a `Row`, so a creation site cannot skip the classification: a bare row is a type
+   * error, and a source id with no policy is one too (`RepresentationSource` is the
+   * policy table's keys). The policy is copied onto the row here, which is what makes
+   * a real transcript auditable afterwards: `auditRepresentations(this.rows)` can
+   * then answer how many lines are history and how many are the Host's own voice.
+   *
+   * A JavaScript caller (a test fixture, an embedder) can still hand over something
+   * that is not a representation. That case is *recorded*, not defaulted: the row is
+   * pushed with no metadata and `unclassifiedRepresentations` counts it, so the audit
+   * fails loudly instead of quietly calling an unknown line durable.
+   */
+  private pushRow(representation: Representation): void {
+    const classified = isRepresentation(representation)
+    // Routing, not classification (B2.3b): the policy says where this representation
+    // is shown, so a control-plane confirmation cannot be a transcript row at one
+    // call site and a footer echo at the next. Only `transcript` reaches the log's
+    // view; the other two are Host-local and never touch the rows at all.
+    if (classified && representation.meta.destination !== 'transcript') {
+      const text = lineModeLines(representation.row).join(' · ')
+      if (this.lineMode) {
+        // Line mode has no footer and no covered row: its feedback has always been
+        // text, and losing it would be a regression in the mode that has the least
+        // chrome to spare.
+        this.appendRow(representation)
+        return
+      }
+      if (representation.meta.destination === 'echo') this.footerEcho = { text }
+      else this.notice = { text }
+      this.markDirty()
+      return
+    }
+    this.appendRow(representation)
+  }
+
+  /** Append one classified row to the transcript (the `transcript` destination). */
+  private appendRow(representation: Representation): void {
+    const classified = isRepresentation(representation)
+    const row = classified ? representation.row : (representation as unknown as Row)
+    if (classified) {
+      ;(row as Row & { representation?: RepresentationMeta }).representation = representation.meta
+    }
+    // A row that arrived without a policy keeps no metadata: the audit reads the
+    // rows back, so it shows up as `unclassified` there rather than being counted
+    // twice or quietly defaulted.
     this.rows.push(row)
     if (this.lineMode) {
       // Appended here rather than from the render timer: a timer can coalesce
@@ -3277,6 +4102,8 @@ export class SshTui {
       : this.rows.indexOf(this.focusedRow)
     const removed = boundTranscriptRows(this.rows)
     if (removed === 0) return
+    // The cutoff is a distance from the front, so it moves with the front.
+    this.clearedRows = Math.max(0, this.clearedRows - removed)
     if (focusedIndex !== undefined && focusedIndex < removed) this.focusedRow = null
   }
 
@@ -3300,7 +4127,7 @@ export class SshTui {
   private collapsibleRows(): CollapsibleBlock[] {
     const compact = this.isCompactView()
     if (compact) {
-      const rows: CollapsibleBlock[] = this.rows.filter(
+      const rows: CollapsibleBlock[] = this.visibleRows().filter(
         (row): row is Extract<Row, { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'changes' }> =>
           row.kind === 'subagent'
           || row.kind === 'plan'
@@ -3308,7 +4135,7 @@ export class SshTui {
           || row.kind === 'goal'
           || row.kind === 'compaction'
           || row.kind === 'changes')
-      for (const burst of compactToolBursts(this.rows)) {
+      for (const burst of compactToolBursts(this.visibleRows())) {
         const callAnchor = burst.groups.calls.at(-1)
         const editAnchor = burst.groups.edits.at(-1)
         if (callAnchor !== undefined) rows.push(callAnchor)
@@ -3316,7 +4143,7 @@ export class SshTui {
       }
       return rows
     }
-    const rows: CollapsibleBlock[] = this.rows.filter(
+    const rows: CollapsibleBlock[] = this.visibleRows().filter(
       (row): row is Extract<Row, { kind: 'reasoning' } | { kind: 'tool' } | { kind: 'subagent' } | { kind: 'plan' } | { kind: 'question' } | { kind: 'goal' } | { kind: 'compaction' } | { kind: 'prompt' } | { kind: 'changes' }> =>
         row.kind === 'reasoning'
         || row.kind === 'tool'
@@ -3328,8 +4155,7 @@ export class SshTui {
         || row.kind === 'prompt'
         || row.kind === 'changes')
     if (this.streaming !== undefined && this.streaming.reasoning !== '') {
-      this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
-      rows.push(this.streamingReasoning)
+      rows.push(this.liveThinkingBlock())
     }
     return rows
   }
@@ -3353,6 +4179,19 @@ export class SshTui {
     const known = new Set<FocusTarget>(this.rows)
     for (const row of collapsible) if (!known.has(row)) ring.push(row)
     return ring
+  }
+
+  /**
+   * The live thinking block, created on first use.
+   *
+   * Expanded or not is the reader's choice for the turn, not this frame's: see
+   * `reasoningExpandedChoice`.
+   */
+  private liveThinkingBlock(): { kind: 'streaming-reasoning'; expanded: boolean } {
+    return this.streamingReasoning ??= {
+      kind: 'streaming-reasoning',
+      expanded: this.reasoningExpandedChoice === true,
+    }
   }
 
   private spinnerFrame(periodMs = 120): string {
@@ -3418,7 +4257,159 @@ export class SshTui {
   }
 
   private findLivePlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
-    return findLivePlanRow(this.rows)
+    return livePlanArtifact(this.planArtifacts) === undefined ? undefined : this.dockedPlanRow()
+  }
+
+  /**
+   * Keep the plan log, and re-fold when it grew.
+   *
+   * Only the events the fold reads are kept (B2.5). They are rare — a plan mode
+   * switch, a todo snapshot, a review — so a whole re-fold per plan event stays
+   * trivial, and it keeps the projection a *pure function of the log* rather than a
+   * running tally that could drift from one.
+   */
+  private recordPlanEvent(event: SessionEvent): void {
+    if (!PLAN_EVENT_TYPES.has(String(event.type))) return
+    const seq = typeof event.seq === 'number' ? event.seq : undefined
+    const data = event.data as PlanEvent['data']
+    if (String(event.type) === 'tool/call' && String(data?.name ?? '') !== 'exit_plan_mode') return
+    this.planEvents.push({
+      type: String(event.type),
+      ...(seq === undefined ? {} : { seq }),
+      ...(data === undefined ? {} : { data }),
+      live: !this.replaying,
+    })
+    this.syncPlanArtifacts()
+  }
+
+  /**
+   * The projection, onto the rows three readers share.
+   *
+   * One artifact, one row: the row is the artifact's *reference* in the transcript
+   * (its lifecycle summary and, when expanded, its steps), the dock paints the live
+   * one, and the review Surface is the dialog. None of the three keeps plan state of
+   * its own (AD-15): they all read what this fold decided.
+   */
+  private syncPlanArtifacts(): void {
+    this.planArtifacts = foldPlanArtifacts(this.planEvents)
+    for (const artifact of this.planArtifacts) {
+      const row = this.planRowFor(artifact.id) ?? this.createPlanRow(artifact)
+      const live = artifactIsLive(artifact)
+      row.active = artifact.active
+      row.pending = artifact.pending
+      row.todos = [...artifact.steps]
+      row.state = artifact.state
+      row.provenance = artifact.provenance
+      if (artifact.body !== undefined) row.planMarkdown = artifact.body
+      row.reviewFeedback = artifact.review?.feedback
+      // The nudge's two display flags follow the *revision*, exactly as they used to
+      // follow a todo patch: a new snapshot re-opens the question, and only a list
+      // that is fully closed lets a later one ask again.
+      const revisionId = artifact.revisions.at(-1)?.id
+      if (revisionId !== undefined && row.lastRevisionId !== revisionId) {
+        const previous = new Map((artifact.revisions.at(-2)?.steps ?? []).map(step => [step.content, step.status]))
+        row.lastRevisionId = revisionId
+        row.turnLeftOpen = false
+        if (artifact.steps.length > 0 && artifact.steps.every(step => step.status === 'completed')) {
+          row.nudged = false
+          this.planNudgePending = false
+        }
+        if (this.lineMode) {
+          // Line mode is an append-only log: a row that is *updated* in place would
+          // never reach it, so each revision prints what it changed. The tool replaces
+          // the whole list, which is why this prints the difference rather than the
+          // list (a long plan would otherwise fill the log on every status flip).
+          const changed = artifact.steps.filter(step => previous.get(step.content) !== step.status)
+          if (changed.length > 0) {
+            const appended = appendRow(changed.map(step => `[${step.status}] ${step.content}`))
+            if (appended !== '') this.writeLineMode(appended)
+          }
+        }
+      }
+      row.archived = !live
+      if (!live) row.expanded = false
+      else if (row.expanded === false && planShouldDefaultExpand({ active: artifact.active, pending: artifact.pending, todos: artifact.steps })) {
+        row.expanded = true
+      }
+      this.announcePlanTransition(artifact)
+    }
+  }
+
+  /** The row that stands for one artifact, if it has been drawn yet. */
+  private planRowFor(id: string): Extract<Row, { kind: 'plan' }> | undefined {
+    return this.rows.findLast((row): row is Extract<Row, { kind: 'plan' }> => row.kind === 'plan' && row.artifactId === id)
+  }
+
+  /** The artifact a docked row belongs to, when the workspace should show one. */
+  private dockedPlanRow(): Extract<Row, { kind: 'plan' }> | undefined {
+    const artifact = livePlanArtifact(this.planArtifacts)
+    return artifact === undefined ? undefined : this.planRowFor(artifact.id)
+  }
+
+  private createPlanRow(artifact: PlanArtifact): Extract<Row, { kind: 'plan' }> {
+    const row: Extract<Row, { kind: 'plan' }> = {
+      kind: 'plan',
+      artifactId: artifact.id,
+      active: artifact.active,
+      pending: artifact.pending,
+      todos: [...artifact.steps],
+      state: artifact.state,
+      provenance: artifact.provenance,
+      expanded: planShouldDefaultExpand({ active: artifact.active, pending: artifact.pending, todos: artifact.steps }),
+      archived: false,
+    }
+    this.pushRow(represent('plan-row', row))
+    return row
+  }
+
+  /**
+   * Say one lifecycle transition, once.
+   *
+   * The transcript keeps the artifact's *lifecycle*: entering plan mode, a review's
+   * answer, leaving the mode. It does not keep a second copy of the plan body — that
+   * is the artifact's (the dock while it is live, the review Surface while it is under
+   * review, this row's overlay afterwards) — and a transition is never announced
+   * twice, which is what makes the fold idempotent under a re-`sync`.
+   */
+  private announcePlanTransition(artifact: PlanArtifact): void {
+    const said = this.planAnnounced.get(artifact.id)
+    if (said === artifact.state) return
+    this.planAnnounced.set(artifact.id, artifact.state)
+    if (said === undefined) {
+      // The first sight of an artifact: entering plan mode is worth one line, a bare
+      // todo list is not (the model writes one during ordinary work).
+      if (artifact.openedBy === 'plan-mode') this.pushRow(represent('plan-lifecycle', { kind: 'system', text: t('plan.entered') }))
+      return
+    }
+    if (artifact.state === 'rejected' && artifact.review?.outcome === 'rejected') {
+      this.pushRow(represent('plan-lifecycle', {
+        kind: 'system',
+        text: artifact.review.feedback === undefined
+          ? t('plan.reviewRejected')
+          : t('plan.reviewRejectedFeedback', { feedback: artifact.review.feedback }),
+      }))
+      return
+    }
+    if (artifact.state === 'rejected' && artifact.review?.outcome === 'dismissed') {
+      this.pushRow(represent('plan-lifecycle', { kind: 'system', text: t('plan.reviewDismissed') }))
+      return
+    }
+    if (artifact.state === 'approved' || artifact.state === 'executing') {
+      // `approved` and `executing` are two states of *one* transition — the review came
+      // back and the mode then left — so only the first of them is announced. (This
+      // pushed the line twice: the second state found the same review outcome.)
+      if (artifact.review?.outcome === 'approved' && said !== 'approved' && said !== 'executing') {
+        this.pushRow(represent('plan-lifecycle', { kind: 'system', text: t('plan.reviewApproved') }))
+      }
+      return
+    }
+    // `unknown` is deliberately silent: a live review is `reviewing` while a replay of
+    // the same unfinished call is `unknown`, and announcing the two differently made a
+    // resumed session print a line the lived one never had. The artifact's own row says
+    // what is known; the transcript only announces what the session settled.
+    if (artifact.state === 'abandoned') {
+      this.pushRow(represent('plan-lifecycle', { kind: 'system', text: t('plan.exited') }))
+    }
   }
 
   /** Older / finished plans stay in the scrolling transcript. */
@@ -3426,54 +4417,14 @@ export class SshTui {
     archiveStalePlans(this.rows, keep)
   }
 
-  private upsertPlanRow(patch: Partial<Extract<Row, { kind: 'plan' }>>): Extract<Row, { kind: 'plan' }> {
-    const existing = this.findLivePlanRow()
-    // A new docked plan only starts when the current one is no longer live
-    // (completed / archived). Re-entering plan mode on the same incomplete
-    // list must keep updating that row, not archive it.
-    if (existing !== undefined && planIsLive(existing)) {
-      Object.assign(existing, patch)
-      existing.archived = false
-      if (patch.todos !== undefined || patch.active !== undefined || patch.pending !== undefined) {
-        existing.turnLeftOpen = false
-        // A patch that leaves items open keeps this episode's reminder spent;
-        // only a list that is fully closed lets a later one ask again.
-        if (!planTurnLeftOpen(existing)) {
-          existing.nudged = false
-          this.planNudgePending = false
-        }
-      }
-      if (!planIsLive(existing)) {
-        existing.archived = true
-        existing.expanded = false
-      } else if (patch.expanded === undefined && planShouldDefaultExpand(existing)) {
-        existing.expanded = true
-      }
-      this.archiveStalePlans(planIsLive(existing) ? existing : undefined)
-      return existing
-    }
-    if (existing !== undefined) {
-      existing.archived = true
-      existing.active = false
-      existing.pending = false
-      existing.expanded = false
-    }
-    const active = patch.active ?? false
-    const pending = patch.pending ?? false
-    const todos = patch.todos ?? []
-    const row: Extract<Row, { kind: 'plan' }> = {
-      kind: 'plan',
-      active,
-      pending,
-      todos,
-      ...(patch.planMarkdown === undefined ? {} : { planMarkdown: patch.planMarkdown }),
-      expanded: planShouldDefaultExpand({ active, pending, todos }),
-      archived: false,
-    }
-    this.pushRow(row)
-    this.archiveStalePlans(row)
-    return row
-  }
+  /**
+   * There used to be a second plan-row writer here (`upsertPlanRow`).
+   *
+   * B2.5 moved every plan row onto the artifact fold — one artifact, one row, and
+   * `syncPlanArtifacts` is the only place a plan row is created — which left this
+   * one with no caller. The B2 final audit removed it rather than leave a second
+   * truth in the file for someone to find and call.
+   */
 
   /** Whether the live plan strip should occupy the workspace footer. */
   private shouldDockPlan(): boolean {
@@ -3494,7 +4445,7 @@ export class SshTui {
     this.planNudgePending = true
     const text = planCloseNudgeText(plan)
     const queued = t('plan.nudgeQueued')
-    this.pushRow({ kind: 'system', text: queued })
+    this.pushRow(represent('plan-notice', { kind: 'system', text: queued }))
     // Plugin notice, not a user turn: the model still sees the follow-up, but
     // the workspace only shows the one-line queued hint — not the todo_write
     // instruction that used to paint as `❯ …`.
@@ -3512,13 +4463,80 @@ export class SshTui {
       plan.nudged = false
       const queuedAt = this.rows.findLastIndex(row => row.kind === 'system' && row.text === queued)
       if (queuedAt >= 0) this.rows.splice(queuedAt, 1)
-      this.pushRow({ kind: 'error', text: t('plan.nudgeFailed', { error: errorChain(error) }) })
+      this.pushRow(represent('plan-notice', { kind: 'error', text: t('plan.nudgeFailed', { error: errorChain(error) }) }))
     }
   }
 
   /** Compact web-style plan strip pinned above the input, not in the transcript. */
-  private paintPlanDock(width: number, yieldBottom: boolean): string[] {
-    const plan = this.findLivePlanRow()
+  /**
+   * The live region's runtime lines: the thinking card, the streamed text, the
+   * wait card — in that order.
+   *
+   * Built before the window is computed, because the region *reserves* rows now:
+   * `paint` needs its height before it can size the transcript. `waitStart` is
+   * where the wait card begins, which is where the compact view splices the
+   * running burst (that is where the transcript paints it for a settled reply).
+   * `thinkingRows` is how many lines the live thinking card owns, so a click on
+   * them reaches the card.
+   */
+  private runtimeTailLines(width: number): { lines: string[]; waitStart: number; thinkingRows: number } {
+    const lines: string[] = []
+    let thinkingRows = 0
+    if (this.streaming !== undefined) {
+      if (!this.isCompactView() && this.showReasoning && this.streaming.reasoning !== '') {
+        const block = this.liveThinkingBlock()
+        const focused = this.focusedRow === block
+        const marker = block.expanded ? '▾' : '▸'
+        const spinner = SPINNER[Math.floor(Date.now() / 120) % SPINNER.length]
+        const chars = this.streaming.reasoning.length
+        const elapsed = this.thinkingStartedAt === undefined
+          ? 0
+          : Math.floor((Date.now() - this.thinkingStartedAt) / 1000)
+        const header = t('reason.live', { marker, spinner, chars })
+          + (elapsed > 0 ? t('reason.elapsed', { seconds: elapsed }) : '')
+        const line = `${focused ? '▶ ' : '  '}${header}`
+        const styled = this.styleLine('reasoning', line)
+        lines.push(this.selectLine(styled, focused))
+        thinkingRows = 1
+        if (block.expanded) {
+          for (const wrapped of wrap(this.streaming.reasoning, width)) {
+            lines.push(this.styleLine('reasoning', wrapped))
+            thinkingRows += 1
+          }
+        }
+      }
+      if (this.streaming.text !== '') {
+        // Streaming text is the model's live token stream: while reasoning is
+        // being produced (before a final assistant message has assembled) it
+        // can contain the raw thinking/chain-of-thought. Rendering it as
+        // markdown here would style that thinking instead of keeping it in the
+        // collapsible reasoning block, so keep the in-progress stream plain.
+        // The completed assistant message is what gets markdown-rendered.
+        for (const line of wrap(this.streaming.text, width)) {
+          lines.push(this.styleLine('assistant', line))
+        }
+      }
+    }
+    const waitStart = lines.length
+    if (this.waitCardVisible()) {
+      const copy = waitCardCopy(this.waitCardSource())
+      const started = this.waitStartedAt ?? Date.now()
+      const elapsed = fmtElapsedCompact((Date.now() - started) / 1000)
+      const hint = t('wait.interrupt', { elapsed })
+      const spinner = this.spinnerFrame()
+      const header = this.color
+        ? `${spinner} ${shimmerText(copy.header, Date.now(), true)}  ${this.styleLine('system', hint)}`
+        : `${spinner} ${copy.header}  ${hint}`
+      lines.push(header)
+      for (const line of wrapWaitDetails(copy.detail ?? '', width)) {
+        lines.push(this.styleLine('system', line))
+      }
+    }
+    return { lines, waitStart, thinkingRows }
+  }
+
+  private paintPlanDock(width: number, yieldBottom: boolean, maxLines = Number.POSITIVE_INFINITY): string[] {
+    const plan = this.dockedPlanRow()
     if (plan === undefined) return []
     const inner = Math.max(1, width - 2)
     const running = plan.todos.some(item => item.status === 'in_progress')
@@ -3565,7 +4583,25 @@ export class SshTui {
         }
       }
     }
-    return lines
+    const budget = Math.max(1, Math.floor(maxLines))
+    // Under height pressure the dock loses density, never existence (B2.5 §10): the
+    // reader must always be able to see that an active plan exists and where it is.
+    // FULL is the ordinary card; COMPACT is one line with the current step; MINIMAL
+    // is the mode and the progress and nothing else.
+    if (budget < 5) return [this.styleLine('plan-dock', padToWidth(this.planDockCompactLine(plan, budget < 3), width))]
+    if (lines.length <= budget) return lines
+    // The dock's own header survives the clip, for the same reason the live
+    // region's does: a card that is only a tail of its own body does not say what
+    // it is. What follows it is either the next lines or, in the last row, how many
+    // were left out — a card cut off with no marker reads as a card that ends
+    // there.
+    if (budget === 1) return lines.slice(0, 1)
+    const dropped = lines.length - budget + 1
+    return [
+      lines[0] ?? '',
+      ...lines.slice(1, budget - 1),
+      this.styleLine('plan-dock', padToWidth(t('plan.moreLines', { count: dropped }), width)),
+    ]
   }
 
   /**
@@ -3699,24 +4735,493 @@ export class SshTui {
     }
   }
 
+  /**
+   * The representations this transcript is made of (B2.3a's audit artifact).
+   *
+   * Reads the policy off the rows themselves, so it reports what is really in the
+   * transcript rather than what the table says should be — including anything that
+   * arrived unclassified.
+   */
+  representationAudit(): RepresentationAudit {
+    return auditRepresentations(this.rows)
+  }
+
+  /**
+   * The ask-user half of the audit: one semantic question, one primary row.
+   *
+   * Read off the real transcript rather than declared, because the invariant is
+   * about what a reader can see: a call with both a question card and a generic
+   * tool card is two primaries for one event, and the count is what catches a
+   * regression (B2.4).
+   */
+  questionPrimaryAudit(): ReturnType<typeof auditQuestionPrimaries> {
+    return auditQuestionPrimaries(this.rows)
+  }
+
+  /** The footer echo the reader can see right now, if any (a test/`/diag` seam). */
+  currentFooterEcho(): string | undefined {
+    return this.footerEcho?.text
+  }
+
+  /** The ephemeral notice the reader can see right now, if any. */
+  currentNotice(): string | undefined {
+    return this.notice?.text
+  }
+
+  /** The audit as text, for the dev script and for `/diag`-style reporting. */
+  formatRepresentationAudit(): string {
+    return formatRepresentationAudit(this.representationAudit())
+  }
+
+  /** The rows the reader can see: everything after the `/clear` cutoff. */
+  private visibleRows(): readonly Row[] {
+    return this.clearedRows === 0 ? this.rows : this.rows.slice(this.clearedRows)
+  }
+
   private workspaceRowsFor(_width: number, height: number): number {
     const header = 2
     const chrome = RESERVED_BOTTOM_LINES + 1
     return Math.max(1, height - header - chrome)
   }
 
-  private paintInspectOverlay(width: number, height: number): void {
-    const dialog = this.dialog
-    if (dialog === undefined || dialog.kind !== 'inspect') return
-    const header = this.styleLine('system', truncateToWidth(dialog.title, width))
-    // A copy from inside the overlay replaces the key legend for the rest of the
-    // visit: the notice row it also pushes is behind this screen, and a copy the
-    // reader cannot confirm is the one thing worse than no copy at all.
-    const hint = this.styleLine('system', truncateToWidth(dialog.notice ?? t('tool.inspectHint'), width))
-    const divider = this.styleLine('system', repeatToWidth('─', width))
-    const bodyBudget = Math.max(1, height - 4)
+  /**
+   * Open one report as a Screen.
+   *
+   * A report is not narrative: it cannot be rebuilt from the session log (it is not
+   * a session event), so leaving it in the transcript meant the reader scrolled
+   * through something that would vanish on the next resume, pushed the real history
+   * out of the window (`/help` moved the anchor 53 rows, measured) and cost a full
+   * clear per invocation. It is ephemeral by design: a Screen, gone when dismissed,
+   * never written to the log (AD-7).
+   *
+   * Only the *successful* path comes here. A command that fails still writes an
+   * `error` row: a failure is part of the session's story and has to outlive the
+   * visit.
+   */
+  private openReport(report: ReportKind, lines: readonly string[], notice?: string): void {
+    // Line mode has no frame at all, so a report there keeps the textual path it
+    // always had — the same rule the inspect bodies follow (`echoInspectToLog`).
+    // `no-TTY` and desktop hosts render the workspace frame, so they do get Screens.
+    if (this.lineMode) {
+      this.pushRow(represent('report-echo', { kind: reportRowKind(report), text: lines.join('\n') }))
+      this.markDirty()
+      return
+    }
+    this.openScreen({
+      kind: 'report',
+      report,
+      title: t(`screen.title.${report}`),
+      lines: lines.map(text => ({ kind: 'system' as const, text })),
+      offset: 0,
+      copyText: lines.join('\n'),
+      ...(notice === undefined || notice === '' ? {} : { notice }),
+    })
+  }
+
+  /**
+   * Open a Screen: it replaces the workspace for as long as it is up.
+   *
+   * The workspace's own state — the transcript window, `scrollOffset`, the focused
+   * card, `/find` hits, the composer draft, and whatever Surface is queued behind
+   * it — is neither touched here nor rebuilt on the way out. A Screen is a visit,
+   * not a second workspace.
+   */
+  private openScreen(screen: ScreenState): void {
+    this.screen = screen
+    this.screenSurface = undefined
+    this.screenSurfaceResolve = undefined
+    this.screenNeedsFullPaint = true
+    this.markDirty()
+  }
+
+  /** Leave the Screen and hand the pixels back to the workspace, as they were. */
+  closeScreen(): void {
+    if (this.screen === undefined) return
+    this.screen = undefined
+    this.screenSurface = undefined
+    this.screenSurfaceResolve = undefined
+    // One full repaint when a Screen closes, and it is deliberate: the transcript
+    // may have grown (or been compacted) while the reader was away, so the frame
+    // that returns has to be rebuilt anyway. It is measured in the Screen contract
+    // tests; what must never happen is a full repaint per *keypress inside* a Screen.
+    this.forceFullPaint = true
+    // A Surface that arrived while this Screen was up has been waiting in the
+    // workspace queue: leaving the Screen is what opens it. Nothing was lost and
+    // nothing was answered on a screen the reader could not see.
+    this.showNextDialog()
+    this.markDirty()
+  }
+
+  /**
+   * Ask a confirmation in whichever channel owns the screen.
+   *
+   * A Screen's own action (the doctor repair) needs a human decision, and while a
+   * Screen is up that question belongs to it: it is painted on the Screen's hint
+   * row and settled by the Screen's key handler, so it never enters the workspace
+   * `dialogQueue` and a workspace question waiting there is left untouched (AD-3).
+   * Returns `undefined` when no Screen is up, so the caller uses the ordinary path.
+   */
+  private askScreenConfirm(prompt: string, hint: string): Promise<'y' | 'n' | 'cancel'> | undefined {
+    if (this.screen === undefined) return undefined
+    this.screenSurfaceResolve?.('cancel')
+    return new Promise<'y' | 'n' | 'cancel'>(resolve => {
+      this.screenSurface = { kind: 'confirm', prompt, hint, resolve: () => {} }
+      this.screenSurfaceResolve = resolve
+      this.markDirty()
+    })
+  }
+
+  /** Settle the Screen's own confirmation, if one is up. */
+  private settleScreenConfirm(value: 'y' | 'n' | 'cancel'): void {
+    const resolve = this.screenSurfaceResolve
+    this.screenSurface = undefined
+    this.screenSurfaceResolve = undefined
+    if (resolve !== undefined) resolve(value)
+    this.markDirty()
+  }
+
+  /**
+   * Paint the Screen that is up: it replaces the workspace entirely.
+   *
+   * A Screen is state (`ScreenState`) plus this renderer, and nothing else: the
+   * same state redraws the same picture, which is what makes a reattach after an
+   * SSH drop ordinary rather than special. Only the *first* frame of a Screen —
+   * opening, a resize, a reattach — clears the screen; scrolling a report repaints
+   * the body rows that actually changed and leaves the title, hint and strip alone.
+   * The previous implementation passed `sizeChanged: true` on every frame, so every
+   * arrow key cost a full clear and a full frame (measured: 2.7 KB per keypress at
+   * 100×20).
+   */
+  private paintScreen(width: number, height: number): void {
+    const screen = this.screen
+    if (screen === undefined) return
+    const layout = screenLayout(height)
+    // One derivation for the strip and the footer: `footerFacts` is the same call
+    // the workspace frame makes, so a Screen cannot disagree with the footer about
+    // whether the agent is running. A Screen has no composer, so the input shape it
+    // passes says exactly that.
+    const facts = this.footerFacts(SCREEN_INPUT, 1)
+    const body = this.renderScreenBody(screen, width)
+    // `/find` reported a hit inside this body, so put it on screen: the Screen used
+    // to open at the top and leave the reader scrolling for it. Done once, so PgDn
+    // afterwards keeps the reader's own position.
+    if (screen.searchRevealed !== true && this.searchNeedle !== '') {
+      const at = body.findIndex(row => searchContains(stripAnsi(row), this.searchNeedle))
+      if (at >= 0) screen.offset = Math.max(0, at - 1)
+      screen.searchRevealed = true
+    }
+    const offset = clampScreenOffset(screen.offset, body.length, layout.bodyRows)
+    screen.offset = offset
+    const slice = body.slice(offset, offset + layout.bodyRows)
+    while (slice.length < layout.bodyRows) slice.push('')
+
+    const paintRows: string[] = []
+    if (layout.titleRows > 0) {
+      paintRows.push(this.styleLine('system', truncateToWidth(screen.title, width)))
+    }
+    if (layout.dividerRows > 0) paintRows.push(this.styleLine('system', repeatToWidth('─', width)))
+    paintRows.push(...slice)
+    if (layout.hintRows > 0) {
+      paintRows.push(this.styleLine('system', truncateToWidth(this.screenHintLine(screen, layout, body.length), width)))
+    }
+    if (layout.stripRows > 0) {
+      const strip = screenRuntimeStrip({
+        activity: facts.activity,
+        // What is waiting *behind* this Screen: an interaction the workspace queued
+        // (it could not open while a Screen owned the screen) or a question the
+        // Session still holds. The activity row already names a wait the session
+        // itself is in — a Screen is never that — so this group is only added when
+        // the activity is not already saying it.
+        waiting: this.screenWaitingWork() && !WAIT_ACTIVITY_KINDS.has(facts.activity.kind),
+        queued: this.pendingMessages.size,
+        queuedQuestions: this.queuedQuestions,
+        link: {
+          kind: this.paintLink,
+          intervalMs: this.paintIntervalMs,
+          probed: this.paintProbed,
+          ...(this.paintRttMs === undefined ? {} : { rttMs: this.paintRttMs }),
+        },
+        ...(this.contextPressure === undefined ? {} : { context: this.contextPressure }),
+        ...(facts.quotaWindow === undefined || this.quotaSnapshot === undefined
+          || this.quotaSnapshot.provider !== facts.provider
+          ? {}
+          : { quota: { remainingPercent: facts.quotaWindow.remainingPercent, period: facts.quotaWindow.period } }),
+        depth: this.colorDepth,
+        color: this.color,
+      }, Math.max(1, width), this.mutedSeparator(), this.spinnerFrame())
+      paintRows.push(`${this.muteFooterLine(strip)}\x1b[0m`)
+    }
+    if (layout.stripRows > 0 && paintRows.length > 0 && layout.stripTop !== paintRows.length - 1) {
+      // The layout owns the geometry; a mismatch means one of the two counted the
+      // rows differently, and painting anyway would shift the strip onto a body row.
+      paintRows.length = layout.stripTop + 1
+    }
+    while (paintRows.length < height) paintRows.push('')
+
+    const stripText = paintRows[layout.stripTop] ?? ''
+    const stripChanged = stripText !== this.lastScreenStrip
+    this.lastScreenStrip = stripText
+    const sizeChanged = this.screenNeedsFullPaint
+      || this.forceFullPaint
+      || width !== this.lastPaintWidth
+      || height !== this.lastPaintHeight
+    this.screenNeedsFullPaint = false
+    this.forceFullPaint = false
+    const frame = composePaintFrame({
+      width,
+      height,
+      paintRows,
+      previousRows: this.lastPaintRows,
+      sizeChanged,
+      // The strip is the only chrome a Screen has; when it changes (the spinner
+      // turns, the link tier moves) every row from it down is repainted, and when
+      // it does not, the body rows that changed are the only ones addressed.
+      chromeChanged: stripChanged,
+      chromeStart: Math.max(0, layout.stripTop),
+      previousChromeStart: this.lastChromeStart,
+      cursorRow: 1,
+      cursorColumn: 1,
+      hideCursor: true,
+      // A size change opens with a full clear, so splitting it across frames would
+      // show a half-empty screen; everything incremental is budgeted like the
+      // workspace frame, and rows that do not fit stay dirty for the next tick.
+      maxBytes: sizeChanged ? undefined : frameByteBudget(linkQualityOf(this.paintLink, this.paintRttMs)),
+      ...(this.paintResume === undefined ? {} : { from: this.paintResume }),
+    })
+    this.paintResume = frame.resume
+    this.lastFrameBytes = Buffer.byteLength(frame.output, 'utf8')
+    this.write(frame.output)
+    this.lastPaintCursorRow = 1
+    this.lastPaintCursorColumn = 1
+    const snapshot = paintRows.length > height ? paintRows.slice(0, height) : paintRows
+    this.lastPaintRows = frame.deferred.length === 0
+      ? snapshot
+      : advancePaintedRows(this.lastPaintRows, snapshot, frame.painted)
+    this.lastChromeKey = `screen:${screen.kind}:${offset}:${width}x${height}`
+    this.lastPaintWidth = width
+    this.lastPaintHeight = height
+    this.lastChromeStart = Math.max(0, layout.stripTop)
+    // The transcript is not on screen, so the next workspace frame — the one that
+    // closes this Screen — must not trust the row bookkeeping it left here.
+    this.lastTranscriptStart = -1
+  }
+
+  /**
+   * The Screen's bottom hint row: how to leave, where the reader is, how to move.
+   *
+   * Composed in that order so truncation takes the least load-bearing part first:
+   * a reader on a 48-column terminal still sees `全文 12–16/80 · Esc 返回`, while a
+   * wide one also gets the navigation keys. A confirmation owned by the Screen, and
+   * a notice from an action it performed, take the row outright — both are answers
+   * to something the reader just did, and both belong to *this* Screen rather than
+   * to the workspace's dialog queue (AD-3).
+   */
+  private screenHintLine(screen: ScreenState, layout: ReturnType<typeof screenLayout>, lineCount: number): string {
+    const surface = this.screenSurface
+    if (surface !== undefined && surface.kind === 'confirm') return `${surface.prompt}  ${surface.hint}`
+    if (screen.notice !== undefined && screen.notice !== '') return screen.notice
+    const pos = screenPositionText(screen.offset, lineCount, layout.bodyRows)
+    const base = t('screen.footer', { pos })
+    const navigation = t('screen.hint')
+    // A *plain* separator, because this string is styled as a whole by the caller
+    // (`styleLine` sanitises, and the sanitiser removes the ESC byte and keeps the
+    // rest of the sequence). The styled separator belongs to `runtimeStrip`, whose
+    // result is written to the terminal as-is; splicing it in here printed the
+    // literal `[90m` after `Esc 返回` — the artifact a reader captured on the quota
+    // report's bottom row.
+    const spacer = ' │ '
+    return visibleWidth(`${base}${spacer}${navigation}`) <= Math.max(1, this.screenColumns())
+      ? `${base}${spacer}${navigation}`
+      : base
+  }
+
+  /**
+   * The setup Screen's rows, built from the wizard's state every frame.
+   *
+   * The order is the contract (B2.6 §8): what this step *is*, then its prose, then the
+   * control the reader acts on, then validation, then the keys. The layout keeps the
+   * last two whatever the height — prose is what gets cut, never the field — and the
+   * secret step renders the key masked, because a Screen is a place other people can
+   * see (B2.6 §4/§8).
+   */
+  private renderSetupBody(width: number): string[] {
+    const state = this.onboarding
+    if (state === undefined) return [this.styleLine('system', t('onboard.needSetup'))]
+    const inner = Math.max(1, width - 2)
+    const rows: string[] = []
+    const push = (kind: DisplayKind, text: string): void => {
+      for (const wrapped of wrap(text, inner)) rows.push(this.styleLine(kind, `  ${wrapped}`))
+    }
+    const prose: string[] = []
+    const addProse = (kind: DisplayKind, text: string): void => {
+      for (const wrapped of wrap(text, inner)) prose.push(this.styleLine(kind, `  ${wrapped}`))
+    }
+    const template = onboardTemplate(state)
+    const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
+    const indicator = t('setup.stepIndicator', {
+      index: SETUP_STEPS.indexOf(state.step) + 1,
+      total: SETUP_STEPS.length,
+      name: t(`onboard.step.${state.step}`),
+    })
+    push('setup-step', indicator)
+    switch (state.step) {
+      case 'provider': {
+        const options = this.mergedProviderEntries(state)
+        if (options.length === 0) {
+          addProse('system', t('onboard.catalogEmpty'))
+          break
+        }
+        const start = pickerWindowStart(state.providerCursor, options.length)
+        const end = Math.min(options.length, start + PICKER_WINDOW)
+        if (start > 0) addProse('system', `  ${t('picker.moreAbove', { count: start })}`)
+        for (let index = start; index < end; index += 1) {
+          const option = options[index]
+          if (option === undefined) continue
+          const focused = index === state.providerCursor ? '›' : ' '
+          addProse(index === state.providerCursor ? 'setup-choice' : 'system',
+            ` ${focused} ○ ${option.label}${option.detail === '' ? '' : ` — ${option.detail}`}`)
+        }
+        if (end < options.length) addProse('system', `  ${t('picker.moreBelow', { count: options.length - end })}`)
+        if (state.field.trim() !== '') addProse('system', t('onboard.catalogHint', { count: options.length }))
+        addProse('system', t('onboard.pickHint'))
+        break
+      }
+      case 'id':
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.idPrompt'))
+        addProse('system', t('onboard.default', { value: template.defaultId }))
+        break
+      case 'key':
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.keyPrompt'))
+        if (state.providerType === 'catalog') addProse('system', t('onboard.keyCatalogHint'))
+        break
+      case 'base-url':
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.basePrompt', {
+          fallback: template.defaultBaseUrl !== ''
+            ? template.defaultBaseUrl
+            : state.providerType === 'catalog' ? t('onboard.baseFallbackCatalog') : t('onboard.baseFallback'),
+        }))
+        break
+      case 'models':
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.modelsPrompt'))
+        addProse('system', state.models.length > 0
+          ? t('onboard.modelsFetched', { count: state.models.length, list: formatModelList(state.models, 6) })
+          : t('onboard.default', { value: template.defaultModels.join(', ') }))
+        if (template.api !== undefined) addProse('system', t('onboard.ctrlF'))
+        if (state.providerType === 'catalog') addProse('system', t('onboard.modelsCatalogHint'))
+        addProse('system', t('onboard.modelsPickHint'))
+        break
+      case 'models-pick': {
+        const candidates = state.modelCandidates ?? []
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.modelsPick', { count: candidates.length }))
+        const start = pickerWindowStart(state.modelCursor ?? 0, candidates.length)
+        const end = Math.min(candidates.length, start + PICKER_WINDOW)
+        if (start > 0) addProse('system', `  ${t('picker.moreAbove', { count: start })}`)
+        for (let index = start; index < end; index += 1) {
+          const id = candidates[index]
+          if (id === undefined) continue
+          const focused = index === (state.modelCursor ?? 0) ? '›' : ' '
+          const mark = (state.modelChecked ?? new Set<number>()).has(index) ? '◉' : '○'
+          addProse(index === (state.modelCursor ?? 0) ? 'setup-choice' : 'system', ` ${focused} ${mark} ${id}`)
+        }
+        if (end < candidates.length) addProse('system', `  ${t('picker.moreBelow', { count: candidates.length - end })}`)
+        addProse('system', t('onboard.modelsCheckHint'))
+        break
+      }
+      case 'model-default': {
+        const checked = this.checkedOnboardingModels(state)
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.defaultModelPick'))
+        const start = pickerWindowStart(state.modelCursor ?? 0, checked.length)
+        const end = Math.min(checked.length, start + PICKER_WINDOW)
+        if (start > 0) addProse('system', `  ${t('picker.moreAbove', { count: start })}`)
+        for (let index = start; index < end; index += 1) {
+          const id = checked[index]
+          if (id === undefined) continue
+          const focused = index === (state.modelCursor ?? 0) ? '›' : ' '
+          addProse(index === (state.modelCursor ?? 0) ? 'setup-choice' : 'system', ` ${focused} ○ ${id}`)
+        }
+        if (end < checked.length) addProse('system', `  ${t('picker.moreBelow', { count: checked.length - end })}`)
+        addProse('system', t('onboard.pickHint'))
+        break
+      }
+      case 'context':
+        addProse('system', t('onboard.providerLine', { label: providerLabel }))
+        addProse('system', t('onboard.contextPrompt'))
+        addProse('system', t('onboard.contextValue', {
+          value: String(state.routeContextWindow ?? HARNESS_DEFAULT_CONTEXT_WINDOW),
+        }))
+        addProse('system', t('onboard.contextHint'))
+        break
+      case 'confirm':
+        addProse('system', t('onboard.confirmTitle'))
+        addProse('system', t('onboard.confirmProvider', { label: providerLabel }))
+        addProse('system', `  Provider ID: ${state.providerId}`)
+        addProse('system', t('onboard.confirmBase', { url: state.baseUrl === '' ? (template.defaultBaseUrl || t('onboard.defaultParen')) : state.baseUrl }))
+        addProse('system', t('onboard.confirmApi', {
+          api: template.api ?? (state.providerType === 'catalog' ? t('onboard.apiCatalog') : 'deepseek-official'),
+        }))
+        addProse('system', t('onboard.confirmModels', { list: formatModelList(state.models, 8) }))
+        if (state.defaultModel !== undefined) addProse('system', t('onboard.confirmDefaultModel', { model: state.defaultModel }))
+        if (state.routeContextWindow !== undefined) addProse('system', t('onboard.confirmContext', { value: String(state.routeContextWindow) }))
+        addProse('system', t('onboard.confirmKey', {
+          head: sliceCodePoints(state.key, 6),
+          tail: lastCodePoints(state.key, 4),
+          length: state.key.length,
+        }))
+        break
+    }
+    // The controls: the field (masked for a secret), the notice, and the keys.
+    const controls: string[] = []
+    if (SETUP_FIELD_STEPS.has(state.step)) {
+      const masked = state.step === 'key'
+      const shown = masked ? '•'.repeat(Array.from(state.field).length) : state.field
+      const caret = state.fieldCursor >= state.field.length ? '' : sliceCodePoints(state.field.slice(state.fieldCursor), 1)
+      const text = `${shown.slice(0, state.fieldCursor)}${caret}${shown.slice(state.fieldCursor + caret.length)}`
+      controls.push(this.styleLine('setup-field', `› ${text}${this.color ? '' : '_'}`))
+    }
+    if (state.saving) controls.push(this.styleLine('system', `  ${t('setup.working')}`))
+    if (state.notice !== undefined) {
+      controls.push(this.styleLine(state.notice.kind === 'error' ? 'error' : 'system', `  ${state.notice.text}`))
+    }
+    if (state.step === 'confirm') {
+      controls.push(this.styleLine('system', `  ${t('onboard.confirmHint')}`))
+    } else {
+      controls.push(this.styleLine('system', `  ${t('onboard.enterEsc')}`))
+    }
+    return [...rows, ...this.windowSetupBody(prose, controls)]
+  }
+
+  /**
+   * Fit prose and controls into whatever rows are left.
+   *
+   * Under height pressure the *prose* is what goes: the field, the notice and the key
+   * hints are how the reader continues, and a setup screen whose only control was cut
+   * away is a dead end (B2.6 §8).
+   */
+  private windowSetupBody(prose: string[], controls: string[]): string[] {
+    const budget = Math.max(1, this.setupBodyBudget())
+    if (prose.length + controls.length <= budget) return [...prose, ...controls]
+    const keepControls = Math.min(controls.length, budget)
+    const keepProse = Math.max(0, budget - keepControls)
+    return [...prose.slice(0, keepProse), ...controls.slice(controls.length - keepControls)]
+  }
+
+  /** Rows the setup body may use: the Screen's own layout, minus the step indicator. */
+  private setupBodyBudget(): number {
+    const layout = screenLayout(Math.max(0, this.screenRows()))
+    return Math.max(1, layout.bodyRows - 1)
+  }
+
+  /** A Screen's body, wrapped for the width it will be shown at. */
+  private renderScreenBody(screen: ScreenState, width: number): string[] {
+    if (screen.kind === 'setup') return this.renderSetupBody(width)
     const rendered: string[] = []
-    for (const line of dialog.lines) {
+    for (const line of screen.lines) {
       const inner = Math.max(1, width - 2)
       const fillRow = line.kind === 'diff-add' || line.kind === 'diff-del'
       for (const wrapped of wrap(line.text, inner)) {
@@ -3726,44 +5231,7 @@ export class SshTui {
         rendered.push(this.markSearchRow(styled, wrapped))
       }
     }
-    // `/find` reported a hit inside this body, so put it on screen: the overlay
-    // used to open at the top and leave the reader scrolling for it. Done once,
-    // so PgDn afterwards keeps the reader's own position.
-    if (dialog.searchRevealed !== true && this.searchNeedle !== '') {
-      const at = rendered.findIndex(row => searchContains(stripAnsi(row), this.searchNeedle))
-      if (at >= 0) dialog.offset = Math.max(0, at - 1)
-      dialog.searchRevealed = true
-    }
-    const maxOffset = Math.max(0, rendered.length - bodyBudget)
-    if (dialog.offset > maxOffset) dialog.offset = maxOffset
-    if (dialog.offset < 0) dialog.offset = 0
-    const slice = rendered.slice(dialog.offset, dialog.offset + bodyBudget)
-    while (slice.length < bodyBudget) slice.push('')
-    const pos = rendered.length === 0
-      ? '0/0'
-      : `${dialog.offset + 1}–${Math.min(rendered.length, dialog.offset + bodyBudget)}/${rendered.length}`
-    const footer = this.styleLine('system', truncateToWidth(t('tool.inspectFooter', { pos }), width))
-    const paintRows = [header, divider, ...slice, hint, footer]
-    this.write(composePaintOutput({
-      width,
-      height,
-      paintRows,
-      previousRows: this.lastPaintRows,
-      sizeChanged: true,
-      chromeChanged: true,
-      chromeStart: 0,
-      previousChromeStart: 0,
-      cursorRow: height,
-      cursorColumn: 1,
-    }))
-    this.lastPaintCursorRow = height
-    this.lastPaintCursorColumn = 1
-    this.lastPaintRows = paintRows.length > height ? paintRows.slice(0, height) : paintRows
-    this.lastChromeKey = `inspect:${dialog.offset}:${width}x${height}`
-    this.lastPaintWidth = width
-    this.lastPaintHeight = height
-    this.lastChromeStart = 0
-    this.lastTranscriptStart = -1
+    return rendered
   }
 
   /**
@@ -3780,29 +5248,23 @@ export class SshTui {
     const lines = toolBodyLines(row, Number.MAX_SAFE_INTEGER)
     const title = t('tool.inspectTitle', { title: `${row.title}${row.summary === '' ? '' : `  ${row.summary}`}` })
     if (this.echoInspectToLog(title, lines)) return
-    this.openDialog({
-      kind: 'inspect',
-      title,
-      lines,
-      offset: 0,
-      copyText: inspectCopyText(lines),
-    })
+    this.openScreen({ kind: 'inspect', title, lines, offset: 0, copyText: inspectCopyText(lines) })
   }
 
   private openSubagentInspect(row: Extract<Row, { kind: 'subagent' }>): void {
-    const dialog = this.dialog
-    if (dialog?.kind === 'inspect' && dialog.subagentSessionId === this.subagentInspectId(row)) {
-      dialog.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
-      dialog.lines = subagentInspectLines(row)
-      dialog.copyText = inspectCopyText(dialog.lines)
-      dialog.notice = undefined
+    const open = this.screen
+    if (open !== undefined && open.kind === 'inspect' && open.subagentSessionId === this.subagentInspectId(row)) {
+      open.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
+      open.lines = subagentInspectLines(row)
+      open.copyText = inspectCopyText(open.lines)
+      open.notice = undefined
       this.markDirty()
       return
     }
     const title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
     const lines = subagentInspectLines(row)
     if (this.echoInspectToLog(title, lines)) return
-    this.openDialog({
+    this.openScreen({
       kind: 'inspect',
       title,
       lines,
@@ -3835,7 +5297,7 @@ export class SshTui {
       .map(line => ({ kind: 'assistant' as const, text: line }))
     const title = t('reply.inspectTitle', { lines: lines.length })
     if (this.echoInspectToLog(title, lines)) return
-    this.openDialog({ kind: 'inspect', title, lines, offset: 0, copyText: row.text })
+    this.openScreen({ kind: 'inspect', title, lines, offset: 0, copyText: row.text })
   }
 
   /**
@@ -3852,17 +5314,13 @@ export class SshTui {
     if (lines.length > shown.length) {
       body.push(t('tool.bodyMoreLines', { count: lines.length - shown.length }))
     }
-    this.pushRow({ kind: 'system', text: body.join('\n') })
+    this.pushRow(represent('surface-echo', { kind: 'system', text: body.join('\n') }))
     this.markDirty()
     return true
   }
 
   closeInspect(): void {
-    if (this.dialog?.kind !== 'inspect') return
-    this.dialog = undefined
-    this.forceFullPaint = true
-    this.markDirty()
-    this.showNextDialog()
+    this.closeScreen()
   }
 
   private paintCollapsibleHeader(
@@ -3987,6 +5445,10 @@ export class SshTui {
     }
     target.expanded = !target.expanded
     this.focusedRow = target
+    // The live thinking card's choice outlives the card itself (the phase settles
+    // into a row and the next phase starts a new one), so it is recorded for the
+    // turn rather than left on an object that is about to be dropped.
+    if (target.kind === 'streaming-reasoning') this.reasoningExpandedChoice = target.expanded
     this.forceFullPaint = true
     this.markDirty()
   }
@@ -4105,18 +5567,18 @@ export class SshTui {
       const live = this.findLivePlanRow()
       if (live !== undefined) {
         this.focusCard(live)
-        this.pushRow({ kind: 'system', text: t('jump.planDock', { category: cardCategoryLabel(category) }) })
+        this.pushRow(represent('find-feedback', { kind: 'system', text: t('jump.planDock', { category: cardCategoryLabel(category) }) }))
         this.revealRow(live)
         return
       }
     }
     const target = this.rows.findLast(row => cardCategoryOf(row) === category)
     if (target === undefined) {
-      this.pushRow({ kind: 'system', text: t('jump.missing', { category: cardCategoryLabel(category) }) })
+      this.pushRow(represent('find-feedback', { kind: 'system', text: t('jump.missing', { category: cardCategoryLabel(category) }) }))
       this.markDirty()
       return
     }
-    this.pushRow({ kind: 'system', text: t('jump.latest', { category: cardCategoryLabel(category) }) })
+    this.pushRow(represent('find-feedback', { kind: 'system', text: t('jump.latest', { category: cardCategoryLabel(category) }) }))
     this.revealRow(target)
   }
 
@@ -4124,32 +5586,41 @@ export class SshTui {
     this.searchQuery = query
     this.searchHits = hits
     if (hits.length === 0) {
+      // A miss while the view is cut off is the moment the boundary matters: the text
+      // may well be in the session log, and the reader has to know local `/find` is not
+      // looking there (AD-9). Said where it is asked, and it replaces the miss notice
+      // rather than piling up beside it.
+      if (this.clearedRows > 0) this.notice = { text: t('find.scopeHint') }
       this.searchIndex = -1
-      this.pushRow({
+      this.pushRow(represent('find-feedback', {
         kind: 'system',
         text: query === '' ? t('find.none') : t('find.noMatch', { query }),
-      })
+      }))
       this.markDirty()
       return
     }
     this.searchIndex = hits.length - 1
     const hit = hits[this.searchIndex]
     const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
-    this.pushRow({
+    this.pushRow(represent('find-feedback', {
       kind: 'system',
       text: t('find.hits', {
         count: hits.length,
         query: query === '' ? '' : `「${query}」`,
         where,
       }),
-    })
+    }))
     this.revealRow(hit)
   }
 
   private runFindCommand(arg: string): void {
     const parsed = parseFindQuery(arg)
     const label = parsed.category === undefined ? '' : `${cardCategoryLabel(parsed.category)} `
-    const hits = matchTranscriptRows(this.rows, arg)
+    // Local `/find` is a workspace search: it looks at what is in the view, which is
+    // what a reader means by "find it here". Content `/clear` hid is not part of it —
+    // searching the durable log is the historical-search Screen's job (AD-9), which
+    // this round does not build.
+    const hits = matchTranscriptRows([...this.visibleRows()], arg)
     // The step message says "回复 deploy"; the highlight must look for "deploy".
     this.searchNeedle = parsed.category === undefined ? arg.trim() : parsed.query
     this.applySearchHits(`${label}${parsed.query}`.trim(), hits)
@@ -4157,7 +5628,7 @@ export class SshTui {
 
   private stepSearch(delta: number): void {
     if (this.searchHits.length === 0) {
-      this.pushRow({ kind: 'system', text: t('find.empty') })
+      this.pushRow(represent('find-feedback', { kind: 'system', text: t('find.empty') }))
       this.markDirty()
       return
     }
@@ -4165,7 +5636,7 @@ export class SshTui {
     this.searchIndex = (this.searchIndex + delta + count) % count
     const hit = this.searchHits[this.searchIndex]
     const where = hit === undefined ? '' : cardCategoryLabel(cardCategoryOf(hit) ?? 'reply')
-    this.pushRow({
+    this.pushRow(represent('find-feedback', {
       kind: 'system',
       text: t('find.step', {
         query: this.searchQuery,
@@ -4173,16 +5644,191 @@ export class SshTui {
         total: count,
         where,
       }),
-    })
+    }))
     this.revealRow(hit)
   }
 
   private paint = (): void => {
     if (this.exiting || this.lineMode) return
+    // Nothing is drawn while the durable log is still being read (B2.4).
+    //
+    // Replay is chunked and yields, so the cadence timer can compose frames
+    // *between* chunks — each one anchored to a session that is still growing. The
+    // reader then watches the transcript roll from wherever the first frame landed
+    // down to the bottom: measured on a 20k-event log at a local cadence, 51 frames
+    // over 1.2 s, the window creeping `回答 3775 → … → 19976`. "A resume starts
+    // somewhere in the middle and scrolls to the end" is that, and the fix is to
+    // compose nothing until there is a whole session to compose: `replayHistory`
+    // ends with `dirty = true`, so the first frame after it is the landing.
+    //
+    // The flag is the *load*, not `replaying`: that one also means "this event came
+    // from the log rather than from the live host", and it stays true for events a
+    // resumed process interacts with afterwards — a frame must still be paintable
+    // then.
+    if (this.loadingHistory) return
     const width = Math.max(10, this.screenColumns())
     const height = Math.max(6, this.screenRows())
-    if (this.dialog?.kind === 'inspect') {
-      this.paintInspectOverlay(width, height)
+    // One clock reading per frame, kept because the resize pacing is the only
+    // thing that has to know how expensive a frame is on *this* session: a short
+    // transcript repaints in a few milliseconds and a long one in a hundred, and
+    // a fixed rate would either throttle the first or starve the loop on the
+    // second.
+    const startedAt = Date.now()
+    try {
+      this.paintFrame(width, height)
+    } finally {
+      this.lastPaintCostMs = Date.now() - startedAt
+    }
+  }
+
+  /**
+   * The dock line for a terminal with no room for the card.
+   *
+   * `compact` keeps the current step (the one thing a reader acts on) and `minimal`
+   * keeps only the mode and the progress. Both stay one row: the dock is under height
+   * pressure precisely because the workspace is small, and a second row would come out
+   * of the transcript.
+   */
+  private planDockCompactLine(plan: Extract<Row, { kind: 'plan' }>, minimal: boolean): string {
+    const counts = todoProgressLabel(plan.todos)
+    const mode = plan.pending ? t('plan.switching')
+      : plan.active ? t('footer.planMode')
+      : t('card.plan')
+    // Every level of the dock leads with the same marker, so "the dock is on screen"
+    // is one shape to look for however small the terminal is.
+    const head = `▾ ${mode}`
+    if (minimal) return `${head} · ${counts === '' ? t('plan.noTasks') : counts}`
+    const current = plan.todos.find(item => item.status === 'in_progress')?.content
+      ?? plan.todos.find(item => item.status !== 'completed')?.content
+    const progress = counts === '' ? t('plan.noTasks') : counts
+    return current === undefined
+      ? `${head} · ${progress}`
+      : `${head} · ${progress} · › ${current.replace(/\s+/gu, ' ').trim()}`
+  }
+
+  /**
+   * The runtime facts the footer and a Screen's compact strip both report.
+   *
+   * One derivation, two readers. The Screen strip could have read `this.*` for
+   * itself, but then a new activity kind would have to be taught to two assemblers
+   * and the two surfaces could disagree about whether the agent is running — the
+   * second truth source the decision record forbids (AD-8). The two parameters are
+   * the composer's *shape*, the one input that is a property of the frame rather
+   * than of the session; the strip does not read them.
+   */
+  private footerFacts(inputView: InputView, inputRows: number): {
+    input: FooterStatusInput
+    activity: { kind: FooterActivityKind; text: string }
+    activityStartedAt: number | undefined
+    provider: string
+    quotaWindow: QuotaWindow | undefined
+  } {
+    const idleMs = Date.now() - this.lastActivity
+    const livePlan = this.findLivePlanRow()
+    const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
+    const current = this.selectionRef?.current
+    const provider = this.currentProviderId()
+    // The footer shows the finest window the provider reports (5-hour first),
+    // not the tightest percent: that is the number a working session hits first.
+    const quotaWindow = this.quotaSnapshot === undefined ? undefined : preferredQuotaWindow(this.quotaSnapshot)
+    const balanceText = this.balanceSnapshot !== undefined && this.balanceSnapshot.provider === provider
+      ? formatFooterBalance(this.balanceSnapshot)
+      : undefined
+    const planBadge = planRouteBadge(
+      provider,
+      this.quotaSnapshot?.provider === provider ? this.quotaSnapshot : undefined,
+    )
+    // The status row reads what the *keyboard owner* means, not what shape it has:
+    // `/model` and `ask_user_question` are both `questions` dialogs, and reading the
+    // shape made a picker claim the agent was waiting while an approval — a
+    // `confirm` — read as idle. A question the Session still holds but nobody is
+    // blocked on (a `continued` one) is a record, not a wait.
+    const ask = this.dialogRole.kind === 'interaction' ? this.dialogRole.ask : undefined
+    const waitingQuestion = ask === 'question' || this.queuedQuestions > 0
+    const planReview = ask === 'plan-review'
+    const waitingApproval = ask === 'approval'
+    const compacting = this.compactionRunning()
+    const parentModel = current?.model ?? this.agent.options.model ?? ''
+    const activityToolLabel = this.activityToolLabel()
+    const sub = this.subagentSelection.current
+    const activityStartedAt = this.footerActivityStartedAt({
+      compacting,
+      waitingQuestions: waitingQuestion || planReview,
+      streaming: this.streaming !== undefined,
+    })
+    const footer = {
+      running: this.agent.status === 'running',
+      planReview,
+      waitingQuestion,
+      waitingApproval,
+      compacting,
+      ...(this.llmRetry === undefined ? {} : { retry: this.llmRetry }),
+      subagents: this.activeSubagents.size,
+      tools: this.openToolCalls.size,
+      ...(activityToolLabel === undefined ? {} : { toolLabel: activityToolLabel }),
+      planLeftOpen: livePlan?.turnLeftOpen === true,
+      planPending: livePlan?.pending === true,
+      planActive: livePlan?.active === true,
+      ...(liveGoal?.phase === 'active' || liveGoal?.phase === 'paused' || liveGoal?.phase === 'blocked'
+        ? { goalPhase: liveGoal.phase }
+        : {}),
+      idleMs,
+      ...(this.streaming === undefined
+        ? {}
+        : {
+          streamingReasoning: this.streaming.reasoning !== '',
+          streamingText: this.streaming.text !== '',
+        }),
+      ...(activityStartedAt === undefined ? {} : { activityStartedAt }),
+      model: parentModel,
+      preset: this.presetName,
+      ...(current?.reasoningEffort === undefined ? {} : { effort: current.reasoningEffort }),
+      provider,
+      parentModel,
+      subModel: sub.model,
+      ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
+      ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
+      // Quota and context pressure stay on the identity line, where they have
+      // always been: B-1 moved them one row up into the strip, and a user
+      // looking at a wide terminal read that as "额度条没了". The strip keeps
+      // the loss order for the groups it does own.
+      ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
+        // No reading for this provider: show the empty bar with a `?` rather
+        // than a number nobody measured. A balance-only provider (DeepSeek)
+        // shows nothing here; its balance line is the reading.
+        ? (this.hasQuotaSurface(provider) ? { quotaUnknown: true } : {})
+        : {
+          quotaCode: shortQuotaPlanName(this.quotaSnapshot),
+          quotaPercent: quotaWindow.remainingPercent,
+          quotaPeriod: quotaWindow.period,
+        }),
+      ...(this.contextPressure === undefined
+        ? {}
+        : { contextChip: formatContextPressureChip(this.contextPressure, false) }),
+
+      ...(balanceText === undefined ? {} : { balanceText }),
+      // The subscription badge is about the *route*, not about a reading: it is
+      // there from the first frame, and the tier sharpens once billing answers.
+      ...(planBadge === undefined ? {} : { planBadge }),
+      ...(this.searchHits.length > 0 && this.searchIndex >= 0
+        ? { search: { index: this.searchIndex, total: this.searchHits.length } }
+        : {}),
+      foldedInput: inputView.folded,
+      multiLineInput: inputRows > 1,
+      queued: this.pendingMessages.size,
+      cwdLabel: formatFooterCwd(this.workspaceCwd()),
+      compactView: this.isCompactView(),
+    } satisfies FooterStatusInput
+    const activity = footerActivity(footer)
+    return { input: footer, activity, activityStartedAt, provider, quotaWindow }
+  }
+
+  private paintFrame(width: number, height: number): void {
+    // One gate for the whole channel: a Screen replaces the workspace, so the
+    // frame below is not composed at all while one is up. It used to be spelled
+    // `dialog?.kind === 'inspect'` and appeared in ten places.
+    if (this.screen !== undefined) {
+      this.paintScreen(width, height)
       return
     }
 
@@ -4235,7 +5881,11 @@ export class SshTui {
     }
 
     const compact = this.isCompactView()
-    const compactBursts = compact ? compactToolBursts(this.rows) : []
+    // Everything below reads the *visible* rows: a row `/clear` hid is not part of the
+    // view, and letting one leak back in through a helper that walks `this.rows` would
+    // be the same bug in a new place.
+    const visibleRowList = this.visibleRows()
+    const compactBursts = compact ? compactToolBursts(visibleRowList) : []
     const compactBurstByReply = new Map<Extract<Row, { kind: 'assistant' }>, (typeof compactBursts)[number]>()
     for (const burst of compactBursts) {
       if (burst.after !== undefined) compactBurstByReply.set(burst.after, burst)
@@ -4269,9 +5919,9 @@ export class SshTui {
     // One tick per frame, shared by every live row: coarse enough not to churn a
     // key mid-frame, fine enough that a spinner or an elapsed time moves.
     const liveTick = Math.floor(Date.now() / 200)
-    for (let rowIndex = 0; rowIndex < this.rows.length; rowIndex += 1) {
+    for (let rowIndex = 0; rowIndex < visibleRowList.length; rowIndex += 1) {
       flushPending()
-      const cachedRow = this.rows[rowIndex]
+      const cachedRow = visibleRowList[rowIndex]
       const inBurst = compact && cachedRow !== undefined && compactBurstByReply.has(cachedRow as Extract<Row, { kind: 'assistant' }>)
       let cacheKey: string | undefined
       if (cachedRow !== undefined && !skipMiddle) {
@@ -4312,7 +5962,7 @@ export class SshTui {
         if (rowIndex === 4) addDisplay(this.styleLine('system', t('history.folded')))
         continue
       }
-      const row = this.rows[rowIndex]
+      const row = visibleRowList[rowIndex]
       if (row === undefined) continue
       if (compact && (row.kind === 'reasoning' || row.kind === 'prompt' || row.kind === 'tool')) continue
       if (compact && !paintedLeadingCompact && (row.kind === 'assistant' || row.kind === 'user')) {
@@ -4361,6 +6011,7 @@ export class SshTui {
           exitCode: row.exitCode,
           spinner: running ? ` ${this.spinnerFrame()}` : '',
           flipping: row.flipUntil !== undefined && Date.now() < row.flipUntil,
+          ...(row.approval === undefined ? {} : { approval: row.approval }),
           ...(row.diff !== undefined && row.diff.length > 0
             ? { diffStat: countDiffAddDel(row.diff) }
             : {}),
@@ -4378,7 +6029,17 @@ export class SshTui {
           ? wrap(header.plain, width)
           : wrapSegmented(header.plain, Math.max(1, width), headerSegments, this.colorDepth)
         for (const wrapped of expandedHeaderLines) {
-          addDisplay(wrapped, row)
+          // An expanded card is still the card the reader has selected, and it used
+          // to be the one state where the highlight vanished: the marker stayed while
+          // the row stopped reading as selected, which made the *next* card look like
+          // the focused one. The highlight belongs to the card, not to its state.
+          addDisplay(this.selectLine(wrapped, focused), row)
+        }
+        // An expanded card spells the approval out: the chip says the state, and
+        // this says how it is known and why. It is the only place a reason a
+        // *resume* could not recover is not silently lost.
+        if (row.approval !== undefined) {
+          addDisplay(this.styleLine('system', `  ${approvalDetailText(row.approval)}`), row)
         }
         // On a measured slow link an expanded body is capped and points at the
         // overlay instead; every other link shows it in full, exactly as it has
@@ -4456,7 +6117,14 @@ export class SshTui {
         const spinner = waiting ? ` ${this.spinnerFrame()}` : ''
         const state = waiting ? t('question.waiting') : row.status === 'answered' ? t('question.answered') : t('question.cancelled')
         const title = row.intent === 'plan-review' ? t('question.planTitle') : t('question.askTitle')
-        const header = `● ${title}${spinner} · ${state} · ${row.summary}${row.expanded ? '' : t('card.expand')}`
+        // A settled card carries both halves of the exchange, and the collapsed
+        // line is the only one most readers see: the question used to be replaced
+        // by its answer the moment it settled, so the card said `预发` and nothing
+        // about what was being chosen (B2.4, §4).
+        const headline = waiting && row.continued !== true
+          ? row.summary
+          : `${row.title}${row.status === 'answered' ? ' → ' : ' · '}${row.summary}`
+        const header = `● ${title}${spinner} · ${state} · ${headline}${row.expanded ? '' : t('card.expand')}`
         this.paintCollapsibleHeader(addDisplay, row, waiting ? 'tool' : 'system', header, width)
         if (row.expanded) {
           if (row.header !== undefined) addDisplay(this.styleLine('system', `  ${row.header}`), row)
@@ -4548,66 +6216,41 @@ export class SshTui {
     // became the last one.
     flushPending()
 
-    if (this.streaming !== undefined) {
-      if (!compact && this.showReasoning && this.streaming.reasoning !== '') {
-        const block = this.streamingReasoning ??= { kind: 'streaming-reasoning', expanded: false }
-        const focused = this.focusedRow === block
-        const marker = block.expanded ? '▾' : '▸'
-        const spinner = SPINNER[Math.floor(Date.now() / 120) % SPINNER.length]
-        const chars = this.streaming.reasoning.length
-        const elapsed = this.thinkingStartedAt === undefined
-          ? 0
-          : Math.floor((Date.now() - this.thinkingStartedAt) / 1000)
-        const header = t('reason.live', { marker, spinner, chars })
-          + (elapsed > 0 ? t('reason.elapsed', { seconds: elapsed }) : '')
-        const line = `${focused ? '▶ ' : '  '}${header}`
-        const styled = this.styleLine('reasoning', line)
-        addDisplay(this.selectLine(styled, focused), block)
-        if (block.expanded) {
-          for (const wrapped of wrap(this.streaming.reasoning, width)) {
-            addDisplay(this.styleLine('reasoning', wrapped), block)
-          }
-        }
-      }
-      if (this.streaming.text !== '') {
-        // Streaming text is the model's live token stream: while reasoning is
-        // being produced (before a final assistant message has assembled) it
-        // can contain the raw thinking/chain-of-thought. Rendering it as
-        // markdown here would style that thinking instead of keeping it in the
-        // collapsible reasoning block, so keep the in-progress stream plain.
-        // The completed assistant message is what gets markdown-rendered.
-        for (const line of wrap(this.streaming.text, width)) {
-          addDisplay(this.styleLine('assistant', line))
-        }
-      }
-    }
+    // The live tail: a projection of runtime state, kept **out of the transcript's
+    // source lines** on purpose (B2.2, AD-12). It used to be appended to `display`,
+    // which made every tick a transcript append: one more source line, a window that
+    // started one line later, and `sizeChanged` behind it — a full clear per tick.
+    // Measured before this change: 20 rows / ~2.9-3.2 KB **per streaming tick**, the
+    // screen cleared each time. These lines paint over the bottom of the window
+    // instead, so the anchor, `scrollOffset` and the row cache never see them.
+    const runtimeTail = this.runtimeTailLines(width)
+    // The compact view folds a turn's tool cards into the running burst, which
+    // belongs between the streamed text and the wait card (where the transcript
+    // paints it for a settled reply). Spliced rather than rebuilt here, because
+    // the burst reads state (`paintedLeadingCompact`) the row loop above decides.
+    const compactTail: string[] = []
     if (compact) {
       const lastAssistant = this.rows.findLast((row): row is Extract<Row, { kind: 'assistant' }> => row.kind === 'assistant')
       if (this.streaming !== undefined) {
         const openBurst = compactBursts.find(burst => burst.after === lastAssistant)
-        if (openBurst !== undefined) this.paintCompactBurst(addDisplay, openBurst.groups, width)
+        if (openBurst !== undefined) this.paintCompactBurst((line) => { compactTail.push(line) }, openBurst.groups, width)
       }
       const leading = compactBursts.find(burst => burst.after === undefined)
       if (leading !== undefined && !paintedLeadingCompact) {
         this.paintCompactBurst(addDisplay, leading.groups, width)
       }
     }
-    if (this.waitCardVisible()) {
-      const copy = waitCardCopy(this.waitCardSource())
-      const started = this.waitStartedAt ?? Date.now()
-      const elapsed = fmtElapsedCompact((Date.now() - started) / 1000)
-      const hint = t('wait.interrupt', { elapsed })
-      const spinner = this.spinnerFrame()
-      const header = this.color
-        ? `${spinner} ${shimmerText(copy.header, Date.now(), true)}  ${this.styleLine('system', hint)}`
-        : `${spinner} ${copy.header}  ${hint}`
-      addDisplay(header)
-      for (const line of wrapWaitDetails(copy.detail ?? '', width)) {
-        addDisplay(this.styleLine('system', line))
-      }
-    }
+    const liveTail = [
+      ...runtimeTail.lines.slice(0, runtimeTail.waitStart),
+      ...compactTail,
+      ...runtimeTail.lines.slice(runtimeTail.waitStart),
+    ]
 
     const dialogLines: string[] = []
+    // Recomputed every frame: the anchor is a property of this frame's drawing,
+    // not of the dialog's life. A confirmation has no list, so its own prompt is
+    // the row that stays visible.
+    this.dialogFocusLine = undefined
     const addDialog = (text: string): void => {
       for (const wrapped of wrap(text, Math.max(1, width))) {
         dialogLines.push(this.styleLine('system', wrapped))
@@ -4615,136 +6258,13 @@ export class SshTui {
     }
     if (this.dialog !== undefined) {
       if (this.dialog.kind === 'confirm') {
+        this.dialogFocusLine = dialogLines.length
         addDialog(this.dialog.prompt)
         addDialog(`  ${this.dialog.hint}`)
-      } else if (this.dialog.kind === 'onboarding') {
-        const ob = this.onboarding
-        if (ob !== undefined) {
-          const template = onboardTemplate(ob)
-          const providerLabel = `${template.label}${template.defaultBaseUrl === '' ? '' : `（${template.defaultBaseUrl}）`}`
-          switch (ob.step) {
-            case 'provider': {
-              const options = this.mergedProviderEntries(ob)
-              addDialog(t('onboard.title'))
-              if (options.length === 0) {
-                addDialog(t('onboard.catalogEmpty'))
-                break
-              }
-              const start = pickerWindowStart(ob.providerCursor, options.length)
-              const end = Math.min(options.length, start + PICKER_WINDOW)
-              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
-              for (let index = start; index < end; index += 1) {
-                const option = options[index]
-                if (option === undefined) continue
-                const focused = index === ob.providerCursor ? '›' : ' '
-                addDialog(` ${focused} ○ ${option.label}${option.detail === '' ? '' : ` — ${option.detail}`}`)
-              }
-              if (end < options.length) addDialog(`  ${t('picker.moreBelow', { count: options.length - end })}`)
-              if (this.input.trim() !== '') addDialog(t('onboard.catalogHint', { count: options.length }))
-              addDialog(t('onboard.pickHint'))
-              break
-            }
-            case 'id':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.idPrompt'))
-              addDialog(t('onboard.default', { value: template.defaultId }))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'key':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.keyPrompt'))
-              if (ob.providerType === 'catalog') addDialog(t('onboard.keyCatalogHint'))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'base-url':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.basePrompt', {
-                fallback: template.defaultBaseUrl !== ''
-                  ? template.defaultBaseUrl
-                  : ob.providerType === 'catalog' ? t('onboard.baseFallbackCatalog') : t('onboard.baseFallback'),
-              }))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'models':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.modelsPrompt'))
-              addDialog(ob.models.length > 0
-                ? t('onboard.modelsFetched', { count: ob.models.length, list: formatModelList(ob.models, 6) })
-                : t('onboard.default', { value: template.defaultModels.join(', ') }))
-              if (template.api !== undefined) addDialog(t('onboard.ctrlF'))
-              if (ob.providerType === 'catalog') addDialog(t('onboard.modelsCatalogHint'))
-              addDialog(t('onboard.modelsPickHint'))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'models-pick': {
-              const candidates = ob.modelCandidates ?? []
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.modelsPick', { count: candidates.length }))
-              const start = pickerWindowStart(ob.modelCursor ?? 0, candidates.length)
-              const end = Math.min(candidates.length, start + PICKER_WINDOW)
-              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
-              for (let index = start; index < end; index += 1) {
-                const id = candidates[index]
-                if (id === undefined) continue
-                const focused = index === (ob.modelCursor ?? 0) ? '›' : ' '
-                const mark = (ob.modelChecked ?? new Set<number>()).has(index) ? '◉' : '○'
-                addDialog(` ${focused} ${mark} ${id}`)
-              }
-              if (end < candidates.length) addDialog(`  ${t('picker.moreBelow', { count: candidates.length - end })}`)
-              addDialog(t('onboard.modelsCheckHint'))
-              break
-            }
-            case 'model-default': {
-              const checked = this.checkedOnboardingModels(ob)
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.defaultModelPick'))
-              const start = pickerWindowStart(ob.modelCursor ?? 0, checked.length)
-              const end = Math.min(checked.length, start + PICKER_WINDOW)
-              if (start > 0) addDialog(`  ${t('picker.moreAbove', { count: start })}`)
-              for (let index = start; index < end; index += 1) {
-                const id = checked[index]
-                if (id === undefined) continue
-                const focused = index === (ob.modelCursor ?? 0) ? '›' : ' '
-                addDialog(` ${focused} ○ ${id}`)
-              }
-              if (end < checked.length) addDialog(`  ${t('picker.moreBelow', { count: checked.length - end })}`)
-              addDialog(t('onboard.pickHint'))
-              break
-            }
-            case 'context':
-              addDialog(t('onboard.providerLine', { label: providerLabel }))
-              addDialog(t('onboard.contextPrompt'))
-              addDialog(t('onboard.contextValue', {
-                value: String(ob.routeContextWindow ?? HARNESS_DEFAULT_CONTEXT_WINDOW),
-              }))
-              addDialog(t('onboard.contextHint'))
-              addDialog(t('onboard.enterEsc'))
-              break
-            case 'confirm':
-              addDialog(t('onboard.confirmTitle'))
-              addDialog(t('onboard.confirmProvider', { label: providerLabel }))
-              addDialog(`  Provider ID: ${ob.providerId}`)
-              addDialog(t('onboard.confirmBase', { url: ob.baseUrl === '' ? (template.defaultBaseUrl || t('onboard.defaultParen')) : ob.baseUrl }))
-              addDialog(t('onboard.confirmApi', {
-                api: template.api ?? (ob.providerType === 'catalog' ? t('onboard.apiCatalog') : 'deepseek-official'),
-              }))
-              addDialog(t('onboard.confirmModels', { list: formatModelList(ob.models, 8) }))
-              if (ob.defaultModel !== undefined) {
-                addDialog(t('onboard.confirmDefaultModel', { model: ob.defaultModel }))
-              }
-              if (ob.routeContextWindow !== undefined) {
-                addDialog(t('onboard.confirmContext', { value: String(ob.routeContextWindow) }))
-              }
-              addDialog(t('onboard.confirmKey', {
-                head: sliceCodePoints(ob.key, 6),
-                tail: lastCodePoints(ob.key, 4),
-                length: ob.key.length,
-              }))
-              addDialog(t('onboard.confirmHint'))
-              break
-          }
-        }
-      } else {
+      } else if (this.dialog.kind === 'questions') {
+        // The `inspect` case can no longer reach here (it is a Screen, and the
+        // frame returned above), so the branch states what it needs instead of
+        // relying on a gate three hundred lines away to have narrowed it.
         const d = this.dialog
         const review = planReviewOf(d.question)
         if (review) {
@@ -4787,6 +6307,10 @@ export class SshTui {
           const focused = index === d.cursor ? '›' : ' '
           const recommended = option.label === approve ? t('dialog.recommended') : ''
           const extra = option.description === undefined ? '' : ` — ${option.description}`
+          // Where the highlighted row lands: the interaction layer windows itself
+          // around this line when the terminal cannot show the whole list, so the
+          // option Enter would submit is always one of the visible ones.
+          if (index === d.cursor) this.dialogFocusLine = dialogLines.length
           addDialog(` ${focused}${key} ${marker} ${option.label}${recommended}${extra}`)
         }
         if (end < visibleIndexes.length) {
@@ -4841,13 +6365,22 @@ export class SshTui {
       ? `\x1b[${themeExtraToken(this.theme, 'accent')}m${promptPlain.trimEnd()}\x1b[0m `
       : promptPlain
     const promptWidth = displayWidth(promptPlain)
-    const masked = this.dialog?.kind === 'onboarding' && this.onboarding?.step === 'key'
+    // The workspace composer is never masked: the wizard's secret field is the setup
+    // Screen's own row, and it masks there (B2.6 §4).
+    const masked = false
     const inputTextWidth = Math.max(1, width - promptWidth)
+    // The row draws whichever field owns the keyboard: a surface that borrowed
+    // text shows its own (so the caret and the content stay that surface's), and
+    // otherwise it is the composer's draft. The geometry is the same row either
+    // way — this is ownership, not layout.
+    const fieldText = this.fieldText()
+    const fieldCursor = this.fieldCursor()
+    const fieldFolded = this.borrowedText === undefined && this.inputFolded
     const inputView: InputView = masked
-      ? { text: '•'.repeat(this.input.length), cursorOffset: displayWidth('•'.repeat(this.cursor)), folded: false }
-      : this.inputFolded
-        ? foldInputView(this.input, this.cursor, inputTextWidth)
-        : { text: this.input, cursorOffset: displayWidth(this.input.slice(0, this.cursor)), folded: false }
+      ? { text: '•'.repeat(fieldText.length), cursorOffset: displayWidth('•'.repeat(fieldCursor)), folded: false }
+      : fieldFolded
+        ? foldInputView(fieldText, fieldCursor, inputTextWidth)
+        : { text: fieldText, cursorOffset: displayWidth(fieldText.slice(0, fieldCursor)), folded: false }
     const inputTextLines = wrap(inputView.text, inputTextWidth)
     const inputDisplayLines = inputTextLines.map((line, index) =>
       index === 0 ? `${prompt}${line}` : line)
@@ -4877,12 +6410,52 @@ export class SshTui {
     const inputRows = Math.max(1, inputDisplayLines.length)
 
     const yieldPlanDock = this.dialog !== undefined || suggestionLines.length > 0
+    // The workspace: every row between the header and the composer's boundary. The
+    // three things that compete for it, in the order they win: the interaction
+    // surface (painted over the transcript, never over the other two), the active
+    // plan dock (reserved, above the composer), and the live region. History gets
+    // what is left, and never less than `MIN_TRANSCRIPT_ROWS`.
+    const space = Math.max(0, height - headerLines.length - RESERVED_BOTTOM_LINES - (inputRows - 1) - suggestionLines.length - 1)
+    // The dock yields first when the terminal is short — it is the card the reader
+    // opened, but a plan that eats the workspace hides the history it is about —
+    // and it is capped by half of it. An uncapped dock was worse than crowded: it
+    // pushed the input box, the footer *and the caret* off the bottom of the screen,
+    // and the caret is where a terminal draws an IME's pre-edit, so a reader typing
+    // Chinese watched the composing text land on the plan card's own first line.
+    const dockBudget = Math.max(1, Math.floor(space / 2))
     const planDockLines = this.shouldDockPlan()
-      ? this.paintPlanDock(width, yieldPlanDock)
+      ? this.paintPlanDock(width, yieldPlanDock, dockBudget)
       : []
-    const inputDivider = this.styleLine('system', repeatToWidth('─', width))
-    const reserved = RESERVED_BOTTOM_LINES + (inputRows - 1) + headerLines.length + suggestionLines.length + planDockLines.length + 1
-    const available = Math.max(0, height - reserved - dialogLines.length)
+    // The composer's own top edge, and the only row that says where the reader's
+    // history ends and the keyboard begins. It is drawn as the input box's corner
+    // rather than as one more full-width rule, so it cannot be mistaken for the
+    // banner's separator — and every transient surface stops above it (B1.2).
+    const inputBoundary = this.styleLine('system', `╭${repeatToWidth('─', Math.max(0, width - 1))}`)
+    // A transient surface is composed *over* the transcript, not into its budget:
+    // it may cover rows the reader can see, but it must not change which rows the
+    // window holds. That is true of a task interaction and of a control-plane
+    // picker alike (B1.2) — they differ in what they mean, not in what they own.
+    // A Surface is composed *over* the workspace, never into its budget (B1.2).
+    // The old `dedicated` rank (an inspect overlay, the onboarding wizard) took its
+    // rows *out* of the window instead; B2.6 gave both a Screen, so there is no
+    // third case left here and every composed surface is a layer.
+    const layerLines = dialogLines
+    const contentBudget = Math.max(0, space - planDockLines.length)
+    // The live region is a *region*, not an overlay (B2.2's tail, corrected): it
+    // takes rows of its own between the transcript and the plan dock instead of
+    // painting over whatever happened to be at the bottom of the window. Painting
+    // over split a card mid-body with no boundary, which is what "the tool card's
+    // content is inside the processing card" was: the reader saw a card's last
+    // lines run straight into the thinking/wait lines below them, and a click on a
+    // row the tail covered was refused because the ref map was cleared for it. A
+    // reader who is scrolled back keeps their history and sees no tail at all.
+    const tailRows = this.scrollOffset === 0 && liveTail.length > 0 && contentBudget > 0
+      // One row is the floor even on a terminal with no room to spare: the live
+      // region is what says the session is working, and a terminal that can show
+      // one transcript row can show that too. It is still clipped from its front.
+      ? Math.min(liveTail.length, Math.max(1, contentBudget - MIN_TRANSCRIPT_ROWS))
+      : 0
+    const available = Math.max(0, contentBudget - tailRows)
     const window = windowTranscript({
       lines: display,
       refs: displayRefs,
@@ -4929,98 +6502,102 @@ export class SshTui {
       this.clickableRows.set(dockTop, dockPlan)
     }
 
-    const linkChip = formatLinkQualityChip(
-      this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color,
-    )
-    const statsGroups = footerStatsGroups(statsRowOf(this.statsTracker.snapshot()))
+    const facts = this.footerFacts(inputView, inputRows)
+    const footer = facts.input
+    const activity = facts.activity
+    const activityStartedAt = facts.activityStartedAt
+    const provider = facts.provider
+    const quotaWindow = facts.quotaWindow
+    // The second row is workspace/runtime metadata only. The activity and its
+    // clock are row one's job now (and repeating them here was the first thing
+    // the new layout showed), the provider/model/effort are painted permanently
+    // in the header, and `sub:` stays because a child route is a *different*
+    // identity from the parent's.
+    const identity = footerIdentityParts(footer, { omitModel: true })
+    // The ephemeral notice (a failed command, an operational warning) takes the
+    // identity row for as long as it lives. That row is always on screen, costs no
+    // geometry, and — unlike covering a transcript row — hides nothing the reader was
+    // reading: a notice must not be the reason a reply is invisible. The telemetry row
+    // above keeps the echo chip, so an acknowledgement is never hidden by a warning.
 
-    const idleMs = Date.now() - this.lastActivity
-    const livePlan = this.findLivePlanRow()
-    const liveGoal = this.rows.findLast((row): row is Extract<Row, { kind: 'goal' }> => row.kind === 'goal')
-    const current = this.selectionRef?.current
-    const provider = this.currentProviderId()
-    // The footer shows the finest window the provider reports (5-hour first),
-    // not the tightest percent: that is the number a working session hits first.
-    const quotaWindow = this.quotaSnapshot === undefined ? undefined : preferredQuotaWindow(this.quotaSnapshot)
-    const balanceText = this.balanceSnapshot !== undefined && this.balanceSnapshot.provider === provider
-      ? formatFooterBalance(this.balanceSnapshot)
-      : undefined
-    const waitingQuestions = this.rows.some(row => row.kind === 'question' && row.status === 'waiting')
-    const compacting = this.compactionRunning()
-    const parentModel = current?.model ?? this.agent.options.model ?? ''
-    const sub = this.subagentSelection.current
-    const footer = {
+    // The default row: link health, what is happening, tokens per second, quota
+    // and context capacity, session total — in that order, losing the least
+    // load-bearing cell first as the terminal narrows. The install health chip
+    // (⚠) still leads the row when the profile is missing rows: it is the only
+    // group that reports a broken install, and its priority predates this pass.
+    const health = footerHealthChip(this.rosterMissing, this.color, this.settingsGeneration === 'forms' ? 'agent-plane' : 'roster')
+    const total = sessionTokenTotal(this.statsTracker.snapshot().usage)
+    // The chip is painted only for a total the harness itself published. A total
+    // this plugin had to assemble from the billed parts is a *different*
+    // accounting — provider by provider, `inputTokens` may or may not already
+    // include the cache counters — and two numbers that mean different things must
+    // not look alike. `/status` prints both, labelled.
+    const sessionTotal = total?.basis === 'harness' ? total.tokens : undefined
+    const stripInput: FooterStripInput = {
+      link: {
+        kind: this.paintLink,
+        intervalMs: this.paintIntervalMs,
+        probed: this.paintProbed,
+        ...(this.paintRttMs === undefined ? {} : { rttMs: this.paintRttMs }),
+      },
+      activity: {
+        kind: activity.kind,
+        text: activity.text,
+        ...(activityStartedAt === undefined ? {} : { startedAt: activityStartedAt }),
+        now: Date.now(),
+      },
+      throughput: this.statsTracker.throughput(),
       running: this.agent.status === 'running',
-      planReview: this.dialog?.kind === 'questions' && planReviewOf(this.dialog.question),
-      waitingQuestion: waitingQuestions || (this.dialog?.kind === 'questions' && !planReviewOf(this.dialog.question)),
-      compacting,
-      ...(this.llmRetry === undefined ? {} : { retry: this.llmRetry }),
-      subagents: this.activeSubagents.size,
-      tools: this.openToolCalls.size,
-      planLeftOpen: livePlan?.turnLeftOpen === true,
-      planPending: livePlan?.pending === true,
-      planActive: livePlan?.active === true,
-      ...(liveGoal?.phase === 'active' || liveGoal?.phase === 'paused' || liveGoal?.phase === 'blocked'
-        ? { goalPhase: liveGoal.phase }
-        : {}),
-      idleMs,
-      model: parentModel,
-      preset: this.presetName,
-      ...(current?.reasoningEffort === undefined ? {} : { effort: current.reasoningEffort }),
-      provider,
-      parentModel,
-      subModel: sub.model,
-      ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
-      ...(sub.reasoningEffort === undefined ? {} : { subEffort: String(sub.reasoningEffort) }),
-      // Quota and context pressure stay on the identity line, where they have
-      // always been: B-1 moved them one row up into the strip, and a user
-      // looking at a wide terminal read that as "额度条没了". The strip keeps
-      // the loss order for the groups it does own.
       ...(quotaWindow === undefined || this.quotaSnapshot === undefined || this.quotaSnapshot.provider !== provider
-        // No reading for this provider: show the empty bar with a `?` rather
-        // than a number nobody measured. A balance-only provider (DeepSeek)
-        // shows nothing here; its balance line is the reading.
-        ? (this.hasQuotaSurface(provider) ? { quotaUnknown: true } : {})
-        : {
-          quotaCode: shortQuotaPlanName(this.quotaSnapshot),
-          quotaPercent: quotaWindow.remainingPercent,
-          quotaPeriod: quotaWindow.period,
-        }),
-      ...(this.contextPressure === undefined
-        ? {}
-        : { contextChip: formatContextPressureChip(this.contextPressure, false) }),
-
-      ...(balanceText === undefined ? {} : { balanceText }),
-      ...(this.searchHits.length > 0 && this.searchIndex >= 0
-        ? { search: { index: this.searchIndex, total: this.searchHits.length } }
-        : {}),
-      foldedInput: inputView.folded,
-      multiLineInput: inputRows > 1,
-      queued: this.pendingMessages.size,
-      cwdLabel: formatFooterCwd(this.workspaceCwd()),
-      compactView: this.isCompactView(),
-    } satisfies FooterStatusInput
-    const activity = footerActivity(footer)
-    const activityText = activity.kind === 'compacting'
-      ? `${this.spinnerFrame()} ${activity.text}`
-      : activity.kind === 'subagents'
-        ? `${this.spinnerFrame(160)} ${activity.text}`
-        : activity.text
-    const identity = footerIdentityParts(footer)
-    const statusText = fitFooterStatusLine(activityText, identity, Math.max(1, width))
-    // Accents on an otherwise muted line: the context ring, then the `sub:`
-    // chip. Each reset reopens mute (`90`), the same way the pre-strip footer
-    // did. `styleLine` sanitises first, so the accents are spliced in after.
-    let statusLine = this.styleLine('system', statusText)
-    if (this.color && this.contextPressure !== undefined) {
-      const ring = formatContextPressureRing(this.contextPressure.percent)
-      statusLine = statusLine.replace(
-        ring,
-        `\x1b[${contextPressureRingColor(this.contextPressure.level)}m${ring}\x1b[0m\x1b[${themeToken(this.theme, 'system')}m`,
-      )
+        // No reading for this provider: the empty bar with `?` rather than a
+        // number nobody measured. A balance-only provider (DeepSeek) shows
+        // nothing here; its balance line is the reading.
+        ? (this.hasQuotaSurface(provider) ? { quota: {} } : {})
+        : { quota: { remainingPercent: quotaWindow.remainingPercent, period: quotaWindow.period } }),
+      ...(this.contextPressure === undefined ? {} : { context: this.contextPressure }),
+      ...(sessionTotal === undefined ? {} : { totalTokens: sessionTotal }),
+      // The install warning is a chip on this row, not a strip fitted around it:
+      // one width convergence path for the whole line (see the budget module).
+      ...(health === undefined ? {} : { warning: { long: health.long, short: health.short } }),
+      depth: this.colorDepth,
+      color: this.color,
+      ...(this.footerEcho === undefined ? {} : { echo: this.footerEcho.text }),
     }
-    if (this.color) {
-      const chip = identity.find(part => part.startsWith('sub:')) ?? ''
+    const stripText = runtimeStrip(stripInput, Math.max(1, width), this.mutedSeparator(), this.spinnerFrame())
+    // The acknowledgement the strip could not fit.
+    //
+    // The echo chip is the lowest-priority group on the stats row, which is exactly
+    // the state a working session is in — so a command's confirmation was dropped
+    // entirely and the reader saw *no* feedback at all (B2.5, reported). The chip is
+    // still where it goes first; when it did not survive, the row that always fits
+    // says it instead. One message, one place, no extra rows.
+    const missingEcho = this.notice === undefined
+      && this.footerEcho !== undefined
+      && !stripText.includes(this.footerEcho.text)
+      ? this.footerEcho.text
+      : undefined
+    // The row is one muted run with the accents spliced in at higher intensity;
+    // `muteFooterLine` reopens the mute after every reset so the (already
+    // coloured) pips and meters cannot bleed into the text around them.
+    const statsLine = clipAnsiToWidth(this.muteFooterLine(stripText), Math.max(1, width))
+    this.healthChipRow = undefined
+
+    // The identity row is composed *after* the strip, because whether it needs to
+    // carry the echo depends on what the strip managed to fit (see below).
+    const statusText = this.notice !== undefined
+      ? truncateToWidth(this.notice.text, Math.max(1, width))
+      : missingEcho === undefined
+        ? fitFooterStatusLine('', identity, Math.max(1, width))
+        : truncateToWidth(missingEcho, Math.max(1, width))
+    // Accents on an otherwise muted line: the `sub:` chip. Each reset reopens
+    // mute, the same way the pre-strip footer did. `styleLine` sanitises first,
+    // so the accent is spliced in after.
+    let statusLine = this.styleLine('system', statusText)
+    if (this.color && this.notice === undefined) {
+      // The chip is only accented when it survived the fit: a `sub:` route the
+      // row could not afford is not on the line, and `paintFooterSubagentChip`
+      // returns the line unchanged when it cannot find its text.
+      const chip = identity.find(text => text.startsWith('sub:')) ?? ''
       statusLine = paintFooterSubagentChip(
         statusLine,
         chip,
@@ -5030,49 +6607,114 @@ export class SshTui {
       )
     }
 
-    // The strip: one loss order for the groups a narrow terminal can do without.
-    // Health leads because it is the only group that reports a broken install;
-    // the session counters go before the operational signals. Quota and context
-    // pressure are deliberately not here — they are on the identity line.
-    const strip: FooterChip[] = []
-    const health = footerHealthChip(this.rosterMissing, this.color, this.settingsGeneration === 'forms' ? 'agent-plane' : 'roster')
-    // Muted like the identity line, accent excepted: the pre-strip footer
-    // painted the counters dim and only the ⚠'s own glyph yellow.
-    if (health !== undefined) strip.push({ ...health, long: this.muteFooterLine(health.long) })
-    strip.push({
-      id: 'link',
-      // Keeps the default foreground, exactly as it looked before the strip.
-      long: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, this.color),
-      short: formatLinkQualityChip(this.paintLink, this.paintIntervalMs, this.paintRttMs, this.paintProbed, false)
-        .replace(/\s*\d+ms$/u, ''),
-      priority: 1,
+    // The live region is clipped from its own front when it is taller than the
+    // room it has: a reply being written is read from its end. Its first line is
+    // the live thinking card's header, which survives the clip — without it the
+    // region has nothing that says what it is, and a reader who expanded that card
+    // could not see the marker that says so.
+    const tailStart = liveTail.length - tailRows
+    const visibleTail = tailRows === 0 ? [] : liveTail.slice(tailStart)
+    if (tailRows > 0 && tailStart > 0 && runtimeTail.thinkingRows > 0) visibleTail[0] = liveTail[0] ?? ''
+    const tailTop = tailRows === 0 ? undefined : headerLines.length + visible.length
+    const tailRefs: (CollapsibleBlock | undefined)[] = visibleTail.map((_, index) => {
+      const block = this.streamingReasoning
+      if (runtimeTail.thinkingRows === 0 || block === undefined) return undefined
+      if (index === 0 && tailStart > 0) return block
+      return tailStart + index < runtimeTail.thinkingRows ? block : undefined
     })
-    statsGroups.forEach((text, index) => {
-      strip.push({ id: `stat${index}`, long: this.muteFooterLine(text), short: '', priority: 4 + index })
-    })
-    const statsLine = clipAnsiToWidth(
-      fitFooterChips(strip, Math.max(1, width), this.mutedSeparator()),
-      Math.max(1, width),
-    )
-    this.healthChipRow = undefined
-
     const paintRows: string[] = [
       ...headerLines,
       ...visibleWithSelection,
+      ...visibleTail,
       ...planDockLines,
-      ...dialogLines,
-      inputDivider,
+      inputBoundary,
       ...suggestionLines,
       ...inputDisplayLines,
       `${statsLine}\x1b[0m`,
       `${statusLine}\x1b[0m`,
     ]
 
+    this.liveTailRegion = tailTop === undefined ? undefined : { top: tailTop + 1, rows: tailRows }
+
+    // The layer takes the rows immediately above the composer's boundary and
+    // *replaces* whatever the base frame put there. The transcript window above it
+    // is untouched: the window was computed without knowing the surface exists, so
+    // its anchor, its scroll offset and its source rows are the same with or
+    // without it — for a picker exactly as for a question.
+    const dividerIndex = headerLines.length + visibleWithSelection.length + tailRows + planDockLines.length
+    const interactionCap = layerLines.length === 0 ? 0 : dividerIndex
+    const interaction = windowInteractionLines(layerLines, interactionCap, this.dialogFocusLine)
+    const interactionTop = interaction.lines.length === 0 ? undefined : dividerIndex - interaction.lines.length
+    if (interactionTop !== undefined) {
+      for (const [offset, line] of interaction.lines.entries()) {
+        paintRows[interactionTop + offset] = line
+      }
+    }
+    this.interactionRegion = interactionTop === undefined
+      ? undefined
+      : { top: interactionTop + 1, rows: interaction.lines.length }
+
+    // Whatever covers rows — the live tail, the transient layer, or both — makes
+    // those rows non-targets: nothing behind them may stay clickable or hold a
+    // painted link, or a click would open a card nobody can see. The mouse handlers
+    // already stand down while a surface owns the keyboard; clearing the maps keeps
+    // the *data* honest too, which is what stops a later change from reintroducing
+    // click-through by forgetting.
+    const coveredFrom = Math.min(
+      interactionTop === undefined ? Number.POSITIVE_INFINITY : interactionTop + 1,
+      tailTop === undefined ? Number.POSITIVE_INFINITY : tailTop + 1,
+    )
+    if (Number.isFinite(coveredFrom)) {
+      for (const key of [...this.clickableRows.keys()]) {
+        if (key >= coveredFrom) this.clickableRows.delete(key)
+      }
+      for (const key of [...this.paintedLinkHitsByRow.keys()]) {
+        if (key >= coveredFrom) this.paintedLinkHitsByRow.delete(key)
+      }
+    }
+    // Registered *after* that sweep, because the live region is exactly where the
+    // sweep stops. The live thinking card is a card like any other: the reader
+    // expands and folds it with a click, which is how they reach a card at all —
+    // the keyboard paths (empty-input ↑ then Enter, Ctrl+R) were the only ones that
+    // worked, which is why "the thinking card cannot be expanded" survived the
+    // state fix: the card was clickable nowhere.
+    if (tailTop !== undefined) {
+      for (const [index, ref] of tailRefs.entries()) {
+        if (ref !== undefined) this.clickableRows.set(tailTop + index + 1, ref)
+      }
+    }
+
     if (health !== undefined) this.healthChipRow = paintRows.length - 1
     // Bottom chrome is force-repainted whenever its state changes while the
     // agent is working; this clears any stale cell left behind by a previous
-    // frame even when the row strings happen to be identical.
-    const chromeStart = Math.max(0, paintRows.length - inputRows - suggestionLines.length - dialogLines.length - planDockLines.length - 3)
+    // frame even when the row strings happen to be identical. The interaction
+    // belongs to that chrome: a selection move repaints from the interaction's
+    // own top, not from the top of the frame.
+    const baseChromeStart = Math.max(0, paintRows.length - inputRows - suggestionLines.length - planDockLines.length - 3)
+    // The live region is *not* part of the force-repainted chrome, even though it
+    // changes on every tick: its rows are compared against the rows that were
+    // actually painted last frame, and a row whose string is unchanged is already
+    // correct on screen. Forcing them made every streaming tick rewrite the whole
+    // region (measured: ~1.3 KB a tick at 100×20) for rows that had not moved.
+    //
+    // The composer rows are excluded for a different reason, and it is not about
+    // bytes: the caret lives there, and a terminal draws an IME's composition *at
+    // the caret* rather than into the buffer. Rewriting the row erases whatever is
+    // being composed — Windows Terminal redraws it immediately, which is the
+    // pre-edit characters flickering over the row above the composer while a turn
+    // runs. The forced repaint therefore starts *below* the input block: the
+    // footer rows keep the stale-cell protection it exists for (a wide glyph the
+    // width table under-counted), and a composer row is written only when its own
+    // text changed.
+    const composerEnd = headerLines.length + visible.length + tailRows + planDockLines.length
+      + 1 + suggestionLines.length + inputRows
+    const chromeStart = Math.max(
+      Math.min(
+        baseChromeStart,
+        interactionTop === undefined ? Number.POSITIVE_INFINITY : interactionTop,
+      ),
+      composerEnd,
+    )
     const chromeKey = [
       this.status,
       this.agent.status,
@@ -5090,16 +6732,26 @@ export class SshTui {
       this.suggestionIndex,
       this.activeSubagents.size,
       this.dialog?.kind ?? '',
-      this.dialog?.kind === 'questions' ? String(this.dialog.cursor) : '',
+      this.dialog !== undefined && this.dialog.kind === 'questions' ? String(this.dialog.cursor) : '',
+      interaction.lines.join('\n'),
+      liveTail.join('\n'),
+      this.notice?.text ?? '',
+      this.dialogRole.kind,
       planDockLines.join('\n'),
       String(chromeStart),
     ].join('\x1f')
     const chromeChanged = chromeKey !== this.lastChromeKey || chromeStart !== this.lastChromeStart
     const transcriptScrolled = start !== this.lastTranscriptStart
+    // A window that moved is not a terminal that changed size. Both dirty every
+    // row, but only the size change needs `ESC[2J`: the terminal reflowed its own
+    // content there, while a scroll shift is this frame's own doing and the rows
+    // it repaints cover it. The live region's height moves the window (it takes
+    // rows of its own now), so a clear here would be a full repaint every time a
+    // streamed line lands — the cost B2.2 removed from the *source* and which
+    // would otherwise come straight back through the geometry.
     const sizeChanged = this.forceFullPaint
       || width !== this.lastPaintWidth
       || height !== this.lastPaintHeight
-      || transcriptScrolled
     this.forceFullPaint = false
 
     // One stdout write per frame: dirty rows only, so jump-host SSH sees a
@@ -5108,14 +6760,19 @@ export class SshTui {
     // link's byte budget: the tail goes first and rows that do not fit stay
     // dirty for the next tick (tracked through `paintResume`), so a big repaint
     // arrives in a few ordered pieces instead of one long freeze.
-    const inputTopRow = visible.length + planDockLines.length + dialogLines.length + suggestionLines.length + headerLines.length + 2
+    const inputTopRow = visible.length + tailRows + planDockLines.length + suggestionLines.length + headerLines.length + 2
     const row = Math.min(height, inputTopRow + cursorRowOffset)
+    // A frame in the middle of a drag: the reader folded the transcript already
+    // (`resizeTailNarrowed`), so this frame only has to bring the chrome to the
+    // new width. The terminal reflows what it holds, and the frame that closes the
+    // drag repaints everything (see `widenPastResizeTail`).
+    const chromeOnly = this.resizeTailNarrowed
     const frame = composePaintFrame({
       width,
       height,
       paintRows,
-      previousRows: this.lastPaintRows,
-      sizeChanged,
+      previousRows: transcriptScrolled && !sizeChanged ? [] : this.lastPaintRows,
+      sizeChanged: sizeChanged && !chromeOnly,
       chromeChanged,
       chromeStart,
       previousChromeStart: this.lastChromeStart,
@@ -5123,18 +6780,28 @@ export class SshTui {
       cursorColumn: column,
       // A size change starts with a full clear, so splitting it would leave the
       // user looking at a half-empty screen for a frame or two; that one frame
-      // stays whole. Everything incremental is budgeted.
-      maxBytes: sizeChanged ? undefined : frameByteBudget(linkQualityOf(this.paintLink, this.paintRttMs)),
+      // stays whole. Everything incremental is budgeted. A chrome-only frame is
+      // atomic for the same reason as a size change: a half-drawn input box is
+      // worse than a late one.
+      maxBytes: sizeChanged || chromeOnly ? undefined : frameByteBudget(linkQualityOf(this.paintLink, this.paintRttMs)),
+      ...(chromeOnly ? { dirtyFrom: chromeStart } : {}),
       ...(this.paintResume === undefined ? {} : { from: this.paintResume }),
     })
     this.paintResume = frame.resume
+    // What the drag pacing compares the queue against (`resizeWireBehind`): the
+    // wire counts bytes, so a character count would under-report a CJK frame by
+    // roughly 3× and let the queue build up exactly where it hurts.
+    this.lastFrameBytes = Buffer.byteLength(frame.output, 'utf8')
     this.write(frame.output)
     this.lastPaintCursorRow = row
     this.lastPaintCursorColumn = Math.min(width, Math.max(1, column))
     const snapshot = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     // Only the rows this frame wrote are up to date; a deferred row keeps its
-    // old entry so the next frame still sees it as changed.
-    this.lastPaintRows = frame.deferred.length === 0
+    // old entry so the next frame still sees it as changed. A chrome-only frame is
+    // the same rule for a different reason: claiming the transcript rows it left
+    // alone would let the next frame compare them equal to themselves and never
+    // paint them at all.
+    this.lastPaintRows = frame.deferred.length === 0 && !chromeOnly
       ? snapshot
       : advancePaintedRows(this.lastPaintRows, snapshot, frame.painted)
     this.lastChromeKey = chromeKey
@@ -5154,7 +6821,7 @@ export class SshTui {
 
   private announceWorkspaceCwd(): void {
     const cwd = this.workspaceCwd()
-    this.pushRow({ kind: 'system', text: t('cwd.full', { cwd }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('cwd.full', { cwd }) }))
     this.markDirty()
   }
 
@@ -5195,9 +6862,80 @@ export class SshTui {
     return `${provider}/${model}${effort === undefined ? '' : ` (${effort})`} · ${kind}`
   }
 
-  /** Compact session stats groups for the first footer row. */
-  private statsText(): string {
+  /**
+   * The session's own telemetry, in the shapes the old status line used.
+   *
+   * Kept because the footer is not the only reader: the numbers a user files a
+   * bug report with (turns, steps, model time, tool time, cache hit, and the
+   * exact per-step decode rate) are still part of the session's public surface,
+   * and this is the accessor `/status` and the tests reach for. The default row
+   * itself no longer shows any of it.
+   */
+  statsText(): string {
     return footerStatsGroups(statsRowOf(this.statsTracker.snapshot())).join(' │ ')
+  }
+
+  /**
+   * When the activity the status row is reporting began.
+   *
+   * Each state has its own natural clock, and the row shows whichever one
+   * belongs to the state it is painting: a tool shows how long that tool has
+   * run, a subagent the age of the oldest child, a compaction its card, and a
+   * streaming step the time since its first delta. A state with no honest clock
+   * — plan mode, a goal, a question nobody has answered yet — gets none, so the
+   * chip shows the verb alone rather than borrowing a number that measures
+   * something else.
+   */
+  private footerActivityStartedAt(input: {
+    compacting: boolean
+    waitingQuestions: boolean
+    streaming: boolean
+  }): number | undefined {
+    if (input.waitingQuestions) return this.waitStartedAt
+    if (input.compacting) {
+      return this.runningCompactions()[0]?.startedAt
+    }
+    if (this.activeSubagents.size > 0) {
+      let oldest: number | undefined
+      for (const subagent of this.activeSubagents.values()) {
+        if (oldest === undefined || subagent.startedAt < oldest) oldest = subagent.startedAt
+      }
+      return oldest
+    }
+    // The oldest open tool call, so the chip counts the one holding the turn up
+    // rather than the one that just started.
+    let oldestTool: number | undefined
+    for (const callId of this.openToolCalls.keys()) {
+      const startedAt = this.statsTracker.toolStartedAt(callId)
+      if (startedAt === undefined) continue
+      oldestTool = Math.min(oldestTool ?? startedAt, startedAt)
+    }
+    if (oldestTool !== undefined) return oldestTool
+    if (input.streaming) {
+      const clocks = this.statsTracker.stepClocks()
+      return clocks.firstTokenAt ?? clocks.startedAt
+    }
+    return undefined
+  }
+
+  /**
+   * What the open tool calls are, as one word for the activity chip.
+   *
+   * One call names itself through the transcript's own tool vocabulary
+   * (`toolTitle`, the same table the cards use, so `bash` reads `terminal` in
+   * both places). Several at once get the count instead, because "which one" has
+   * no single answer and a comma-separated list is not a status chip.
+   */
+  private activityToolLabel(): string | undefined {
+    if (!this.agentStatusRunning()) return undefined
+    const names = [...this.openToolCalls.values()].filter(name => !HIDDEN_TOOL_NAMES.has(name))
+    if (names.length === 0) return undefined
+    if (names.length > 1) return t('footer.tools', { count: names.length })
+    return toolTitle(names[0] ?? '')
+  }
+
+  private agentStatusRunning(): boolean {
+    return this.agent.status === 'running'
   }
 
   /** Refresh the terminal window title (throttled while running). */
@@ -5270,7 +7008,7 @@ export class SshTui {
       && this.activeSubagents.size === 0
     ) {
       this.stalledWarningShown = true
-      this.pushRow({ kind: 'error', text: t('stall.warning') })
+      this.pushRow(represent('runtime-warning', { kind: 'error', text: t('stall.warning') }))
       this.markDirty()
       return
     }
@@ -5279,15 +7017,34 @@ export class SshTui {
   }
 
   /** Whether the previous frames have not drained yet (slow link, big burst). */
-  private stdoutBacklogged(): boolean {
-    // Only the direct-stdout path can be measured here; a detached display
-    // sends through its own socket and keeps its own queue.
+  /**
+   * Whether the last frame is still on its way to the terminal.
+   *
+   * Two wires, one question. A direct TTY is `stdout`; a relayed session writes
+   * into the display socket, and that socket is the one that knows how much has
+   * not left yet. The relay path used to answer "no, never backlogged", which left
+   * the Host with no way to tell a link that is keeping up from one that is not —
+   * so it paced itself from the measured round trip alone, and a drag on a fast
+   * link waited for a cadence nobody needed.
+   */
+  private outputBacklogged(): boolean {
+    // `?.()` on the method as well as the object: a display host is a class in
+    // production, but the field is also stubbed by tests and by embedders, and a
+    // host that cannot answer the question must not take the paint path down with
+    // it — it falls through to the stdout branch instead.
+    const pending = this.pendingBytes()
+    if (pending !== undefined) return pending > STDOUT_BACKLOG_BYTES
     if (this.displayHost?.attached === true || this.displayDetached) return false
     try {
       return process.stdout.writableLength > STDOUT_BACKLOG_BYTES
     } catch {
       return false
     }
+  }
+
+  /** The name the paint path has always used for this question. */
+  private stdoutBacklogged(): boolean {
+    return this.outputBacklogged()
   }
 
   /**
@@ -5303,10 +7060,10 @@ export class SshTui {
   private async runPresetCommand(arg: string): Promise<void> {
     const service = this.presetService()
     if (service === undefined) {
-      this.pushRow({
+      this.pushRow(represent('preset-error', {
         kind: 'error',
         text: this.missingPresetService(t('preset.missingService')),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -5323,7 +7080,7 @@ export class SshTui {
     if (sub === 'rename') return this.presetWriteMetadata(service, rest[0], { name: rest.slice(1).join(' ') })
     if (sub === 'describe') return this.presetWriteMetadata(service, rest[0], { description: rest.slice(1).join(' ') })
     if (sub === 'delete') return this.presetDelete(service, rest[0])
-    this.pushRow({ kind: 'error', text: t('preset.unknownSub', { sub }) })
+    this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.unknownSub', { sub }) }))
     this.markDirty()
   }
 
@@ -5345,7 +7102,7 @@ export class SshTui {
     try {
       const presets = await service.list()
       if (presets.length === 0) {
-        this.pushRow({ kind: 'error', text: t('preset.none') })
+        this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.none') }))
         this.markDirty()
         return
       }
@@ -5432,7 +7189,7 @@ export class SshTui {
 
   /** A wizard step the user backed out of: nothing was written. */
   private presetCancelled(): void {
-    this.pushRow({ kind: 'system', text: t('preset.cancelled') })
+    this.pushRow(represent('preset-feedback', { kind: 'system', text: t('preset.cancelled') }))
     this.markDirty()
   }
 
@@ -5453,7 +7210,7 @@ export class SshTui {
     lines.push(authorable
       ? t('preset.listWritable', { root: service.roots?.find(root => root.trust === 'user')?.path ?? '' })
       : t('preset.listReadOnly'))
-    this.pushRow({ kind: 'system', text: lines.join('\n') })
+    this.pushRow(represent('preset-feedback', { kind: 'system', text: lines.join('\n') }))
     this.markDirty()
   }
 
@@ -5462,13 +7219,13 @@ export class SshTui {
     const presets = await service.list()
     const ids = presets.map(preset => preset.id).join(', ')
     if (id === undefined || id === '') {
-      this.pushRow({ kind: 'error', text: t('preset.needId', { ids }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.needId', { ids }) }))
       this.markDirty()
       return
     }
     const preset = presets.find(candidate => candidate.id === id)
     if (preset === undefined) {
-      this.pushRow({ kind: 'error', text: t('preset.unknownId', { id, ids }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.unknownId', { id, ids }) }))
       this.markDirty()
       return
     }
@@ -5508,7 +7265,7 @@ export class SshTui {
     } else {
       lines.push(t('preset.unsupported', { feature: 'read' }))
     }
-    this.pushRow({ kind: 'system', text: lines.join('\n') })
+    this.pushRow(represent('preset-feedback', { kind: 'system', text: lines.join('\n') }))
     this.markDirty()
   }
 
@@ -5520,7 +7277,7 @@ export class SshTui {
     name: string,
   ): Promise<void> {
     if (typeof service.copy !== 'function') {
-      this.pushRow({ kind: 'error', text: t('preset.unsupported', { feature: 'copy' }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.unsupported', { feature: 'copy' }) }))
       this.markDirty()
       return
     }
@@ -5557,15 +7314,15 @@ export class SshTui {
     const presets = await service.list()
     const preset = presets.find(candidate => candidate.id === id)
     if (preset === undefined) {
-      this.pushRow({
+      this.pushRow(represent('preset-error', {
         kind: 'error',
         text: t('preset.unknownId', { id: id ?? '', ids: presets.map(candidate => candidate.id).join(', ') }),
-      })
+      }))
       this.markDirty()
       return
     }
     if ((patch.name ?? patch.description ?? '').trim() === '') {
-      this.pushRow({ kind: 'error', text: t('preset.needValue', { id: preset.id }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.needValue', { id: preset.id }) }))
       this.markDirty()
       return
     }
@@ -5592,17 +7349,17 @@ export class SshTui {
   /** Delete a user preset after one confirmation. */
   private async presetDelete(service: PresetService, id: string | undefined): Promise<void> {
     if (typeof service.remove !== 'function') {
-      this.pushRow({ kind: 'error', text: t('preset.unsupported', { feature: 'delete' }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.unsupported', { feature: 'delete' }) }))
       this.markDirty()
       return
     }
     const presets = await service.list()
     const preset = presets.find(candidate => candidate.id === id)
     if (preset === undefined) {
-      this.pushRow({
+      this.pushRow(represent('preset-error', {
         kind: 'error',
         text: t('preset.unknownId', { id: id ?? '', ids: presets.map(candidate => candidate.id).join(', ') }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -5623,7 +7380,7 @@ export class SshTui {
       )
     })
     if (answer !== 'y') {
-      this.pushRow({ kind: 'system', text: t('preset.deleteCancelled') })
+      this.pushRow(represent('preset-feedback', { kind: 'system', text: t('preset.deleteCancelled') }))
       this.markDirty()
       return
     }
@@ -5643,23 +7400,23 @@ export class SshTui {
    */
   private async presetWrite(call: () => Promise<string>): Promise<void> {
     try {
-      this.pushRow({ kind: 'system', text: await call() })
+      this.pushRow(represent('preset-feedback', { kind: 'system', text: await call() }))
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('preset.failed', { error: errorChain(error) }) })
+      this.pushRow(represent('preset-error', { kind: 'error', text: t('preset.failed', { error: errorChain(error) }) }))
     }
     this.markDirty()
   }
 
   /** One refusal, in the user's language. */
   private pushPresetRefusal(refusal: PresetRefusal): void {
-    this.pushRow({
+    this.pushRow(represent('preset-error', {
       kind: 'error',
       text: t(`preset.refused.${refusal.error}`, {
         id: refusal.id ?? '',
         name: refusal.name ?? refusal.id ?? '',
         root: this.presetService()?.roots?.find(root => root.trust === 'user')?.path ?? '',
       }, refusal.error),
-    })
+    }))
     this.markDirty()
   }
 
@@ -5757,15 +7514,27 @@ export class SshTui {
     }
     if (chunk.type === 'text-delta') {
       this.streaming ??= { text: '', reasoning: '' }
-      this.streaming.text += chunk.text ?? ''
+      const text = chunk.text ?? ''
+      this.streaming.text += text
+      // The status row's live rate is measured from *characters*, because the
+      // harness reports no per-token count until the step settles. Reasoning
+      // counts too: a thinking model is decoding either way, and a rate that
+      // only started at the visible answer would read as zero for a minute.
+      this.statsTracker.noteDelta(text, streamed.time || Date.now())
       this.markDirty()
     } else if (chunk.type === 'reasoning-delta') {
       this.streaming ??= { text: '', reasoning: '' }
-      if (this.streaming.reasoning === '' && (chunk.text ?? '') !== '') {
+      const text = chunk.text ?? ''
+      if (this.streaming.reasoning === '' && text !== '') {
         this.thinkingStartedAt = Date.now()
-        this.streamingReasoning = { kind: 'streaming-reasoning', expanded: false }
+        // The block is reused across the steps of one turn: a model that thinks,
+        // answers, and thinks again used to get a fresh, collapsed block at every
+        // phase, so expanding it while the answer streamed looked like it did
+        // nothing. `turn/start` is what resets it, because that is a new turn.
+        this.liveThinkingBlock()
       }
-      this.streaming.reasoning += chunk.text ?? ''
+      this.streaming.reasoning += text
+      this.statsTracker.noteDelta(text, streamed.time || Date.now())
       this.markDirty()
     }
   }
@@ -5864,6 +7633,7 @@ export class SshTui {
     }
     this.lastActivity = Date.now()
     if (!this.replaying) this.refreshContextPressure()
+    this.recordPlanEvent(event)
     // Before the switch, and by string: `workspace/changes` is not a key of the
     // 0.1.5 `SessionEventMap`, so a `case` for it fails strict compilation on
     // that tree. A Host without the service records nothing and this returns.
@@ -5877,18 +7647,24 @@ export class SshTui {
           .filter(block => block.type === 'text')
           .map(block => block.text)
           .join('')
+        // The authoritative source for "was anything typed into this session": the
+        // log itself. It used to be set only by the composer's submit path, and a
+        // second, unreachable `case 'user/message'` further down tried to derive it
+        // (dead code — a duplicate case label is never reached). A resume replays
+        // these events, so the flag now survives it.
+        this.sawUserInput = true
         if (text !== '') {
           const source = event.data.source as { kind?: string; plugin?: string; form?: string; summary?: string }
           const sourceKind = source.kind ?? ''
           if (sourceKind === 'user') {
-            this.pushRow({ kind: 'user', text: `❯ ${text}` })
+            this.pushRow(represent('user-message', { kind: 'user', text: `❯ ${text}` }))
             if (!this.replaying) this.beginWait()
           } else if (source.form === 'notice') {
             const summary = source.summary?.trim() ?? ''
             // Body stays off the workspace (the model still received it).
             const last = this.rows.at(-1)
             const alreadyShown = last?.kind === 'system' && last.text === summary
-            if (summary !== '' && !alreadyShown) this.pushRow({ kind: 'system', text: summary })
+            if (summary !== '' && !alreadyShown) this.pushRow(represent('session-notice', { kind: 'system', text: summary }))
             // Replaying a resumed session: the reminder in the log belongs to
             // the open list that is being rebuilt, so mark it as spent.
             if (summary === t('plan.nudgeQueued')) {
@@ -5902,11 +7678,11 @@ export class SshTui {
             // two content branches above key on the form: keying them on the
             // released `plugin` kind dropped a `time-context` snapshot — and
             // this plugin's own notices — into the raw-context row below.
-            this.pushRow({ kind: 'system', text: text })
+            this.pushRow(represent('session-notice', { kind: 'system', text: text }))
           } else if (isPromptInjectionMessage(sourceKind, text, source.plugin)) {
             this.pushPromptInjection(text, source.plugin)
           } else {
-            this.pushRow({ kind: 'system', text: t('prompt.contextPrefix', { text }) })
+            this.pushRow(represent('session-notice', { kind: 'system', text: t('prompt.contextPrefix', { text }) }))
           }
           this.streaming = undefined
           this.streamingReasoning = undefined
@@ -5943,14 +7719,14 @@ export class SshTui {
         this.thinkingStartedAt = undefined
         const interruptedMark = interrupted ? t('stream.interrupted') : ''
         if (reasoning !== '') {
-          this.pushRow({ kind: 'reasoning', text: `${reasoning}${interruptedMark}`, expanded: reasoningExpanded })
+          this.pushRow(represent('reasoning-message', { kind: 'reasoning', text: `${reasoning}${interruptedMark}`, expanded: reasoningExpanded }))
         }
         if (reasoning !== '') this.turnSawReasoning = true
         if (text !== '') {
           this.turnSawOutput = true
-          this.pushRow({ kind: 'assistant', text: `${text}${interruptedMark}` })
+          this.pushRow(represent('assistant-message', { kind: 'assistant', text: `${text}${interruptedMark}` }))
         } else if (interrupted && reasoning === '') {
-          this.pushRow({ kind: 'system', text: t('stream.interruptedEmpty') })
+          this.pushRow(represent('session-notice', { kind: 'system', text: t('stream.interruptedEmpty') }))
         }
         this.markDirty()
         break
@@ -5958,9 +7734,30 @@ export class SshTui {
       case 'tool/call': {
         this.turnSawOutput = true
         this.openToolCalls.set(String(event.data.callId), event.data.name)
+        // The durable fold needs the questions, and the *settled* half of the
+        // Session's projection names only the call and its answers — so the batch
+        // is remembered here, where the log states it, for a replay to reuse.
+        if (event.data.name === 'ask_user_question') {
+          const asked = askQuestions(event.data.arguments)
+          if (asked.length > 0) this.askedByCall.set(String(event.data.callId), asked)
+        }
         this.toolCallNames.set(String(event.data.callId), event.data.name)
         this.statsTracker.noteToolStart(String(event.data.callId), event.time)
-        if (!HIDDEN_TOOL_NAMES.has(event.data.name)) {
+        // `ask_user_question` is represented by the question it asked, not by a
+        // generic tool card (B2.4): one semantic question gets exactly one primary
+        // transcript representation. The card is created from the call's own
+        // arguments right here, so the live path, the replay path and a log whose
+        // projection never folded the call all draw the same thing — the projection
+        // only ever *updates* the card's state.
+        if (event.data.name === 'ask_user_question') {
+          const asked = this.askedByCall.get(String(event.data.callId)) ?? []
+          for (const question of asked) this.ensureQuestionCard(String(event.data.callId), question)
+        }
+        if (
+          !HIDDEN_TOOL_NAMES.has(event.data.name)
+          && !QUESTION_TOOL_NAMES.has(event.data.name)
+          && !PLAN_TOOL_NAMES.has(event.data.name)
+        ) {
           const present = presentToolCall(event.data.name, event.data.arguments)
           if (SUBAGENT_TOOL_NAMES.has(event.data.name)) {
             const task = present.summary.trim()
@@ -5974,13 +7771,13 @@ export class SshTui {
               candidate.kind === 'subagent' && candidate.runId === callId)) {
               // Live `subagent/start` is not in the parent log. Resume still
               // needs a courtesy chip; a live Host already has the real card.
-              this.pushRow(subagentRowFromSpawnTool({
+              this.pushRow(represent('subagent-card', subagentRowFromSpawnTool({
                 callId,
                 task,
                 modelProvider: this.currentProviderId(),
                 status: 'running',
                 startedAt: typeof event.time === 'number' ? event.time : Date.now(),
-              }))
+              })))
             }
             this.streaming = undefined
             this.markDirty()
@@ -6011,12 +7808,14 @@ export class SshTui {
               ...present.diff === undefined ? {} : { diff: present.diff },
               expanded: false,
             }
-            this.pushRow(row)
+            this.adoptPendingApproval(row)
+            this.pushRow(represent('tool-call', row))
           }
         }
         if (event.data.name === 'exit_plan_mode') {
           const markdown = planMarkdownFromArgs(event.data.arguments)
-          if (markdown !== undefined) this.upsertPlanRow({ planMarkdown: markdown, expanded: false })
+          void markdown
+          // …and the body is the artifact's, folded from this very call.
         }
         this.streaming = undefined
         this.markDirty()
@@ -6052,6 +7851,8 @@ export class SshTui {
         }
         const row = this.findToolRowByCallId(callId)
         if (row !== undefined) {
+          this.adoptPendingApproval(row)
+          this.inferApprovalFromResult(row, event.data.message)
           const metaDiffs = diffMetaDiffs(event.data.meta)
           if (metaDiffs !== null) {
             row.diff = (row.repeats ?? 1) > 1 && row.diff !== undefined && row.diff.length > 0
@@ -6080,6 +7881,14 @@ export class SshTui {
           const recordedName = this.toolCallNames.get(callId)
             ?? (typeof sourceName === 'string' ? sourceName : '')
           if (recordedName !== '' && HIDDEN_TOOL_NAMES.has(recordedName)) break
+          // The question tool's result is the *answer*, and the question card
+          // carries it — a second card for the same call is the duplicate B2.4
+          // removes.
+          if (recordedName !== '' && QUESTION_TOOL_NAMES.has(recordedName)) break
+          // The plan tool's representation is the plan artifact (its review, its body
+          // and the lifecycle lines) — a generic card beside it was the third copy of
+          // the same event (B2.5 §15).
+          if (recordedName !== '' && PLAN_TOOL_NAMES.has(recordedName)) break
           // A spawn is drawn as the child's chip, never as a `subagent` tool
           // card: without a start there is still no card to settle, and a
           // second card beside the chip is exactly the duplicate to avoid.
@@ -6088,7 +7897,7 @@ export class SshTui {
           // recorded tool name; fall back to a generic tool card.
           const toolName = displayToolName(recordedName)
           const present = presentToolCall(toolName, '')
-          this.pushRow({
+          this.pushRow(represent('tool-call', {
             kind: 'tool',
             callId,
             name: toolName,
@@ -6098,7 +7907,7 @@ export class SshTui {
             title: present.title,
             summary: present.summary,
             expanded: false,
-          })
+          }))
         }
         this.markDirty()
         break
@@ -6126,14 +7935,56 @@ export class SshTui {
       case 'sandbox/mode':
         this.hostSandboxMode = String((event.data as { mode?: unknown }).mode ?? '')
         break
+      case 'approval/asked': {
+        // The Harness's own audit pair: this is what "an approval was required"
+        // means durably, and it names the tool call it guards. Read, never written
+        // — the plugin keeps no approval store (B2.4).
+        const id = String((event.data as { id?: unknown }).id ?? '')
+        const toolName = String((event.data as { toolName?: unknown }).toolName ?? '')
+        const rawCallId = (event.data as { callId?: unknown }).callId
+        const reason = (event.data as { reason?: unknown }).reason
+        if (id === '') break
+        this.approvalAsked.set(id, {
+          toolName,
+          ...(rawCallId === undefined ? {} : { callId: String(rawCallId) }),
+          ...(typeof reason === 'string' && reason !== '' ? { reason } : {}),
+        })
+        if (rawCallId !== undefined) {
+          // While a *live* Host is asking, the state is genuinely `waiting`; a
+          // replay reaches the same event with nobody waiting, so the ask alone
+          // never claims more than "it was asked" — see `approval/decided`.
+          this.setToolApproval(String(rawCallId), {
+            state: this.replaying ? 'unknown' : 'waiting',
+            provenance: 'durable',
+          })
+        }
+        break
+      }
+      case 'approval/decided': {
+        const id = String((event.data as { id?: unknown }).id ?? '')
+        const asked = this.approvalAsked.get(id)
+        const state = approvalStateFromOutcome(String((event.data as { outcome?: unknown }).outcome ?? ''))
+        if (asked?.callId !== undefined) {
+          this.setToolApproval(asked.callId, {
+            state,
+            provenance: 'durable',
+            ...(asked.reason === undefined ? {} : { reason: asked.reason }),
+          })
+        }
+        break
+      }
       case 'approval/policy':
         this.hostApprovalPolicy = String((event.data as { policy?: unknown }).policy ?? '')
         if (this.hostApprovalPolicy === 'never') this.warnApprovalMismatch()
         break
-      case 'user/message':
-        this.sawUserInput = true
-        break
       case 'turn/start':
+        // A new turn is new thinking: the live reasoning block starts collapsed
+        // again, and with its clock reset. The reader's expansion choice belongs to
+        // the turn that was on screen when they made it, so it goes with the block:
+        // one card left open must not make every later turn open silently.
+        this.streamingReasoning = undefined
+        this.reasoningExpandedChoice = undefined
+        this.thinkingStartedAt = undefined
         this.stalledWarningShown = false
         this.turnSawOutput = false
         this.turnSawReasoning = false
@@ -6176,7 +8027,7 @@ export class SshTui {
             ? `error: ${reason.error.message}`
             : `idle (${reason.kind})`
         if (reason.kind === 'error') {
-          this.pushRow({ kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) })
+          this.pushRow(represent('turn-error', { kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) }))
           this.reportAuthFailure(String(reason.error.message ?? ''))
         }
         if (reason.kind === 'completed' && !this.replaying && !this.turnSawOutput) {
@@ -6185,19 +8036,25 @@ export class SshTui {
           // `reasoning_content` and then finish with stop and no content, so the
           // turn looks completed while nothing was said and the user is left to
           // guess that another Enter is what continues it. Say so instead.
-          this.pushRow({
+          this.pushRow(represent('session-notice', {
             kind: 'system',
             text: t(this.turnSawReasoning ? 'turn.emptyThinkingOnly' : 'turn.emptyReply'),
-          })
+          }))
         }
         const livePlan = this.findLivePlanRow()
         if (livePlan !== undefined && reason.kind === 'completed') {
           applyTurnEndToPlan(livePlan)
           if (livePlan.turnLeftOpen === true) {
-            this.pushRow({
+            // A *notice*, not a plan row (B2 final audit). It was classified
+            // `plan-row` while carrying a plain system row, which is the one thing a
+            // representation may not be: a plan row is the artifact's reference in the
+            // transcript and has steps — this is one sentence about the turn, and
+            // classifying it as the artifact made the audit's `plan-row` count
+            // disagree with the artifacts it names.
+            this.pushRow(represent('plan-notice', {
               kind: 'system',
               text: planDockNote(livePlan),
-            })
+            }))
             // Driver is still `running` while `turn/end` is appended. Wait for
             // idle so this follow-up does not make `/compact` report busy.
             queueMicrotask(() => this.flushPlanCloseNudge())
@@ -6210,6 +8067,10 @@ export class SshTui {
         this.handleExtensionEvent(event)
         break
     }
+    // Question state is derived from the Session, not from the request that opened
+    // a dialog, so both a lived and a replayed session draw the same cards. The
+    // set is small on purpose: these are the events the projection folds.
+    if (QUESTION_FOLD_EVENTS.has(String(event.type))) this.syncQuestionRows()
   }
 
   private readonly handleStatus = ({ agent, status }: { agent: Agent; status: string }): void => {
@@ -6248,7 +8109,7 @@ export class SshTui {
   private readonly handleError = ({ agent, error }: { agent: Agent; error: unknown }): void => {
     if (agent !== this.agent) return
     this.lastActivity = Date.now()
-    this.pushRow({ kind: 'error', text: errorChain(error) })
+    this.pushRow(represent('error-surface', { kind: 'error', text: errorChain(error) }))
     this.markDirty()
   }
 
@@ -6265,7 +8126,7 @@ export class SshTui {
   private readonly handleDisposed = ({ agent }: { agent: Agent }): void => {
     if (agent !== this.agent) return
     this.agentGone = true
-    this.pushRow({ kind: 'error', text: t('agent.disposed') })
+    this.pushRow(represent('command-error', { kind: 'error', text: t('agent.disposed') }))
     this.status = 'disposed'
     this.markDirty()
   }
@@ -6301,7 +8162,7 @@ export class SshTui {
         expanded: false,
       }
       this.fillChangesCard(row, summary, seq)
-      this.pushRow(row)
+      this.pushRow(represent('changes-card', row))
     }
     this.markDirty()
   }
@@ -6349,21 +8210,21 @@ export class SshTui {
   /** Open (or replace) the changes overlay, or echo it to the log in line mode. */
   private openChangesInspectLines(title: string, lines: DiffDisplayLine[]): void {
     if (this.echoInspectToLog(title, lines)) return
-    const dialog = this.dialog
-    if (dialog?.kind === 'inspect') {
-      dialog.title = title
-      dialog.lines = lines
-      dialog.offset = 0
-      // The dialog may be a leftover from another overlay, and this path is
-      // asynchronous: a reply overlay opened while the diff was being read would
-      // keep its `copyText`, so the copy key would hand back the reply under a
-      // diff. Everything the previous body owned is replaced here.
-      dialog.copyText = inspectCopyText(lines)
-      dialog.notice = undefined
+    const open = this.screen
+    if (open !== undefined && open.kind === 'inspect') {
+      open.title = title
+      open.lines = lines
+      open.offset = 0
+      // The Screen may be a leftover from another body, and this path is
+      // asynchronous: a reply opened while the diff was being read would keep its
+      // `copyText`, so the copy key would hand back the reply under a diff.
+      // Everything the previous body owned is replaced here.
+      open.copyText = inspectCopyText(lines)
+      open.notice = undefined
       this.markDirty()
       return
     }
-    this.openDialog({ kind: 'inspect', title, lines, offset: 0, copyText: inspectCopyText(lines) })
+    this.openScreen({ kind: 'inspect', title, lines, offset: 0, copyText: inspectCopyText(lines) })
   }
 
   /** Plan-mode / command / team events that plugins merge into SessionEventMap. */
@@ -6371,19 +8232,14 @@ export class SshTui {
     const type = String(event.type)
     const data = (event as SessionEvent & { data?: unknown }).data as { active?: unknown; name?: unknown; args?: unknown } | undefined
     if (type === 'plan/mode') {
-      const active = data?.active === true
-      this.upsertPlanRow({ active, pending: false })
-      this.pushRow({
-        kind: 'system',
-        text: active
-          ? t('plan.entered')
-          : t('plan.exited'),
-      })
+      // The activation itself is the projection's (`recordPlanEvent` folded it before
+      // this switch), and so is the lifecycle line it pushes: nothing here keeps plan
+      // state, which is the point of B2.5.
       this.markDirty()
       return
     }
     if (type === 'todo/write') {
-      this.upsertPlanRow({ todos: parsePlanTodos((data as { todos?: unknown } | undefined)?.todos) })
+      // Same: the snapshot is a revision of the artifact, folded from the event.
       this.markDirty()
       return
     }
@@ -6407,7 +8263,7 @@ export class SshTui {
       return
     }
     if (type === 'session/title-llm-request') {
-      this.pushRow({ kind: 'system', text: t('retry.generatingTitle') })
+      this.pushRow(represent('retry-notice', { kind: 'system', text: t('retry.generatingTitle') }))
       this.markDirty()
       return
     }
@@ -6418,7 +8274,7 @@ export class SshTui {
       const failure = (data as { failure?: { message?: unknown } } | undefined)?.failure
       const message = typeof failure?.message === 'string' ? failure.message : t('retry.busy')
       this.llmRetry = { retry, maxRetries, delayMs, message }
-      this.pushRow({
+      this.pushRow(represent('retry-notice', {
         kind: 'system',
         text: t('retry.progress', {
           ms: Math.round(delayMs),
@@ -6426,13 +8282,13 @@ export class SshTui {
           max: maxRetries,
           message,
         }),
-      })
+      }))
       this.markDirty()
       return
     }
     if (type === 'llm/retry-started') {
       if (this.llmRetry !== undefined) {
-        this.pushRow({ kind: 'system', text: t('retry.started', { retry: this.llmRetry.retry }) })
+        this.pushRow(represent('retry-notice', { kind: 'system', text: t('retry.started', { retry: this.llmRetry.retry }) }))
       }
       // The backoff is over and the retried request is in flight: the footer
       // must go back to the ordinary running/waiting states instead of holding
@@ -6452,7 +8308,7 @@ export class SshTui {
       return
     }
     if (type.startsWith('team/')) {
-      this.pushRow({ kind: 'system', text: t('team.event', { type }) })
+      this.pushRow(represent('subagent-card', { kind: 'system', text: t('team.event', { type }) }))
       this.markDirty()
     }
   }
@@ -6519,7 +8375,7 @@ export class SshTui {
     const data = payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}
     const compactionId = typeof data.compactionId === 'string' ? data.compactionId : ''
     if (type === 'compaction/start') {
-      this.pushRow({
+      this.pushRow(represent('compaction', {
         kind: 'compaction',
         compactionId,
         status: 'running',
@@ -6527,7 +8383,7 @@ export class SshTui {
         pruneCount: 0,
         prunedTokens: 0,
         expanded: false,
-      })
+      }))
       this.status = t('compact.status')
       this.markDirty()
       return
@@ -6564,10 +8420,10 @@ export class SshTui {
         row.endedAt = event.time || Date.now()
         if (error !== undefined) row.error = error
       } else {
-        this.pushRow({
+        this.pushRow(represent('compaction', {
           kind: 'system',
           text: error === undefined ? t('compact.finished') : t('compact.failedNotice', { error }),
-        })
+        }))
       }
       if (this.status.startsWith(t('compact.short')) || this.status.startsWith('compact')) {
         this.status = this.agent.status === 'running' ? 'running' : 'idle'
@@ -6604,7 +8460,7 @@ export class SshTui {
     }
     if (next !== undefined && next.level !== 'ok' && next.level !== this.contextAlertLevel) {
       this.contextAlertLevel = next.level
-      this.pushRow({ kind: 'system', text: contextPressureAlertText(next) })
+      this.pushRow(represent('runtime-warning', { kind: 'system', text: contextPressureAlertText(next) }))
     } else if (next === undefined || next.level === 'ok') {
       this.contextAlertLevel = undefined
     }
@@ -6644,7 +8500,7 @@ export class SshTui {
       } | undefined>
     } | undefined
     if (commands?.execute === undefined) {
-      if (reason === 'user') this.pushRow({ kind: 'error', text: t('cmd.unknown', { command: 'compact' }) })
+      if (reason === 'user') this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.unknown', { command: 'compact' }) }))
       return
     }
     // A card left running by a Host that died is closed here rather than
@@ -6654,7 +8510,7 @@ export class SshTui {
     this.settleUnfinishedCompactions({ staleOnly: true })
     if (this.agent.status === 'running'
       || this.compactionRunning()) {
-      if (reason === 'user') this.pushRow({ kind: 'error', text: t('compact.busy') })
+      if (reason === 'user') this.pushRow(represent('command-error', { kind: 'error', text: t('compact.busy') }))
       this.markDirty()
       return
     }
@@ -6662,7 +8518,7 @@ export class SshTui {
     this.lastIdleCompactAt = Date.now()
     if (reason === 'idle') {
       const view = this.contextPressure
-      this.pushRow({
+      this.pushRow(represent('command-feedback', {
         kind: 'system',
         text: view === undefined
           ? t('context.autoCompact')
@@ -6671,7 +8527,7 @@ export class SshTui {
             window: formatTokens(view.contextWindow),
             percent: view.percent.toFixed(0),
           }),
-      })
+      }))
     }
     this.commandAbort?.abort()
     const controller = new AbortController()
@@ -6679,7 +8535,7 @@ export class SshTui {
     void commands.execute(this.agent, '/compact', [], controller.signal).then((execution) => {
       if (execution === undefined) {
         this.idleCompactInFlight = false
-        if (reason === 'user') this.pushRow({ kind: 'error', text: t('cmd.unknown', { command: 'compact' }) })
+        if (reason === 'user') this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.unknown', { command: 'compact' }) }))
         return
       }
       const compactionRunning = (): boolean =>
@@ -6695,19 +8551,19 @@ export class SshTui {
       }
       if (execution.result?.kind === 'error') {
         this.idleCompactInFlight = false
-        this.pushRow({
+        this.pushRow(represent('command-error', {
           kind: 'error',
           text: formatCompactCommandError(this.formatCommandText(String(execution.result.text ?? ''))),
-        })
+        }))
       } else if (typeof execution.result?.text === 'string' && execution.result.text !== '') {
-        this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
+        this.pushRow(represent('command-feedback', { kind: 'system', text: this.formatCommandText(execution.result.text) }))
         releaseIfSettled()
       } else {
         releaseIfSettled()
       }
     }).catch((error: unknown) => {
       this.idleCompactInFlight = false
-      this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'compact', error: errorChain(error) }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'compact', error: errorChain(error) }) }))
     }).finally(() => {
       if (this.commandAbort === controller) this.commandAbort = undefined
       this.markDirty()
@@ -6719,15 +8575,10 @@ export class SshTui {
     const args = String(data?.args ?? '').trim()
     if (name === 'plan') {
       const wantsActive = args !== 'off'
-      const current = this.findLivePlanRow()
-      this.upsertPlanRow({
-        pending: current !== undefined && current.active !== wantsActive,
-        active: current?.active ?? false,
-      })
-      this.pushRow({
+      this.pushRow(represent('command-event', {
         kind: 'system',
         text: wantsActive ? t('plan.requestOn') : t('plan.requestOff'),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -6737,10 +8588,10 @@ export class SshTui {
       return
     }
     if (name === '') return
-    this.pushRow({
+    this.pushRow(represent('command-event', {
       kind: 'system',
       text: args === '' ? `/${name}` : `/${name} ${args}`,
-    })
+    }))
     this.markDirty()
   }
 
@@ -6777,7 +8628,7 @@ export class SshTui {
     const text = typeof payload.text === 'string' ? payload.text.trim() : ''
     if (kind === 'error') {
       const errText = formatCompactCommandError(this.formatCommandText(text))
-      this.pushRow({ kind: 'error', text: errText === '' ? t('command.failed') : errText })
+      this.pushRow(represent('command-event', { kind: 'error', text: errText === '' ? t('command.failed') : errText }))
       if (this.status.startsWith(t('compact.short')) || this.status.startsWith('compact')) {
         this.status = this.agent.status === 'running' ? 'running' : 'idle'
       }
@@ -6788,7 +8639,7 @@ export class SshTui {
       return
     }
     if (text !== '') {
-      this.pushRow({ kind: 'system', text: this.formatCommandText(text) })
+      this.pushRow(represent('command-event', { kind: 'system', text: this.formatCommandText(text) }))
     }
     this.markDirty()
   }
@@ -6801,9 +8652,9 @@ export class SshTui {
         existing.phase = 'cleared'
         existing.blockedReason = undefined
       } else {
-        this.pushRow({ kind: 'goal', objective: t('goal.clearedLabel'), phase: 'cleared', expanded: false })
+        this.pushRow(represent('goal', { kind: 'goal', objective: t('goal.clearedLabel'), phase: 'cleared', expanded: false }))
       }
-      this.pushRow({ kind: 'system', text: t('goal.clearedNotice') })
+      this.pushRow(represent('goal', { kind: 'system', text: t('goal.clearedNotice') }))
       this.markDirty()
       return
     }
@@ -6819,31 +8670,31 @@ export class SshTui {
       existing.phase = phase
       existing.blockedReason = blockedReason
     } else {
-      this.pushRow({
+      this.pushRow(represent('goal', {
         kind: 'goal',
         objective,
         phase,
         ...(blockedReason === undefined ? {} : { blockedReason }),
         expanded: false,
-      })
+      }))
     }
     const notice = phase === 'active' ? t('goal.set')
       : phase === 'paused' ? t('goal.pausedNotice')
       : phase === 'blocked' ? t('goal.blockedNotice')
       : t('goal.doneNotice')
-    this.pushRow({ kind: 'system', text: `${notice}：${objective}` })
+    this.pushRow(represent('goal', { kind: 'system', text: `${notice}：${objective}` }))
     this.markDirty()
   }
 
   private pushPromptInjection(text: string, plugin?: string): void {
     const sources = promptInjectionSources(text, plugin)
-    this.pushRow({
+    this.pushRow(represent('prompt-injection', {
       kind: 'prompt',
       sources,
       text,
       ...(plugin === undefined ? {} : { plugin }),
       expanded: false,
-    })
+    }))
   }
 
   private handleSubagentExtensionEvent(row: Extract<Row, { kind: 'subagent' }>, event: SessionEvent): void {
@@ -6981,7 +8832,7 @@ export class SshTui {
       appendSubagentLog(existing, { kind: 'system', text: startedText })
       this.refreshOpenSubagentInspect(existing)
     } else {
-      this.pushRow({
+      this.pushRow(represent('subagent-notice', {
         kind: 'subagent',
         sessionId,
         childSessionId: sessionId,
@@ -6997,7 +8848,7 @@ export class SshTui {
         lastActivity: t('sub.started'),
         logs: [{ kind: 'system', text: startedText }],
         expanded: false,
-      })
+      }))
     }
     this.markDirty()
   }
@@ -7049,7 +8900,7 @@ export class SshTui {
       })
       this.refreshOpenSubagentInspect(row)
     } else {
-      this.pushRow({
+      this.pushRow(represent('subagent-notice', {
         kind: 'subagent',
         sessionId: String(info.id),
         childSessionId: String(info.id),
@@ -7066,22 +8917,22 @@ export class SshTui {
         lastActivity: endText,
         logs: [{ kind: failed ? 'result' : 'system', text: endText }],
         expanded: false,
-      })
+      }))
     }
     this.markDirty()
   }
 
   /** Keep an open inspect overlay in sync with the live child log. */
   private refreshOpenSubagentInspect(row: Extract<Row, { kind: 'subagent' }>): void {
-    const dialog = this.dialog
-    if (dialog === undefined || dialog.kind !== 'inspect') return
-    if (dialog.subagentSessionId !== this.subagentInspectId(row)) return
-    dialog.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
-    dialog.lines = subagentInspectLines(row)
+    const screen = this.screen
+    if (screen === undefined || screen.kind !== 'inspect') return
+    if (screen.subagentSessionId !== this.subagentInspectId(row)) return
+    screen.title = t('sub.inspectTitle', { title: subagentDisplayName(row) })
+    screen.lines = subagentInspectLines(row)
     // The body grows while the child runs, and the copy text is that body: it
     // has to move with it or the key hands back the log as it stood when the
-    // overlay opened.
-    dialog.copyText = inspectCopyText(dialog.lines)
+    // Screen opened.
+    screen.copyText = inspectCopyText(screen.lines)
   }
 
   // ── approval and questions ──────────────────────────────────────────────
@@ -7185,7 +9036,7 @@ export class SshTui {
     if (this.autoApprovalMode !== 'auto' || this.approvalMismatchWarned) return
     if (this.hostApprovalPolicy !== 'never') return
     this.approvalMismatchWarned = true
-    this.pushRow({ kind: 'system', text: t('approval.mismatchNever') })
+    this.pushRow(represent('approval-warning', { kind: 'system', text: t('approval.mismatchNever') }))
     this.markDirty()
   }
 
@@ -7304,24 +9155,24 @@ export class SshTui {
         if (chunk.type === 'text-delta') text += chunk.text
       }
     } catch (error: unknown) {
-      this.pushRow({
+      this.pushRow(represent('approval-warning', {
         kind: 'system',
         text: t('approval.reviewFailed', { error: errorChain(error) }),
-      })
+      }))
       this.markDirty()
       return undefined
     }
     const verdict = parseReviewOutput(text)
     if (verdict === undefined) {
       const preview = text.trim() === '' ? t('approval.reviewNoReply') : text.trim()
-      this.pushRow({
+      this.pushRow(represent('approval-warning', {
         kind: 'system',
         text: t('approval.reviewUnparsed', { output: preview.slice(0, 160) }),
-      })
+      }))
       this.markDirty()
       return undefined
     }
-    this.pushRow({
+    this.pushRow(represent('approval-warning', {
       kind: 'system',
       text: t('approval.reviewRow', {
         verdict: verdict.approved ? t('approval.reviewApproved') : t('approval.reviewRejected'),
@@ -7329,7 +9180,7 @@ export class SshTui {
         authorization: verdict.authorization,
         reason: verdict.reason,
       }),
-    })
+    }))
     this.markDirty()
     return verdict
   }
@@ -7364,7 +9215,12 @@ export class SshTui {
           risk,
           reason,
         })
-    this.pushRow({ kind: 'system', text: rowText })
+    // A grant is an acknowledgement (footer chip); a refusal is the one the reader
+    // must not miss (notice row). Neither is a transcript row: the decision's
+    // durable home is the tool card it guarded, rebuilt from the Harness's audit
+    // pair, so a permanent sentence here would be a second representation of the
+    // same event — and one nothing can rebuild (B2.4).
+    this.pushRow(represent(decision === 'allow' ? 'approval-allowance' : 'approval-notice', { kind: 'system', text: rowText }))
     this.markDirty()
     if (decision === 'deny') this.tellModelApprovalDenied(clipped, reason, rowText)
   }
@@ -7394,6 +9250,49 @@ export class SshTui {
     }
   }
 
+  /**
+   * The card an approval request guards, marked as *being asked*.
+   *
+   * Waiting is a live-only state: it is true while a Host is holding the request
+   * open, and a replay can never claim it (see `approval/asked`). Set here rather
+   * than in the auto path so a manual prompt and an automatic decision both show
+   * the same thing on the card while the decision is being made.
+   * @param request - the pending approval.
+   * @param provenance - who is deciding: a person (`live`) or this plugin (`policy`).
+   */
+  private markApprovalWaiting(request: ApprovalRequest, provenance: 'live' | 'policy'): void {
+    if (request.callId === undefined) return
+    this.setToolApproval(String(request.callId), {
+      state: 'waiting',
+      provenance,
+      ...(provenance === 'policy' ? { auto: true } : {}),
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+    })
+  }
+
+  /**
+   * Record the decision on the card it guarded.
+   *
+   * `provenance` is the strongest source that produced it: `policy` for a rule, a
+   * cached verdict or a reviewer, `live` for the person at the keyboard. The
+   * Harness's own `approval/decided` event follows this on the same turn and says
+   * strictly less, so `mergeApproval` lets this win (B2.4).
+   */
+  private settleToolApproval(
+    request: ApprovalRequest,
+    outcome: ApprovalOutcome,
+    provenance: 'live' | 'policy',
+  ): void {
+    if (request.callId === undefined) return
+    const state = outcome === 'allowed-once' ? 'approved' : outcome === 'rejected' ? 'rejected' : 'unknown'
+    this.setToolApproval(String(request.callId), {
+      state,
+      provenance,
+      ...(provenance === 'policy' ? { auto: true } : {}),
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+    })
+  }
+
   readonly handleApproval = async (
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
@@ -7404,6 +9303,7 @@ export class SshTui {
     // human is attached — detached turns reject so they complete instead of
     // stalling toward the idle kill.
     if (this.autoApprovalMode === 'auto') {
+      this.markApprovalWaiting(request, 'policy')
       const row = request.callId === undefined
         ? undefined
         : this.findToolRowByCallId(String(request.callId))
@@ -7422,10 +9322,12 @@ export class SshTui {
       const ruleReason = t(`approval.reason.${classified.reasonKey}`, undefined, classified.reasonKey)
       if (classified.decision === 'allow') {
         this.recordAutoApproval('allow', classified.risk, request.toolName, command, ruleReason)
+        this.settleToolApproval(request, 'allowed-once', 'policy')
         return 'allowed-once'
       }
       if (classified.decision === 'deny') {
         this.recordAutoApproval('deny', classified.risk, request.toolName, command, ruleReason)
+        this.settleToolApproval(request, 'rejected', 'policy')
         return 'rejected'
       }
       // Unknown shape: the rule table cannot judge it — hand it to the
@@ -7447,7 +9349,9 @@ export class SshTui {
             : cached.verdict.reason,
           { fromCache: true, ageMs: cached.ageMs },
         )
-        return cached.verdict.approved ? 'allowed-once' : 'rejected'
+        const cachedOutcome: ApprovalOutcome = cached.verdict.approved ? 'allowed-once' : 'rejected'
+        this.settleToolApproval(request, cachedOutcome, 'policy')
+        return cachedOutcome
       }
       const reviewed = await this.reviewUnknownWithModel(request, command, row?.args)
       if (reviewed !== undefined && cacheKey !== undefined) this.approvalCache.store(cacheKey, reviewed)
@@ -7459,6 +9363,7 @@ export class SshTui {
           command,
           reviewed.reason === '' ? t('approval.reviewApproved') : reviewed.reason,
         )
+        this.settleToolApproval(request, 'allowed-once', 'policy')
         return 'allowed-once'
       }
       if (reviewed !== undefined) {
@@ -7469,11 +9374,13 @@ export class SshTui {
           command,
           reviewed.reason === '' ? t('approval.reviewRejected') : reviewed.reason,
         )
+        this.settleToolApproval(request, 'rejected', 'policy')
         return 'rejected'
       }
       if (!this.hasLiveDisplay()) {
         this.detachedDeniedCount += 1
         this.recordAutoApproval('deny', 'medium', request.toolName, command, t('approval.ruleDetached'))
+        this.settleToolApproval(request, 'rejected', 'policy')
         return 'rejected'
       }
     }
@@ -7481,21 +9388,28 @@ export class SshTui {
       try {
         await this.waitForLiveDisplay(request.signal)
       } catch {
+        this.settleToolApproval(request, 'cancelled', 'live')
         return 'cancelled'
       }
     }
     const agentLabel = t('sub.agentLabel', { name: this.subagentNameFor(String(request.agent.id)) })
     return new Promise<ApprovalOutcome>((resolve) => {
       if (request.signal?.aborted === true) {
+        // Asked and abandoned: the card says so rather than guessing a verdict.
+        this.settleToolApproval(request, 'cancelled', 'live')
         resolve('cancelled')
         return
       }
       let dialog: ConfirmDialog | undefined
       const onAbort = (): void => {
         request.signal?.removeEventListener('abort', onAbort)
-        if (dialog !== undefined) this.abortConfirm(dialog)
+        if (dialog !== undefined) {
+          this.settleToolApproval(request, 'cancelled', 'live')
+          this.abortConfirm(dialog)
+        }
       }
       request.signal?.addEventListener('abort', onAbort, { once: true })
+      this.markApprovalWaiting(request, 'live')
       dialog = this.openConfirm(
         t('approval.prompt', {
           tool: request.toolName,
@@ -7505,10 +9419,249 @@ export class SshTui {
         t('approval.hint'),
         (answer) => {
           request.signal?.removeEventListener('abort', onAbort)
-          resolve(answer === 'y' ? 'allowed-once' : answer === 'n' ? 'rejected' : 'cancelled')
+          const outcome: ApprovalOutcome = answer === 'y' ? 'allowed-once' : answer === 'n' ? 'rejected' : 'cancelled'
+          // The reader's own decision, said by the reader — the strongest source
+          // there is, so it is never relabelled by the event that records it.
+          this.settleToolApproval(request, outcome, 'live')
+          resolve(outcome)
         },
+        'approval',
       )
     })
+  }
+
+  /**
+   * Answer a question whose window closed but whose call the Session still holds.
+   *
+   * `ctx.userQuestions.answer(agent, callId, batch)` is the Harness's own channel
+   * for this: it steers a `user-question-reply` message into the agent, and that
+   * message is what closes the question in the projection. Two preconditions come
+   * from the service, not from us — the agent must be the session's live runtime
+   * root, and the question must still be `continued` — so a refusal here is
+   * reported rather than retried.
+   * @param row - the focused question card.
+   * @returns true when the card consumed the key.
+   */
+  private answerContinuedQuestion(row: Extract<Row, { kind: 'question' }>): boolean {
+    if (row.continued !== true || row.status !== 'waiting' || row.callId === undefined) return false
+    const service = this.ctx.get('userQuestions') as unknown as
+      | {
+        answer?: (
+          agent: unknown,
+          callId: string,
+          answer: { answers: { id: string; selected: string[]; custom?: string }[] },
+        ) => boolean
+      }
+      | undefined
+    if (service?.answer === undefined) {
+      this.pushRow(represent('question-notice', { kind: 'error', text: t('question.continuedUnavailable') }))
+      this.markDirty()
+      return true
+    }
+    const callId = row.callId
+    // Not `askQuestion`: that one is the control-plane helper. Answering a
+    // question the task is still holding is the task waiting for a person.
+    void this.openQuestionAs(
+      {
+        id: row.questionId,
+        question: row.title,
+        ...(row.header === undefined ? {} : { header: row.header }),
+        ...(row.detail === undefined ? {} : { detail: row.detail }),
+        // The original choices: the answer has to keep the call's own shape, and a
+        // question re-opened without them would be answered as free text.
+        ...(row.options === undefined ? {} : { options: row.options }),
+        ...(row.multiSelect === true ? { multiSelect: true } : {}),
+      },
+      interactionRole('question'),
+    ).then(answer => {
+      const batch = {
+        answers: [{
+          id: row.questionId,
+          selected: answer.selected,
+          ...(answer.custom === undefined ? {} : { custom: answer.custom }),
+        }],
+      }
+      let accepted = false
+      try {
+        accepted = service.answer?.(this.agent, callId, batch) === true
+      } catch (error) {
+        this.pushRow(represent('question-notice', { kind: 'error', text: t('question.continuedFailed', { error: errorChain(error) }) }))
+        this.markDirty()
+        return
+      }
+      if (!accepted) {
+        this.pushRow(represent('question-notice', { kind: 'error', text: t('question.continuedGone') }))
+        this.markDirty()
+      }
+    }).catch(() => undefined)
+    return true
+  }
+
+  /**
+   * The text field a surface borrowed, when the surface needs typed input.
+   *
+   * The composer's draft used to *be* every dialog's text field: a free-text
+   * answer, a setup field and a picker's search all wrote `this.input`. That made
+   * "what does this string mean" depend on which mode happened to be active, and
+   * a paste or a cancelled answer could overwrite the message the reader was
+   * writing. A surface that needs text now gets its own field; the composer keeps
+   * its draft until the composer is the thing being typed into.
+   */
+  private borrowedText: { text: string; cursor: number } | undefined
+
+  /** Whether this dialog types into a field of its own rather than the composer. */
+  private dialogNeedsText(dialog: Dialog): boolean {
+    // A list answers with its highlight and its hotkeys; only a question with no
+    // options is answered by typing.
+    if (dialog.kind === 'questions') return (dialog.question.options?.length ?? 0) === 0
+    return false
+  }
+
+  /** Give a text-needing dialog its own field. The composer draft stays put. */
+  private borrowTextFor(dialog: Dialog): void {
+    if (this.dialogNeedsText(dialog)) this.borrowedText ??= { text: '', cursor: 0 }
+    else this.releaseBorrowedText()
+  }
+
+  private releaseBorrowedText(): void {
+    this.borrowedText = undefined
+  }
+
+  /** The text the keyboard is editing: a borrowed field, or the composer draft. */
+  private fieldText(): string {
+    return this.borrowedText?.text ?? this.input
+  }
+
+  private fieldCursor(): number {
+    return this.borrowedText?.cursor ?? this.cursor
+  }
+
+  /** Write the field the keyboard is editing, wherever it lives. */
+  private setField(text: string, cursor: number): void {
+    if (this.borrowedText === undefined) {
+      this.input = text
+      this.cursor = cursor
+      return
+    }
+    this.borrowedText.text = text
+    this.borrowedText.cursor = cursor
+  }
+
+  /** Insert at the caret of whichever field owns the keyboard. */
+  private insertIntoField(text: string): void {
+    const current = this.fieldText()
+    const at = this.fieldCursor()
+    this.setField(`${current.slice(0, at)}${text}${current.slice(at)}`, at + text.length)
+  }
+
+  /** One card's key: a call's batch can repeat a question id across calls. */
+  private questionCardKey(callId: string | undefined, questionId: string): string {
+    return `${callId ?? `live:${this.liveQuestionSeq}`}\u0000${questionId}`
+  }
+
+  /**
+   * The Session's durable question view, when the projection is registered.
+   *
+   * `ctx.sessionProjections` is driven by `@deepseek-ai/dsh-user-questions`, which
+   * folds `tool/call` + `tool/result` (and late replies) into
+   * `{ active, settled }`. Absent in a bare Context — a test, an embedder without
+   * the projection package — which is why every caller here has a live fallback.
+   */
+  private questionProjection(): UserQuestionProjectionView | undefined {
+    const registry = this.ctx.get('sessionProjections') as unknown as
+      | { stateOf?: (session: unknown, key: string) => unknown }
+      | undefined
+    if (registry?.stateOf === undefined) return undefined
+    try {
+      return questionViewOf(registry.stateOf(this.agent.session, 'userQuestions'))
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Draw the cards the Session log can account for.
+   *
+   * Called for the events that can change question state, live and replayed alike,
+   * so the two paths produce the same transcript. It never removes a card: a card
+   * is history once it is drawn, and a call the projection cannot see (the legacy
+   * blocking schema, or no projection at all) is the live path's to own.
+   */
+  private syncQuestionRows(): void {
+    const view = this.questionProjection()
+    if (view === undefined) return
+    for (const record of durableQuestionRecords(view, callId => this.askedByCall.get(callId))) {
+      this.applyQuestionRecord(record)
+    }
+  }
+
+  /** One durable record onto its card, creating the card the first time. */
+  private applyQuestionRecord(record: DurableQuestionRecord): void {
+    const card = this.ensureQuestionCard(record.callId, record.question)
+    if (card === undefined) return
+    card.durable = true
+    const answered = record.state === 'answered' || record.state === 'cancelled'
+    card.status = record.state === 'answered'
+      ? 'answered'
+      : record.state === 'cancelled' ? 'cancelled' : 'waiting'
+    if (record.state === 'continued') {
+      card.continued = true
+      card.summary = t('question.continued')
+    } else if (answered) {
+      card.continued = false
+      card.summary = answerSummaryText(record.answers)
+    } else {
+      card.continued = false
+      card.summary = record.question.question
+    }
+    this.markDirty()
+  }
+
+  /**
+   * The card for one call's question, created from its structured form if new.
+   *
+   * A **plan review** gets none (B2.5 §7): it is the plan artifact's interaction, not
+   * an ordinary ask, and the artifact already has a row — the same review drawn as
+   * both a question summary and a plan state is the duplicate this round removes. The
+   * Surface (the dialog) is unchanged, and `dsh-plan-mode` identifies the review by the
+   * `exit_plan_mode` call it belongs to, which the projection reads.
+   * @returns the card, or undefined when the question belongs to another artifact.
+   */
+  private ensureQuestionCard(
+    callId: string | undefined,
+    question: AskUserQuestionItem,
+  ): Extract<Row, { kind: 'question' }> | undefined {
+    if (planReviewOf(question)) return undefined
+    const key = this.questionCardKey(callId, question.id)
+    const existing = this.questionCards.get(key)
+    if (existing !== undefined) return existing
+    // A live request that carries no call id — the legacy blocking schema, or a
+    // host line whose answerer is not handed one — still belongs to a call the
+    // Session may already have recorded. Reusing that card is what keeps the
+    // question from being drawn twice, and the second copy is not only noise: it
+    // appends a row, which moves the transcript window the reader is looking at.
+    if (callId === undefined) {
+      for (const [otherKey, other] of this.questionCards) {
+        if (other.durable === true && otherKey.endsWith(`\u0000${question.id}`)) return other
+      }
+    }
+    const card: Extract<Row, { kind: 'question' }> = {
+      kind: 'question',
+      questionId: question.id,
+      ...(callId === undefined ? {} : { callId }),
+      title: question.question,
+      ...(question.header === undefined ? {} : { header: question.header }),
+      ...(question.detail === undefined ? {} : { detail: question.detail }),
+      intent: planReviewOf(question) ? 'plan-review' : 'ask',
+      ...(question.options === undefined ? {} : { options: question.options }),
+      ...(question.multiSelect === true ? { multiSelect: true } : {}),
+      status: 'waiting',
+      summary: question.question,
+      expanded: false,
+    }
+    this.questionCards.set(key, card)
+    this.pushRow(represent('question-card', card))
+    return card
   }
 
   readonly handleUserQuestions = async (request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> => {
@@ -7535,22 +9688,13 @@ export class SshTui {
     const agentLabel = request.agent === undefined || request.agent.id === this.agent.id
       ? undefined
       : t('sub.agentLabel', { name: this.subagentNameFor(String(request.agent.id)) })
-    const cards: Extract<Row, { kind: 'question' }>[] = []
-    for (const question of request.questions) {
-      const card: Extract<Row, { kind: 'question' }> = {
-        kind: 'question',
-        questionId: question.id,
-        title: question.question,
-        ...(question.header === undefined ? {} : { header: question.header }),
-        ...(question.detail === undefined ? {} : { detail: question.detail }),
-        intent: planReviewOf(question) ? 'plan-review' : 'ask',
-        status: 'waiting',
-        summary: question.question,
-        expanded: false,
-      }
-      cards.push(card)
-      this.pushRow(card)
-    }
+    // The request carries the call for a timed question, which is what the Session
+    // records; a legacy blocking call has none, and its card is the live path's.
+    const callId = request.wait?.callId === undefined ? undefined : String(request.wait.callId)
+    if (callId !== undefined) this.askedByCall.set(callId, request.questions)
+    const cards = request.questions
+      .map(question => this.ensureQuestionCard(callId, question))
+      .filter((card): card is Extract<Row, { kind: 'question' }> => card !== undefined)
     this.markDirty()
     const settleCards = (status: 'answered' | 'cancelled', summary: string): void => {
       for (const card of cards) {
@@ -7584,10 +9728,20 @@ export class SshTui {
           const labeled: AskUserQuestionItem = agentLabel === undefined
             ? question
             : { ...question, question: `[${agentLabel}] ${question.question}` }
-          dialog = this.openQuestion(labeled, index, request.questions.length, (selection) => {
-            request.signal?.removeEventListener('abort', onAbort)
-            resolve(selection)
-          }, fail)
+          dialog = this.openQuestion(
+            labeled,
+            index,
+            request.questions.length,
+            (selection) => {
+              request.signal?.removeEventListener('abort', onAbort)
+              resolve(selection)
+            },
+            fail,
+            undefined,
+            undefined,
+            undefined,
+            interactionRole(planReviewOf(question) ? 'plan-review' : 'question'),
+          )
         })
         answers.push({ id: question.id, selected: answer.selected, custom: answer.custom })
         const card = cards[index]
@@ -7606,13 +9760,37 @@ export class SshTui {
     }
   }
 
-  /** Queue one dialog behind an already-open one instead of overwriting it. */
-  private openDialog(dialog: Dialog): void {
-    if (this.dialog === undefined) {
+  /**
+   * Queue one dialog behind an already-open one instead of overwriting it.
+   *
+   * The active surface is never replaced: whoever owns the keyboard keeps it until
+   * it is answered or cancelled, so a picker can never cover a question (and a
+   * question can never silently discard a half-made choice). What priority decides
+   * is the *line*: a task interaction takes the keyboard ahead of a picker that was
+   * already waiting, because someone is blocked on it. Ranks are compared, not
+   * stacked — equal ranks keep arrival order.
+   */
+  private openDialog(dialog: Dialog | InspectDialog, role: SurfaceRole): void {
+    // The single judgement (B2.1). A Screen is not a dialog, so it must not enter
+    // this queue: a report and a queued question can then never be flushed in the
+    // same frame, and a Surface can never be replaced by a Screen. Nothing in this
+    // file opens one this way any more — the door is closed so that a future call
+    // site cannot open it by accident.
+    if (dialog.kind === 'inspect') {
+      const asScreen = screenFromDialog(dialog)
+      if (asScreen !== undefined) this.openScreen(asScreen)
+      return
+    }
+    if (this.dialog === undefined && this.screen === undefined) {
       this.dialog = dialog
+      this.dialogRole = role
+      this.borrowTextFor(dialog)
       this.echoLineModeDialog(dialog)
     } else {
-      this.dialogQueue.push(dialog)
+      const rank = surfacePriority(role)
+      const at = this.dialogQueue.findIndex(entry => surfacePriority(entry.role) < rank)
+      if (at === -1) this.dialogQueue.push({ dialog, role })
+      else this.dialogQueue.splice(at, 0, { dialog, role })
     }
     this.markDirty()
   }
@@ -7621,8 +9799,10 @@ export class SshTui {
     if (this.dialog !== undefined) return
     const next = this.dialogQueue.shift()
     if (next !== undefined) {
-      this.dialog = next
-      this.echoLineModeDialog(next)
+      this.dialog = next.dialog
+      this.dialogRole = next.role
+      this.borrowTextFor(next.dialog)
+      this.echoLineModeDialog(next.dialog)
       this.markDirty()
     }
   }
@@ -7635,8 +9815,8 @@ export class SshTui {
   private echoLineModeDialog(dialog: Dialog): void {
     if (!this.lineMode) return
     if (dialog.kind === 'confirm') {
-      this.pushRow({ kind: 'system', text: dialog.prompt })
-      this.pushRow({ kind: 'system', text: dialog.hint })
+      this.pushRow(represent('surface-echo', { kind: 'system', text: dialog.prompt }))
+      this.pushRow(represent('surface-echo', { kind: 'system', text: dialog.hint }))
       return
     }
     if (dialog.kind === 'questions') {
@@ -7645,38 +9825,37 @@ export class SshTui {
         total: dialog.total,
         question: dialog.question.question,
       })
-      this.pushRow({ kind: 'system', text: header })
+      this.pushRow(represent('surface-echo', { kind: 'system', text: header }))
       if (dialog.question.header !== undefined && dialog.question.header !== '') {
-        this.pushRow({ kind: 'system', text: dialog.question.header })
+        this.pushRow(represent('surface-echo', { kind: 'system', text: dialog.question.header }))
       }
       const options = dialog.question.options ?? []
       for (const [index, option] of options.entries()) {
         if (option === undefined) continue
         const key = QUESTION_OPTION_KEYS[index] ?? String(index + 1)
         const extra = option.description === undefined ? '' : ` — ${option.description}`
-        this.pushRow({ kind: 'system', text: `  ${key} ${option.label}${extra}` })
+        this.pushRow(represent('surface-echo', { kind: 'system', text: `  ${key} ${option.label}${extra}` }))
       }
-      this.pushRow({
+      this.pushRow(represent('surface-echo', {
         kind: 'system',
         text: options.length === 0
           ? t('dialog.freeform')
           : dialog.question.multiSelect === true ? t('dialog.multiHint') : t('dialog.singleHint'),
-      })
+      }))
       return
-    }
-    if (dialog.kind === 'onboarding') {
-      this.pushRow({ kind: 'system', text: t('onboard.title') })
     }
   }
 
   private removeQueuedDialog(dialog: Dialog): void {
-    const index = this.dialogQueue.indexOf(dialog)
+    const index = this.dialogQueue.findIndex(entry => entry.dialog === dialog)
     if (index !== -1) this.dialogQueue.splice(index, 1)
   }
 
   private settleQuestion(dialog: QuestionDialog, finish: () => void): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.dialogRole = PICKER_ROLE
+      this.releaseBorrowedText()
     } else {
       this.removeQueuedDialog(dialog)
     }
@@ -7685,9 +9864,14 @@ export class SshTui {
     this.markDirty()
   }
 
-  private openConfirm(prompt: string, hint: string, resolve: (value: 'y' | 'n' | 'cancel') => void): ConfirmDialog {
+  private openConfirm(
+    prompt: string,
+    hint: string,
+    resolve: (value: 'y' | 'n' | 'cancel') => void,
+    ask: InteractionKind = 'confirm',
+  ): ConfirmDialog {
     const dialog: ConfirmDialog = { kind: 'confirm', prompt, hint, resolve }
-    this.openDialog(dialog)
+    this.openDialog(dialog, interactionRole(ask))
     return dialog
   }
 
@@ -7695,6 +9879,8 @@ export class SshTui {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'confirm') return
     this.dialog = undefined
+    this.dialogRole = PICKER_ROLE
+    this.releaseBorrowedText()
     dialog.resolve(value)
     this.showNextDialog()
     this.markDirty()
@@ -7704,6 +9890,8 @@ export class SshTui {
   private abortConfirm(dialog: ConfirmDialog): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.dialogRole = PICKER_ROLE
+      this.releaseBorrowedText()
       dialog.resolve('cancel')
       this.showNextDialog()
       this.markDirty()
@@ -7722,6 +9910,7 @@ export class SshTui {
     preselected?: number,
     matchKeys?: readonly string[],
     onCursor?: (cursor: number) => void,
+    role: SurfaceRole = PICKER_ROLE,
   ): QuestionDialog {
     // A list opens with its first option already chosen: Enter then answers that
     // default for a single- and a multi-select question alike, instead of
@@ -7758,11 +9947,17 @@ export class SshTui {
         this.settleQuestion(dialog, () => reject(error))
       },
     }
-    this.openDialog(dialog)
+    this.openDialog(dialog, role)
     return dialog
   }
 
-  /** Open one question dialog and await its answer (cancellation rejects). */
+  /**
+   * Open one control-plane question and await its answer (cancellation rejects).
+   *
+   * Every `/model`-style menu goes through here, which is why the role is
+   * `picker`: the agent is neither waiting nor interrupted by a menu that only
+   * changes the environment.
+   */
   private askQuestion(
     question: AskUserQuestionItem,
     index = 0,
@@ -7772,7 +9967,14 @@ export class SshTui {
     onCursor?: (cursor: number) => void,
   ): Promise<DialogAnswer> {
     return new Promise<DialogAnswer>((resolve, reject) => {
-      this.openQuestion(question, index, total, resolve, reject, preselected, matchKeys, onCursor)
+      this.openQuestion(question, index, total, resolve, reject, preselected, matchKeys, onCursor, PICKER_ROLE)
+    })
+  }
+
+  /** One question dialog with an explicit role, awaited by the caller. */
+  private openQuestionAs(question: AskUserQuestionItem, role: SurfaceRole): Promise<DialogAnswer> {
+    return new Promise<DialogAnswer>((resolve, reject) => {
+      this.openQuestion(question, 0, 1, resolve, reject, undefined, undefined, undefined, role)
     })
   }
 
@@ -8090,7 +10292,7 @@ export class SshTui {
         // a dead end — `/provider` lists families, so the hint names the family
         // and `/model` (which files the pick on the right row itself).
         const family = this.displayProviderId(provider)
-        this.pushRow({
+        this.pushRow(represent('command-error', {
           kind: 'error',
           text: t('model.wrongRoute', {
             model: modelId,
@@ -8100,7 +10302,7 @@ export class SshTui {
               ? t('model.wrongRouteSetup')
               : t('model.wrongRouteTarget', { provider: family }),
           }),
-        })
+        }))
         this.markDirty()
         return false
       }
@@ -8123,11 +10325,11 @@ export class SshTui {
       await settings.mutate(settingsNamespace('llm-pi-ai'), [
         { op: 'set', path: ['providers', provider, 'models'], value: [...models, modelEntry] },
       ])
-      this.pushRow({ kind: 'system', text: t('model.added', { model: modelId, provider: this.displayProviderId(provider) }) })
+      this.pushRow(represent('command-status', { kind: 'system', text: t('model.added', { model: modelId, provider: this.displayProviderId(provider) }) }))
       this.markDirty()
       return true
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('model.addFailed', { model: modelId, error: errorChain(error) }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('model.addFailed', { model: modelId, error: errorChain(error) }) }))
       this.markDirty()
       return false
     }
@@ -8345,7 +10547,7 @@ export class SshTui {
     // and fell back to index 0, pre-selecting the wrong supplier.
     const current = this.displayProviderId(this.currentProviderId())
     if (providers.length === 0) {
-      this.pushRow({ kind: 'error', text: t('provider.none') })
+      this.pushRow(represent('command-misuse', { kind: 'error', text: t('provider.none') }))
       this.markDirty()
       return
     }
@@ -8514,10 +10716,10 @@ export class SshTui {
     const kind = describeProviderRoute(display)
     const effortText = effort ?? t('effort.defaultShort')
     const note = isUndeclared && effort !== undefined ? t('effort.manualNote') : ''
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: t('effort.switchedModel', { kind: kind.kind, provider: display, model: modelId, effort: effortText, note }),
-    })
+    }))
     const listedIds = listed.filter(id => id !== '__switch_provider__' && id !== '')
     const previousProvider = current?.provider ?? this.agent.options.provider ?? this.providerName
     if (this.displayProviderId(previousProvider) !== display) {
@@ -8557,15 +10759,15 @@ export class SshTui {
         })
         return true
       } catch (error: unknown) {
-        this.pushRow({
+        this.pushRow(represent('command-error', {
           kind: 'error',
           text: t('model.persistFailSettings', { error: errorChain(error) }),
-        })
+        }))
         this.markDirty()
         return false
       }
     }
-    this.pushRow({ kind: 'error', text: t('model.persistFailNone') })
+    this.pushRow(represent('command-error', { kind: 'error', text: t('model.persistFailNone') }))
     this.markDirty()
     return false
   }
@@ -8618,10 +10820,10 @@ export class SshTui {
       model: nextModel,
       reasoningEffort: undefined,
     })
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: t('sub.followed', { provider, model: nextModel, sessionOnly: persisted ? '' : t('sub.sessionOnly') }),
-    })
+    }))
   }
 
   /**
@@ -8647,7 +10849,7 @@ export class SshTui {
       ],
     }, 0, 1, 0)
     if (answer.selected[0] === followLabel) return false
-    this.pushRow({ kind: 'system', text: t('sub.pinKept', { pinned, parent: provider }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('sub.pinKept', { pinned, parent: provider }) }))
     this.markDirty()
     return true
   }
@@ -8677,7 +10879,7 @@ export class SshTui {
     this.noteSessionRoute()
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
-      this.pushRow({ kind: 'error', text: t('sub.settingsMissing') })
+      this.pushRow(represent('subagent-notice', { kind: 'error', text: t('sub.settingsMissing') }))
       this.markDirty()
       return false
     }
@@ -8746,10 +10948,10 @@ export class SshTui {
         model: nextModel,
         reasoningEffort: undefined,
       })
-      this.pushRow({
+      this.pushRow(represent('command-feedback', {
         kind: 'system',
         text: t('sub.followed', { provider: parentProvider, model: nextModel, sessionOnly: persisted ? '' : t('sub.sessionOnly') }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -8822,13 +11024,13 @@ export class SshTui {
       ...(effort === undefined ? {} : { reasoningEffort: effort }),
     }
     const persisted = await this.saveSubagentSelection(next)
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: (options.pinProvider
         ? t('sub.modelPinned', { model: modelId, provider: display })
         : t('sub.modelFollow', { model: modelId, provider: display }))
         + (persisted ? '' : t('sub.sessionOnly')),
-    })
+    }))
     this.markDirty()
   }
 
@@ -8838,7 +11040,7 @@ export class SshTui {
     const display = this.displayProviderId(provider)
     const current = this.selectionRef?.current
     if (current === undefined || current.model === undefined) {
-      this.pushRow({ kind: 'error', text: t('effort.noModel') })
+      this.pushRow(represent('command-misuse', { kind: 'error', text: t('effort.noModel') }))
       this.markDirty()
       return
     }
@@ -8859,7 +11061,7 @@ export class SshTui {
     const parsed = parseEffortArg(arg ?? '')
     if ((arg ?? '').trim() !== '') {
       if (parsed === undefined) {
-        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) })
+        this.pushRow(represent('command-misuse', { kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) }))
         this.markDirty()
         return
       }
@@ -8867,7 +11069,7 @@ export class SshTui {
         ? UNDECLARED_EFFORT_IDS
         : declaredOptions.map(option => option.id)
       if (parsed.kind === 'id' && !allowed.includes(parsed.id)) {
-        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: parsed.id }) })
+        this.pushRow(represent('command-misuse', { kind: 'error', text: t('effort.unknown', { id: parsed.id }) }))
         this.markDirty()
         return
       }
@@ -8956,7 +11158,7 @@ export class SshTui {
       ])
       return true
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('effort.declareFailed', { provider, model: modelId, error: errorChain(error) }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('effort.declareFailed', { provider, model: modelId, error: errorChain(error) }) }))
       this.markDirty()
       return false
     }
@@ -8980,10 +11182,10 @@ export class SshTui {
     await this.rememberRoute(next)
     const effortText = effort ?? t('effort.defaultExplicit')
     const note = isUndeclared && effort !== undefined ? t('effort.manualNote') : ''
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: t('effort.updated', { provider, model: modelId, effort: effortText, note }),
-    })
+    }))
     this.markDirty()
   }
 
@@ -9004,7 +11206,7 @@ export class SshTui {
     const parsed = parseEffortArg(arg ?? '')
     if ((arg ?? '').trim() !== '') {
       if (parsed === undefined) {
-        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) })
+        this.pushRow(represent('command-misuse', { kind: 'error', text: t('effort.unknown', { id: (arg ?? '').trim() }) }))
         this.markDirty()
         return
       }
@@ -9012,7 +11214,7 @@ export class SshTui {
         ? UNDECLARED_EFFORT_IDS
         : effortOptions.map(option => option.id)
       if (parsed.kind === 'id' && !allowed.includes(parsed.id)) {
-        this.pushRow({ kind: 'error', text: t('effort.unknown', { id: parsed.id }) })
+        this.pushRow(represent('command-misuse', { kind: 'error', text: t('effort.unknown', { id: parsed.id }) }))
         this.markDirty()
         return
       }
@@ -9025,12 +11227,12 @@ export class SshTui {
         ...(targetEffort === undefined ? { reasoningEffort: undefined } : { reasoningEffort: ReasoningEffortId(targetEffort) }),
       }
       const persisted = await this.saveSubagentSelection(next)
-      this.pushRow({
+      this.pushRow(represent('command-feedback', {
         kind: 'system',
         text: `${targetEffort === undefined
           ? t('effort.subDefault')
           : t('effort.subSwitched', { effort: targetEffort })}${persisted ? '' : t('effort.sessionOnly')}`,
-      })
+      }))
       this.markDirty()
       return
     }
@@ -9071,12 +11273,12 @@ export class SshTui {
         : { reasoningEffort: ReasoningEffortId(picked.id) }),
     }
     const persisted = await this.saveSubagentSelection(next)
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: `${picked.id === undefined
         ? t('effort.subDefault')
         : t('effort.subSwitched', { effort: picked.id })}${persisted ? '' : t('effort.sessionOnly')}`,
-    })
+    }))
     this.markDirty()
   }
 
@@ -9085,7 +11287,7 @@ export class SshTui {
     const direct = localeFromTag(arg)
     let next: Locale | undefined = direct
     if (next === undefined && arg.trim() !== '') {
-      this.pushRow({ kind: 'error', text: t('lang.unknown', { id: arg.trim() }) })
+      this.pushRow(represent('command-misuse', { kind: 'error', text: t('lang.unknown', { id: arg.trim() }) }))
       this.markDirty()
       return
     }
@@ -9105,13 +11307,13 @@ export class SshTui {
     setLocale(next)
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
-      this.pushRow({ kind: 'error', text: t('lang.settingsMissing') })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('lang.settingsMissing') }))
     } else {
       await this.mergeUiSettings({ language: next })
       applySavedLocale({ language: next })
     }
     this.forceFullPaint = true
-    this.pushRow({ kind: 'system', text: t('lang.switched', { name: localeDisplayName(next) }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('lang.switched', { name: localeDisplayName(next) }) }))
     this.markDirty()
   }
 
@@ -9120,7 +11322,7 @@ export class SshTui {
     const direct = parseWorkspaceView(arg)
     let next: WorkspaceView | undefined = direct
     if (next === undefined && arg.trim() !== '') {
-      this.pushRow({ kind: 'error', text: t('view.unknown', { id: arg.trim() }) })
+      this.pushRow(represent('command-misuse', { kind: 'error', text: t('view.unknown', { id: arg.trim() }) }))
       this.markDirty()
       return
     }
@@ -9140,7 +11342,7 @@ export class SshTui {
     this.workspaceView = next
     await this.mergeUiSettings({ view: next })
     this.forceFullPaint = true
-    this.pushRow({ kind: 'system', text: t('view.switched', { name: next === 'compact' ? t('view.compact') : t('view.detailed') }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('view.switched', { name: next === 'compact' ? t('view.compact') : t('view.detailed') }) }))
     this.markDirty()
   }
 
@@ -9155,22 +11357,22 @@ export class SshTui {
   private async runNotifyCommand(arg: string): Promise<void> {
     const target = parseNotifyTarget(arg)
     if (target === undefined) {
-      this.pushRow({ kind: 'error', text: t('notify.usage') })
+      this.pushRow(represent('command-usage', { kind: 'error', text: t('notify.usage') }))
       this.markDirty()
       return
     }
     if (target.kind === 'off' && arg.trim() === '') {
       const current = this.readNotifyCommand()
-      this.pushRow({
+      this.pushRow(represent('command-status', {
         kind: 'system',
         text: current === undefined ? t('notify.statusOff') : t('notify.statusOn', { command: current }),
-      })
+      }))
       this.markDirty()
       return
     }
     if (target.kind === 'off') {
       await this.mergeUiSettings({ notify: '', notifySmtpUser: '', notifySmtpPassword: '' })
-      this.pushRow({ kind: 'system', text: t('notify.cleared') })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('notify.cleared') }))
       this.markDirty()
       return
     }
@@ -9179,7 +11381,7 @@ export class SshTui {
       notifySmtpUser: target.kind === 'smtp' ? target.user ?? '' : '',
       notifySmtpPassword: target.kind === 'smtp' ? target.password ?? '' : '',
     })
-    this.pushRow({ kind: 'system', text: t('notify.saved', { target: notifyTargetLabel(target) }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('notify.saved', { target: notifyTargetLabel(target) }) }))
     this.markDirty()
   }
 
@@ -9198,7 +11400,15 @@ export class SshTui {
     // The reasoning-replay 400 is an upstream bug with its own workarounds, so it
     // gets its own sentence rather than the auth advice.
     if (isReasoningReplayFailure(message)) {
-      this.pushRow({ kind: 'system', text: t('auth.reasoningReplay') })
+      this.pushRow(represent('auth-notice', { kind: 'system', text: t('auth.reasoningReplay') }))
+      this.markDirty()
+      return
+    }
+    // The bare sibling: the gateway refused the request and said nothing else. It
+    // gets its own sentence for the same reason, and deliberately no retry — see
+    // `isRequestRejectedFailure` for the measurements behind that.
+    if (isRequestRejectedFailure(message)) {
+      this.pushRow(represent('auth-notice', { kind: 'system', text: t('auth.requestRejected') }))
       this.markDirty()
       return
     }
@@ -9212,15 +11422,15 @@ export class SshTui {
     const envRef = provider === 'deepseek-official' ? 'DEEPSEEK_API_KEY' : envRefForId(provider)
     const configured = (await this.resolveCredential(envRef)) !== undefined
     if (classified.origin === 'provider' && configured) {
-      this.pushRow({
+      this.pushRow(represent('auth-notice', {
         kind: 'system',
         text: t('auth.providerRejected', {
           env: envRef,
           status: classified.status === undefined ? '' : `HTTP ${classified.status}`,
         }),
-      })
+      }))
     } else {
-      this.pushRow({ kind: 'system', text: t('auth.credentialMissing', { env: envRef }) })
+      this.pushRow(represent('auth-notice', { kind: 'system', text: t('auth.credentialMissing', { env: envRef }) }))
     }
     const retryable = classified.origin === 'provider' && configured
       && this.retryProviderAuthEnabled() && this.authRetryArmed
@@ -9234,7 +11444,7 @@ export class SshTui {
     // Cleared first: the retry starts its own turn, and a second failure inside
     // it must not fire another attempt.
     this.lastUserText = ''
-    this.pushRow({ kind: 'system', text: t('auth.retryOnce') })
+    this.pushRow(represent('auth-notice', { kind: 'system', text: t('auth.retryOnce') }))
     this.beginWait()
     this.agent.followup(createUserMessage({
       content: [{ type: 'text', text }],
@@ -9277,27 +11487,27 @@ export class SshTui {
   private async runCleanupCommand(arg: string): Promise<void> {
     const dryRun = arg.trim() === '--dry-run'
     if (arg.trim() !== '' && !dryRun) {
-      this.pushRow({ kind: 'error', text: t('cleanup.usage') })
+      this.pushRow(represent('command-usage', { kind: 'error', text: t('cleanup.usage') }))
       this.markDirty()
       return
     }
     const persistence = this.ctx.get('sessionPersistence')
     if (persistence === undefined) {
-      this.pushRow({ kind: 'error', text: t('cleanup.unavailable') })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('cleanup.unavailable') }))
       this.markDirty()
       return
     }
-    this.pushRow({ kind: 'system', text: t(dryRun ? 'cleanup.scanning' : 'cleanup.working') })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t(dryRun ? 'cleanup.scanning' : 'cleanup.working') }))
     this.markDirty()
     const result = await pruneBlankSessions(persistence, String(this.agent.session.id), { dryRun })
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: t(dryRun ? 'cleanup.dryRun' : 'cleanup.done', {
         pruned: String(result.pruned),
         kept: String(result.kept),
         unreadable: String(result.unreadable),
       }),
-    })
+    }))
     this.markDirty()
   }
 
@@ -9347,20 +11557,20 @@ export class SshTui {
         picked = answer.selected[0]
       } catch {
         apply(before.name)
-        this.pushRow({ kind: 'system', text: t('theme.cancelled', { name: before.name }) })
+        this.pushRow(represent('command-feedback', { kind: 'system', text: t('theme.cancelled', { name: before.name }) }))
         this.markDirty()
         return
       }
       const next = themeByName(picked) ?? before
       apply(next.name)
       await this.mergeUiSettings({ theme: next.name })
-      this.pushRow({ kind: 'system', text: t('theme.switched', { name: next.name }) })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('theme.switched', { name: next.name }) }))
       this.markDirty()
       return
     }
     const next = themeByName(wanted)
     if (next === undefined) {
-      this.pushRow({ kind: 'error', text: t('theme.unknown', { name: wanted, known: themeNames().join(', ') }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('theme.unknown', { name: wanted, known: themeNames().join(', ') }) }))
       this.markDirty()
       return
     }
@@ -9368,7 +11578,7 @@ export class SshTui {
     await this.mergeUiSettings({ theme: next.name })
     // A theme change touches every cached line, so the whole frame is stale.
     this.forceFullPaint = true
-    this.pushRow({ kind: 'system', text: t('theme.switched', { name: next.name }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('theme.switched', { name: next.name }) }))
     this.markDirty()
   }
 
@@ -9376,23 +11586,23 @@ export class SshTui {
   private async runRetryAuthCommand(arg: string): Promise<void> {
     const id = arg.trim().toLowerCase()
     if (id === '' || id === 'status') {
-      this.pushRow({
+      this.pushRow(represent('command-status', {
         kind: 'system',
         text: t('retryauth.status', {
           state: this.retryProviderAuthEnabled() ? t('retryauth.on') : t('retryauth.off'),
         }),
-      })
+      }))
       this.markDirty()
       return
     }
     if (!['on', 'off'].includes(id)) {
-      this.pushRow({ kind: 'error', text: t('retryauth.usage') })
+      this.pushRow(represent('command-usage', { kind: 'error', text: t('retryauth.usage') }))
       this.markDirty()
       return
     }
     const on = id === 'on'
     await this.mergeUiSettings({ retryProviderAuth: on })
-    this.pushRow({ kind: 'system', text: t('retryauth.switched', { state: on ? t('retryauth.on') : t('retryauth.off') }) })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('retryauth.switched', { state: on ? t('retryauth.on') : t('retryauth.off') }) }))
     this.markDirty()
   }
 
@@ -9400,7 +11610,7 @@ export class SshTui {
     const direct = parseDisconnectPolicy(arg)
     let next: DisconnectPolicyName | undefined = direct
     if (next === undefined && arg.trim() !== '') {
-      this.pushRow({ kind: 'error', text: t('disconnect.unknown', { id: arg.trim() }) })
+      this.pushRow(represent('command-misuse', { kind: 'error', text: t('disconnect.unknown', { id: arg.trim() }) }))
       this.markDirty()
       return
     }
@@ -9420,10 +11630,10 @@ export class SshTui {
     this.disconnectPolicy = next
     await this.mergeUiSettings({ disconnect: next })
     this.forceFullPaint = true
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: t('disconnect.switched', { name: next === 'continue' ? t('disconnect.continue') : t('disconnect.pause') }),
-    })
+    }))
     this.markDirty()
   }
 
@@ -9442,16 +11652,16 @@ export class SshTui {
       // scripts are the checkout path, while an npm install and the in-app
       // `dsh plugin add` update never run them.
       const profile = profileFromArgv()
-      this.pushRow({
+      this.pushRow(represent('command-error', {
         kind: 'error',
         text: this.missingPresetService(t('mode.missingService')),
-      })
+      }))
       this.markDirty()
       return
     }
     const presets = await agentPresets.list()
     if (presets.length === 0) {
-      this.pushRow({ kind: 'error', text: t('mode.none') })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('mode.none') }))
       this.markDirty()
       return
     }
@@ -9468,10 +11678,10 @@ export class SshTui {
       ? -1
       : options.findIndex(option => matchesDirect(option))
     if (index < 0 && direct !== '') {
-      this.pushRow({
+      this.pushRow(represent('command-error', {
         kind: 'error',
         text: t('mode.unknown', { id: arg.trim(), available: options.map(option => option.id).join(', ') }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -9492,10 +11702,10 @@ export class SshTui {
     const selected = presets.find(preset => preset.id === option.id)
     if (selected === undefined) return
     if (option.broken !== undefined) {
-      this.pushRow({
+      this.pushRow(represent('command-error', {
         kind: 'error',
         text: t('mode.broken', { name: option.label, reason: option.broken }),
-      })
+      }))
       this.markDirty()
       return
     }
@@ -9505,19 +11715,19 @@ export class SshTui {
       // Feature-detected: a host whose registry predates `recompose` still
       // lists presets, and switching then needs a restarted session.
       if (typeof agentPresets.recompose !== 'function') {
-        this.pushRow({ kind: 'error', text: t('mode.noRecompose', { id: selected.id }) })
+        this.pushRow(represent('command-error', { kind: 'error', text: t('mode.noRecompose', { id: selected.id }) }))
         this.markDirty()
         return
       }
       await agentPresets.recompose(this.agent.ctx, selected.id)
       this.presetId = selected.id
       this.presetName = selectedName
-      this.pushRow({ kind: 'system', text: t('mode.switched', { name: selectedName }) })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('mode.switched', { name: selectedName }) }))
     } else {
-      this.pushRow({
+      this.pushRow(represent('repair-result', {
         kind: 'system',
         text: t('mode.remembered', { name: selectedName }),
-      })
+      }))
     }
     await this.ctx.get('settings')?.update(settingsNamespace('agent-presets'), { default: selected.id })
     this.markDirty()
@@ -9570,12 +11780,12 @@ export class SshTui {
       const generation = this.settingsGeneration
       const result = await ensureRosterRows(resolveDshHome(), profile, rosterRows(generation), generation)
       this.refreshRosterHealth()
-      this.pushRow({
+      this.pushRow(represent('repair-result', {
         kind: 'system',
         text: result === 'present' ? t('mode.fixPresent', { patch }) : t('mode.fixWritten', { patch }),
-      })
+      }))
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('mode.fixFailed', { patch, error: errorChain(error) }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('mode.fixFailed', { patch, error: errorChain(error) }) }))
     }
     this.markDirty()
   }
@@ -9681,25 +11891,25 @@ export class SshTui {
     this.status = t('usage.querying')
     this.markDirty()
     try {
-      const quota = await this.refreshQuota({ reason: 'command', announce: true })
-      if (quota !== undefined) return
+      const quota = await this.refreshQuota({ reason: 'command', announce: false })
+      if (quota !== undefined) {
+        this.openReport('usage', formatQuotaSnapshot(quota).split('\n'))
+        return
+      }
       if (this.balanceSnapshot !== undefined) {
-        this.pushRow({ kind: 'system', text: formatAccountBalance(this.balanceSnapshot) })
+        this.openReport('usage', [formatAccountBalance(this.balanceSnapshot)])
         return
       }
       const provider = this.currentProviderId()
       const llmPiAi = readSettingsSection(this.ctx, settingsNamespace('llm-pi-ai'))
       const source = openCodeSourceFor(provider, llmPiAi)
       if (source?.flavor === 'zen') {
-        this.pushRow({ kind: 'system', text: this.zenUsageText(source) })
+        this.openReport('usage', this.zenUsageText(source).split('\n'))
       } else {
-        this.pushRow({
-          kind: 'system',
-          text: t('usage.none', { provider }),
-        })
+        this.openReport('usage', [t('usage.none', { provider })])
       }
     } catch (error: unknown) {
-      this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'balance', error: errorChain(error) }) })
+      this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'balance', error: errorChain(error) }) }))
     } finally {
       this.status = previousStatus
       this.markDirty()
@@ -9709,14 +11919,14 @@ export class SshTui {
   private applyQuotaSnapshot(snapshot: QuotaSnapshot, announce: boolean): void {
     const previous = this.quotaSnapshot === undefined ? undefined : tightestQuotaWindow(this.quotaSnapshot)
     this.quotaSnapshot = snapshot
-    if (announce) this.pushRow({ kind: 'system', text: formatQuotaSnapshot(snapshot) })
+    if (announce) this.pushRow(represent('quota-report', { kind: 'system', text: formatQuotaSnapshot(snapshot) }))
     const window = tightestQuotaWindow(snapshot)
     if (window !== undefined) {
       for (const threshold of crossedQuotaThresholds(previous?.remainingPercent, window.remainingPercent)) {
         const key = `${snapshot.provider}:${window.period}:${threshold}`
         if (this.quotaAlerted.has(key)) continue
         this.quotaAlerted.add(key)
-        this.pushRow({ kind: 'system', text: quotaAlertText(snapshot, window) })
+        this.pushRow(represent('quota-report', { kind: 'system', text: quotaAlertText(snapshot, window) }))
       }
     }
     this.markDirty()
@@ -9767,7 +11977,7 @@ export class SshTui {
           this.balanceSnapshot = balance
           this.quotaSnapshot = undefined
           this.quotaAlerted.clear()
-          if (options.announce) this.pushRow({ kind: 'system', text: formatAccountBalance(balance) })
+          if (options.announce) this.pushRow(represent('quota-report', { kind: 'system', text: formatAccountBalance(balance) }))
           this.markDirty()
           return undefined
         }
@@ -9903,6 +12113,142 @@ export class SshTui {
     this.inputGuard.push(decoded)
   }
 
+  /**
+   * One key, handled by the Screen that is up.
+   *
+   * The Screen owns the keyboard completely, so this is also the place that keeps
+   * the workspace's state out of reach: no arrow moves a card behind the Screen, no
+   * page key scrolls the transcript, no print reaches the composer draft. Closing
+   * keys come from `inspectClosesOn`, which is what the overlay always accepted —
+   * plus `q`, which a full-screen report is expected to answer to.
+   */
+  private handleScreenInput(combined: string, moved: string | undefined): void {
+    const screen = this.screen
+    if (screen === undefined) return
+    // The setup Screen owns its own field, its own navigation and its own keys: it
+    // consumes everything while it is up, and nothing reaches the workspace's
+    // composer, history or transcript (B2.6 §4).
+    if (screen.kind === 'setup') {
+      this.handleSetupKey(combined, moved)
+      return
+    }
+    // The Screen's own confirmation owns the keys while it is up: it is a question
+    // asked by this Screen, and answering it must not reach into the workspace.
+    if (this.screenSurface !== undefined) {
+      if (combined === '\x1b' || combined === '\x03') {
+        this.settleScreenConfirm('cancel')
+        return
+      }
+      const answer = confirmAnswer(combined)
+      if (answer !== undefined) this.settleScreenConfirm(answer)
+      return
+    }
+    if (moved === 'copy' && (screen.copyText ?? '') !== '') {
+      this.copyFromScreen(screen)
+      return
+    }
+    // Mouse reports arrive through this same path. A wheel scrolls the Screen (the
+    // transcript behind it is not the reader's target and must not move); a click
+    // does nothing at all, because nothing behind a Screen is a target either.
+    const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
+    if (sgr !== null) {
+      if (sgr[4] !== 'M') return
+      const button = Number(sgr[1])
+      if (button === 64) this.scrollScreen(3)
+      else if (button === 65) this.scrollScreen(-3)
+      return
+    }
+    const escape = /^\x1b\[([A-D])$/u
+    const match = combined.match(escape)
+    if (match !== null) {
+      // Arrows and the page keys scroll the Screen, never the transcript behind it.
+      if (match[1] === 'A') this.scrollScreen(1)
+      else if (match[1] === 'B') this.scrollScreen(-1)
+      else if (match[1] === 'C') this.scrollScreen(-1)
+      else this.scrollScreen(1)
+      return
+    }
+    // A printable key is not silently swallowed: a Screen has no composer (AD-8), and
+    // a reader who starts typing a command here has to be told why nothing happens —
+    // the alternative is a terminal that looks broken. It becomes the Screen's own
+    // hint row, so repeated keys cannot pile up notices.
+    if (PRINTABLE.test(combined)) {
+      const hint = t('screen.typeHint')
+      if (screen.notice !== hint) {
+        screen.notice = hint
+        this.markDirty()
+      }
+      return
+    }
+    if (combined === '\x1b[5~') this.scrollScreen(this.screenPage())
+    else if (combined === '\x1b[6~') this.scrollScreen(-this.screenPage())
+    else if (combined === '\x1b[H' || combined === '\x1b[1~') this.scrollScreenTo(0)
+    else if (combined === '\x1b[F' || combined === '\x1b[4~') this.scrollScreenTo(Number.MAX_SAFE_INTEGER)
+    else if (inspectClosesOn(combined)) this.closeScreen()
+  }
+
+  /**
+   * Whether anything human is waiting behind the Screen that is up.
+   *
+   * A Surface cannot open while a Screen owns the screen (it stays in the workspace
+   * queue), so without this the reader would have no way to know that an approval
+   * or a question is waiting for them behind the report — the one thing a Screen
+   * must never hide (AD-8). A question the Session still holds counts too: the agent
+   * is not blocked, but the reader has something to answer.
+   */
+  private screenWaitingWork(): boolean {
+    if (this.dialogQueue.some(entry => stallsTask(entry.role))) return true
+    if (this.dialog !== undefined && stallsTask(this.dialogRole)) return true
+    return this.queuedQuestions > 0
+  }
+
+  /** Rows one PageUp moves a Screen: the body, less one row of context. */
+  private screenPage(): number {
+    return Math.max(1, screenLayout(Math.max(6, this.screenRows())).bodyRows - 1)
+  }
+
+  /** Scroll a Screen by `up` rows toward the start of its body. */
+  private scrollScreen(up: number): void {
+    const screen = this.screen
+    if (screen === undefined) return
+    this.scrollScreenTo(screen.offset - up)
+  }
+
+  private scrollScreenTo(offset: number): void {
+    const screen = this.screen
+    if (screen === undefined) return
+    const layout = screenLayout(Math.max(6, this.screenRows()))
+    const next = clampScreenOffset(offset, screen.lines.length, layout.bodyRows)
+    if (next === screen.offset) return
+    screen.offset = next
+    this.markDirty()
+  }
+
+  /** The copy key inside a Screen: what the Screen shows is what the reader means. */
+  private copyFromScreen(screen: ScreenState): void {
+    const text = screen.copyText ?? ''
+    if (text.trim() === '') {
+      screen.notice = t('copy.empty')
+      this.markDirty()
+      return
+    }
+    const notice = t('copy.ok', { chars: text.length, source: t('copy.sourceFull') })
+    const alreadyWarned = this.osc52HintShown
+    this.copyPlainText(text, notice)
+    // Two rows the copy pushes land *behind* this Screen: the confirmation, and —
+    // where the terminal cannot take an OSC 52 write — the caveat that says so. Both
+    // are things the reader has to see at the moment they press the key, so the
+    // Screen's own hint row carries them; the rows stay in the transcript for later.
+    const caveat = !alreadyWarned && this.osc52HintShown
+      ? t('copy.osc52Hint', { terminal: this.terminalCaps.label })
+      : undefined
+    // The caveat leads when it fires: it says the copy the reader just asked for may
+    // not have landed, and a Screen has one row to say it in — with the confirmation
+    // in front, the part that matters was clipped off the right edge.
+    screen.notice = caveat ?? notice
+    this.markDirty()
+  }
+
   private handleInputText(text: string): void {
     const combined = this.escapeBuffer + text
     this.escapeBuffer = ''
@@ -9924,15 +12270,15 @@ export class SshTui {
     // everything else keeps the handling below, which is what makes the defaults
     // unchanged by construction.
     const moved = combined === '' ? undefined : this.keymap.sequences.get(combined)
-    // While a dialog is open its own routing owns the keys — with one exception:
-    // an inspect overlay is the only place the copy key can be pressed at all,
-    // and gating it put the reader's rebound key out of reach exactly where the
-    // overlay's own hint advertises copying.
-    const overlayCopy = this.dialog !== undefined
-      && this.dialog.kind === 'inspect'
-      && (this.dialog.copyText ?? '') !== ''
-      && moved === 'copy'
-    if ((this.dialog === undefined || overlayCopy) && combined !== '') {
+    // A Screen replaces the workspace and owns every key outright. There is no
+    // composer behind it, no transcript to fall through to and no Surface it could
+    // share with: one gate, instead of the ten `dialog?.kind === 'inspect'` checks
+    // this replaced (B2.1).
+    if (this.screen !== undefined) {
+      this.handleScreenInput(combined, moved)
+      return
+    }
+    if (this.dialog === undefined && combined !== '') {
       if (moved !== undefined && this.keymap.overridden.has(moved)) {
         if (this.runKeyAction(moved)) return
       }
@@ -9944,43 +12290,42 @@ export class SshTui {
     if (match !== null) {
       switch (match[1]) {
         case 'A':
-          if (this.dialog?.kind === 'inspect') {
-            this.scrollInspectOrTranscript(-1)
-          } else if (this.moveQuestionCursor(-1)) {
+          if (this.moveQuestionCursor(-1)) {
             return
-          } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(-1)) {
             return
-          } else if (this.dialog?.kind === 'onboarding' && this.moveOnboardingModelCursor(-1)) {
+            return
+          } else if (this.dialog !== undefined) {
+            // A surface owns the keyboard: an arrow it does not use is not the
+            // transcript's. Falling through moved the selection behind the dialog,
+            // and with a non-empty field it rewrote the field from history.
             return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
             this.markDirty()
-          } else if (this.input === '' && this.collapsibleRows().length > 0) {
+          } else if (this.fieldText() === '' && this.collapsibleRows().length > 0) {
             this.moveFocus(-1)
           } else {
             this.historyBack()
           }
           return
         case 'B':
-          if (this.dialog?.kind === 'inspect') {
-            this.scrollInspectOrTranscript(1)
-          } else if (this.moveQuestionCursor(1)) {
+          if (this.moveQuestionCursor(1)) {
             return
-          } else if (this.dialog?.kind === 'onboarding' && this.moveProviderCursor(1)) {
             return
-          } else if (this.dialog?.kind === 'onboarding' && this.moveOnboardingModelCursor(1)) {
+            return
+          } else if (this.dialog !== undefined) {
             return
           } else if (this.suggestionsVisible()) {
             this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
             this.markDirty()
-          } else if (this.input === '' && this.collapsibleRows().length > 0) {
+          } else if (this.fieldText() === '' && this.collapsibleRows().length > 0) {
             this.moveFocus(1)
           } else {
             this.historyForward()
           }
           return
-        case 'C': this.moveCursor(1); return
-        case 'D': this.moveCursor(-1); return
+        case 'C': if (this.textIsEditable()) this.moveCursor(1); return
+        case 'D': if (this.textIsEditable()) this.moveCursor(-1); return
       }
     }
     const sgrMouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
@@ -9990,11 +12335,11 @@ export class SshTui {
       const y = Number(sgrMouse[3])
       if (sgrMouse[4] === 'M') {
         if (button === 64) {
-          this.scrollInspectOrTranscript(3)
+          this.scrollActiveSurface(3)
           return
         }
         if (button === 65) {
-          this.scrollInspectOrTranscript(-3)
+          this.scrollActiveSurface(-3)
           return
         }
         // 32 is "motion with the left button held": a drag over a reply. Shift
@@ -10017,11 +12362,11 @@ export class SshTui {
       return
     }
     if (combined === '\x1b[5~') {
-      this.scrollInspectOrTranscript(Math.max(3, Math.floor(this.screenRows() / 2)))
+      this.scrollActiveSurface(Math.max(3, Math.floor(this.screenRows() / 2)))
       return
     }
     if (combined === '\x1b[6~') {
-      this.scrollInspectOrTranscript(-Math.max(3, Math.floor(this.screenRows() / 2)))
+      this.scrollActiveSurface(-Math.max(3, Math.floor(this.screenRows() / 2)))
       return
     }
     if (parseCursorPositionReply(combined) !== undefined) return
@@ -10030,7 +12375,7 @@ export class SshTui {
     if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
     // kitty / CSI-u Ctrl+Shift+C (codepoint 99, mods 6 = Ctrl+Shift)
     if (combined === '\x1b[99;6u') {
-      this.copyFocusedCard()
+      this.copyKey()
       return
     }
     const ss3 = /^\x1bO[A-Z]/u.exec(combined)
@@ -10117,17 +12462,43 @@ export class SshTui {
     }
   }
 
-  /** Insert pasted text into the input buffer; CR/LF are literal newlines. */
+  /**
+   * Insert pasted text into the field that owns the keyboard; CR/LF are literal
+   * newlines.
+   *
+   * A paste is text input, so it goes through the same ownership question ordinary
+   * typing does: into the composer's draft when the composer owns the keyboard, and
+   * into a borrowed field when a surface that has one does. A surface without a
+   * text field (a confirmation, the inspect overlay) takes no paste at all — the
+   * alternative was writing the composer's hidden draft behind it, which is how a
+   * paste into an approval dialog could silently rewrite the message being written.
+   */
   private handlePasteText(text: string): void {
     const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     if (normalized === '') return
+    if (!this.textIsEditable()) return
     this.leaveHistoryBrowse()
-    this.input = `${this.input.slice(0, this.cursor)}${normalized}${this.input.slice(this.cursor)}`
-    this.cursor += normalized.length
-    const cols = Math.max(10, this.screenColumns())
-    const lineWidth = Math.max(1, cols - 2)
-    if (normalized.includes('\n') || displayWidth(this.input) > lineWidth) this.inputFolded = true
+    const current = this.fieldText()
+    const at = this.fieldCursor()
+    this.setField(`${current.slice(0, at)}${normalized}${current.slice(at)}`, at + normalized.length)
+    if (this.borrowedText === undefined) {
+      const cols = Math.max(10, this.screenColumns())
+      const lineWidth = Math.max(1, cols - 2)
+      if (normalized.includes('\n') || displayWidth(this.fieldText()) > lineWidth) this.inputFolded = true
+    }
     this.markDirty()
+  }
+
+  /**
+   * Whether the keys that edit text belong to a field right now.
+   *
+   * The composer always has one; an open surface only has one when it borrowed it
+   * (a free-text answer, a setup field). Everything else — a confirmation, a menu,
+   * the inspect overlay — owns the keyboard without owning text, and those keys
+   * must do nothing rather than reach the draft behind the surface.
+   */
+  private textIsEditable(): boolean {
+    return this.dialog === undefined || this.borrowedText !== undefined
   }
 
   private handlePlainText(text: string): void {
@@ -10161,14 +12532,25 @@ export class SshTui {
   }
 
   private handleChar(char: string): void {
+    // A setup Screen owns every key, Enter included: it is the key that submits a
+    // step, and the composer behind the screen must never receive one (B2.6 §4).
+    // Ctrl+C is the exception — it is the terminal's own interrupt and keeps its
+    // global meaning.
+    if (this.screen?.kind === 'setup' && char !== '\x03') {
+      this.handleScreenInput(char, this.keymap.sequences.get(char))
+      return
+    }
     switch (char) {
       case '\x1b': this.handleEscape(); return
       case '\r':
       case '\n': this.submit(); return
-      case '\x7f': this.backspace(); return
-      case '\x08': this.backspace(); return
+      case '\x7f': if (this.textIsEditable()) this.backspace(); return
+      case '\x08': if (this.textIsEditable()) this.backspace(); return
       case '\x03': this.handleCtrlC(); return
-      case '\x04': void this.requestExit(0); return
+      // Ctrl+D is the composer's exit key. A surface that owns the keyboard has no
+      // exit semantics of its own, and falling through to the process exit left a
+      // dialog on screen killing the session it was waiting for.
+      case '\x04': if (this.dialog === undefined && this.screen === undefined) void this.requestExit(0); return
       case '\x0c':
         this.lastPaintRows = []
         this.lastChromeKey = ''
@@ -10177,41 +12559,61 @@ export class SshTui {
         this.dirty = true
         this.render()
         return
-      case '\x01': this.cursor = 0; this.markDirty(); return
-      case '\x05': this.cursor = this.input.length; this.markDirty(); return
-      case '\x15': this.leaveHistoryBrowse(); this.input = ''; this.cursor = 0; this.inputFolded = false; this.markDirty(); return
-      case '\x0b': this.leaveHistoryBrowse(); this.input = this.input.slice(0, this.cursor); this.markDirty(); return
+      case '\x01': if (this.textIsEditable()) this.setField(this.fieldText(), 0); this.markDirty(); return
+      case '\x05': if (this.textIsEditable()) this.setField(this.fieldText(), this.fieldText().length); this.markDirty(); return
+      case '\x15':
+        if (!this.textIsEditable()) return
+        this.leaveHistoryBrowse()
+        this.setField('', 0)
+        if (this.borrowedText === undefined) this.inputFolded = false
+        this.markDirty()
+        return
+      case '\x0b':
+        if (!this.textIsEditable()) return
+        this.leaveHistoryBrowse()
+        this.setField(this.fieldText().slice(0, this.fieldCursor()), this.fieldCursor())
+        this.markDirty()
+        return
       // A dialog owns the keyboard while it is up: moving the transcript cursor
       // under it changed what a later copy would take while the screen showed
       // nothing of the sort.
       case '\x0e':
-        if (this.dialog === undefined) this.moveFocus(1)
+        if (this.dialog === undefined && this.screen === undefined) this.moveFocus(1)
         return
       case '\x10':
-        if (this.dialog === undefined) this.moveFocus(-1)
+        if (this.dialog === undefined && this.screen === undefined) this.moveFocus(-1)
         return
       case '\x12':
         if (this.dialog !== undefined) return
         if (this.focusedRow === null) this.toggleCollapsible()
         else this.toggleAllCollapsible()
         return
-      case '\x14': this.inputFolded = !this.inputFolded; this.markDirty(); return
+      case '\x14': if (this.dialog === undefined) this.inputFolded = !this.inputFolded; this.markDirty(); return
+    }
+    // A Screen owns the keyboard here too. This is the path a plain character
+    // takes (`handleChar`), and the Screen branch must come first or a `y` typed at
+    // a Screen's confirmation would fall through to the composer behind it.
+    if (this.screen !== undefined) {
+      this.handleScreenInput(char, this.keymap.sequences.get(char))
+      return
     }
     if (this.dialog !== undefined) {
       this.handleDialogChar(char)
       return
     }
     if (char === '\x07') {
-      this.stepSearch(1)
+      if (this.dialog === undefined) this.stepSearch(1)
       return
     }
     if (char === '\x1f') {
+      if (this.dialog !== undefined) return
       this.input = '/find '
       this.cursor = this.input.length
       this.markDirty()
       return
     }
     if (char === '\t') {
+      if (this.dialog !== undefined) return
       if (this.suggestionsVisible()) {
         const selected = this.commandSuggestions[this.suggestionIndex]
         if (selected !== undefined) {
@@ -10229,9 +12631,9 @@ export class SshTui {
       return
     }
     if (char >= ' ' && char !== '\x7f') {
+      if (!this.textIsEditable()) return
       this.leaveHistoryBrowse()
-      this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
-      this.cursor += char.length
+      this.insertIntoField(char)
       this.markDirty()
     }
   }
@@ -10244,16 +12646,16 @@ export class SshTui {
   private runKeyAction(action: KeyAction): boolean {
     switch (action) {
       case 'pageUp':
-        this.scrollInspectOrTranscript(Math.max(3, Math.floor(this.screenRows() / 2)))
+        this.scrollActiveSurface(Math.max(3, Math.floor(this.screenRows() / 2)))
         return true
       case 'pageDown':
-        this.scrollInspectOrTranscript(-Math.max(3, Math.floor(this.screenRows() / 2)))
+        this.scrollActiveSurface(-Math.max(3, Math.floor(this.screenRows() / 2)))
         return true
       case 'toggleCard':
         this.toggleCollapsible()
         return true
       case 'copy':
-        this.copyFocusedCard()
+        this.copyKey()
         return true
       case 'cancel':
         this.handleEscape()
@@ -10274,12 +12676,11 @@ export class SshTui {
   private handleDialogChar(text: string): void {
     const dialog = this.dialog
     if (dialog === undefined) return
-    if (dialog.kind === 'inspect') {
-      if (inspectClosesOn(text)) this.closeInspect()
-      return
-    }
-    if (dialog.kind === 'onboarding') {
-      this.handleOnboardingChar(text)
+    if (!isSurfaceDialog(dialog)) {
+      // A deprecated shape (the pre-B2.6 onboarding dialog) is not a live path: it is
+      // dropped rather than answered through the question machinery (B2.6 §17).
+      this.dialog = undefined
+      this.showNextDialog()
       return
     }
     if (dialog.kind === 'confirm') {
@@ -10315,7 +12716,7 @@ export class SshTui {
     }
     if (selectQuestionOptionByKey(dialog, text)) this.markDirty()
     if (text === '\r' || text === '\n') {
-      const submit = questionSubmit(dialog, this.input)
+      const submit = questionSubmit(dialog, this.fieldText())
       if (submit.kind === 'reject') {
         // A list with options always answers with its highlight; this guards
         // only a malformed question whose cursor names no option.
@@ -10323,11 +12724,11 @@ export class SshTui {
         return
       }
       if (submit.kind === 'resolve') {
+        // The typed answer is carried by the resolve; the borrowed field it was
+        // typed into is released by `settleQuestion` on the way out. Clearing a
+        // field here would be clearing the *composer* — by then the surface has
+        // already given the field back, so `setField` would aim at the draft.
         dialog.resolve({ selected: submit.selected, ...(submit.custom === undefined ? {} : { custom: submit.custom }) })
-        if (submit.custom !== undefined) {
-          this.input = ''
-          this.cursor = 0
-        }
         return
       }
       return
@@ -10338,10 +12739,7 @@ export class SshTui {
     }
     if (optionsLength(dialog) === 0) {
       for (const char of text) {
-        if (char >= ' ' && char !== '\x7f') {
-          this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
-          this.cursor += char.length
-        }
+        if (char >= ' ' && char !== '\x7f') this.insertIntoField(char)
       }
       this.markDirty()
     }
@@ -10361,7 +12759,7 @@ export class SshTui {
       { key: 'template:openai-responses', label: templates['openai-responses'].label, detail: 'openai-responses' },
       { key: 'template:anthropic-messages', label: templates['anthropic-messages'].label, detail: 'anthropic-messages' },
     ]
-    return mergeProviderEntries(templateEntries, state.catalogPresets ?? [], ['deepseek', 'opencode-go'], this.input)
+    return mergeProviderEntries(templateEntries, state.catalogPresets ?? [], ['deepseek', 'opencode-go'], state.field)
   }
 
   private moveProviderCursor(delta: number): boolean {
@@ -10445,8 +12843,7 @@ export class SshTui {
           ?? HARNESS_DEFAULT_CONTEXT_WINDOW
         state.step = 'context'
       }
-      this.input = ''
-      this.cursor = 0
+      this.setField('', 0)
       this.markDirty()
     } finally {
       this.finishingModels.delete(state)
@@ -10497,6 +12894,131 @@ export class SshTui {
     }
   }
 
+  /** The wizard's field text, from the wizard's own state. */
+  private setupField(state: OnboardingState): string {
+    return state.field
+  }
+
+  /** Replace the wizard's field and caret; the composer is not touched. */
+  private setupSetField(state: OnboardingState, text: string, cursor: number): void {
+    state.field = text
+    state.fieldCursor = Math.max(0, Math.min(cursor, text.length))
+  }
+
+  /** Insert into the wizard's field at its caret. */
+  private setupInsert(state: OnboardingState, text: string): void {
+    const current = state.field
+    const at = state.fieldCursor
+    this.setupSetField(state, `${current.slice(0, at)}${text}${current.slice(at)}`, at + text.length)
+  }
+
+  /** Delete the code point before the wizard's caret. */
+  private setupBackspace(state: OnboardingState): void {
+    const current = state.field
+    const at = state.fieldCursor
+    if (at <= 0) return
+    const before = Array.from(current.slice(0, at)).slice(0, -1).join('')
+    this.setupSetField(state, `${before}${current.slice(at)}`, before.length)
+  }
+
+  /**
+   * Say something inside the setup Screen.
+   *
+   * Framed mode keeps it on the Screen's own message row — the wizard is a screen,
+   * not history, and a `Step 1 done` transcript would be a record of a flow that
+   * only ever ran once (B2.6 §12/§13). Line mode has no screen to say it on and has
+   * always printed the wizard's messages as text, so it still appends one.
+   */
+  private setupMessage(state: OnboardingState, kind: 'system' | 'error', text: string): void {
+    if (this.lineMode) {
+      this.pushRow(represent('onboarding', { kind: kind === 'error' ? 'error' : 'system', text }))
+      return
+    }
+    state.notice = { kind, text }
+    this.markDirty()
+  }
+
+  /**
+   * The setup Screen's key handling: its own field, its own navigation.
+   *
+   * Everything the wizard used to get from the workspace's composer and its
+   * dialog key path is handled here — the caret keys edit the wizard's field, the
+   * arrows move the wizard's pickers, Esc steps back through the picker steps or
+   * abandons the flow, and the confirm step answers itself. A key this does not
+   * consume is *not* forwarded anywhere: a setup screen has no other owner (B2.6 §4).
+   */
+  private handleSetupKey(combined: string, moved: string | undefined): void {
+    const state = this.onboarding
+    if (state === undefined) {
+      // No wizard behind the screen (a teardown raced the paint): leaving is the
+      // only honest answer.
+      this.closeScreen()
+      return
+    }
+    if (state.saving) return
+    if (state.step === 'confirm') {
+      if (combined === '\x1b' || combined === '\x03') {
+        this.cancelOnboarding()
+        return
+      }
+      const answer = confirmAnswer(combined)
+      if (answer !== undefined) {
+        if (answer === 'y') void this.saveOnboarding()
+        else this.cancelOnboarding()
+      }
+      return
+    }
+    if (combined === '\x1b' || combined === '\x03') {
+      // Inside the picker steps Esc goes back one step; anywhere else it abandons
+      // the wizard, exactly as it always did.
+      if (!this.stepBackOnboarding()) this.cancelOnboarding()
+      return
+    }
+    if (moved === 'copy') return
+    if (combined === '\x7f' || combined === '\b' || combined === '\x08') {
+      if (state.step === 'provider' || state.step === 'models-pick' || state.step === 'model-default') {
+        this.handleOnboardingChar('\x7f')
+        return
+      }
+      this.setupBackspace(state)
+      this.markDirty()
+      return
+    }
+    if (combined === '\x0c') {
+      // Ctrl+L still repaints the whole frame: the field is a row like any other,
+      // and a forced repaint is how a reader clears a garbled terminal.
+      this.screenNeedsFullPaint = true
+      this.markDirty()
+      return
+    }
+    if (combined === '\x15') {
+      // Ctrl+U clears the wizard's field, not the workspace's draft.
+      this.setupSetField(state, '', 0)
+      this.markDirty()
+      return
+    }
+    const sgr = /^\x1b\[(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
+    if (sgr !== null) return
+    const escaped = /^\x1b\[([A-D])$/u.exec(combined)
+    if (escaped !== null) {
+      if (state.step === 'provider') {
+        const total = this.mergedProviderEntries(state).length
+        if (total > 0) {
+          const step = escaped[1] === 'A' ? -1 : escaped[1] === 'B' ? 1 : 0
+          if (step !== 0) {
+            state.providerCursor = Math.max(0, Math.min(total - 1, state.providerCursor + step))
+            this.markDirty()
+            return
+          }
+        }
+      } else if (this.moveOnboardingModelCursor(escaped[1] === 'A' ? -1 : escaped[1] === 'B' ? 1 : 0)) {
+        return
+      }
+      return
+    }
+    this.handleOnboardingChar(combined)
+  }
+
   private handleOnboardingChar(text: string): void {
     const state = this.onboarding
     if (state === undefined) return
@@ -10515,8 +13037,7 @@ export class SshTui {
           state.key = ''
           state.models = []
           state.modelCapacity = new Map()
-          this.input = ''
-          this.cursor = 0
+          this.setupSetField(state, '', 0)
           if (entry.catalog !== undefined) {
             state.providerType = 'catalog'
             state.catalog = entry.catalog
@@ -10529,8 +13050,9 @@ export class SshTui {
           return
         }
         if (text === '\x7f') {
-          if (this.input !== '') {
-            this.input = this.input.slice(0, -1)
+          const current = this.setupField(state)
+          if (current !== '') {
+            this.setupSetField(state, current.slice(0, -1), Math.max(0, state.fieldCursor - 1))
             state.providerCursor = 0
           }
           this.markDirty()
@@ -10539,8 +13061,7 @@ export class SshTui {
         let changed = false
         for (const char of text) {
           if (char >= ' ' && char !== '\x7f') {
-            this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
-            this.cursor += char.length
+            this.setupInsert(state, char)
             changed = true
           }
         }
@@ -10571,7 +13092,7 @@ export class SshTui {
           if (text === '\r' || text === '\n') {
             const picked = this.checkedOnboardingModels(state)
             if (picked.length === 0) {
-              this.pushRow({ kind: 'error', text: t('onboard.needModel') })
+              this.setupMessage(state, 'error', t('onboard.needModel'))
               this.markDirty()
               return
             }
@@ -10623,19 +13144,19 @@ export class SshTui {
           return
         }
         if (text === '\r' || text === '\n') {
-          const value = this.input.trim()
+          const value = this.setupField(state).trim()
           if (state.step === 'id') {
             const template = onboardTemplate(state)
             const id = value === '' ? template.defaultId : value
             if (!/^[a-z0-9][a-z0-9-]*$/u.test(id)) {
-              this.pushRow({ kind: 'error', text: t('onboard.idInvalid') })
+              this.setupMessage(state, 'error', t('onboard.idInvalid'))
               this.markDirty()
               return
             }
             state.providerId = id
           } else if (state.step === 'key') {
             if (value === '' && state.providerType !== 'catalog') {
-              this.pushRow({ kind: 'error', text: t('onboard.keyEmpty') })
+              this.setupMessage(state, 'error', t('onboard.keyEmpty'))
               this.markDirty()
               return
             }
@@ -10654,7 +13175,7 @@ export class SshTui {
             }
             const parsed = value.split(/[\s,，]+/u).filter(Boolean)
             if (parsed.length === 0) {
-              this.pushRow({ kind: 'error', text: t('onboard.needModel') })
+              this.setupMessage(state, 'error', t('onboard.needModel'))
               this.markDirty()
               return
             }
@@ -10665,7 +13186,7 @@ export class SshTui {
             if (value !== '') {
               const parsed = Number.parseInt(value.replace(/[_,\s]/gu, ''), 10)
               if (!Number.isInteger(parsed) || parsed <= 0) {
-                this.pushRow({ kind: 'error', text: t('onboard.contextInvalid', { value }) })
+                this.setupMessage(state, 'error', t('onboard.contextInvalid', { value }))
                 this.markDirty()
                 return
               }
@@ -10674,16 +13195,12 @@ export class SshTui {
           } else {
             state.baseUrl = value
           }
-          this.input = ''
-          this.cursor = 0
+          this.setupSetField(state, '', 0)
           this.advanceOnboarding()
           return
         }
         for (const char of text) {
-          if (char >= ' ' && char !== '\x7f') {
-            this.input = `${this.input.slice(0, this.cursor)}${char}${this.input.slice(this.cursor)}`
-            this.cursor += char.length
-          }
+          if (char >= ' ' && char !== '\x7f') this.setupInsert(state, char)
         }
         this.markDirty()
         return
@@ -10692,8 +13209,7 @@ export class SshTui {
         if (state.saving) return
         if (text === 'y' || text === 'Y') {
           state.saving = true
-          this.input = ''
-          this.cursor = 0
+          this.setupSetField(state, '', 0)
           void this.saveOnboarding()
         } else if (text === 'n' || text === 'N') {
           state.step = 'provider'
@@ -10709,8 +13225,7 @@ export class SshTui {
           state.modelChecked = new Set<number>()
           state.modelCursor = 0
           state.modelCapacity = new Map()
-          this.input = ''
-          this.cursor = 0
+          this.setupSetField(state, '', 0)
           this.markDirty()
         }
         return
@@ -10736,8 +13251,7 @@ export class SshTui {
     } else if (state.step === 'context') {
       state.step = 'confirm'
     }
-    this.input = ''
-    this.cursor = 0
+    this.setupSetField(state, '', 0)
     this.markDirty()
   }
 
@@ -10756,7 +13270,7 @@ export class SshTui {
       (state.models.length > 0 ? state.models : template.defaultModels).filter(id => id !== ''),
     )]
     if (candidates.length === 0) {
-      this.pushRow({ kind: 'error', text: t('onboard.needModel') })
+      this.setupMessage(state, 'error', t('onboard.needModel'))
       this.markDirty()
       return
     }
@@ -10770,8 +13284,7 @@ export class SshTui {
     state.modelChecked = checked
     state.modelCursor = Math.min(...checked)
     state.step = 'models-pick'
-    this.input = ''
-    this.cursor = 0
+    this.setupSetField(state, '', 0)
     this.markDirty()
   }
 
@@ -10837,7 +13350,7 @@ export class SshTui {
     const key = state.key
     const baseURL = baseUrl === '' ? template.defaultBaseUrl : baseUrl
     if (baseURL === '' && providerType !== 'catalog') {
-      this.pushRow({ kind: 'error', text: t('onboard.needBase') })
+      this.setupMessage(state, 'error', t('onboard.needBase'))
       this.markDirty()
       return
     }
@@ -10865,7 +13378,7 @@ export class SshTui {
       if (!stillCurrent) return
       const ids = [...new Set(discovered.map(model => model.id).filter(id => id.length > 0))]
       if (ids.length === 0) {
-        this.pushRow({ kind: 'error', text: t('onboard.noModels') })
+        this.setupMessage(state, 'error', t('onboard.noModels'))
       } else {
         // Read the gateway's own route list while the key is still in hand: the
         // confirm step has no way to ask for it again.
@@ -10880,12 +13393,11 @@ export class SshTui {
           }
           return Object.keys(capacity).length === 0 ? [] : [[model.id, capacity] as const]
         }))
-        this.input = ''
-        this.cursor = 0
-        this.pushRow({ kind: 'system', text: t('onboard.fetchedModels', { count: ids.length, list: formatModelList(ids, 6) }) })
+        this.setupSetField(state, '', 0)
+        this.setupMessage(state, 'system', t('onboard.fetchedModels', { count: ids.length, list: formatModelList(ids, 6) }))
       }
     } catch (error) {
-      this.pushRow({ kind: 'error', text: t('onboard.fetchFailed', { error: errorChain(error) }) })
+      this.setupMessage(state, 'error', t('onboard.fetchFailed', { error: errorChain(error) }))
     } finally {
       this.status = previousStatus
       this.markDirty()
@@ -10918,13 +13430,10 @@ export class SshTui {
         await this.syncSubagentToProvider('deepseek-official', state.models, previousParentProvider !== 'deepseek-official')
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
-          this.pushRow({ kind: 'system', text: t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }) })
+          this.setupMessage(state, 'system', t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }))
         }
         if (saved) {
-          this.pushRow({
-            kind: 'system',
-            text: t('onboard.officialDone', { model }),
-          })
+          this.setupMessage(state, 'system', t('onboard.officialDone', { model }))
         }
       } else {
         const envRef = envRefForId(state.providerId)
@@ -11064,7 +13573,7 @@ export class SshTui {
         // the chosen model — with a split they are no longer the same id.
         const ownerId = entryId(writes.find(entry => entry.models.includes(model))?.protocol ?? baseProtocol)
         if (settings === undefined) {
-          this.pushRow({ kind: 'error', text: t('onboard.settingsMissing') })
+          this.setupMessage(state, 'error', t('onboard.settingsMissing'))
           saved = false
         } else {
           await settings.mutate(settingsNamespace('llm-pi-ai'), writes.map(entry => ({
@@ -11072,10 +13581,10 @@ export class SshTui {
             path: ['providers', entryId(entry.protocol)],
             value: profileFor(entry.protocol, entry.models),
           })))
-          this.pushRow({ kind: 'system', text: t('onboard.providerSaved', { id: state.providerId, path: displayDshPath('settings.yaml') }) })
+          this.setupMessage(state, 'system', t('onboard.providerSaved', { id: state.providerId, path: displayDshPath('settings.yaml') }))
           if (template.protocols !== undefined) {
             const summary = writes.map(entry => `${GATEWAY_PROTOCOL_SUFFIX[entry.protocol]} ${entry.models.length}`).join(' · ')
-            this.pushRow({ kind: 'system', text: t('onboard.providerSplit', { id: state.providerId, summary }) })
+            this.setupMessage(state, 'system', t('onboard.providerSplit', { id: state.providerId, summary }))
           }
         }
         // Only store the key when its provider profile actually made it to
@@ -11094,18 +13603,14 @@ export class SshTui {
           this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
-          this.pushRow({
-            kind: 'system',
-            text: t('onboard.customDone', { id: ownerId, model }),
-          })
+          this.setupMessage(state, 'system', t('onboard.customDone', { id: ownerId, model }))
         }
       }
     } catch (error) {
       saved = false
-      this.pushRow({ kind: 'error', text: t('onboard.saveFailed', { error: errorChain(error) }) })
+      this.setupMessage(state, 'error', t('onboard.saveFailed', { error: errorChain(error) }))
     } finally {
       this.onboarding = undefined
-      if (this.dialog?.kind === 'onboarding') this.dialog = undefined
       state.resolve(saved)
       this.showNextDialog()
       this.markDirty()
@@ -11126,18 +13631,18 @@ export class SshTui {
       // ignored any mode the store passed, so the file that holds every API key
       // gets its ACL tightened here.
       await restrictPathToUser(join(dshHomeDir(), '.credentials.yaml'), { mode: 0o600 })
-      this.pushRow({ kind: 'system', text: t('onboard.credSaved', { env: envRef, path: displayDshPath('.credentials.yaml') }) })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('onboard.credSaved', { env: envRef, path: displayDshPath('.credentials.yaml') }) }))
       return
     }
     await this.writeLaunchEnv({ [envRef]: key })
-    this.pushRow({
+    this.pushRow(represent('command-feedback', {
       kind: 'system',
       text: shadowed
         ? IS_WINDOWS
           ? t('onboard.envShadowWin', { env: envRef })
           : t('onboard.envShadowUnix', { env: envRef })
         : t('onboard.credMissing', { path: displayDshPath(envFileName()) }),
-    })
+    }))
   }
 
   /** Write launch-environment overrides so they beat system-injected variables. */
@@ -11233,7 +13738,15 @@ export class SshTui {
   }
 
   private handleEscape(): void {
+    if (this.screen !== undefined) {
+      // A confirmation the Screen is asking is settled first; otherwise Esc leaves
+      // the Screen. Esc must not fall through to the transcript below it — that is
+      // the same rule every other key follows while a Screen owns the screen.
+      this.handleScreenInput('\x1b', undefined)
+      return
+    }
     if (this.dialog?.kind === 'questions'
+      && isSurfaceDialog(this.dialog)
       && (this.dialog.filtering === true || (this.dialog.filter ?? '') !== '')) {
       // Esc means "show me everything again" while a filter is up; cancelling
       // the whole question on the same key would throw away the answer the user
@@ -11243,16 +13756,14 @@ export class SshTui {
       return
     }
     if (this.dialog !== undefined) {
-      if (this.dialog.kind === 'inspect') {
-        this.closeInspect()
+      if (!isSurfaceDialog(this.dialog)) {
+        // A deprecated shape cannot be answered; dropping it is the only honest exit
+        // (the wizard is a Screen now and never gets here).
+        this.dialog = undefined
+        this.showNextDialog()
         return
       }
       if (this.dialog.kind === 'confirm') this.closeConfirm('cancel')
-      else if (this.dialog.kind === 'onboarding') {
-        // Inside the models picker Esc steps back through the wizard's own
-        // steps; anywhere else it still abandons the wizard.
-        if (!this.stepBackOnboarding()) this.cancelOnboarding()
-      }
       else this.dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
       return
     }
@@ -11273,7 +13784,7 @@ export class SshTui {
       return
     }
     if (this.agent.status === 'running') {
-      this.pushRow({ kind: 'system', text: t('cancel.esc') })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('cancel.esc') }))
       this.agent.cancel({ kind: 'user' })
       this.status = 'cancelling…'
       this.markDirty()
@@ -11322,9 +13833,23 @@ export class SshTui {
 
   /** Screen row from a mouse report to an index into `selectableLines`. */
   private selectableLineAt(screenY: number): number | undefined {
+    // A row a covered region sits on is not a row the reader can point at: the drag
+    // selection stops at that region's top edge instead of running under it. Both
+    // regions count — the live tail paints over the newest history just as the
+    // transient layer paints over whatever it needs.
+    if (this.interactionRegion !== undefined && screenY >= this.interactionRegion.top) return undefined
+    if (this.liveTailRegion !== undefined && screenY >= this.liveTailRegion.top) return undefined
     const index = screenY - this.transcriptTopScreenY
     if (index < 0 || index >= this.selectableLines.length) return undefined
     return index
+  }
+
+  /** The last transcript row the interaction does not cover, or the whole list. */
+  private lastSelectableLine(): number {
+    const tops = [this.interactionRegion?.top, this.liveTailRegion?.top]
+      .filter((top): top is number => top !== undefined)
+    if (tops.length === 0) return this.selectableLines.length - 1
+    return Math.min(this.selectableLines.length - 1, Math.min(...tops) - 1 - this.transcriptTopScreenY)
   }
 
   /**
@@ -11335,7 +13860,10 @@ export class SshTui {
   private beginMouseSelection(y: number, x: number): void {
     this.pendingMouseClick = undefined
     this.mouseAnchor = undefined
-    if (this.dialog !== undefined) {
+    // A Screen covers the transcript, so nothing behind it is a target: the click
+    // is remembered (the release may still be a link or a card toggle, and it too
+    // will be refused below) but no selection can start on a row nobody can see.
+    if (this.dialog !== undefined || this.screen !== undefined) {
       this.pendingMouseClick = { y, x }
       return
     }
@@ -11357,7 +13885,7 @@ export class SshTui {
     if (resolved === undefined || this.mouseAnchor === undefined) return
     this.mouseAnchor = { line: resolved, column: this.mouseAnchor.column }
     const anchor = this.mouseAnchor
-    const line = this.selectableLineAt(y) ?? (y < this.transcriptTopScreenY ? 0 : this.selectableLines.length - 1)
+    const line = this.selectableLineAt(y) ?? (y < this.transcriptTopScreenY ? 0 : this.lastSelectableLine())
     const clamped = clampSelection(this.plainSelectableLines(), anchor, { line, column: Math.max(0, x - 1) })
     if (clamped === undefined) return
     const same = this.mouseSelection !== undefined
@@ -11416,7 +13944,9 @@ export class SshTui {
   }
 
   handleMouseClick(y: number, x = 1): void {
-    if (this.dialog !== undefined) return
+    // Nothing behind a Surface or a Screen is a target: the rows the reader can
+    // point at are the rows the current channel actually painted.
+    if (this.dialog !== undefined || this.screen !== undefined) return
     // The health chip is a standing warning, so clicking it opens the report
     // that explains it — the row is the strip, and the chip leads it.
     if (this.healthChipRow !== undefined && y === this.healthChipRow) {
@@ -11449,7 +13979,7 @@ export class SshTui {
     this.inputFolded = false
     this.leaveHistoryBrowse()
     this.write(osc52Clipboard(text))
-    this.pushRow({ kind: 'system', text: notice })
+    this.pushRow(represent('copy-feedback', { kind: 'system', text: notice }))
     // The write is a request the terminal may ignore: VTE (GNOME/XFCE/…) has
     // never implemented OSC 52, conhost and screen cannot, Konsole only from
     // 24.12, and xterm/tmux need configuration. The write still goes out — it is
@@ -11472,75 +14002,130 @@ export class SshTui {
     // asserts it does, for seven terminal profiles).
     if (!this.terminalCaps.osc52 && !this.sshSession && !this.osc52HintShown) {
       this.osc52HintShown = true
-      this.pushRow({ kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) })
+      this.pushRow(represent('copy-caveat', { kind: 'system', text: t('copy.osc52Hint', { terminal: this.terminalCaps.label }) }))
     }
     this.markDirty()
   }
 
+  /**
+   * `/copy [reply|highlight|error]` — copy plain text to the local clipboard.
+   *
+   * The default is the model's **last reply**, which is what a reader wants on
+   * the clipboard most of the time: the answer they just read, whole, ready to
+   * paste into a report. It used to be "the highlighted card, else the newest
+   * reply", so any card left highlighted (one click on a tool card does it)
+   * silently redirected the copy and the reply became unreachable without
+   * deselecting first. `highlight` is that old rule, now said out loud.
+   */
   copyFocusedCard(arg = ''): boolean {
-    // A dialog covers the input line, so the copy key is the only way to copy
-    // from inside one. The inspect overlay carries what it is showing; every
-    // other dialog keeps the key inert, exactly as it always was.
-    const overlay = this.dialog?.kind === 'inspect' ? this.dialog : undefined
-    if (this.dialog !== undefined && overlay === undefined) return false
+    const mode = arg.trim().toLowerCase()
     // `error` copies the newest failure or diagnostic row: a long path or a
     // command in one of those must reach the clipboard whole, which is exactly
     // what copying the row's own text does (the wrapped screen lines a drag
     // would join are not what the user wants to paste into a report).
-    if (arg.trim().toLowerCase() === 'error') {
-      const failed = this.rows.findLast(row => row.kind === 'error' || row.kind === 'diag')
-      const text = copyTextFromRow(failed)
-      if (text.trim() === '') {
-        this.pushRow({ kind: 'system', text: t('copy.noError') })
-        this.markDirty()
-        return false
-      }
-      this.copyPlainText(text, t('copy.ok', { chars: text.length, source: t('copy.sourceError') }))
-      return true
-    }
-    if (arg.trim() === '') {
-      const shown = overlay?.copyText
-      const picked = shown !== undefined && shown.trim() !== ''
-        ? { text: shown, source: 'focused' as const }
-        : copyTextFromTranscript(this.rows, this.focusedRow)
-      if (picked.text.trim() === '') {
-        this.pushRow({ kind: 'system', text: t('copy.empty') })
-        this.markDirty()
-        return false
-      }
-      // The label follows the text: when the overlay supplied it, the row the
-      // cursor sits on may be a different card entirely (Ctrl+N/P used to move
-      // it behind the overlay), and naming that row would be a false report.
-      const source = shown !== undefined && shown.trim() !== ''
-        ? t('copy.sourceFull')
-        : picked.source === 'focused'
-          ? t(this.focusedRow?.kind === 'assistant' ? 'copy.sourceFocusedReply' : 'copy.sourceFocused')
-          : t('copy.sourceAssistant')
-      const notice = t('copy.ok', { chars: picked.text.length, source })
-      this.copyPlainText(picked.text, notice)
-      if (overlay !== undefined) {
-        // The notice row is behind the overlay, so the overlay says it too.
-        overlay.notice = notice
-        this.markDirty()
-      }
-      return true
-    }
-    this.pushRow({ kind: 'system', text: t('copy.usage') })
+    if (mode === 'error') return this.copyErrorRow()
+    if (mode === 'highlight') return this.copyHighlighted(false)
+    if (mode === '' || mode === 'reply') return this.copyLatestReply()
+    this.pushRow(represent('copy-feedback', { kind: 'system', text: t('copy.usage') }))
     this.markDirty()
     return false
   }
 
-  private scrollInspectOrTranscript(delta: number): void {
-    if (this.dialog?.kind === 'inspect') {
-      this.dialog.offset = Math.max(0, this.dialog.offset + delta)
+  /**
+   * The copy key: what the reader is *pointing at*.
+   *
+   * The key and the command are two grammars over the same act, and they differ
+   * in exactly one place: with nothing highlighted the key falls back to the
+   * newest reply (a key that copies nothing reads as a broken key), while
+   * `/copy highlight` says there is nothing highlighted. Inside a Surface the key
+   * is the only way to copy at all: a Screen carries what it shows, and every
+   * other dialog keeps the key inert, exactly as it always was.
+   */
+  private copyKey(): boolean {
+    if (this.dialog !== undefined && this.screen === undefined) return false
+    return this.copyHighlighted(true)
+  }
+
+  /** The newest error or diagnostic row, whole. */
+  private copyErrorRow(): boolean {
+    const failed = this.rows.findLast(row => row.kind === 'error' || row.kind === 'diag')
+    const text = copyTextFromRow(failed)
+    if (text.trim() === '') {
+      this.pushRow(represent('copy-feedback', { kind: 'system', text: t('copy.noError') }))
       this.markDirty()
+      return false
+    }
+    this.copyPlainText(text, t('copy.ok', { chars: text.length, source: t('copy.sourceError') }))
+    return true
+  }
+
+  /** The highlighted card — or, for the key, the newest reply when none is. */
+  private copyHighlighted(fallbackToReply: boolean): boolean {
+    const overlay = this.screen
+    const shown = overlay?.copyText
+    const picked = shown !== undefined && shown.trim() !== ''
+      ? { text: shown, source: 'focused' as const }
+      : copyTextFromTranscript([...this.visibleRows()], this.focusedRow, 'highlight')
+    if (picked.text.trim() === '') {
+      if (fallbackToReply) return this.copyLatestReply()
+      this.pushRow(represent('copy-feedback', { kind: 'system', text: t('copy.noHighlight') }))
+      this.markDirty()
+      return false
+    }
+    // The label follows the text: when the overlay supplied it, the row the
+    // cursor sits on may be a different card entirely (Ctrl+N/P used to move
+    // it behind the overlay), and naming that row would be a false report.
+    const source = shown !== undefined && shown.trim() !== ''
+      ? t('copy.sourceFull')
+      : picked.source === 'focused'
+        ? t(this.focusedRow?.kind === 'assistant' ? 'copy.sourceFocusedReply' : 'copy.sourceFocused')
+        : t('copy.sourceAssistant')
+    const notice = t('copy.ok', { chars: picked.text.length, source })
+    this.copyPlainText(picked.text, notice)
+    if (overlay !== undefined) {
+      // The notice row is behind the overlay, so the overlay says it too.
+      overlay.notice = notice
+      this.markDirty()
+    }
+    return true
+  }
+
+  /** The model's last reply: the `/copy` default, and the key's last resort. */
+  private copyLatestReply(): boolean {
+    const text = latestReplyText([...this.visibleRows()])
+    if (text === '') {
+      this.pushRow(represent('copy-feedback', { kind: 'system', text: t('copy.empty') }))
+      this.markDirty()
+      return false
+    }
+    this.copyPlainText(text, t('copy.ok', { chars: text.length, source: t('copy.sourceAssistant') }))
+    return true
+  }
+
+  /**
+   * Scroll whichever surface the reader is looking at, by `up` lines toward the
+   * earlier content.
+   *
+   * One sign for every caller, because the two surfaces count in opposite
+   * directions: the transcript's `scrollOffset` is the distance *back* from the
+   * newest line, and the overlay's `offset` is the index of its first visible line.
+   * Adding one delta to both — which is what this did — made PgUp and the wheel
+   * scroll the overlay the wrong way, while the arrow keys, which passed their own
+   * inverted sign, were the only ones that felt right. A surface that is not the
+   * inspect overlay owns the keyboard and takes no scroll at all: the transcript
+   * behind a dialog must not move.
+   */
+  private scrollActiveSurface(up: number): void {
+    if (this.screen !== undefined) {
+      this.scrollScreen(up)
       return
     }
+    if (this.dialog !== undefined) return
     if (this.paintTailBudget > 0) {
       this.paintTailBudget = 0
       this.forceFullPaint = true
     }
-    this.scrollOffset = Math.max(0, this.scrollOffset + delta)
+    this.scrollOffset = Math.max(0, this.scrollOffset + up)
     this.markDirty()
   }
 
@@ -11552,7 +14137,7 @@ export class SshTui {
     }
     if (this.agent.status === 'running') {
       this.lastIdleCtrlCAt = 0
-      this.pushRow({ kind: 'system', text: t('cancel.ctrlC') })
+      this.pushRow(represent('command-feedback', { kind: 'system', text: t('cancel.ctrlC') }))
       this.agent.cancel({ kind: 'user' })
       this.status = 'cancelling…'
       this.markDirty()
@@ -11565,7 +14150,7 @@ export class SshTui {
       return
     }
     this.lastIdleCtrlCAt = now
-    this.pushRow({ kind: 'system', text: t('exit.ctrlCAgain') })
+    this.pushRow(represent('command-feedback', { kind: 'system', text: t('exit.ctrlCAgain') }))
     this.markDirty()
   }
 
@@ -11574,11 +14159,26 @@ export class SshTui {
       this.handleDialogChar('\r')
       return
     }
+    // The reader has moved on: an acknowledgement or a warning from their last action
+    // has done its job, and it is not history to keep. This is the *only* thing that
+    // clears them besides a newer one replacing them — no timer, so a reader who
+    // comes back after a while still sees what happened (B2.3b §4).
+    if (this.footerEcho !== undefined || this.notice !== undefined) {
+      this.footerEcho = undefined
+      this.notice = undefined
+    }
     this.scrollOffset = 0
     // A selected reply has no card to fold, so Enter has to reach it too: the
     // gate below only asks about collapsible rows, and in a session with no card
     // at all (a plain Q&A, or right after `/clear`) that left Enter doing
     // nothing while `Alt+4` / Ctrl+N had just selected the reply.
+    if (this.input.trim() === '' && this.focusedRow !== null && this.focusedRow.kind === 'question') {
+      // A question the Session still accepts an answer for is the one card whose
+      // Enter is an action rather than a fold: the wait that opened it is gone (its
+      // window closed, or a different process held it), and the durable projection
+      // is what says it is still answerable.
+      if (this.answerContinuedQuestion(this.focusedRow)) return
+    }
     if (this.input.trim() === '' && this.focusedRow !== null && this.focusedRow.kind === 'assistant') {
       this.toggleCollapsible()
       return
@@ -11598,7 +14198,7 @@ export class SshTui {
     if (text === '') return
     // Framed mode paints the composer; line mode has to put the typed line
     // into the log itself, or a `tee` never sees what the user sent.
-    if (this.lineMode) this.pushRow({ kind: 'user', text: t('line.prompt', { text }) })
+    if (this.lineMode) this.pushRow(represent('command-feedback', { kind: 'user', text: t('line.prompt', { text }) }))
     if (text.startsWith('/')) {
       this.historyIndex = this.history.length
       this.historyDraft = ''
@@ -11620,7 +14220,14 @@ export class SshTui {
     })
     if (this.agent.status === 'running') {
       this.pendingMessages.set(message.id, text)
-      this.pushRow({ kind: 'system', text: t('steer.queued', { text }) })
+      // An acknowledgement, not history: the *record* of a mid-turn message is the
+      // `user/message` the Harness appends when the step claims it, and the reader
+      // only needs to know now that it was accepted and when it applies. As a
+      // footer chip it was the first thing dropped on a busy stats row — with a
+      // turn running that row is exactly that — so a reader who typed mid-turn saw
+      // no confirmation at all (B2.4). The notice row is always on screen and costs
+      // no geometry.
+      this.pushRow(represent('steer-notice', { kind: 'system', text: t('steer.queued', { text }) }))
       this.agent.steer(message)
     } else {
       this.beginWait()
@@ -11645,22 +14252,19 @@ export class SshTui {
             const desc = t(descKey, undefined, item.description)
             return `/${item.name.padEnd(12)} ${commandAcceptsAttachments(item.input) ? t('cmd.withImagesSuffix', { desc }) : desc}  (dsh)`
           })
-        this.pushRow({
-          kind: 'system',
-          text: [
-            ...local,
-            ...dsh,
-            '',
-            t('help.intro1'),
-            t('help.intro2'),
-            t('help.intro3'),
-            t('help.intro4'),
-            t('help.intro5'),
-            t('help.intro6'),
-            t('help.intro7'),
-            t('help.intro8'),
-          ].join('\n'),
-        })
+        this.openReport('help', [
+          ...local,
+          ...dsh,
+          '',
+          t('help.intro1'),
+          t('help.intro2'),
+          t('help.intro3'),
+          t('help.intro4'),
+          t('help.intro5'),
+          t('help.intro6'),
+          t('help.intro7'),
+          t('help.intro8'),
+        ])
         break
       }
       case 'quit':
@@ -11670,9 +14274,9 @@ export class SshTui {
       case 'model':
         void this.runModelCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.modelCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.modelCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'model', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'model', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11680,9 +14284,9 @@ export class SshTui {
       case 'effort':
         void this.runEffortCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.effortCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.effortCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'effort', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'effort', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11690,9 +14294,9 @@ export class SshTui {
       case 'provider':
         void this.runProviderCommand().catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.providerCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.providerCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'provider', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'provider', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11700,9 +14304,9 @@ export class SshTui {
       case 'submodel':
         void this.runSubmodelCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.submodelCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.submodelCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'submodel', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'submodel', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11710,9 +14314,9 @@ export class SshTui {
       case 'subeffort':
         void this.runSubeffortCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.subeffortCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.subeffortCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'subeffort', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'subeffort', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11720,9 +14324,9 @@ export class SshTui {
       case 'mode':
         void this.runModeCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.modeCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'mode', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'mode', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11731,9 +14335,9 @@ export class SshTui {
       case 'lang':
         void this.runLanguageCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.modeCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'language', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'language', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
@@ -11741,44 +14345,44 @@ export class SshTui {
       case 'view':
         void this.runViewCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.modeCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'view', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'view', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
         break
       case 'notify':
         void this.runNotifyCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'notify', error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'notify', error: errorChain(error) }) }))
           this.markDirty()
         })
         break
       case 'disconnect':
         void this.runDisconnectCommand(arg).catch((error: unknown) => {
           if (error instanceof UserQuestionError) {
-            this.pushRow({ kind: 'system', text: t('help.modeCancel') })
+            this.pushRow(represent('command-feedback', { kind: 'system', text: t('help.modeCancel') }))
           } else {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'disconnect', error: errorChain(error) }) }))
           }
           this.markDirty()
         })
         break
       case 'cleanup':
         void this.runCleanupCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'cleanup', error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'cleanup', error: errorChain(error) }) }))
           this.markDirty()
         })
         break
       case 'theme':
         void this.runThemeCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'theme', error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'theme', error: errorChain(error) }) }))
           this.markDirty()
         })
         break
       case 'retryauth':
         void this.runRetryAuthCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'retryauth', error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'retryauth', error: errorChain(error) }) }))
           this.markDirty()
         })
         break
@@ -11789,23 +14393,34 @@ export class SshTui {
         this.runFindCommand(arg)
         break
       case 'clear':
-        this.rows.length = 0
-        this.streaming = undefined
-        this.streamingReasoning = undefined
-        this.thinkingStartedAt = undefined
-        this.waitStartedAt = undefined
+        // A presentation-only cutoff (AD-4). Nothing is deleted: not the rows, not
+        // the session log, not the agent's context, not an artifact. The view starts
+        // after this point, and a resume shows the full history again — which is the
+        // documented behaviour, not a bug to be papered over with a log write.
+        this.clearedRows = this.rows.length
+        this.scrollOffset = 0
         this.focusedRow = null
         this.searchHits = []
         this.searchIndex = -1
         this.searchQuery = ''
-        this.planNudgePending = false
         this.pendingReveal = undefined
-        this.pushRow({ kind: 'system', text: t('clear.transcript') })
+        this.pendingMouseClick = undefined
+        this.mouseAnchor = undefined
+        this.mouseSelection = undefined
+        // Said as a notice rather than a row: the reader asked for a clearer screen,
+        // and answering with a line the cutoff immediately hides would be absurd —
+        // or worse, a line that survives and makes `/clear` look like it failed.
+        this.notice = { text: t('clear.cutoff') }
+        this.forceFullPaint = true
+        this.markDirty()
         break
       case 'status':
         {
           const plan = this.findLivePlanRow()
-          const waiting = this.rows.filter(row => row.kind === 'question' && row.status === 'waiting').length
+          // A `continued` question is durable but the turn is over, so it is not a
+          // wait: `/status` lists the two separately rather than adding them.
+          const waiting = this.rows.filter(row =>
+            row.kind === 'question' && row.status === 'waiting' && row.continued !== true).length
           const provider = this.currentProviderId()
           const model = this.selectionRef?.current?.model ?? this.agent.options.model ?? 'default'
           const effort = this.selectionRef?.current?.reasoningEffort
@@ -11832,25 +14447,30 @@ export class SshTui {
             ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
             subModel: sub.model,
             cwd: this.workspaceCwd(),
+            // The default row gave these up when it became a status row rather
+            // than a telemetry dump. They are not deleted anywhere: this is
+            // where they live now, and `/diag` keeps its own copy.
+            stats: statsRowOf(this.statsTracker.snapshot()),
+            throughput: this.statsTracker.throughput(),
           })
-          this.pushRow({ kind: 'system', text: lines.join('\n') })
+          this.openReport('status', lines)
         }
         break
       case 'diag':
         void this.runDiagCommand().catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
         break
       case 'doctor':
         void this.runDoctorCommand(arg, /--fix|(^|\s)fix(\s|$)/u.test(arg)).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
         break
       case 'fix':
         void this.runFixCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
         break
@@ -11858,7 +14478,7 @@ export class SshTui {
       case 'balance':
       case 'quota':
         void this.runUsageCommand().catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
         break
@@ -11868,29 +14488,29 @@ export class SshTui {
           const [action, ...ids] = trimmed.split(/\s+/u)
           if (action === 'kill' || action === 'stop') {
             if (ids.length === 0) {
-              this.pushRow({ kind: 'error', text: t('sub.killNeedId') })
+              this.pushRow(represent('subagent-notice', { kind: 'error', text: t('sub.killNeedId') }))
               break
             }
             const subagents = this.ctx.get('subagents')
             if (subagents === undefined) {
-              this.pushRow({ kind: 'error', text: t('cmd.serviceMissing', { service: 'subagents' }) })
+              this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.serviceMissing', { service: 'subagents' }) }))
               break
             }
             const targets = ids.map(id => SessionId(id))
             void subagents.drainContinuableChildren(this.agent, targets).then(() => {
-              this.pushRow({ kind: 'system', text: t('sub.killRequested', { ids: ids.join(', ') }) })
+              this.pushRow(represent('subagent-notice', { kind: 'system', text: t('sub.killRequested', { ids: ids.join(', ') }) }))
               this.markDirty()
             }).catch((error: unknown) => {
-              this.pushRow({ kind: 'error', text: `/subagents kill failed: ${errorChain(error)}` })
+              this.pushRow(represent('command-error', { kind: 'error', text: `/subagents kill failed: ${errorChain(error)}` }))
               this.markDirty()
             })
             break
           }
-          this.pushRow({ kind: 'error', text: t('sub.unknownAction', { action }) })
+          this.pushRow(represent('subagent-notice', { kind: 'error', text: t('sub.unknownAction', { action }) }))
           break
         }
         if (this.activeSubagents.size === 0) {
-          this.pushRow({ kind: 'system', text: t('sub.none') })
+          this.openReport('subagents', [t('sub.none')])
         } else {
           const lines = [...this.activeSubagents.entries()].map(([, sub]) => {
             const card = this.findSubagentRow(sub.id)
@@ -11909,14 +14529,17 @@ export class SshTui {
               activity,
             })
           })
-          this.pushRow({ kind: 'system', text: t('sub.listHint', { lines: lines.join('\n') }) })
+          // The one hint key already carries both halves: the list, then the keys.
+          // Rendered empty it yields just the key line, so the body goes above it.
+          const hint = t('sub.listHint', { lines: '' }).split('\n').filter(line => line !== '')
+          this.openReport('subagents', [...lines, '', ...hint])
         }
         break
       }
       case 'approval': {
         const requested = arg.trim() === '' ? 'toggle' : arg.trim()
         if (isApprovalStatusArg(requested)) {
-          this.pushRow({
+          this.pushRow(represent('approval-warning', {
             kind: 'system',
             text: this.autoApprovalMode === 'auto'
               ? t('approval.statusAuto', {
@@ -11927,7 +14550,7 @@ export class SshTui {
                 cached: this.approvalCache.size,
               })
               : t('approval.statusOff'),
-          })
+          }))
           this.markDirty()
           break
         }
@@ -11937,16 +14560,16 @@ export class SshTui {
         if (requested === 'cache' || requested === 'cache clear' || requested === 'cache status') {
           if (requested === 'cache clear') {
             const dropped = this.approvalCache.clear()
-            this.pushRow({ kind: 'system', text: t('approval.cacheCleared', { count: dropped }) })
+            this.pushRow(represent('approval-warning', { kind: 'system', text: t('approval.cacheCleared', { count: dropped }) }))
           } else {
-            this.pushRow({
+            this.pushRow(represent('approval-warning', {
               kind: 'system',
               text: t('approval.cacheStatus', {
                 cached: this.approvalCache.size,
                 cacheHits: this.cacheHitCount,
                 minutes: this.approvalCache.ttlMinutes,
               }),
-            })
+            }))
           }
           this.markDirty()
           break
@@ -11955,7 +14578,7 @@ export class SshTui {
           ? this.autoApprovalMode === 'auto' ? 'off' : 'auto'
           : parseAutoApprovalMode(requested)
         if (next === undefined) {
-          this.pushRow({ kind: 'error', text: t('approval.unknown', { arg: requested }) })
+          this.pushRow(represent('approval-warning', { kind: 'error', text: t('approval.unknown', { arg: requested }) }))
           this.markDirty()
           break
         }
@@ -11964,20 +14587,20 @@ export class SshTui {
         // auto mode (or re-entering it) starts from an empty cache.
         this.approvalCache.clear()
         void this.mergeUiSettings({ autoApproval: next }).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command: 'approval', error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command: 'approval', error: errorChain(error) }) }))
           this.markDirty()
         })
-        this.pushRow({
+        this.pushRow(represent('approval-warning', {
           kind: 'system',
           text: next === 'auto' ? t('approval.autoOn') : t('approval.autoOff'),
-        })
+        }))
         if (next === 'auto') this.warnApprovalMismatch()
         this.markDirty()
         break
       }
       case 'preset':
         void this.runPresetCommand(arg).catch((error: unknown) => {
-          this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
         break
@@ -11987,7 +14610,7 @@ export class SshTui {
       case 'dialog-test': {
         const questions = this.ctx.get('userQuestions')
         if (questions === undefined) {
-          this.pushRow({ kind: 'error', text: t('cmd.serviceMissing', { service: 'userQuestions' }) })
+          this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.serviceMissing', { service: 'userQuestions' }) }))
           break
         }
         void questions.ask({
@@ -11999,11 +14622,11 @@ export class SshTui {
           agent: this.agent,
         }).then(
           (answer) => {
-            this.pushRow({ kind: 'system', text: t('dialog.answer', { json: JSON.stringify(answer) }) })
+            this.pushRow(represent('command-status', { kind: 'system', text: t('dialog.answer', { json: JSON.stringify(answer) }) }))
             this.markDirty()
           },
           (error) => {
-            this.pushRow({ kind: 'error', text: t('dialog.error', { error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('dialog.error', { error: errorChain(error) }) }))
             this.markDirty()
           },
         )
@@ -12013,7 +14636,7 @@ export class SshTui {
         {
           const commands = this.ctx.get('commands')
           if (commands === undefined) {
-            this.pushRow({ kind: 'error', text: t('cmd.unknown', { command }) })
+            this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.unknown', { command }) }))
             break
           }
           if (command === 'compact') {
@@ -12025,7 +14648,7 @@ export class SshTui {
           this.commandAbort = controller
           void commands.execute(this.agent, text, [], controller.signal).then((execution) => {
             if (execution === undefined) {
-              this.pushRow({ kind: 'error', text: t('cmd.unknown', { command }) })
+              this.pushRow(represent('command-misuse', { kind: 'error', text: t('cmd.unknown', { command }) }))
               return
             }
             // command/run + command/done already paint via handleCommandDone
@@ -12033,12 +14656,12 @@ export class SshTui {
             // arrived (no persistence, or a handler that skipped the log).
             if (this.seenCommandDoneIds.has(String(execution.commandId))) return
             if (execution.result.kind === 'error') {
-              this.pushRow({ kind: 'error', text: formatCompactCommandError(this.formatCommandText(execution.result.text)) })
+              this.pushRow(represent('command-error', { kind: 'error', text: formatCompactCommandError(this.formatCommandText(execution.result.text)) }))
             } else if (execution.result.text !== undefined && execution.result.text !== '') {
-              this.pushRow({ kind: 'system', text: this.formatCommandText(execution.result.text) })
+              this.pushRow(represent('command-feedback', { kind: 'system', text: this.formatCommandText(execution.result.text) }))
             }
           }).catch((error: unknown) => {
-            this.pushRow({ kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) })
+            this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           }).finally(() => {
             if (this.commandAbort === controller) this.commandAbort = undefined
             this.markDirty()
@@ -12078,47 +14701,53 @@ export class SshTui {
     return undefined
   }
 
+  /** Delete one grapheme back, in whichever field owns the keyboard. */
   private backspace(): void {
-    if (this.cursor === 0) return
+    const text = this.fieldText()
+    const cursor = this.fieldCursor()
+    if (cursor === 0) return
     this.leaveHistoryBrowse()
-    const range = this.graphemeBefore(this.cursor)
-    this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
-    this.cursor = range.start
+    const range = this.graphemeBefore(cursor)
+    this.setField(`${text.slice(0, range.start)}${text.slice(range.end)}`, range.start)
     this.markDirty()
   }
 
+  /** Delete one grapheme forward, in whichever field owns the keyboard. */
   private deleteAtCursor(): void {
-    const range = this.graphemeAfter(this.cursor)
+    const text = this.fieldText()
+    const range = this.graphemeAfter(this.fieldCursor())
     if (range === undefined) return
     this.leaveHistoryBrowse()
-    this.input = `${this.input.slice(0, range.start)}${this.input.slice(range.end)}`
-    this.cursor = range.start
+    this.setField(`${text.slice(0, range.start)}${text.slice(range.end)}`, range.start)
     this.markDirty()
   }
 
+  /** Move the caret one grapheme, in whichever field owns the keyboard. */
   private moveCursor(delta: number): void {
+    const text = this.fieldText()
+    const cursor = this.fieldCursor()
     if (delta < 0) {
       let target = 0
-      for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
-        if (segment.index >= this.cursor) break
+      for (const segment of GRAPHEME_SEGMENTER.segment(text)) {
+        if (segment.index >= cursor) break
         target = segment.index
       }
-      this.cursor = target
+      this.setField(text, target)
     } else {
-      let target = this.input.length
-      for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+      let target = text.length
+      for (const segment of GRAPHEME_SEGMENTER.segment(text)) {
         const start = segment.index
         const end = start + segment.segment.length
-        if (start > this.cursor) {
+        if (start > cursor) {
           target = start
           break
         }
-        if (end > this.cursor) {
+        if (end > cursor) {
           target = end
           break
         }
       }
-      this.cursor = target
+      this.setField(text, target)
     }
     this.markDirty()
   }

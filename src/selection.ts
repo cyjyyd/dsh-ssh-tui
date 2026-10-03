@@ -19,7 +19,7 @@
  * (emoji) are treated the same way.
  */
 
-import { displayWidth } from './term-text.js'
+import { ambiguousPolicy, charCellWidth, displayWidth } from './term-text.js'
 
 /** One painted screen line, with the origin the selection rules care about. */
 export interface SelectableLine {
@@ -128,13 +128,14 @@ function lineWidth(text: string): number {
  */
 export function offsetAtColumn(text: string, column: number): number {
   if (column <= 0) return 0
+  const policy = ambiguousPolicy()
   let used = 0
   let index = 0
   while (index < text.length) {
     const cp = text.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    const width = displayWidth(char)
+    const width = charCellWidth(cp, policy)
     if (used + width > column) return index
     used += width
     index += char.length
@@ -151,13 +152,14 @@ export function offsetAtColumn(text: string, column: number): number {
  */
 export function offsetAfterColumn(text: string, column: number): number {
   if (column <= 0) return 0
+  const policy = ambiguousPolicy()
   let used = 0
   let index = 0
   while (index < text.length) {
     const cp = text.codePointAt(index)
     if (cp === undefined) break
     const char = String.fromCodePoint(cp)
-    const width = displayWidth(char)
+    const width = charCellWidth(cp, policy)
     // A boundary exactly at a glyph's first cell excludes that glyph; only a
     // boundary strictly inside one (a wide glyph's second cell) includes it.
     if (used === column) return index

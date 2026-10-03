@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
-import { classifyAuthFailure, isReasoningReplayFailure, statusOf } from '../lib/auth-failure.js'
+import { classifyAuthFailure, isReasoningReplayFailure, isRequestRejectedFailure, statusOf } from '../lib/auth-failure.js'
 import { SshTui } from '../lib/tui.js'
 
 setLocale('zh')
@@ -205,6 +205,50 @@ test('/retryauth reports and flips the setting', async () => {
     tui.runCommand('/retryauth')
     assert.match(rows(tui).at(-1) ?? '', /关/u, 'default is off')
     assert.match((rows(tui).at(-1) ?? '').length > 0 ? rows(tui).at(-1) : '', /自动重试/u)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_TUI_RETRY_PROVIDER_AUTH
+    else process.env.DSH_TUI_RETRY_PROVIDER_AUTH = previous
+  }
+})
+
+// ── the bare sibling: a 400 the gateway refuses to explain ──────────────────
+//
+// Measured in one long session (2026-10-03, command-code, effort max): 13 of 14
+// failed turns were HTTP 400, 12 of them this bare envelope, arriving in runs (eight
+// consecutive turns over twelve minutes) and then clearing up on the same route. The
+// harness retried none of them (14 attempts, 0 retries) — a 400 is outside its
+// retryable set. The plugin says what it knows and does not spend a context guessing.
+
+const BARE_400 = 'command-code API error (400): {"message":"{\\"type\\":\\"invalid_request_error\\",\\"code\\":\\"\\",\\"message\\":\\"invalid request error trace_id: 3ad7a3cd26a46e9d53b4b7e717b894b0\\"}\\n","type":"invalid_request_error"}'
+
+test('the bare 400 is recognised, and a diagnosable 400 is not', () => {
+  assert.equal(isRequestRejectedFailure(BARE_400), true)
+  // The named sibling keeps its own branch: this predicate must not swallow it.
+  assert.equal(isRequestRejectedFailure(REASONING_REPLAY_400), false)
+  // A 400 that names what is wrong is a different fix, so it is not this case.
+  assert.equal(isRequestRejectedFailure('OpenAI API error (400): {"message":"json: unknown field \\"summary\\""}'), false)
+  // Other statuses and other shapes are not this either.
+  assert.equal(isRequestRejectedFailure('OpenAI API error (403): permission_error'), false)
+  assert.equal(isRequestRejectedFailure('command-code API error (400): upstream connect error'), false)
+  assert.equal(isRequestRejectedFailure(''), false)
+})
+
+test('the bare 400 gets its own advice, and still no automatic retry', async () => {
+  const previous = process.env.DSH_TUI_RETRY_PROVIDER_AUTH
+  process.env.DSH_TUI_RETRY_PROVIDER_AUTH = 'on'
+  try {
+    const { tui, agent, calls } = makeTui({ credentials: configuredCredentials })
+    send(tui, agent, 'turn/start', { turn: 18 })
+    tui.lastUserText = 'carry on'
+    send(tui, agent, 'turn/end', { turn: 18, reason: { kind: 'error', error: { message: BARE_400, code: 'INVALID_REQUEST' } } })
+    await flush()
+    const said = rows(tui).join('\n')
+    assert.match(said, /请求本身/u, 'it says the request was refused')
+    assert.match(said, /不是本机缺凭据/u, 'and that it is not a credential problem')
+    assert.match(said, /1780|#231/u, 'it names the known family')
+    assert.match(said, /effort off|command-code-messages/u, 'and gives the workarounds')
+    assert.equal(/提供商拒绝了请求|没有可用的/u.test(said), false, 'not the auth advice')
+    assert.equal(calls.length, 0, 'and no automatic retry, even with /retryauth on')
   } finally {
     if (previous === undefined) delete process.env.DSH_TUI_RETRY_PROVIDER_AUTH
     else process.env.DSH_TUI_RETRY_PROVIDER_AUTH = previous

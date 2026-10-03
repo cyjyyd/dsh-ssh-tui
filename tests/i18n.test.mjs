@@ -5,6 +5,7 @@ import { localeFromTag, resolveLocale, setLocale, t } from '../lib/i18n/index.js
 import { zh } from '../lib/i18n/zh.js'
 import { en } from '../lib/i18n/en.js'
 import { footerActivity, presentToolCall, promptInjectionTitle, SshTui } from '../lib/tui.js'
+import { feedbackText } from './wait.mjs'
 
 test('localeFromTag maps zh/en and ignores C/POSIX', () => {
   assert.equal(localeFromTag('zh_CN.UTF-8'), 'zh')
@@ -257,13 +258,13 @@ test('effort command adjusts current model reasoning effort with manual override
   tui.runCommand('/effort high')
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(tui.selectionRef.current.reasoningEffort, 'high')
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('已更新思考强度') && String(row.text).includes('high')))
+  assert.ok(feedbackText(tui).includes('已更新思考强度') && feedbackText(tui).includes('high'))
 
   // 2. Check fallback to default (undefined reasoningEffort)
   tui.runCommand('/effort default')
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(tui.selectionRef.current.reasoningEffort, undefined)
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('默认（不显式传参）')))
+  assert.ok(feedbackText(tui).includes('默认（不显式传参）'))
 
   // 3. Check /effort in suggestions
   tui.input = '/eff'
@@ -276,5 +277,5 @@ test('effort command adjusts current model reasoning effort with manual override
   tui.runCommand('/effort not an effort')
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(tui.selectionRef.current.reasoningEffort, undefined)
-  assert.ok(tui.rows.some(row => row.kind === 'error' && String(row.text).includes('未知思考强度')))
+  assert.ok(feedbackText(tui).includes('未知思考强度'))
 })

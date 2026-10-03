@@ -111,6 +111,45 @@ export function paintIntervalForRtt(rttMs: number | undefined): number {
 }
 
 /**
+ * Where the paint cadence came from: a measured round trip, an explicit
+ * `DSH_TUI_PAINT_MS`, a local TTY's constant, or a probe that never answered.
+ */
+export type PaintCadenceSource = 'measured' | 'configured' | 'local' | 'unprobed'
+
+/** The redraw budget a drag assumes on a link whose round trip was never measured. */
+export const RESIZE_UNKNOWN_LINK_BUDGET_MS = 200
+
+/**
+ * How long one frame takes to reach the terminal, for pacing a drag.
+ *
+ * Two of the four sources are an *answer*: `paintIntervalForRtt` already turned a
+ * measured round trip into a cadence, and an explicit `DSH_TUI_PAINT_MS` is the
+ * user's own. The other two are not, and they are not the same kind of guess:
+ *
+ * - a local TTY's cadence is a constant about a link that is not a link, so it is
+ *   used as it stands;
+ * - an **unprobed** link's interval is the SSH default — a number nobody measured
+ *   — and pacing frames by it composes them faster than the link can deliver them,
+ *   which queues stale geometries behind each other and reads as a drag that
+ *   freezes and jumps. That case gets a deliberately slow budget instead.
+ *
+ * Nothing here claims a round trip: the status row keeps painting `SSH ○○○○ 160ms`
+ * when the probe never answered, and this budget stays an internal pacing floor.
+ * @param link - which kind of link the session is on.
+ * @param source - where the cadence came from.
+ * @param intervalMs - the cadence in force.
+ * @returns milliseconds one frame needs, at least.
+ */
+export function linkRedrawBudgetMs(
+  link: PaintLinkKind,
+  source: PaintCadenceSource,
+  intervalMs: number,
+): number {
+  if (link === 'ssh' && source === 'unprobed') return RESIZE_UNKNOWN_LINK_BUDGET_MS
+  return intervalMs
+}
+
+/**
  * How many measurements the link's reported round-trip is taken over.
  *
  * Three is the smallest window where one outlier cannot move the answer and two
@@ -256,6 +295,25 @@ export interface PaintOptions {
   cursorColumn: number
   /** Keep the cursor hidden (session picker). Default shows it on the input. */
   hideCursor?: boolean
+  /**
+   * Never touch a row above this index, even when the size changed.
+   *
+   * A window drag repaints the whole screen on every event, and a frame's size is
+   * proportional to the width, so the *growing* direction is the expensive one:
+   * each frame is bigger than the last while the terminal drains at a fixed rate,
+   * the backlog compounds, and the screen keeps moving after the pointer has
+   * stopped (measured against a byte-rate-limited consumer: 30–44 ms of leftover
+   * drain growing, against 0–10 ms shrinking). The transcript is not what that
+   * frame is needed for — the terminal reflows the grid it already holds — so a
+   * drag paints the chrome and leaves the transcript to the terminal: a frame
+   * about 1/6 the size, flat in the column count. `paintTailBudget` already
+   * decides when the transcript may be left behind; this is the frame's half of
+   * the same decision.
+   *
+   * A frame with `dirtyFrom` never clears the screen: `\x1b[H\x1b[J` is precisely
+   * what it must not do.
+   */
+  dirtyFrom?: number
 }
 
 export interface PaintFrame {
@@ -308,14 +366,20 @@ export function composePaintFrame(options: PaintOptions & {
   // higher of the two chrome starts so leftover tool-body glyphs cannot sit
   // on the prompt.
   const dirtyChromeStart = Math.min(chromeStart, previousChromeStart)
+  // A partial frame keeps every row above `dirtyFrom` as it is, on the screen and
+  // in the comparison: it must not clear, and it must not treat the rows it is
+  // leaving alone as size-changed dirt either.
+  const partial = options.dirtyFrom !== undefined
+  const dirtyFrom = options.dirtyFrom ?? 0
   let out = '\x1b[?25l'
-  const prev = sizeChanged ? [] : previousRows
-  if (sizeChanged) out += '\x1b[H\x1b[J'
+  const prev = sizeChanged && !partial ? [] : previousRows
+  if (sizeChanged && !partial) out += '\x1b[H\x1b[J'
   // Never address row height+1: that scrolls the SSH viewport and leaves
   // thinking/tool/assistant glyphs sitting on the next card.
   const rowCount = Math.min(height, paintRows.length)
   const dirty: number[] = []
   for (let index = 0; index < rowCount; index += 1) {
+    if (index < dirtyFrom) continue
     const current = paintRows[index] ?? ''
     if (current === prev[index] && !(chromeChanged && index >= dirtyChromeStart)) continue
     dirty.push(index)
@@ -346,11 +410,13 @@ export function composePaintFrame(options: PaintOptions & {
     used += row.length
     painted.push(index)
   }
-  if (rowCount < height && (sizeChanged || previousRows.length !== paintRows.length)) {
+  // Never on a partial frame: erasing below the content would take the rows this
+  // frame was written to leave alone.
+  if (!partial && rowCount < height && (sizeChanged || previousRows.length !== paintRows.length)) {
     rows += `\x1b[${rowCount + 1};1H\x1b[J`
   }
   painted.sort((left, right) => left - right)
-  const paintedAny = painted.length > 0 || sizeChanged
+  const paintedAny = painted.length > 0 || (sizeChanged && !partial)
   if (!paintedAny && options.hideCursor === true) {
     return { output: '', painted, deferred, resume: undefined, bytes: 0 }
   }

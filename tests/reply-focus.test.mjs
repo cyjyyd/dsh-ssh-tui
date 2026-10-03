@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import { lastFeedback } from './wait.mjs'
 
 setLocale('zh')
 
@@ -73,7 +74,7 @@ const assistantRows = tui => tui.rows.filter(row => row.kind === 'assistant')
 const toolRows = tui => tui.rows.filter(row => row.kind === 'tool')
 const frameLine = (tui, needle, width = 100, height = 30) =>
   tui.captureFrame(width, height).find(line => line.includes(needle)) ?? ''
-const lastSystemRow = tui => String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+const lastSystemRow = tui => lastFeedback(tui)
 
 test('↑ lands on the newest card or reply, and the marker follows the focus', () => {
   const tui = makeTui()
@@ -115,7 +116,7 @@ test('the live thinking card is not dropped out of the ring', () => {
   assert.equal(live.expanded, true, 'and Enter expands it')
 })
 
-test('/copy copies the selected reply, not the newest one', () => {
+test('/copy highlight copies the selected reply, not the newest one', () => {
   // The clipboard caveat is a row of its own on every terminal the capability
   // table does not promise OSC 52 for, and CI runs outside SSH — which is the
   // one case that silences it. Declare the clipboard working so the notice
@@ -130,7 +131,7 @@ test('/copy copies the selected reply, not the newest one', () => {
     press(tui, KEY.up)
     press(tui, KEY.up)
     assert.equal(tui.focusedRow, older)
-    assert.equal(tui.copyFocusedCard(), true)
+    assert.equal(tui.copyFocusedCard('highlight'), true)
     assert.equal(tui.lastCopiedText, '第一版回复', 'the row\'s own text, not the newest reply')
     assert.match(lastSystemRow(tui), /焦点回复/)
   } finally {
@@ -148,9 +149,9 @@ test('a second copy takes the same row again', () => {
   press(tui, KEY.up)
   press(tui, KEY.up)
   press(tui, KEY.up)
-  tui.copyFocusedCard()
+  tui.copyFocusedCard('highlight')
   assert.equal(tui.focusedRow, older)
-  tui.copyFocusedCard()
+  tui.copyFocusedCard('highlight')
   assert.equal(tui.lastCopiedText, '第一版回复')
 })
 
@@ -158,8 +159,8 @@ test('Enter on a selected reply opens the full view and toggles no card', () => 
   const tui = makeTui()
   press(tui, KEY.up)
   press(tui, KEY.enter)
-  assert.equal(tui.dialog?.kind, 'inspect')
-  assert.match(String(tui.dialog?.title), /回复全文/)
+  assert.equal(tui.screen?.kind, 'inspect')
+  assert.match(String(tui.screen?.title), /回复全文/)
   assert.match(tui.captureFrame(100, 30).join('\n'), /最新回复/, 'the overlay shows the reply itself')
   assert.deepEqual(toolRows(tui).map(row => row.expanded), [false, false],
     'the newest card was not expanded behind the reader\'s back')
@@ -174,8 +175,8 @@ test('Enter reaches a selected reply in a session with no card at all', () => {
   const [, newest] = assistantRows(tui)
   assert.equal(tui.focusedRow, newest, 'Ctrl+P is not gated on cards')
   press(tui, KEY.enter)
-  assert.equal(tui.dialog?.kind, 'inspect', 'and Enter opens it')
-  assert.match(String(tui.dialog?.title), /回复全文/)
+  assert.equal(tui.screen?.kind, 'inspect', 'and Enter opens it')
+  assert.match(String(tui.screen?.title), /回复全文/)
 })
 
 test('↑ still recalls the previous prompt when there is no card to select', () => {
@@ -209,8 +210,8 @@ test('the copy key works inside the reply overlay, and says so there', () => {
   press(tui, KEY.enter)
   press(tui, KEY.copy)
   assert.equal(tui.lastCopiedText, '最新回复 **粗体**', 'the raw markdown, not the painted wrap')
-  assert.match(String(tui.dialog?.notice ?? ''), /已复制/)
-  assert.match(String(tui.dialog?.notice ?? ''), /全文/, 'the label names the body the overlay showed')
+  assert.match(String(tui.screen?.notice ?? ''), /已复制/)
+  assert.match(String(tui.screen?.notice ?? ''), /全文/, 'the label names the body the overlay showed')
   assert.match(tui.captureFrame(100, 30).join('\n'), /已复制/, 'and the overlay itself shows it')
 })
 
@@ -230,7 +231,7 @@ test('a tool overlay copies the body it shows, not the card row', () => {
   tool.output = 'line one\nline two'
   tui.focusedRow = tool
   tui.openToolInspect(tool)
-  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.screen?.kind, 'inspect')
   press(tui, KEY.copy)
   assert.match(tui.lastCopiedText, /line two/, 'the body is on the clipboard')
   assert.equal(tui.lastCopiedText.includes('$ ls'), false, 'and the card summary is not')
@@ -243,9 +244,9 @@ test('a body that replaces another body takes its copy text with it', () => {
   const tui = makeTui()
   press(tui, KEY.up)
   press(tui, KEY.enter)
-  assert.equal(tui.dialog?.copyText, '最新回复 **粗体**')
+  assert.equal(tui.screen?.copyText, '最新回复 **粗体**')
   tui.openChangesInspectLines('本轮改动 · a.ts  +1 -0', [{ kind: 'diff-add', text: '+added line' }])
-  assert.equal(tui.dialog?.copyText, '+added line')
+  assert.equal(tui.screen?.copyText, '+added line')
   assert.equal(tui.dialog?.notice, undefined, 'and the previous body\'s confirmation goes too')
   press(tui, KEY.copy)
   assert.equal(tui.lastCopiedText, '+added line')
@@ -286,7 +287,7 @@ test('the transcript cursor does not move behind an open overlay', () => {
   press(tui, KEY.up)
   const selected = tui.focusedRow
   press(tui, KEY.enter)
-  assert.equal(tui.dialog?.kind, 'inspect')
+  assert.equal(tui.screen?.kind, 'inspect')
   press(tui, KEY.ctrlP)
   assert.equal(tui.focusedRow, selected, 'the cursor stayed where the overlay left it')
   press(tui, KEY.ctrlR)

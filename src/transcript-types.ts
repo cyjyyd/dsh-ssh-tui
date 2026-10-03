@@ -5,6 +5,11 @@
 
 export type DisconnectPolicyName = 'pause' | 'continue'
 
+import type { AskUserQuestionOption } from '@deepseek-ai/dsh-user-questions'
+import type { ToolApproval } from './approval-state.js'
+import type { PlanProvenance, PlanState } from './plan-projection.js'
+import type { RepresentationMeta } from './representation.js'
+
 export type SubagentLogKind = 'user' | 'assistant' | 'tool' | 'result' | 'turn' | 'approval' | 'team' | 'system'
 
 /** One child-session event folded into a parent-side subagent card. */
@@ -28,7 +33,18 @@ export interface PlanTodoItem {
   status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped'
 }
 
-export type Row =
+/**
+ * A transcript line, plus the policy that produced it.
+ *
+ * The metadata is attached by `pushRow` (the only entry), which is why it is
+ * optional in the *shape*: a creation site writes a plain row and names its source,
+ * and the audit reads the classification back off the row afterwards. It is
+ * deliberately not a field each site fills in by hand — one owner, one place to get
+ * it wrong.
+ */
+export type Row = RowShape & { representation?: RepresentationMeta }
+
+type RowShape =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
   | { kind: 'reasoning'; text: string; expanded: boolean }
@@ -59,6 +75,14 @@ export type Row =
       totalLines?: number
       /** Flip-card animation until this timestamp (ms since epoch). */
       flipUntil?: number
+      /**
+       * The approval that guarded this call, when one did (B2.4).
+       *
+       * A field of the tool card, not a row of its own: approval is a state of
+       * the call. `provenance` says how well it is known, so a resume can never
+       * dress an inference up as a decision — see `approval-state.ts`.
+       */
+      approval?: ToolApproval
     }
   | {
       kind: 'subagent'
@@ -95,6 +119,23 @@ export type Row =
       /** When true the plan stays in the scrolling transcript, not the dock. */
       archived?: boolean
       /**
+       * The plan artifact this row stands for (B2.5).
+       *
+       * The row is a *reference*: its state, its steps and its lifecycle come from the
+       * projection of durable events, and the id is derived from the sequence that
+       * opened the artifact — so a replay finds the same row again instead of
+       * rebuilding "the newest live plan" from display order.
+       */
+      artifactId?: string
+      /** The artifact's folded state. */
+      state?: PlanState
+      /** How that state is known: an event said it, or it was read off the log. */
+      provenance?: PlanProvenance
+      /** The reader's words when they refused a review with feedback. */
+      reviewFeedback?: string
+      /** The revision the two display flags below were last computed for. */
+      lastRevisionId?: string
+      /**
        * Display-only: the last turn ended while todos were still open.
        * Does not rewrite the session log.
        */
@@ -111,11 +152,30 @@ export type Row =
   | {
       kind: 'question'
       questionId: string
+      /**
+       * The `ask_user_question` call this question came from, when the Session
+       * recorded one. It is what ties the card to the durable projection, so a
+       * timed question answered *after* its window closed can be settled from the
+       * log instead of from a request that no longer exists.
+       */
+      callId?: string
       title: string
       header?: string
       detail?: string
       intent: 'ask' | 'plan-review'
+      /**
+       * The choices the call offered, kept so a question the Session still holds
+       * can be answered *as the question it was*: without them a second answer is
+       * a free-text box, and `ctx.userQuestions.answer` is handed a batch that does
+       * not match the call's own shape.
+       */
+      options?: AskUserQuestionOption[]
+      multiSelect?: boolean
       status: 'waiting' | 'answered' | 'cancelled'
+      /** True when the Session still accepts an answer for this call. */
+      continued?: boolean
+      /** True once the durable projection, not a live request, owns this card. */
+      durable?: boolean
       summary: string
       expanded: boolean
     }
@@ -177,6 +237,12 @@ export type CollapsibleBlock =
   | { kind: 'streaming-reasoning'; expanded: boolean }
 
 export type DisplayKind = Row['kind'] | 'tool-result' | 'diff-add' | 'diff-del' | 'diff-path' | 'todo-done' | 'todo-active' | 'todo-pending' | 'todo-failed' | 'todo-skipped' | 'plan-dock' | 'subagent-header'
+  // The setup Screen's own three roles: its step indicator, the row the reader is
+  // acting on (a picker entry), and the field they are typing into.
+  | 'setup-step' | 'setup-choice' | 'setup-field'
+  // The setup Screen's own two roles: the step indicator, and the row the reader is
+  // acting on (one entry in a picker, or the field they are typing into).
+  | 'setup-step' | 'setup-choice' | 'setup-field'
 
 /** One rendered diff/inspect body line with its display role. */
 export interface DiffDisplayLine {

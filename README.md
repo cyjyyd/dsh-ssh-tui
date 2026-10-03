@@ -196,7 +196,7 @@ docs/screenshots/slow-link.json
 - reasoning 折叠与实时查看；
 - plan / approval / ask-user-question；
 - 子代理独立状态卡；
-- 会话 token、速度、额度与活动状态；
+- 状态行按一眼扫读的顺序回答五个问题：链路健康、正在做什么、tok/s、额度余量、上下文占用（宽度不够时按优先级逐项收敛，窄屏更简洁而不是更拥挤）；轮数 / 步数 / 模型时间 / 工具时间 / 缓存命中移出常驻行，仍可在 `/status` 与 `/diag` 查看；
 - `/model`、`/mode`、`/submodel` 等 Harness 能力直接进入终端。
 
 ### Session continuity
@@ -498,6 +498,13 @@ npm run build
 npm test
 ```
 
+两条不跑"有没有坏"、而跑"有没有守住"的命令：
+
+```bash
+npm run freeze   # B2 冻结：八条不变量 + 七条退役路径（unclassified / live source rows / …）
+npm run bench    # 性能基线：流式 / 等待 / 报告翻页 / 菜单移动 / 向导打字，并断言都不整屏重画
+```
+
 真实终端、断线与平台行为由额外 probe 覆盖。
 
 项目的目标不是让模拟测试代替终端，而是让：
@@ -522,6 +529,7 @@ cross-platform CI
 | [remote-ops.md](docs/remote-ops.md) | SSH、断线、attach、Host 生命周期 |
 | [desktop.md](docs/desktop.md) | 官方 Harness Desktop / no-TTY Host |
 | [platform.md](docs/platform.md) | 平台生命周期设计与维护者约束 |
+| [release.md](docs/release.md) | 发版流程（硬性规则）与发布前人工门槛 |
 | [terminals.md](docs/terminals.md) | Terminal capability 与兼容矩阵 |
 | [upstream-desktop-report.md](docs/upstream-desktop-report.md) | 可复现的上游 Desktop 问题记录 |
 

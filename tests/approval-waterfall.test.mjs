@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import { feedbackText, lastFeedback } from './wait.mjs'
 
 setLocale('zh')
 
@@ -24,6 +25,16 @@ function approvalTui(extraCtx = {}) {
   tui.runCommand('/approval auto')
   return { tui, agent }
 }
+
+/**
+ * The plugin's own decision *sentences* in the transcript — which, since B2.4,
+ * must be none: the durable home of a decision is the tool card it guarded, and
+ * the sentence is a transient echo/notice. Matched on the decision wording rather
+ * than the family word, because `/approval auto` legitimately writes a status row
+ * that mentions 自动审批 too.
+ */
+const decisionRows = tui => tui.rows.filter(row =>
+  row.kind === 'system' && /自动审批 (通过|拒绝)/u.test(String(row.text)))
 
 function bashCall(tui, agent, callId, command) {
   tui.handleSessionEvent(agent.session, {
@@ -48,12 +59,23 @@ test('auto mode allows low-risk shell shapes without calling next()', async () =
   const { tui, agent } = approvalTui()
   const outcome = await decide(tui, bashCall(tui, agent, 'c-allow', 'git status'))
   assert.equal(outcome, 'allowed-once')
-  const card = String(tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('自动审批'))?.text ?? '')
+  // Since B2.4 the sentence is the footer chip, not a row: what a test asserts is
+  // the *message*, and `feedbackText` reads whichever sink the policy picked.
+  const card = feedbackText(tui)
   assert.match(card, /自动审批 通过/)
   assert.match(card, /git status/)
   assert.match(card, /风险 low/)
+  assert.equal(
+    decisionRows(tui).length,
+    0,
+    'and no transcript row claims to be the decision',
+  )
+  // The decision itself is on the card it guarded, read from the pair the Harness
+  // records — our own sentence is display-only and proves nothing on resume.
+  const guarded = tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-allow')
+  assert.deepEqual(guarded?.approval, { state: 'approved', provenance: 'policy', auto: true })
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /自动审批开启/)
   assert.match(status, /已自动放行 1 次/)
   assert.match(status, /AI 复核 0 次/)
@@ -71,12 +93,21 @@ test('auto mode rejects danger shapes without calling next()', async () => {
     const outcome = await decide(tui, bashCall(tui, agent, id, command))
     assert.equal(outcome, 'rejected', command)
   }
-  const denied = tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('自动审批 拒绝'))
-  assert.equal(denied.length, 5)
-  assert.match(String(denied[0]?.text), /rm -rf \/tmp\/x/)
-  assert.match(String(denied[0]?.text), /风险 high/)
+  // One refusal replaces the last in the notice row, so the count belongs to the
+  // counter (`/approval status` below) and the message is asserted per decision.
+  assert.match(feedbackText(tui), /自动审批 拒绝/)
+  assert.match(feedbackText(tui), /git push --force origin main/, 'the newest refusal is the one on screen')
+  assert.match(feedbackText(tui), /风险 high/)
+  assert.equal(decisionRows(tui).length, 0, 'no transcript row claims to be a decision (B2.4)')
+  for (const [id, command] of [['c-rm', 'rm -rf /tmp/x'], ['c-sudo', 'sudo apt install x']]) {
+    assert.deepEqual(
+      tui.rows.findLast(row => row.kind === 'tool' && row.callId === id)?.approval,
+      { state: 'rejected', provenance: 'policy', auto: true },
+      `${command} is recorded on its own card`,
+    )
+  }
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /自动拒绝 5 次/)
 })
 
@@ -100,9 +131,9 @@ test('auto mode asks the reviewer for unrecognized shapes and can deny', async (
   const { tui, agent } = approvalTui(ctx)
   const outcome = await decide(tui, bashCall(tui, agent, 'c-ask', 'python deploy.py'))
   assert.equal(outcome, 'rejected')
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('自动审批复核')))
+  assert.ok(feedbackText(tui).includes('自动审批复核'))
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /自动拒绝 1 次/)
   assert.match(status, /AI 复核 1 次/)
 })
@@ -228,7 +259,7 @@ test('unparsed reviewer output leaves a card then asks', async () => {
   const { tui, agent } = approvalTui(ctx)
   const pending = decide(tui, bashCall(tui, agent, 'c-unparsed', 'python deploy.py'))
   await new Promise(resolve => setTimeout(resolve, 20))
-  assert.ok(tui.rows.some(row => row.kind === 'system' && String(row.text).includes('无可用结论')))
+  assert.ok(feedbackText(tui).includes('无可用结论'))
   assert.equal(tui.dialog?.kind, 'confirm')
   tui.handleChar('n')
   assert.equal(await pending, 'rejected')
@@ -297,9 +328,10 @@ test('sandbox-escalation delete of a home-directory probe auto-allows from the r
     reason: 'the user is escalating this command to "danger-full-access": rm /home/homeserver/silian.txt',
   })
   assert.equal(outcome, 'allowed-once')
-  const card = String(tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('自动审批'))?.text ?? '')
+  const card = feedbackText(tui)
   assert.match(card, /自动审批 通过/)
   assert.match(card, /rm \/home\/homeserver\/silian.txt/)
+  assert.equal(decisionRows(tui).length, 0, 'and it is still not a transcript row (B2.4)')
 })
 
 test('sandbox-escalation copy into a home directory auto-allows from the reason text', async () => {
@@ -311,9 +343,10 @@ test('sandbox-escalation copy into a home directory auto-allows from the reason 
     reason: 'the user is escalating this command to "danger-full-access": cp /www/wwwroot/blog.wdsky.top/silian.txt /home/homeserver/silian.txt',
   })
   assert.equal(outcome, 'allowed-once')
-  const card = String(tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('自动审批'))?.text ?? '')
+  const card = feedbackText(tui)
   assert.match(card, /自动审批 通过/)
   assert.match(card, /cp \/www\/wwwroot\/blog.wdsky.top\/silian.txt/)
+  assert.equal(decisionRows(tui).length, 0, 'and it is still not a transcript row (B2.4)')
 })
 
 /**
@@ -351,11 +384,11 @@ test('an identical unrecognized shape is answered from the cache the second time
 
   assert.equal(counters.reviews, 1, 'the reviewer ran once')
   assert.ok(
-    tui.rows.some(row => row.kind === 'system' && String(row.text).includes('缓存命中')),
+    feedbackText(tui).includes('缓存命中'),
     'the transcript says the second decision came from the cache',
   )
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /AI 复核 1 次/)
   assert.match(status, /缓存命中 1 次/)
   assert.match(status, /1 条/)
@@ -369,7 +402,7 @@ test('different arguments, workspace, or authorization never reuse a verdict', a
   assert.equal(counters.reviews, 2, 'a different command line is a different request')
 
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /缓存命中 0 次/)
 })
 
@@ -381,7 +414,7 @@ test('an opaque interpreter payload is never remembered', async () => {
   assert.equal(counters.reviews, 2, 'the payload, not the wrapper, decides the risk')
 
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /缓存命中 0 次/)
 })
 
@@ -391,12 +424,12 @@ test('a cached verdict never answers a shape the rule table refuses', async () =
   await decide(tui, bashCall(tui, agent, 'c-1', 'python deploy.py'))
   const denied = await decide(tui, bashCall(tui, agent, 'c-2', 'rm -rf /tmp/x'))
   assert.equal(denied, 'rejected')
-  const row = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const row = lastFeedback(tui)
   assert.match(row, /自动审批 拒绝/)
   assert.doesNotMatch(row, /缓存命中/)
 
   tui.runCommand('/approval status')
-  const status = String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '')
+  const status = feedbackText(tui)
   assert.match(status, /缓存命中 0 次/)
 })
 
@@ -408,9 +441,9 @@ test('/approval cache clear drops the verdicts and the next call reviews again',
   assert.equal(counters.reviews, 1)
 
   tui.runCommand('/approval cache clear')
-  assert.ok(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? '').includes('已清空'))
+  assert.ok(feedbackText(tui).includes('已清空'))
   tui.runCommand('/approval cache')
-  assert.match(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? ''), /0 条/)
+  assert.match(feedbackText(tui), /0 条/)
 
   await decide(tui, bashCall(tui, agent, 'c-3', 'python deploy.py'))
   assert.equal(counters.reviews, 2, 'a cleared cache pays for a fresh review')
@@ -418,5 +451,5 @@ test('/approval cache clear drops the verdicts and the next call reviews again',
   // Leaving auto mode also drops what was remembered.
   tui.runCommand('/approval off')
   tui.runCommand('/approval cache')
-  assert.match(String(tui.rows.findLast(row => row.kind === 'system')?.text ?? ''), /0 条/)
+  assert.match(feedbackText(tui), /0 条/)
 })

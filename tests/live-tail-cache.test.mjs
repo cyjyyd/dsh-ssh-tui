@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
+import { pushRow } from './wait.mjs'
 
 /**
  * The live tail (the wait card, the streaming buffer, a burst with no reply
@@ -33,7 +34,7 @@ function fixture(rows, { compact = false } = {}) {
   }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   if (compact) tui.workspaceView = 'compact'
-  for (const row of rows) tui.pushRow(row)
+  for (const row of rows) pushRow(tui, row)
   return tui
 }
 
@@ -77,23 +78,37 @@ test('a row never keeps a copy of the live wait card it was painted before', () 
 })
 
 test('a burst with no reply above it is painted once, not once per row it cached', () => {
+  // Idle agent: this case is about the *cache*, and a running session paints a live
+  // tail over the newest rows (the tail is a projection, not history — B2.2), which
+  // would hide the line this case counts.
   const tui = fixture([tool(1), tool(2)], { compact: true })
+  tui.agent.status = 'idle'
   const first = frame(tui).join('\n')
   assert.equal(count(first, '已调用'), 1, `one burst line:\n${first}`)
 
   const second = frame(tui).join('\n')
   assert.equal(count(second, '已调用'), 1, `still one burst line:\n${second}`)
+
+  // And while the agent *is* running, the same rule must still hold: the tail may
+  // cover the line, but it may never duplicate it.
+  tui.agent.status = 'running'
+  const live = frame(tui).join('\n')
+  assert.ok(count(live, '已调用') <= 1, `the tail must not add a second copy:\n${live}`)
 })
 
 test('the streaming reasoning buffer is not stored in the row above it', () => {
   const tui = fixture([{ kind: 'user', text: '想想。' }])
   tui.streaming = { text: '', reasoning: '**边框对齐** 先看这里' }
   tui.thinkingStartedAt = Date.now()
-  const first = frame(tui).join('\n')
+  // The status row also answers "what is happening" now, so it says 思考中 too.
+  // Only the transcript is counted here: this test is about the reasoning card,
+  // and the footer's copy of the state is a deliberate second place it appears.
+  const transcript = lines => lines.slice(0, -2).join('\n')
+  const first = transcript(frame(tui))
   assert.equal(count(first, '思考中'), 1, `one live reasoning line:\n${first}`)
 
   tui.streaming.reasoning = '**边框对齐** 先看这里，再看那里'
-  const second = frame(tui).join('\n')
+  const second = transcript(frame(tui))
   assert.equal(count(second, '思考中'), 1, `still one live reasoning line:\n${second}`)
   assert.equal(count(second, '先看这里\n'), 0, 'the old buffer is not replayed')
 })

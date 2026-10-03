@@ -53,17 +53,44 @@ export function copyTextFromRow(row: Row | CollapsibleBlock | undefined): string
   }
 }
 
+/** What a copy is aimed at: the highlighted card, or the model's last reply. */
+export type CopyTarget = 'highlight' | 'reply'
+
+/** The newest model reply with text, or `''` when the session has not produced one. */
+export function latestReplyText(rows: readonly Row[]): string {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i]
+    if (row?.kind === 'assistant' && row.text.trim() !== '') return clipCopy(row.text)
+  }
+  return ''
+}
+
+/**
+ * The text one copy target holds.
+ *
+ * The two targets are deliberately exclusive. They used to be one rule —
+ * "the highlighted card, else the newest reply" — and the fallback made the
+ * reply unreachable: any card left highlighted (one click on a tool card is
+ * enough) silently redirected `/copy`, with nothing on screen saying the reply
+ * had been passed over. `/copy` now names its target and defaults to the reply;
+ * `highlight` is the old rule with its own, honest, empty case.
+ * @param rows - the rows the reader can see (a `/clear` cutoff is not searched).
+ * @param focused - the highlighted row, if any.
+ * @param target - what the reader asked for; `reply` is the command's default.
+ */
 export function copyTextFromTranscript(
   rows: readonly Row[],
   focused: Row | CollapsibleBlock | null,
+  target: CopyTarget = 'reply',
 ): { text: string; source: 'focused' | 'assistant' | 'empty' } {
-  const focusedText = copyTextFromRow(focused ?? undefined)
-  if (focusedText.trim() !== '') return { text: focusedText, source: 'focused' }
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const row = rows[i]
-    if (row?.kind === 'assistant' && row.text.trim() !== '') {
-      return { text: clipCopy(row.text), source: 'assistant' }
-    }
+  if (target === 'highlight') {
+    // A reply has no body to fold away and no card text of its own beyond its
+    // lines, so `copyTextFromRow` is the whole rule for both kinds.
+    const focusedText = copyTextFromRow(focused ?? undefined)
+    return focusedText.trim() === ''
+      ? { text: '', source: 'empty' }
+      : { text: focusedText, source: 'focused' }
   }
-  return { text: '', source: 'empty' }
+  const reply = latestReplyText(rows)
+  return reply === '' ? { text: '', source: 'empty' } : { text: reply, source: 'assistant' }
 }

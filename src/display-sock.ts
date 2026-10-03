@@ -153,6 +153,28 @@ function glyphProbeTimeoutMs(rttMs: number | undefined): number {
  * that case without waiting a full cadence.
  */
 const RTT_RECHECK_FIRST_MS = 8_000
+/**
+ * How often a relay re-reads its own terminal's size.
+ *
+ * The resize *event* is the fast path and this is the backstop. A geometry the
+ * Host never learns about is not a cosmetic bug: the Host composes rows for the
+ * width it believes in, so a terminal that grew keeps the new columns filled with
+ * whatever was there before — the "half the screen is stale" report — and one
+ * that shrank gets its rows truncated at the edge. Resize events can be missed
+ * (a multiplexer that does not forward them, a window manager that moves a window
+ * between monitors, a console that only reports the *initial* size), and a
+ * one-second poll of two integers costs nothing next to being wrong all session.
+ */
+const SIZE_RECHECK_MS = 1_000
+/**
+ * How long a burst of resize events is collapsed before the geometry is sent.
+ *
+ * The first event of a burst bypasses it: a lone resize is reported at once, and
+ * only a *dragged* edge (an event every few milliseconds) pays the wait — that is
+ * where collapsing matters, because the Host would otherwise be told about every
+ * intermediate geometry the pointer passed through.
+ */
+const RELAY_RESIZE_DEBOUNCE_MS = 20
 
 /** How often an attached relay re-measures the link for the Host's chip. */
 const RTT_RECHECK_MS = 20_000
@@ -822,6 +844,29 @@ export class DisplayHost {
     const settle = this.probeSettle
     this.probeSettle = undefined
     settle?.(verdict)
+  }
+
+  /**
+   * How many bytes are queued for the terminal and still undelivered.
+   *
+   * The Host composes every frame, and on a resize it is the only one that can
+   * decide whether there is room for another one: the socket the frames travel on
+   * belongs to this object. Without the number the Host can only *guess* how fast
+   * the link is (from the measured round trip) and pace itself conservatively,
+   * which is what made a drag lag behind the pointer on a fast link. With it, the
+   * rule becomes the honest one: paint the new size now, unless the previous frame
+   * has not left yet.
+   * @returns queued bytes, or undefined when no display is attached.
+   */
+  pendingBytes(): number | undefined {
+    const socket = this.socket
+    if (socket === undefined || this.attached !== true) return undefined
+    try {
+      const size = Number(socket.writableLength)
+      return Number.isFinite(size) ? size : undefined
+    } catch {
+      return undefined
+    }
   }
 
   sendStdout(bytes: Buffer | string): boolean {
@@ -1525,6 +1570,8 @@ export interface DisplayRelayOptions {
   /** Re-measure cadences (tests); defaults to {@link RTT_RECHECK_FIRST_MS} / {@link RTT_RECHECK_MS}. */
   rttFirstRecheckMs?: number
   rttRecheckMs?: number
+  /** Terminal-size poll cadence (tests); default {@link SIZE_RECHECK_MS}. */
+  sizeRecheckMs?: number
   /** Typing captured before this relay existed; sent to the Host after HELLO. */
   seed?: string
   /**
@@ -1646,6 +1693,8 @@ export async function runDisplayRelay(
       await pump.handBack(grace)
     }
     const cleanup = (): void => {
+      if (sizeTimer !== undefined) clearTimeout(sizeTimer)
+      sizeTimer = undefined
       if (rttTimer !== undefined) clearTimeout(rttTimer)
       rttTimer = undefined
       pump.stop()
@@ -1747,6 +1796,79 @@ export async function runDisplayRelay(
       if (settled) return
       forwardInput(held)
     }
+    let resizeTimer: NodeJS.Timeout | undefined
+    /**
+     * The geometry to report, resolved at the moment it is sent.
+     *
+     * Two callers own the size in two different ways, and conflating them is what
+     * made a window resize do nothing at all:
+     *
+     * - a **pipe parent** has no `resize` event and no SIGWINCH; it declares the
+     *   panel's geometry with `CSI 8 ; rows ; cols t`, which arrives on the input
+     *   pipe and is remembered here (`reported`), and
+     * - a **terminal we own** is read *now*. Snapshotting `relayTerminalSize` once
+     *   per relay and re-sending it from the debounced handler meant every resize
+     *   after the first reported the attach-time geometry, so the Host saw no
+     *   change, skipped the repaint, and the frame stayed at the old width while
+     *   the user dragged the window.
+     *
+     * Reading at send time also collapses a burst of events to the newest size,
+     * which is the point of the debounce in the first place.
+     */
+    let reportedSize: { columns: number; rows: number } | undefined
+    /** What the Host was told last, so a re-check only speaks when it moved. */
+    let lastSentSize = { columns: 0, rows: 0 }
+    let sizeTimer: NodeJS.Timeout | undefined
+    const currentSize = (): { columns: number; rows: number } =>
+      reportedSize ?? relayTerminalSize(stdout)
+    const sendResize = (): void => {
+      const size = currentSize()
+      lastSentSize = { columns: size.columns, rows: size.rows }
+      try {
+        socket.write(encodeResize(size.columns, size.rows))
+      } catch {
+        finish('host-closed')
+      }
+    }
+    /**
+     * Report the size again if it moved without an event saying so.
+     *
+     * Only the terminal this relay owns is polled: a pipe parent's geometry is
+     * the parent's to declare, and reading `columns` there would answer with a
+     * default the parent never chose.
+     */
+    const recheckSize = (): void => {
+      if (settled) return
+      if (reportedSize === undefined) {
+        const now = relayTerminalSize(stdout)
+        if (now.columns !== lastSentSize.columns || now.rows !== lastSentSize.rows) sendResize()
+      }
+      sizeTimer = setTimeout(recheckSize, options.sizeRecheckMs ?? SIZE_RECHECK_MS)
+      sizeTimer.unref?.()
+    }
+    /**
+     * Report a resize, collapsing a burst.
+     *
+     * The first event of a burst goes out at once: a single resize (a window
+     * snap, a `tmux` pane change) has nothing to be collapsed with, and making it
+     * wait 20 ms added that delay to every one of them for no benefit. The
+     * debounce is for the rest of the burst — a dragged edge emits events every
+     * few milliseconds, and the Host only needs the geometry the drag lands on.
+     */
+    const onResize = (): void => {
+      if (resizeTimer === undefined) {
+        sendResize()
+        resizeTimer = setTimeout(() => {
+          resizeTimer = undefined
+        }, RELAY_RESIZE_DEBOUNCE_MS)
+        return
+      }
+      clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined
+        sendResize()
+      }, RELAY_RESIZE_DEBOUNCE_MS)
+    }
     const deliver = (text: string): void => {
       // A pipe parent has no `resize` event to fire and no SIGWINCH to raise:
       // `CSI 8 ; rows ; cols t` on the input pipe is how it says the panel is
@@ -1754,8 +1876,9 @@ export async function runDisplayRelay(
       // read is.
       const { forward, sizes } = parentResize.push(text)
       for (const reported of sizes) {
-        size.columns = reported.columns
-        size.rows = reported.rows
+        // The parent's declaration outranks the terminal we cannot see: a pipe
+        // parent may not even have a `columns` for this process to read.
+        reportedSize = { columns: reported.columns, rows: reported.rows }
         sendResize()
       }
       if (parentResize.pending) {
@@ -1779,24 +1902,6 @@ export async function runDisplayRelay(
         ? { debug: (message: string) => { process.stderr.write(`dsh-ssh-tui: ${message}\n`) } }
         : {}),
     })
-    let resizeTimer: NodeJS.Timeout | undefined
-    // Resolved once per relay: a terminal can change size and says so with a
-    // resize event, while a pipe parent declares it up front and sends a frame.
-    const size = relayTerminalSize(stdout)
-    const sendResize = (): void => {
-      try {
-        socket.write(encodeResize(size.columns, size.rows))
-      } catch {
-        finish('host-closed')
-      }
-    }
-    const onResize = (): void => {
-      if (resizeTimer !== undefined) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => {
-        resizeTimer = undefined
-        sendResize()
-      }, 20)
-    }
     /**
      * Keep the Host's picture of the link current.
      *
@@ -1911,7 +2016,14 @@ export async function runDisplayRelay(
           // tells us nothing (see `TerminalVerdict`).
           terminalAnswered = rtt !== undefined
           reportedRtt = rtt
-          const { columns, rows } = size
+          // The handshake carries the geometry as it is *now*: a parent that
+          // declared a size on the input pipe before HELLO has already won
+          // (`reportedSize`), and a terminal is read fresh.
+          const { columns, rows } = currentSize()
+          // The handshake *is* a resize report, and the size poll compares
+          // against what the Host was told: leave this out and the first poll
+          // speaks up to repeat a geometry the Host already has.
+          lastSentSize = { columns, rows }
           socket.write(Buffer.concat([
             encodeFrame(FRAME_HELLO),
             encodeResize(columns, rows),
@@ -1968,6 +2080,9 @@ export async function runDisplayRelay(
             }
           }
           scheduleRttRecheck(options.rttFirstRecheckMs ?? RTT_RECHECK_FIRST_MS)
+          // The size backstop, started with the geometry the handshake claimed:
+          // every later poll compares against what the Host was actually told.
+          recheckSize()
           if (options.announce === true) {
             try {
               stdout.write('\r\x1b[2K')

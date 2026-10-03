@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { displayWidth, stripAnsi } from '../lib/term-text.js'
 import { SshTui } from '../lib/tui.js'
-import { allText } from './wait.mjs'
+import { allText, feedbackText } from './wait.mjs'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
 
 /** A terminal with every capability, so a test asserts the full sequence set
@@ -75,7 +75,7 @@ test('dragging across a reply copies exactly what the drag covered', () => {
 
   tui.handleData(Buffer.from(release(0, end.endColumn, end.row)))
   assert.equal(tui.copyYank, 'npm test 再提交', 'the dragged text is what reaches the clipboard')
-  assert.match(allText(tui), /已复制选中文本/u)
+  assert.match(feedbackText(tui), /已复制选中文本/u)
   assert.equal(
     tui.captureFrame(100, 30).join('\n').includes('\x1b[7m'),
     false,

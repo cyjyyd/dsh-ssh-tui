@@ -52,10 +52,26 @@ export interface QuestionDialog {
   reject(error: unknown): void
 }
 
+/**
+ * @deprecated Superseded by a Screen (`ScreenState`, `kind: 'setup'`) in B2.6.
+ *
+ * Kept as a *shape* so 0.8.x does not break an importer that names the type: nothing
+ * in this plugin constructs one any more, and the wizard has no dialog path left to
+ * reach it through. A dialog handed to the dialog path is still rejected as a
+ * question rather than silently queued.
+ */
 export interface OnboardingDialog {
   kind: 'onboarding'
 }
 
+/**
+ * @deprecated Superseded by `ScreenState` (`screen.ts`) in B2.1.
+ *
+ * Kept as a *shape* rather than a dialog so the single judgement entry
+ * (`screenFromDialog`) can recognise one if it is ever handed to the dialog path,
+ * and so 0.8.x does not break an importer that names the type. Nothing in this
+ * plugin constructs one any more: every caller opens a Screen.
+ */
 export interface InspectDialog {
   kind: 'inspect'
   title: string
@@ -83,7 +99,90 @@ export interface InspectDialog {
   notice?: string
 }
 
-export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog | InspectDialog
+/**
+ * A dialog that owns the keyboard for the length of one human action.
+ *
+ * Deliberately does **not** include the inspect shape: since B2.1 an inspect body
+ * is a *Screen*, not a dialog — it replaces the workspace instead of borrowing rows
+ * from it, and it never enters `dialogQueue` (`screenFromDialog` converts the legacy
+ * shape, and `docs/decisions/b2-architecture-decisions.md` AD-1…AD-3 freeze why).
+ */
+export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog
+
+/**
+ * The dialogs the *live* dialog path can actually receive.
+ *
+ * `OnboardingDialog` is in the union only for 0.8.x importers; the wizard is a Screen
+ * now, so the queue, the role and the painter only ever see these two (B2.6 §17).
+ */
+export type SurfaceDialog = Extract<Dialog, { kind: 'confirm' | 'questions' }>
+
+/** Whether this is a dialog the live path can own (see {@link SurfaceDialog}). */
+export function isSurfaceDialog(dialog: Dialog): dialog is SurfaceDialog {
+  return dialog.kind === 'confirm' || dialog.kind === 'questions'
+}
+
+/**
+ * What kind of human action a surface is asking for.
+ *
+ * The dialog *shape* deliberately does not say this: `/model` and
+ * `ask_user_question` both open a `questions` dialog, and the two mean opposite
+ * things — one changes the operating environment, the other is the task stopping
+ * to wait for a person. Reading the shape as the meaning is what made the status
+ * row claim the agent was waiting while a picker was open, and call an approval
+ * idle. The opener declares the role instead.
+ */
+export type InteractionKind = 'question' | 'plan-review' | 'approval' | 'confirm'
+
+/**
+ * Who owns the keyboard, and what that means for the task.
+ *
+ * - `interaction` — the agent (or the action the reader asked for) is blocked on a
+ *   human decision, and only `ask` distinguishes the three that stall a turn from
+ *   a confirmation that blocks a local command;
+ * - `picker` — control plane: it changes the environment and leaves the agent
+ *   exactly as busy or idle as it already was.
+ *
+ * There used to be a third, `dedicated`, for "a surface with the whole screen and its
+ * own state machine". B2.6 gave the two things that meant — the inspect overlay and
+ * the setup wizard — the Screen contract instead, and with no producer left the role
+ * was removed rather than kept as a path nothing could reach.
+ */
+export type SurfaceRole =
+  | { kind: 'interaction'; ask: InteractionKind }
+  | { kind: 'picker' }
+
+/** The roles as values, so no call site invents its own object. */
+export const PICKER_ROLE: SurfaceRole = { kind: 'picker' }
+export function interactionRole(ask: InteractionKind): SurfaceRole {
+  return { kind: 'interaction', ask }
+}
+
+/**
+ * Whether a role means the task is stopped waiting for the human.
+ *
+ * A local `confirm` (deleting a preset, repairing the profile) owns the keyboard
+ * too, but the agent is not waiting on it — reporting it as a wait is the same
+ * class of mistake as reporting a picker as one.
+ */
+export function stallsTask(role: SurfaceRole | undefined): boolean {
+  return role?.kind === 'interaction' && role.ask !== 'confirm'
+}
+
+/**
+ * Which surface gets the keyboard first when more than one is waiting (B1.2).
+ *
+ * Only one transient surface is ever drawn, so this is not a z-order: it decides
+ * who is *next in line*. A task interaction outranks a picker (someone is blocked on
+ * it, and the agent cannot proceed), and a picker outranks whatever the reader was
+ * about to type. Equal ranks keep their arrival order, so a queue of two pickers
+ * still behaves exactly as it did before.
+ *
+ * A Screen is not in this ordering at all: it is not a surface (B2.6 §1).
+ */
+export function surfacePriority(role: SurfaceRole): number {
+  return role.kind === 'interaction' ? 1 : 0
+}
 
 export interface DialogAnswer {
   selected: string[]
@@ -294,4 +393,53 @@ export function confirmAnswer(text: string): 'y' | 'n' | 'cancel' | undefined {
 /** The inspect overlay closes on any of these, and ignores the rest. */
 export function inspectClosesOn(text: string): boolean {
   return text === '\x1b' || text === '\x03' || text === 'q' || text === 'Q' || text === '\r' || text === '\n'
+}
+
+/**
+ * Fit an interaction's rendered lines into the rows the frame can give it.
+ *
+ * The interaction layer is composed *over* the transcript (see `paintFrame`), and
+ * the space above the composer is whatever the terminal has left after the footer,
+ * the composer and the header. On a short terminal that can be fewer rows than a
+ * question list needs — and clipping the *bottom* would hide the options and the
+ * key hint, which is exactly the part that has to stay reachable. So the window
+ * keeps the focused row visible and marks what it dropped.
+ *
+ * @param lines - the interaction as its renderer drew it, top to bottom.
+ * @param cap - how many rows the frame has for it.
+ * @param focusLine - index of the row that must stay visible (the highlighted
+ *   option, or the prompt when there is no list).
+ * @returns the rows to place, top to bottom, at most `cap` of them.
+ */
+export function windowInteractionLines(
+  lines: readonly string[],
+  cap: number,
+  focusLine?: number,
+): { lines: string[]; hiddenAbove: number; hiddenBelow: number } {
+  if (cap <= 0) return { lines: [], hiddenAbove: lines.length, hiddenBelow: 0 }
+  if (lines.length <= cap) return { lines: [...lines], hiddenAbove: 0, hiddenBelow: 0 }
+  // One row is spent on the "there is more" marker, so the reader can tell a
+  // clipped list from a short one.
+  const room = Math.max(1, cap - 1)
+  // The last line is the key hint: it is what says how to answer, so it is kept
+  // even when the window has to drop the middle of the interaction. Only when
+  // doing so would leave no room for the focused row does it go.
+  const tail = lines[lines.length - 1]
+  const keepTail = lines.length > 1 && room >= 3 && (focusLine ?? 0) < lines.length - 1
+  const body = keepTail ? lines.slice(0, -1) : lines
+  const rows = keepTail ? room - 1 : room
+  const focus = Math.max(0, Math.min(body.length - 1, focusLine ?? body.length - 1))
+  let start = Math.max(0, Math.min(body.length - rows, focus - Math.floor(rows / 2)))
+  // The focus must be inside the window whatever the centring worked out to.
+  if (focus < start) start = focus
+  if (focus >= start + rows) start = focus - rows + 1
+  start = Math.max(0, Math.min(start, body.length - rows))
+  const kept = body.slice(start, start + rows)
+  const hiddenAbove = start
+  const hiddenBelow = body.length - start - rows
+  return {
+    lines: [`… ${hiddenAbove + hiddenBelow}`, ...kept, ...(keepTail ? [tail] : [])],
+    hiddenAbove,
+    hiddenBelow,
+  }
 }

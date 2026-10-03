@@ -9,6 +9,7 @@ import { parseJsonArgs } from './json-args.js'
 import { subagentCourtesyName } from './job-label.js'
 import { activeTheme, themeExtraToken, themeThresholdToken, themeToken, type Theme } from './theme.js'
 import { sliceCodePoints, type TextSegment } from './term-text.js'
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 import type { DiffDisplayLine, DisplayKind, PlanTodoItem, Row, SubagentLogEntry } from './transcript-types.js'
 
 export const MAX_SUBAGENT_LOGS = 80
@@ -392,6 +393,60 @@ export function askSummary(value: unknown): string {
     ? (first as { question: string }).question
     : t('question.waiting')
   return questions.length > 1 ? t('ask.multi', { text, count: questions.length }) : text
+}
+
+/**
+ * The questions one `ask_user_question` call recorded, for the durable fold.
+ *
+ * The Session's own reader (`questionsOf` in `@deepseek-ai/dsh-user-questions`)
+ * validates against the tool's schema and returns nothing when it does not match.
+ * This one only has to be faithful enough to draw a card from a log entry this
+ * process did not witness, so it takes the fields it can use and drops the rest
+ * rather than refusing the whole call.
+ * @param value - the tool call's arguments, raw JSON or already parsed.
+ * @returns the questions, or an empty list when the shape is unusable.
+ */
+export function askQuestions(value: unknown): readonly AskUserQuestionItem[] {
+  const root = typeof value === 'string' ? parseJsonArgs(value) : value
+  const questions = root !== null && typeof root === 'object' && !Array.isArray(root)
+    ? (root as { questions?: unknown }).questions
+    : undefined
+  if (!Array.isArray(questions)) return []
+  const out: AskUserQuestionItem[] = []
+  for (const entry of questions) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const item = entry as {
+      id?: unknown
+      question?: unknown
+      header?: unknown
+      detail?: unknown
+      multi_select?: unknown
+      multiSelect?: unknown
+      options?: unknown
+    }
+    if (typeof item.id !== 'string' || typeof item.question !== 'string') continue
+    const options = Array.isArray(item.options)
+      ? item.options.flatMap((option: unknown) => {
+        if (typeof option !== 'object' || option === null) return []
+        const shape = option as { label?: unknown; description?: unknown }
+        if (typeof shape.label !== 'string') return []
+        return [{
+          label: shape.label,
+          ...(typeof shape.description === 'string' ? { description: shape.description } : {}),
+        }]
+      })
+      : undefined
+    const multi = item.multi_select === true || item.multiSelect === true
+    out.push({
+      id: item.id,
+      question: item.question,
+      ...(typeof item.header === 'string' ? { header: item.header } : {}),
+      ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
+      ...(options === undefined ? {} : { options }),
+      ...(multi ? { multiSelect: true } : {}),
+    })
+  }
+  return out
 }
 
 /** First non-empty line, collapsed to a single scan line. */

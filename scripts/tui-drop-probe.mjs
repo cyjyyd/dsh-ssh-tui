@@ -315,14 +315,48 @@ async function runProbe({ sessionId, keep, home }) {
     //    each `/status` typed below only comes back if a new Host is serving.
     const beforeCrash = b.output.length
     await killHostByLock(createdSessionId, home)
+    // One request in flight at a time, and a *per-attempt* signal. The old loop fired
+    // `/status` every 2.5 s and decided from the whole slice since the crash, which
+    // raced itself twice over: `arrived` stayed true from an earlier attempt's report
+    // (so the loop stopped while a fresh answer was still travelling), and a late
+    // answer opened the Screen *after* the Esc below — leaving a Screen up to eat the
+    // `/exit` in step 7. Measured: 2 failures in 7 runs, both exactly that shape.
+    //
+    // Two state tests, both about *now* rather than everything that ever arrived:
+    // `screenVisibleNow` looks at the tail (the last frame or two), and `arrived`
+    // looks only at what came back since this attempt's request.
+    const screenVisibleNow = () => /全文 \d+–\d+\/\d+/u.test(plain(b.output.slice(-2_000)))
+    const closeScreen = async () => {
+      for (let close = 0; close < 4 && screenVisibleNow(); close += 1) {
+        b.term.write('\x1b')
+        await delay(800)
+      }
+    }
     let recovered = false
     for (let attempt = 0; attempt < 10 && !recovered; attempt += 1) {
       await delay(2_500)
+      // Nothing may be typed while a Screen owns the keyboard: a command typed at one
+      // is explained, not run. Close it and wait for the composer first.
+      await closeScreen()
+      const mark = b.output.length
       b.term.write('/status\r')
-      await delay(500)
-      recovered = plain(b.output.slice(beforeCrash)).includes(createdSessionId)
+      const deadline = Date.now() + 4_000
+      while (Date.now() < deadline && !plain(b.output.slice(mark)).includes(createdSessionId)) await delay(100)
+      recovered = plain(b.output.slice(mark)).includes(createdSessionId)
     }
     check(recovered, 'a crashed Host must be replaced and re-attached automatically, not left to the user')
+    // `/status` is a Screen since B2.1 (AD-7): it replaces the workspace and owns the
+    // keyboard while it is up, so a key typed after it — including `/exit` — reaches
+    // the Screen, not the composer. Step 7 below types a command, so the Screen has to
+    // be dismissed first, and this is the assertion that was flaking: it is closed
+    // until it is gone, with a settle afterwards in case a frame was still travelling.
+    await closeScreen()
+    await delay(1_200)
+    await closeScreen()
+    check(
+      !screenVisibleNow(),
+      `the /status Screen must close on Esc: ${JSON.stringify(plain(b.output.slice(-160)))}`,
+    )
     check(
       b.exited === undefined,
       `the attached window must not exit when its Host dies (exited with ${b.exited})`,
@@ -334,7 +368,13 @@ async function runProbe({ sessionId, keep, home }) {
     b.term.write('\x15')
     b.term.write('/exit\r')
     const exitCode = await waitForExit(b, 15_000)
-    check(exitCode === 0, `the resumed window must exit on /exit (got ${exitCode ?? 'no exit within 15s'})`)
+    // A timeout here has two very different shapes — the key never reached the
+    // command path, or the launcher stayed up — and the bare timeout cannot tell
+    // them apart. The screen can.
+    const exitTail = exitCode === undefined
+      ? `\n--- screen at the timeout ---\n${plain(b.output.slice(beforeExit)).split('\n').slice(-6).join('\n')}`
+      : ''
+    check(exitCode === 0, `the resumed window must exit on /exit (got ${exitCode ?? 'no exit within 15s'})${exitTail}`)
     check(
       b.output.slice(beforeExit).includes('\x1b[?1049l'),
       'the resumed window must hand the alternate screen back',

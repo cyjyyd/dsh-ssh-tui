@@ -3,10 +3,11 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { copyTextFromRow, copyTextFromTranscript } from '../lib/copy-text.js'
 import { SshTui } from '../lib/tui.js'
+import { feedbackText, lastFeedback } from './wait.mjs'
 
 setLocale('zh')
 
-test('copyTextFromTranscript prefers the focused card then the latest reply', () => {
+test('copyTextFromTranscript answers for one target at a time', () => {
   const assistant = { kind: 'assistant', text: '最终回复正文' }
   const tool = {
     kind: 'tool', callId: 'c1', name: 'bash', args: '{}', output: 'ok\n',
@@ -14,9 +15,85 @@ test('copyTextFromTranscript prefers the focused card then the latest reply', ()
   }
   assert.equal(copyTextFromRow(assistant), '最终回复正文')
   assert.equal(copyTextFromRow(tool), 'git status\ngit status\nok')
-  assert.deepEqual(copyTextFromTranscript([assistant], tool), { text: 'git status\ngit status\nok', source: 'focused' })
+  // `/copy highlight` is the focused card and nothing else: it does not fall back
+  // to the reply (that fallback is what hid the reply behind a stray highlight).
+  assert.deepEqual(copyTextFromTranscript([assistant], tool, 'highlight'), { text: 'git status\ngit status\nok', source: 'focused' })
+  assert.deepEqual(copyTextFromTranscript([assistant], tool), { text: '最终回复正文', source: 'assistant' },
+    'the default target is the reply, whatever is highlighted')
+  assert.deepEqual(copyTextFromTranscript([assistant], null, 'highlight'), { text: '', source: 'empty' })
   assert.deepEqual(copyTextFromTranscript([assistant], null), { text: '最终回复正文', source: 'assistant' })
   assert.equal(copyTextFromTranscript([], null).source, 'empty')
+})
+
+test('/copy takes the model\'s last reply even with a card highlighted', () => {
+  // What the reader reported: "copy no longer copies the reply". Their card was
+  // clicked at some point (a click is also how a card expands), and the old rule
+  // then silently redirected every `/copy` to that card. The default is the reply;
+  // `highlight` is the old rule, and it says when there is nothing highlighted
+  // instead of quietly handing back the reply under the wrong label.
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  process.env.DSH_TUI_TERM_CAPS = 'osc52'
+  try {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.write = () => {}
+    const card = {
+      kind: 'tool', callId: 'c1', name: 'bash', args: '{}', output: 'ok',
+      title: '终端', summary: 'ls', command: 'ls', expanded: false, status: 'ok',
+    }
+    tui.rows.push(card)
+    tui.rows.push({ kind: 'assistant', text: '模型最后一条回复' })
+    tui.focusedRow = card
+
+    tui.runCommand('/copy')
+    assert.equal(tui.copyYank, '模型最后一条回复', `the reply, not the highlighted card: ${feedbackText(tui)}`)
+    assert.match(String(lastFeedback(tui)), /最近回复/u)
+
+    tui.runCommand('/copy reply')
+    assert.equal(tui.copyYank, '模型最后一条回复', '/copy reply is the same target, spelled out')
+
+    tui.runCommand('/copy highlight')
+    assert.equal(tui.copyYank, 'ls\nls\nok', 'and /copy highlight still takes the card')
+
+    tui.focusedRow = null
+    tui.runCommand('/copy highlight')
+    assert.match(feedbackText(tui), /没有高亮的卡片/u, 'with nothing highlighted it says so, it does not fall back')
+    assert.equal(tui.copyYank, 'ls\nls\nok', 'and copies nothing new')
+  } finally {
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
+  }
+})
+
+test('the copy key takes the highlighted card, and the reply when nothing is highlighted', () => {
+  // The key has to keep working as it always did: a keyboard copy with nothing
+  // selected copying "nothing to copy" would read as a broken key. What changed is
+  // only that the *command* names its target.
+  const previousCaps = process.env.DSH_TUI_TERM_CAPS
+  process.env.DSH_TUI_TERM_CAPS = 'osc52'
+  try {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+    tui.write = () => {}
+    const card = {
+      kind: 'tool', callId: 'c1', name: 'bash', args: '{}', output: 'ok',
+      title: '终端', summary: 'ls', command: 'ls', expanded: false, status: 'ok',
+    }
+    tui.rows.push(card)
+    tui.rows.push({ kind: 'assistant', text: '回复正文' })
+
+    tui.handleData(Buffer.from('\x1b[99;6u'))
+    assert.equal(tui.copyYank, '回复正文', 'nothing highlighted: the newest reply')
+
+    tui.focusedRow = card
+    tui.handleData(Buffer.from('\x1b[99;6u'))
+    assert.equal(tui.copyYank, 'ls\nls\nok', 'highlighted: that card')
+  } finally {
+    if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
+    else process.env.DSH_TUI_TERM_CAPS = previousCaps
+  }
 })
 
 test('/copy writes OSC 52 and a workspace notice', () => {
@@ -43,14 +120,14 @@ test('/copy writes OSC 52 and a workspace notice', () => {
   // latest reply" and the assertions below passed for the wrong reason).
   const reply = tui.rows.at(-1)
   tui.focusedRow = reply
-  tui.runCommand('/copy')
+  tui.runCommand('/copy highlight')
   assert.ok(tui.lastCopiedText.includes('可复制的回复'))
   assert.ok(writes.some(chunk => chunk.includes('\x1b]52;c;') && chunk.endsWith('\x1b\\')))
   // The selection survives the copy: `▶` stays on the row it copied, which is
   // how the reader sees what went to the clipboard, and pressing the key again
   // copies the same thing instead of silently falling back to "latest reply".
   assert.equal(tui.focusedRow, reply)
-  const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
+  const notice = lastFeedback(tui)
   assert.match(String(notice), /已复制/)
   assert.match(String(notice), /焦点回复/)
   tui.handleChar('a')
@@ -84,7 +161,7 @@ test('clicking an OSC 8 column copies the URL instead of toggling a card', () =>
     const [y, hits] = entry
     tui.handleMouseClick(y, hits[0].startCol + 1)
     assert.equal(tui.lastCopiedText, 'https://example.com/click')
-    const notice = tui.rows.findLast(row => row.kind === 'system')?.text ?? ''
+    const notice = lastFeedback(tui)
     assert.match(String(notice), /example.com\/click/)
   } finally {
     if (previous === undefined) delete process.env.DSH_TUI_OSC8
@@ -117,13 +194,16 @@ test('the clipboard caveat is said once per session, not after every copy', () =
     tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
     tui.focusedRow = tui.rows[0]
 
-    const caveats = () => tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('OSC 52')).length
+    const said = () => feedbackText(tui).includes('OSC 52')
+    const rowsWithCaveat = () => tui.rows.filter(row => String(row.text ?? '').includes('OSC 52')).length
     tui.runCommand('/copy')
-    assert.equal(caveats(), 1, 'the first copy explains why the clipboard may be empty')
+    assert.equal(said(), true, 'the first copy explains why the clipboard may be empty')
+    assert.equal(rowsWithCaveat(), 0, 'as a notice, not as a transcript row (B2.3b)')
     tui.rows.push({ kind: 'assistant', text: '第二条' })
     tui.focusedRow = tui.rows.at(-1)
     tui.runCommand('/copy')
-    assert.equal(caveats(), 1, 'and the second copy does not repeat it')
+    assert.equal(said(), true, 'and the second copy does not need to repeat it')
+    assert.equal(rowsWithCaveat(), 0, 'still not a row')
   } finally {
     if (previousCaps === undefined) delete process.env.DSH_TUI_TERM_CAPS
     else process.env.DSH_TUI_TERM_CAPS = previousCaps
@@ -155,8 +235,9 @@ test('a relayed local window still warns, because the table described that termi
     tui.rows.push({ kind: 'assistant', text: '可复制的回复' })
     tui.focusedRow = tui.rows[0]
     tui.runCommand('/copy')
-    const caveats = tui.rows.filter(row => row.kind === 'system' && String(row.text).includes('OSC 52'))
-    assert.equal(caveats.length, 1, 'this terminal really cannot take the write, so the caveat is not a lie')
+    // The caveat is a notice since B2.3b (the row beside it is the acknowledgement):
+    // what matters is that the reader is told, wherever the policy routed it.
+    assert.ok(feedbackText(tui).includes('OSC 52'), `the caveat must be shown: ${feedbackText(tui)}`)
   } finally {
     for (const [key, value] of previousSsh) {
       if (value === undefined) delete process.env[key]

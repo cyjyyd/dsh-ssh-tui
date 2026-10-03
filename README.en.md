@@ -92,8 +92,13 @@ OSC 52 into your local clipboard; a tool card still expands on click; an SSH ses
 into the local terminal and no longer warns that it cannot) · a reply is a selectable card too:
 one `↑` on an empty input lands on the newest reply-or-card (marked `▶`, in screen order;
 `Alt+4` selects the latest reply), `/copy` then takes that one as written rather than the
-wrapped screen text, and `Enter` opens it full-screen · the footer is one priority-ordered chip
-strip, and `⚠` opens `/doctor` · the quota bar is on screen from the first frame and names
+wrapped screen text, and `Enter` opens it full-screen · the status row answers five questions
+in one order — link health, what is running, tokens per second, quota left, context used — and
+degrades by dropping cells as the terminal narrows (`⚠` still opens `/doctor`; the install
+warning outranks everything), and the row under it is *ordered* by priority and cut from the
+right — `dir:… · search n/m · queued n · sub:…`, closed by `OpenCode-GO` or
+`CommandCode-GOAT` on those two subscriptions, so a narrow terminal loses the least
+load-bearing part first · the quota meter is on screen from the first frame and names
 its window (`5Hr`/`1Wk`/`1Mo`, smallest window by default, `?%` with a 15-second retry until
 a reading arrives) · `/mode` groups presets and filters with `/` · the compact view names
 every changed file · tool diffs are line-level, emphasise only what changed, and go
@@ -463,11 +468,14 @@ model, and sends unrecognized shapes (`npm publish`, interpreter `-c`/`-e`)
 to the subagent-model reviewer (user message + args/reason/sandbox; English
 UI uses the English reviewer; `authorization=yes` required). `/approval
 status` also reports how many AI reviews ran this session.
-The identity footer row shows a one-cell Braille ring after the
-remaining-quota bar for occupancy of the routed model's context window
-(DSH `contextPressure`, provider-agnostic); green / yellow / red map
-to ok / 80% / 95%.
-`/status` prints the same figures. Warnings fire near 80%/95%; idle
+The status row shows context occupancy as a capacity meter over the routed
+model's context window (DSH `contextPressure`, provider-agnostic); the bands are
+the harness's own pressure levels, so 80% turns the meter yellow and 95% red —
+exactly where compaction starts warning.
+`/status` prints the same figures, plus everything the row gave up: turns,
+steps, input/output/cached tokens, the session total (with the accounting it
+came from), model time, tool time, cache hit and the exact last-step and
+running `tokens/sec`. Warnings fire near 80%/95%; idle
 auto-`/compact` starts near 72% so recovery is not left to a mid-turn
 overflow. `/compact` shows a spinning compact card and footer until it
 finishes, then the tokens recovered. `Tab` completes, `Enter` runs.
@@ -891,7 +899,18 @@ src/i18n/                 zh/en UI catalogs
 ```sh
 npm install
 npm run build
+npm test
 ```
+
+Two commands that do not ask "is anything broken" but "is anything still held":
+
+```sh
+npm run freeze   # the B2 freeze: eight invariants + seven retired paths (unclassified / live source rows / …)
+npm run bench    # the perf baseline: stream / wait / report paging / menu move / wizard typing, all incremental
+```
+
+The release rules — including the two things CI cannot cover (a Windows machine, and a
+first-run home) — are in [docs/release.md](docs/release.md) (Chinese).
 
 ## Privacy
 

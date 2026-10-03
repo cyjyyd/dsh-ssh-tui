@@ -55,6 +55,37 @@ Set PROBE_HOME to a throwaway tree to keep the probe away from real sessions.`
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 const OSC = /\x1b\][^\x07]*\x07/gu
 
+/**
+ * The status row as the terminal received it.
+ *
+ * Rows are addressed absolutely and a frame carries no newlines, so the stream is
+ * split on the cursor-position sequences rather than on lines: the last newline-
+ * delimited chunk is the whole screen and would match anything.
+ */
+function statusRowOf(buffer) {
+  const rows = buffer
+    .split(/\x1b\[\d+;\d+H/u)
+    .map(plain)
+    .map(line => line.replace(/\s+$/u, ''))
+    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  return rows.at(-1) ?? ''
+}
+
+/**
+ * The screen as the terminal holds it, rebuilt from the byte stream.
+ *
+ * The painter addresses rows absolutely (`\x1b[<row>;1H`) and a later write wins,
+ * so the whole session's output reconstructs the current screen — which is what an
+ * assertion about "what the reader sees" needs when the frame that follows does not
+ * re-emit an unchanged row.
+ */
+function screenRows(text) {
+  const rows = new Map()
+  const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
+  for (const match of text.matchAll(pattern)) rows.set(Number(match[1]), plain(match[2] ?? ''))
+  return rows
+}
+
 function plain(text) {
   return text.replace(CSI, '').replace(OSC, '')
 }
@@ -269,7 +300,44 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       'the resize must not repaint the finished session picker',
     )
 
+    // 2b. The frame must follow the terminal's *current* geometry, both ways.
+    //
+    // A Host composing rows for a width the terminal no longer has is not a
+    // cosmetic problem: the columns it still believes in keep whatever was there
+    // before, so half the screen stays stale while the other half is repainted —
+    // the "window grew and the layout looks half-scaled" report. The relay used
+    // to re-send the size it captured at attach, which meant the Host never heard
+    // about a resize at all; these reads are what catches that class.
+    const sweep = []
+    for (const [columns, rows] of [[60, 20], [120, 30], [60, 20], [120, 30]]) {
+      const mark = output.length
+      term.resize(columns, rows)
+      await new Promise(resolve => setTimeout(resolve, 1_000))
+      const bytes = output.length - mark
+      sweep.push({ columns, bytes, row: statusRowOf(output) })
+      check(bytes > 0, `the resize to ${columns}x${rows} produced no repaint`)
+      check(sweep.at(-1).row !== '', `no status row after resizing to ${columns}x${rows}`)
+    }
+    // A wider terminal paints a bigger frame; identical byte counts at 60 and 120
+    // columns would mean the Host is still composing for one fixed width.
+    check(
+      sweep[1].bytes > sweep[0].bytes,
+      `the frame must scale with the terminal: ${sweep[0].bytes} bytes at 60 columns,`
+      + ` ${sweep[1].bytes} at 120`,
+    )
+    check(
+      sweep[0].row === sweep[2].row && sweep[1].row === sweep[3].row,
+      'returning to a size must reproduce the same status row'
+      + ` (60: ${JSON.stringify(sweep[0].row)} vs ${JSON.stringify(sweep[2].row)},`
+      + ` 120: ${JSON.stringify(sweep[1].row)} vs ${JSON.stringify(sweep[3].row)})`,
+    )
+    console.log(`resize sweep: ${sweep.map(entry => `${entry.columns}→${entry.bytes}B`).join(' ')}`)
+
     // 3. /diag answers with the local facts, including the verdict chain.
+    //    Since B2.1 a report is a **Screen**: it replaces the workspace, owns the
+    //    keyboard and writes nothing to the transcript (AD-7). Typing while one is
+    //    up reaches the Screen, not the composer — so every report step below ends
+    //    with Esc, which is also what puts the workspace back.
     //    Back to the boot size first: at 24 rows the report's head (the version
     //    line) scrolls out of the painted viewport and never reaches the wire.
     term.resize(100, 30)
@@ -282,6 +350,15 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     for (const variants of [['版本', 'versions'], ['显示通道', 'display channel'], ['Host']]) {
       check(variants.some(needle => diag.includes(needle)), `/diag output must mention ${variants.join(' / ')}`)
     }
+    check(/Esc 返回|Esc to return/u.test(diag), 'the Screen must say how to leave it')
+    check(/空闲|运行中|idle|running/u.test(diag), 'and keep the runtime strip: is the agent still working')
+    // Dismissed with Esc: the workspace comes back, and no report row was written.
+    term.write('\x1b')
+    await new Promise(resolve => setTimeout(resolve, 600))
+    check(
+      !/全文 \d+–\d+\/\d+/u.test(plain(output.slice(-3000))),
+      `Esc must leave the report Screen: ${JSON.stringify(plain(output.slice(-200)))}`,
+    )
 
     // 4. /doctor judges the deployment composition, read-only: a report with a
     //    status mark per check and the patch path it read.
@@ -298,17 +375,31 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
     check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
 
-    // 4b. /copy error puts the report on the wire: the row kind introduced in
-    //     batch A is only useful if its text reaches the terminal's clipboard.
+    // 4b. The copy key reaches the clipboard *from inside the Screen*: it carries
+    //     what the Screen shows, which is the report. (Before B2.1 this step typed
+    //     `/copy error` at the prompt and read the row the report left behind; the
+    //     report no longer leaves one, so the key is now the only way to it — and
+    //     the key exists precisely because a Screen covers the input line.)
     const beforeCopy = output.length
-    term.write('/copy error\r')
+    term.write('\x1b[99;6u')
+    // The clipboard write is immediate; the Screen's confirmation rides the next
+    // painted frame, which the link tier may hold for up to one interval.
+    await new Promise(resolve => setTimeout(resolve, 800))
     await waitFor(text => /52;[^;]*;[A-Za-z0-9+/=]+\x1b/u.test(text.slice(beforeCopy)), 20_000, 'the OSC 52 write')
     const copied = clipboardWrites(output.slice(beforeCopy))
-    check(copied.length >= 1, '/copy error must send an OSC 52 clipboard write')
+    check(copied.length >= 1, 'the copy key inside a Screen must send an OSC 52 write')
     check(
       copied.some(text => /profile 补丁|profile patch|部署体检|deployment checkup/u.test(text)),
-      `/copy error must send the report itself, got: ${JSON.stringify(copied.map(t => t.slice(0, 60)))}`,
+      `it must send the report the Screen shows, got: ${JSON.stringify(copied.map(t => t.slice(0, 60)))}`,
     )
+    // The Screen says the copy happened: the notice row it would otherwise push is
+    // behind the Screen, so silence would read as a failure.
+    check(
+      /已复制|copied/u.test(plain(output.slice(beforeCopy))),
+      'the Screen must confirm the copy on its own row',
+    )
+    term.write('\x1b')
+    await new Promise(resolve => setTimeout(resolve, 500))
 
     // 4c. The mouse modes a drag needs are on the real terminal: `?1000h` alone
     //     reports presses, so a drag would be invisible without `?1002h`.
@@ -364,6 +455,248 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     term.write('hello probe')
     await waitFor(text => plain(text.slice(beforeTyping)).includes('hello probe'), 15_000, 'typed text on the prompt')
 
+    // 6b. The live tail: a streamed reply must arrive as many small frames, not as a
+    //     series of full clears.
+    //
+    // Until B2.2 the streaming text was appended to the transcript's own source
+    // lines, so every tick moved the window one line and took the `sizeChanged`
+    // path — one `\x1b[H\x1b[J` and a whole frame per tick, for as long as the model
+    // was writing. This step submits a prompt and measures what the link actually
+    // received while the answer was being produced.
+    {
+      const beforeReply = output.length
+      term.write('\r')
+      await waitFor(
+        text => /回复中|思考中|处理中|运行中|空闲|idle|replying|thinking/u.test(plain(text.slice(beforeReply))),
+        15_000,
+        'the live activity row while the answer streams',
+      )
+      // Let the answer stream and settle: the step then measures a window that
+      // certainly contains several ticks.
+      await new Promise(resolve => setTimeout(resolve, 6_000))
+      const streamed = output.slice(beforeReply)
+      const clears = [...streamed.matchAll(/\x1b\[H\x1b\[J|\x1b\[2J/gu)].length
+      const addressed = [...streamed.matchAll(/\x1b\[\d+;1H/gu)].length
+      console.log(`live stream: ${addressed} row writes, ${clears} full clears, ${Buffer.byteLength(streamed)}B`)
+      check(addressed > 0, 'the streaming answer must reach the wire')
+      // A full clear is allowed for the *settle* (the durable append follows the
+      // tail), and for a size change — never once per tick.
+      check(
+        clears <= 4,
+        `streaming must not clear per tick (${clears} clears for ${addressed} row writes)`,
+      )
+      check(
+        addressed >= clears * 4,
+        `most of the stream must be incremental (${clears} clears vs ${addressed} row writes)`,
+      )
+    }
+
+    // 6c. A task interaction is a layer over the transcript, not a piece of it.
+    //
+    // The observable difference on the wire is the *shape* of a repaint while the
+    // interaction is up. Before B1.1 the dialog lived in the transcript's own
+    // budget, so every change to it re-windowed the viewport and the frame carried
+    // a full clear and every row. Now the layer owns the rows above the composer and
+    // nothing else: moving the selection paints those rows, from the layer's top
+    // down. (Asking the *first* time also appends the question's card, and that
+    // append is an ordinary transcript event — the transcript follow it triggers is
+    // not the layer's doing, so the assertions here start after the dialog is up.)
+    // `/dialog-test` asks through the real question service, so this needs no model.
+    {
+      const beforeAsk = output.length
+      term.write('\x15/dialog-test\r')
+      await waitFor(text => text.slice(beforeAsk).includes('Option A'), 30_000, 'the test question dialog')
+      check(
+        plain(output.slice(beforeAsk)).includes('Enter'),
+        'the dialog must reach the terminal with its key hint',
+      )
+
+      const beforeMove = output.length
+      term.write('\x1b[B')
+      await new Promise(resolve => setTimeout(resolve, 500))
+      const moving = output.slice(beforeMove)
+      const movedRows = [...moving.matchAll(/\x1b\[(\d+);1H/gu)].map(match => Number(match[1]))
+      check(movedRows.length > 0, 'moving the selection must repaint the layer')
+      check(
+        movedRows.length <= 12,
+        `moving the selection must repaint only the layer (${movedRows.length} rows addressed)`,
+      )
+      check(
+        movedRows.every(row => row >= 5),
+        `the repaint must start at the layer, not at the top of the frame (rows ${movedRows.join(',')})`,
+      )
+      check(
+        !/\x1b\[[HJ]|\x1b\[2J/u.test(moving),
+        `moving the selection must not clear the screen: ${JSON.stringify(plain(moving).slice(0, 120))}`,
+      )
+
+      // Answering closes the layer: the status row leaves the waiting state, and
+      // the card the Session keeps says what was answered.
+      const beforeAnswer = output.length
+      term.write('\r')
+      await waitFor(
+        text => /已回答|answered/gu.test(plain(text.slice(beforeAnswer))),
+        30_000,
+        'the answered question card',
+      )
+      check(
+        !/等待回答|waiting/u.test(statusRowOf(output)),
+        `the status row must stop saying the task is waiting: ${JSON.stringify(statusRowOf(output))}`,
+      )
+      await new Promise(resolve => setTimeout(resolve, 300))
+      check(
+        /dialog answer/u.test(plain(output.slice(beforeAnswer))),
+        'the answer must come back through the question service',
+      )
+    }
+
+    // 6d. A control-plane picker is the same kind of layer (B1.2).
+    //
+    // `/view` is a menu the plugin opens for itself: nobody is blocked on it and
+    // answering it changes the environment, not the task. On the wire it must look
+    // like the interaction above — a localised repaint from its own top, no clear,
+    // and the composer's boundary still drawn under it.
+    {
+      const beforeMenu = output.length
+      term.write('\x15/view\r')
+      await waitFor(text => text.slice(beforeMenu).includes('工作区视图'), 30_000, 'the /view menu')
+      check(
+        plain(output.slice(beforeMenu)).includes('Enter'),
+        'the menu must reach the terminal with its key hint',
+      )
+      // On the *screen*, not in this frame's bytes: the boundary is unchanged by the
+      // menu opening (a layer replaces rows above it), and a row whose content did
+      // not change is not rewritten (B2.4 stopped force-repainting the composer
+      // rows at all, because the caret and an IME's pre-edit live there). What must
+      // hold is that the reader still sees it.
+      check(
+        [...screenRows(output).values()].some(line => line.includes('╭')),
+        'the composer boundary must be on screen with the menu up',
+      )
+
+      const beforeMove = output.length
+      term.write('\x1b[B')
+      await new Promise(resolve => setTimeout(resolve, 500))
+      const moving = output.slice(beforeMove)
+      const movedRows = [...moving.matchAll(/\x1b\[(\d+);1H/gu)].map(match => Number(match[1]))
+      check(movedRows.length > 0, 'moving the menu highlight must repaint the layer')
+      check(
+        movedRows.length <= 12,
+        `moving the menu highlight must repaint only the layer (${movedRows.length} rows addressed)`,
+      )
+      check(
+        movedRows.every(row => row >= 3),
+        `the menu repaint must start at the layer, not at the top of the frame (rows ${movedRows.join(',')})`,
+      )
+      check(
+        !/\x1b\[[HJ]|\x1b\[2J/u.test(moving),
+        `moving the menu highlight must not clear the screen: ${JSON.stringify(plain(moving).slice(0, 120))}`,
+      )
+
+      // Escape closes it and the transcript rows come back where they were: the
+      // menu never owned them, so closing is a repaint, not a re-window. The one
+      // thing allowed to clear the screen is a durable transcript row — cancelling
+      // a command writes "模式选择已取消。", and that append is ordinary tail-follow
+      // (the same rule B1.1 left alone), not the layer coming down.
+      const beforeClose = output.length
+      term.write('\x1b')
+      await new Promise(resolve => setTimeout(resolve, 600))
+      const closing = output.slice(beforeClose)
+      const cleared = /\x1b\[[HJ]|\x1b\[2J/u.test(closing)
+      const appended = /模式选择已取消/u.test(plain(closing))
+      check(
+        !cleared || appended,
+        `closing the menu must not clear the screen unless a durable row was appended: ${JSON.stringify(plain(closing).slice(0, 160))}`,
+      )
+      console.log(`menu close: ${cleared ? 'cleared (the cancel notice was appended)' : 'partial repaint'}`)
+      check(
+        appended,
+        'cancelling the menu must report itself, so the clear above has a reason',
+      )
+      check(
+        !/等待回答|waiting/u.test(statusRowOf(output)),
+        `a menu must not make the task read as waiting: ${JSON.stringify(statusRowOf(output))}`,
+      )
+      check(
+        !/工作区视图/u.test(plain(closing.slice(-4000))),
+        'the menu must be gone from the last frame it painted',
+      )
+    }
+
+    // 6e. A report Screen owns the screen, and its navigation is incremental.
+    //
+    // This is the B2.1 claim on the wire: opening a Screen may establish the whole
+    // frame (the terminal holds an unrelated picture), but *navigating* one must
+    // repaint the rows that changed and never clear the screen — the previous
+    // inspect overlay passed `sizeChanged: true` on every frame, so every arrow key
+    // cost a full clear and a full frame on a weak link.
+    {
+      // `/help` on purpose: its body is longer than a 30-row terminal's viewport,
+      // so PgDn actually moves. (`/status` fits whole, and a page that cannot move
+      // correctly paints nothing — which is what this step first measured.)
+      const beforeScreen = output.length
+      term.write('/help\r')
+      await waitFor(text => /全文 \d+–\d+\/\d+|full \d+–\d+\/\d+/u.test(plain(text.slice(beforeScreen))), 30_000, 'the /status Screen')
+      const opened = output.slice(beforeScreen)
+      check(
+        /空闲|运行中|idle|running/u.test(plain(opened)),
+        'the Screen must carry the compact runtime strip',
+      )
+      check(
+        /Esc 返回|Esc to return/u.test(plain(opened)),
+        'and say how to leave it',
+      )
+
+      // One page down: the body moves, the chrome does not.
+      const beforeScroll = output.length
+      term.write('\x1b[6~')
+      await new Promise(resolve => setTimeout(resolve, 700))
+      const scrolled = output.slice(beforeScroll)
+      const scrolledRows = [...scrolled.matchAll(/\x1b\[(\d+);1H/gu)].map(match => Number(match[1]))
+      check(scrolledRows.length > 0, 'PgDn must repaint the Screen body')
+      check(
+        scrolledRows.length <= 28,
+        `PgDn must repaint the body, not the frame (${scrolledRows.length} rows addressed)`,
+      )
+      check(
+        scrolledRows.every(row => row >= 3),
+        `the repaint must start at the body, never at the title (rows ${scrolledRows.join(',')})`,
+      )
+      check(
+        !/\x1b\[[HJ]|\x1b\[2J/u.test(scrolled),
+        `scrolling a Screen must not clear it: ${JSON.stringify(plain(scrolled).slice(0, 120))}`,
+      )
+      console.log(`screen scroll: ${scrolledRows.length} rows, ${Buffer.byteLength(scrolled)}B, no clear`)
+
+      // A resize while a Screen is up: the Screen re-lays out at the new geometry.
+      const beforeResize = output.length
+      term.resize(72, 24)
+      await new Promise(resolve => setTimeout(resolve, 700))
+      const resized = plain(output.slice(beforeResize))
+      check(
+        /全文 \d+–\d+\/\d+|full \d+–\d+\/\d+/u.test(resized),
+        `the Screen must survive a resize: ${JSON.stringify(resized.slice(-200))}`,
+      )
+      // Back to the size the rest of the probe expects.
+      term.resize(100, 30)
+      await new Promise(resolve => setTimeout(resolve, 700))
+
+      // Esc hands the workspace back: the composer row and the two footer rows are
+      // the workspace's own, and the Screen's readout is gone.
+      const beforeExit = output.length
+      term.write('\x1b')
+      await new Promise(resolve => setTimeout(resolve, 800))
+      const back = plain(output.slice(beforeExit))
+      check(
+        !/全文 \d+–\d+\/\d+/u.test(back),
+        `Esc must close the Screen: ${JSON.stringify(back.slice(-160))}`,
+      )
+      check(
+        /❯|>/u.test(back),
+        `the composer must come back with the workspace: ${JSON.stringify(back.slice(-160))}`,
+      )
+    }
+
     // 7. `/exit` hands the terminal back. The launcher's graceful shutdown only
     //    sets process.exitCode, and a lingering watcher handle used to keep it
     //    alive in front of a shell that never got its prompt back — the user
@@ -412,7 +745,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
   }
-  console.log('OK: boot, resize repaint, /diag, /doctor, /copy error, /preset, mouse modes, typing, and the /exit handback all behaved')
+  console.log('OK: boot, resize repaint, /diag, /doctor, /copy error, /preset, mouse modes, the interaction layer, the picker layer, typing, the Screen reports, and the /exit handback all behaved')
   return 0
 }
 

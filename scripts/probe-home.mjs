@@ -26,7 +26,7 @@
  *   node scripts/probe-home.mjs --home <dir>    # build at a fixed path
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -44,6 +44,8 @@ const USAGE = `usage: node scripts/probe-home.mjs [--probe] [--keep] [--home <di
   --probe          run a PTY probe against the built home, then clean up
   --script <name>  which probe to run (default: tui-probe.mjs)
   --keep           keep the throwaway home (prints the path either way)
+  --unconfigured   leave the home without a credential, so the boot is a first run
+                   (the setup wizard is what boots; use it with tui-setup-probe.mjs)
   --home <dir>     build at this path instead of a fresh temp directory
   --profile <name> profile to build (default: tui)
   --               everything after this reaches the probe`
@@ -59,13 +61,58 @@ function run(command, args, options = {}) {
 }
 
 /**
+ * Write the credential a real user would have after finishing the wizard.
+ *
+ * The PTY probes drive the *workspace*: `/diag`, `/status`, a report Screen, a
+ * menu. None of that is what a home with no provider shows — since 0.8.2 a home
+ * with nothing configured boots into the **setup wizard** (that is the fix for a
+ * bug that made the wizard unreachable: `hostArgvForSession` spawns the Host with
+ * `--resume=<id>` even for a brand-new id, and the first-run guard read that flag
+ * as "already configured"). These probes were only ever green because of that bug.
+ *
+ * The key is a placeholder on purpose. It exists so the *decision* ("is anything
+ * configured?") is yes, exactly as it is on a machine that has been set up once;
+ * a turn that reaches a provider with it fails, which is the same shape the probes
+ * already ran against (they never had a working key either — `--dump-config` and
+ * the boot path do not need one).
+ *
+ * `--unconfigured` skips this step, which is what `tui-setup-probe.mjs` needs.
+ */
+export function provisionProbeCredential({ home, profile = 'tui', cli = CLI, log = console.log }) {
+  const env = { ...process.env, DSH_HOME: home, DSH_TUI_NO_UPDATE_CHECK: '1' }
+  // Which ref? The one the plugin computes from the profile's route, so a home
+  // pinned to a gateway (this repo's own tui patch names `command-code`) gets its
+  // own variable rather than a DeepSeek one it would never read.
+  const dumped = spawnSync(process.execPath, [cli, '--profile', profile, '--dump-config'], {
+    env, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+  })
+  const text = String(dumped.stdout ?? '')
+  const route = /- id: agent-default-model[\s\S]{0,400}?provider:\s*([\w.-]+)/u.exec(text)?.[1] ?? 'deepseek-official'
+  const ref = route === 'deepseek-official'
+    ? 'DEEPSEEK_API_KEY'
+    : `${route.replaceAll('-', '_').toUpperCase()}_API_KEY`
+  const file = join(home, '.credentials.yaml')
+  const existing = existsSync(file) ? readFileSync(file, 'utf8') : ''
+  if (!new RegExp(`^${ref}\\s*:`, 'mu').test(existing)) {
+    writeFileSync(file, `${existing}${ref}: probe-placeholder-not-a-real-key\n`, { mode: 0o600 })
+  }
+  // The store refuses a document the group can read, so the mode has to be right
+  // even when the file already existed with a wider one. POSIX only: on Windows the
+  // mode is not what protects the file (ACLs are, and the store's own check is
+  // POSIX-only), and `chmodSync` there is at best a no-op.
+  if (process.platform !== 'win32') chmodSync(file, 0o600)
+  log(`==> provisioned ${ref} (placeholder) so the probe home boots configured`)
+  return ref
+}
+
+/**
  * Create (or reuse) the home and return it.
  *
  * `--home` is for a caller that wants a stable path (the CI cache, or a human
  * poking at the result); otherwise a fresh temp directory is used so two runs
  * never share a session store.
  */
-export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, log = console.log } = {}) {
+export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, log = console.log, credential = true } = {}) {
   const target = home ?? mkdtempSync(join(tmpdir(), 'dsh-probe-home-'))
   const env = { ...process.env, DSH_HOME: target, DSH_TUI_NO_UPDATE_CHECK: '1' }
   log(`==> building a probe home at ${target}`)
@@ -92,6 +139,8 @@ export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, 
 
   // A profile that composes but cannot boot is worse than no profile: fail here.
   run(process.execPath, [cli, '--profile', profile, '--dump-config'], { env, stdio: 'ignore' })
+  if (credential) provisionProbeCredential({ home: target, profile, cli, log })
+  else log('==> left unconfigured (--unconfigured): the boot is a first run')
   log(`==> probe home ready: ${target}`)
   return target
 }
@@ -122,7 +171,11 @@ async function main(argv) {
     console.log(USAGE)
     return 0
   }
-  const home = buildProbeHome({ home: valueOf('--home'), profile: valueOf('--profile') ?? 'tui' })
+  const home = buildProbeHome({
+    home: valueOf('--home'),
+    profile: valueOf('--profile') ?? 'tui',
+    credential: !own.includes('--unconfigured'),
+  })
 
   if (!runProbe) {
     console.log(`point a probe at it with: PROBE_HOME=${home} node scripts/tui-probe.mjs`)

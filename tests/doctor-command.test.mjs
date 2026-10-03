@@ -5,9 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
-import {
-  allText, diagText, errorText, lastSystemText, systemText, tick, waitForDialog, waitForError, waitForText,
-} from './wait.mjs'
+import { allText, errorText, feedbackText, lastSystemText, screenText, systemText, tick, waitForDialog, waitForError, waitForFeedback, waitForScreen, waitForScreenConfirm, waitForText } from './wait.mjs'
 import { FORMS_PATCH_BLOCK, ROSTER_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { SshTui } from '../lib/tui.js'
 import { FORMS_HOST } from './host-line.mjs'
@@ -74,7 +72,7 @@ async function writtenPatch(path, expect, tui, timeoutMs = 4_000) {
     const text = await readFile(path, 'utf8').catch(() => '')
     if (matches(text)) return text
     if (Date.now() >= deadline) {
-      assert.fail(`no patch matching ${expect} at ${path}\n--- last content ---\n${text}\n--- transcript ---\n${allText(tui)}`)
+      assert.fail(`no patch matching ${expect} at ${path}\n--- last content ---\n${text}\n--- transcript ---\n${feedbackText(tui)}`)
     }
     await new Promise(resolve => setTimeout(resolve, 25))
   }
@@ -102,8 +100,8 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await waitForText(tui, MISSING_SUMMARY)
-  const report = diagText(tui)
+  await waitForScreen(tui, MISSING_SUMMARY)
+  const report = screenText(tui)
   assert.ok(report.includes('/doctor'), report)
   assert.ok(report.includes(MISSING_SUMMARY), report)
   // Every row this line's profile is missing is named, one detail each.
@@ -112,7 +110,7 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   assert.ok(report.includes('/doctor --fix'), report)
 
   tui.runCommand('/doctor --fix')
-  await waitForDialog(tui, 'confirm')
+  await waitForScreenConfirm(tui)
   tui.handleChar('y')
   await tick()
 
@@ -129,13 +127,13 @@ test('/doctor names the missing rows and --fix mounts them behind a backup', asy
   // it rather than reading the transcript straight after the file appeared: the
   // write resolves first, and on a slow runner the rows that report it land a
   // microtask later — the race this wait was added for.
-  await waitForText(tui, '重启 TUI 后生效')
-  assert.ok(allText(tui).includes('重启 TUI 后生效'), allText(tui))
+  await waitForFeedback(tui, '重启 TUI 后生效')
+  assert.ok(feedbackText(tui).includes('重启 TUI 后生效'), feedbackText(tui))
 
   // The services stay missing for this launcher, so the report still fails, but
   // a second --fix has nothing left to write.
   tui.runCommand('/doctor --fix')
-  await waitForText(tui, '没有需要修复的行')
+  await waitForFeedback(tui, '没有需要修复的行')
   assert.equal(await writtenPatch(patch, written, tui), written)
 })
 
@@ -150,8 +148,8 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   const tui = fixture()
 
   tui.runCommand('/doctor')
-  await waitForText(tui, MISSING_SUMMARY)
-  const report = diagText(tui)
+  await waitForScreen(tui, MISSING_SUMMARY)
+  const report = screenText(tui)
   assert.ok(report.includes('3 行被挂载两次'), report)
   // The second copy starts after the first block; the detail carries its line.
   const blockLines = ROSTER_PATCH_BLOCK.split('\n').length
@@ -160,7 +158,7 @@ test('/doctor reports a duplicate mount by line and --fix merges it', async t =>
   assert.ok(Math.min(...lines) > blockLines, `duplicates point past the first copy: ${lines}`)
 
   tui.runCommand('/doctor --fix')
-  await waitForDialog(tui, 'confirm')
+  await waitForScreenConfirm(tui)
   tui.handleChar('y')
   await tick()
   assert.equal(await writtenPatch(patch, MERGED_PATCH, tui), MERGED_PATCH)
@@ -173,7 +171,7 @@ test('/fix <row> writes one requested row', async t => {
   const tui = fixture()
 
   tui.runCommand('/fix nonsense')
-  await waitForError(tui, '未知的行名')
+  await waitForFeedback(tui, '未知的行名')
 
   tui.runCommand('/fix code-runtime')
   await waitForDialog(tui, 'confirm')
@@ -219,8 +217,8 @@ test('/doctor lists two dsh-scope installs from its anchors', async t => {
   const tui = fixture({ baseUrl: anchor })
 
   tui.runCommand('/doctor')
-  await waitForText(tui, MISSING_SUMMARY)
-  const report = diagText(tui)
+  await waitForScreen(tui, MISSING_SUMMARY)
+  const report = screenText(tui)
   assert.ok(report.includes(join(anchor, 'node_modules', '@deepseek-ai', 'dsh-scope')), report)
   // The test runner's own anchor may add the repository's copy; either way the
   // check must not claim a single install while the nested one is visible.

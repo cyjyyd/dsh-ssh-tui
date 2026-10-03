@@ -18,7 +18,13 @@
  *      assert the OSC 52 clipboard write carries exactly the dragged text;
  *   5. select the reply (Alt+4) and press the copy key, so the whole reply as
  *      written reaches the clipboard — the selection marker the focused row
- *      paints is chrome and must not ride along.
+ *      paints is chrome and must not ride along;
+ *   6. resize the window across eight geometries and assert the *status row*
+ *      reflows: it repaints on every change, never exceeds the new width, takes
+ *      several distinct shapes, is wider at 160 than at 72, and comes back to
+ *      the same row when the size comes back. The reply from step 2 is what
+ *      makes the row width-dependent (session tokens, context meter), which an
+ *      empty session cannot be.
  *
  * Usage:
  *   node scripts/tui-mock-probe.mjs [--keep]
@@ -122,6 +128,23 @@ function screenRows(text) {
 }
 
 /** Where `needle` is on the reconstructed screen: a 1-based row and cell column. */
+/**
+ * The status row as the terminal received it.
+ *
+ * Rows are addressed absolutely and the frame never contains a newline, so the
+ * stream is split on the cursor-position sequences: taking the last
+ * newline-delimited line would concatenate the transcript, both footer rows and
+ * the prompt into one string.
+ */
+function statusRow(buffer) {
+  const rows = buffer
+    .split(/\x1b\[\d+;\d+H/u)
+    .map(plain)
+    .map(line => line.replace(/\s+$/u, ''))
+    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  return rows.at(-1) ?? ''
+}
+
 function locateOnScreen(text, needle) {
   for (const [row, line] of screenRows(text)) {
     const at = line.indexOf(needle)
@@ -631,7 +654,38 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     )
     console.log(`selected reply copied: ${JSON.stringify(selected.at(-1)?.slice(0, 90))}`)
 
-    // 5. The window still exits on its own terms.
+    // 5. Resize: the status row has to follow the window, not just repaint.
+    //
+    // The relay used to re-send the geometry it captured at attach time, so the
+    // Host saw no change and the frame stayed at the old width — a user dragging
+    // the window got nothing. This drives the real chain (terminal → PTY → relay
+    // → Host) and reads the row off the wire.
+    const GEOMETRIES = [[160, 40], [120, 30], [100, 30], [88, 30], [72, 24], [60, 24], [48, 24], [120, 30], [160, 40]]
+    const rowsSeen = []
+    for (const [columns, rows] of GEOMETRIES) {
+      const before = output.length
+      term.resize(columns, rows)
+      await delay(900)
+      const repainted = output.length - before
+      const row = statusRow(output)
+      rowsSeen.push({ columns, row, width: cellWidth(row), repainted })
+      check(repainted > 0, `resize to ${columns}x${rows} produced no repaint at all`)
+      check(row !== '', `no status row after resizing to ${columns}`)
+      check(cellWidth(row) <= columns, `the status row is ${cellWidth(row)} cells at ${columns} columns: ${JSON.stringify(row)}`)
+    }
+    for (const seen of rowsSeen) {
+      console.log(`  ${String(seen.columns).padStart(3)} cols → ${String(seen.width).padStart(3)} cells  ${seen.row}`)
+    }
+    const shapes = new Set(rowsSeen.map(seen => seen.row))
+    check(shapes.size >= 3, `the status row took only ${shapes.size} shape(s) across 8 resizes: it does not reflow`)
+    check(
+      rowsSeen[0].width > rowsSeen[4].width,
+      `the row must be wider at 160 (${rowsSeen[0].width}) than at 72 (${rowsSeen[4].width})`,
+    )
+    check(rowsSeen[0].row === rowsSeen[8].row, '160 → … → 160 did not come back to the same row')
+    check(rowsSeen[1].row === rowsSeen[7].row, '120 → … → 120 did not come back to the same row')
+
+    // 6. The window still exits on its own terms.
     term.write('\x15')
     term.write('/exit\r')
     const exitCode = await waitForExit(15_000)
@@ -658,6 +712,7 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     return 1
   }
   console.log('OK: a scripted turn was copied by dragging and by the copy key on the selected reply,')
+  console.log('    and the status row reflowed with the window across eight geometries,')
   console.log('    and /find marked the match itself')
   return 0
 }
