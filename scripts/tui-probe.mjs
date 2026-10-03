@@ -62,6 +62,32 @@ const OSC = /\x1b\][^\x07]*\x07/gu
  * split on the cursor-position sequences rather than on lines: the last newline-
  * delimited chunk is the whole screen and would match anything.
  */
+/**
+ * The status row, read from a frame that has stopped moving.
+ *
+ * A fixed sleep and then one read is a race on a slow runner: the frame being composed
+ * when the read happens may hold the logo, or half of the next row, and the *string*
+ * that comes back is not the one the reader sees. It settles here first — two agreeing
+ * readings 200 ms apart — and only then is the row taken.
+ */
+async function settledStatusRow(buffer, timeoutMs = 6_000) {
+  const deadline = Date.now() + timeoutMs
+  let previous = ''
+  let stableFor = 0
+  while (Date.now() < deadline) {
+    const row = statusRowOf(buffer())
+    if (row !== '' && row === previous) {
+      stableFor += 1
+      if (stableFor >= 1) return row
+    } else {
+      stableFor = 0
+    }
+    previous = row
+    await new Promise(resolve => setTimeout(resolve, 200))
+  }
+  return statusRowOf(buffer())
+}
+
 function statusRowOf(buffer) {
   const rows = buffer
     .split(/\x1b\[\d+;\d+H/u)
@@ -314,7 +340,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       term.resize(columns, rows)
       await new Promise(resolve => setTimeout(resolve, 1_000))
       const bytes = output.length - mark
-      sweep.push({ columns, bytes, row: statusRowOf(output) })
+      sweep.push({ columns, bytes, row: await settledStatusRow(() => output) })
       check(bytes > 0, `the resize to ${columns}x${rows} produced no repaint`)
       check(sweep.at(-1).row !== '', `no status row after resizing to ${columns}x${rows}`)
     }
@@ -356,7 +382,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     term.write('\x1b')
     await new Promise(resolve => setTimeout(resolve, 600))
     check(
-      !/全文 \d+–\d+\/\d+/u.test(plain(output.slice(-3000))),
+      !/全文 \d+–\s?\d+\/\d+/u.test(plain(output.slice(-3000))),
       `Esc must leave the report Screen: ${JSON.stringify(plain(output.slice(-200)))}`,
     )
 
@@ -636,7 +662,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       // correctly paints nothing — which is what this step first measured.)
       const beforeScreen = output.length
       term.write('/help\r')
-      await waitFor(text => /全文 \d+–\d+\/\d+|full \d+–\d+\/\d+/u.test(plain(text.slice(beforeScreen))), 30_000, 'the /status Screen')
+      await waitFor(text => /全文 \d+–\s?\d+\/\d+|full \d+–\s?\d+\/\d+/u.test(plain(text.slice(beforeScreen))), 30_000, 'the /status Screen')
       const opened = output.slice(beforeScreen)
       check(
         /空闲|运行中|idle|running/u.test(plain(opened)),
@@ -674,7 +700,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       await new Promise(resolve => setTimeout(resolve, 700))
       const resized = plain(output.slice(beforeResize))
       check(
-        /全文 \d+–\d+\/\d+|full \d+–\d+\/\d+/u.test(resized),
+        /全文 \d+–\s?\d+\/\d+|full \d+–\s?\d+\/\d+/u.test(resized),
         `the Screen must survive a resize: ${JSON.stringify(resized.slice(-200))}`,
       )
       // Back to the size the rest of the probe expects.
@@ -688,7 +714,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       await new Promise(resolve => setTimeout(resolve, 800))
       const back = plain(output.slice(beforeExit))
       check(
-        !/全文 \d+–\d+\/\d+/u.test(back),
+        !/全文 \d+–\s?\d+\/\d+/u.test(back),
         `Esc must close the Screen: ${JSON.stringify(back.slice(-160))}`,
       )
       check(
