@@ -24,6 +24,7 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 import { provisionProbeCredential } from './probe-home.mjs'
@@ -194,6 +195,17 @@ async function runProbe(argv) {
   //    not care how the key got there. (`--unconfigured` in `probe-home.mjs` is the
   //    other direction: the same home with no credential, which is phase 1 above.)
   if (problems.length === 0 && pty !== undefined) {
+    // The home is restored afterwards: this probe writes the credential a completed
+    // wizard would have left, which would make the *next* run of this very probe skip
+    // with "already configured". A probe that silently stops covering what it exists
+    // to cover is worse than one that fails.
+    const credentialFile = join(home, '.credentials.yaml')
+    let previousCredential
+    try {
+      previousCredential = readFileSync(credentialFile, 'utf8')
+    } catch {
+      previousCredential = undefined
+    }
     provisionProbeCredential({ home, profile: 'tui', cli: CLI, log: () => {} })
     const second = pty.spawn(process.execPath, [CLI, '--profile', 'tui'], {
       name: 'xterm-256color',
@@ -221,6 +233,9 @@ async function runProbe(argv) {
       console.log(`second boot on the configured home: ${/目录:|目录：/u.test(text) ? 'workspace, no wizard' : 'no workspace'}`)
     } finally {
       try { second.kill() } catch { /* already gone */ }
+      // Put the home back the way this run found it.
+      if (previousCredential === undefined) rmSync(credentialFile, { force: true })
+      else writeFileSync(credentialFile, previousCredential, { mode: 0o600 })
     }
   }
 
