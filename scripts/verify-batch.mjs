@@ -14,8 +14,9 @@
  *   node scripts/verify-batch.mjs --only test,probe   # subset, for iteration
  *
  * A probe that prints `SKIP:` counts as skipped, not failed: node-pty and the
- * mock server are optional for a machine without a built PTY stack, and a skip
- * is reported as such rather than quietly passing.
+ * mock server are optional for a machine without a built PTY stack. A skipped
+ * step is never summarized as a pass — the run ends `INCOMPLETE` and exits 2 —
+ * because a gate that reports success for work it did not do is not a gate.
  */
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -31,6 +32,11 @@ const STEPS = [
   // One boot per terminal family, asserting the escapes each would get: the
   // capability table is cheap to unit test, the wiring is what shipped wrong.
   { id: 'term', label: 'pty terminal-capability probe', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-term-probe.mjs'], timeoutMs: 900_000 },
+  // The link chip, in both shapes: a fresh session on a link that starts slow
+  // (the original "the chip never recovered" report) and a *resume with history*,
+  // where no frame may be composed until the log has been read — the window the
+  // relay attaches inside, and the one a fix there can silently break.
+  { id: 'link', label: 'pty link-quality probe (fresh + resume)', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-rtt-probe.mjs'], timeoutMs: 900_000 },
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },
@@ -112,7 +118,7 @@ function parseArgs(argv) {
     if (arg === '--batch') parsed.batch = argv[++index]
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,drop,mock,route,busy,busycrash,linemode,footer]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,home,term,link,drop,mock,route,busy,busycrash,linemode,footer]')
       process.exit(0)
     } else {
       console.error(`unknown argument: ${arg}`)
@@ -153,4 +159,12 @@ if (failed.length > 0) {
   process.exit(1)
 }
 const skipped = results.filter(entry => entry.verdict === 'SKIP').map(entry => entry.step.id)
-console.log(`RESULT: PASS${skipped.length === 0 ? '' : ` (skipped: ${skipped.join(', ')})`}`)
+if (skipped.length > 0) {
+  // A skip is evidence of nothing. It used to close the run with `RESULT: PASS
+  // (skipped: …)`, which reads as a pass with a footnote — and a footnote is
+  // exactly how a gate stops being one. INCOMPLETE exits 2, between "everything
+  // ran" and "something failed", so a batch cannot be quoted as accepted.
+  console.error(`RESULT: INCOMPLETE — ${skipped.join(', ')} skipped, so this run is not evidence`)
+  process.exit(2)
+}
+console.log('RESULT: PASS')

@@ -222,6 +222,25 @@ npm run bench                        # 五个动作的中位数 + 「无全清�
 数字写进发版说明；`unclassified / unknown destination / live source rows / duplicate primary`
 有一项不是 0，就不要发版。
 
+### 四、一条命令跑完验收（`verify-batch`）
+
+```sh
+node scripts/verify-batch.mjs                    # typecheck + 全套 + 全部真 PTY 探针
+node scripts/verify-batch.mjs --only link --batch RC   # 只跑某一项，迭代用
+```
+
+它按顺序跑完 typecheck、全套测试与真 PTY 探针，每步一行结论，最后给一条 `RESULT:`。两种"不是通过"
+的收尾必须分清：
+
+- `RESULT: FAIL`（exit 1）：有步骤真的失败，会附带该步最后 25 行输出；
+- `RESULT: INCOMPLETE`（exit 2）：有步骤打印了 `SKIP:`（例如机器上没有 node-pty），**这条不是通过、
+  也不是失败，是"没测到"**。修好环境重跑，别把 INCOMPLETE 当成 PASS 引用。
+
+其中 **链路探针（`tui-rtt-probe.mjs`）** 覆盖两种形状，缺一不可：新会话在"先慢后快"的链路上让
+chip 追上真实值；以及**带历史的 resume**——回放期间不合成任何帧（B2.4），relay 恰好在这个窗口里接入，
+所以这一段既可能被别的写入清成黑屏，也可能让 chip 永远停在 `○○○○ 160ms`。两个断言都做过变异校验：
+把进屏序列改回"接入即写"会报 4 秒黑屏，把 RTT 应用关掉会报 chip 停在占位值。
+
 ## 发版窗口怎么定
 
 选日期看的是热度曲线，不是感觉：GitHub 的 traffic 只留 14 天，发版脉冲 24–48 小时就衰减，

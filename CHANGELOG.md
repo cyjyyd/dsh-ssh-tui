@@ -84,6 +84,12 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ### Internal
 
+- **链路验收补齐"带历史的 resume"**：`scripts/tui-rtt-probe.mjs` 现在有两个阶段——新会话（先慢后快的
+  链路）与**带历史的 resume**（探针自己写一份 20k 事件的持久化日志，回放期间不合成帧）。后者同时断言
+  三件事：读者画面上出现过加载行之后**不得再变空**、转写落地、chip 落在真实测量值而不是 `○○○○ 160ms`
+  占位。两条断言都做过变异校验（改回"接入即写"报 4 秒黑屏；关掉 RTT 应用报 chip 停在占位）。
+- **`verify-batch.mjs` 不再把 SKIP 说成 PASS**：有步骤跳过时收尾为 `RESULT: INCOMPLETE`（exit 2），
+  与 `FAIL`（exit 1）分开；`link` 已加入验收步骤表（`--only link` 可单跑）。
 - 表示管线：每条转写行都带 durability / class / destination；审计对未分类行、未知 destination、
   live 源行与重复 primary 表示各自计数，四个数字都必须为 0。
 - 退役并在 CI 上禁止复活：`dedicated` Surface 角色、onboarding 的对话框渲染路径、
