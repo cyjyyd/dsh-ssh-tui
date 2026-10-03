@@ -344,15 +344,17 @@ test('a wire that is behind is not asked for another frame', async () => {
   }
   const behind = frames()
   assert.ok(behind < 20, `a backed-up wire must skip frames: ${behind} of 20`)
-  // …and when it drains, the size it had been holding lands.
+  // …and when it drains, the screen is at the size the drag ended on.
   //
-  // Waited for rather than slept on: this is the one assertion in the file that asks
-  // for something to *happen*, and a fixed 300 ms read the old state on a slow leg —
-  // exactly the race `tests/wait.mjs` exists to stop (it failed on the Windows runner
-  // while passing here). The pacing it waits on is bounded by the paint interval.
+  // The assertion is *convergence*, not "another frame was sent": a frame the burst
+  // deferred may already have been superseded — the 4-cadence override eventually
+  // paints regardless, so `dirty` can be clear by the time the wire drains and there is
+  // then nothing owed at all. Waiting for a counter to move was the race (it never moved
+  // on the Windows runner while passing here); what the reader can see is what the drag
+  // settled on, and that has to hold either way.
   tui.displayHost = { attached: true, pendingBytes: () => 0 }
-  await waitFor(() => frames() > behind, {
-    describe: 'the held frame to be painted once the wire drained',
+  await waitFor(() => tui.lastPaintWidth === width, {
+    describe: `the frame at the settled width (${width}) to land once the wire drained`,
     timeoutMs: 5_000,
   })
   assert.equal(tui.lastPaintWidth, width, 'at the size the drag ended on')
