@@ -477,8 +477,14 @@ function addressedRowsOf(frame) {
 
 test('a mid-drag frame paints the chrome, not the transcript', async () => {
   const { tui } = await resizableTui(400)
+  // Which frames were *mid-drag* is recorded as they are written, not inferred from the
+  // clock afterwards: a resize gap longer than `RESIZE_SETTLE_MS` — 40 ms, which a
+  // loaded Windows runner exceeds between two 18 ms sleeps — lets the drag settle
+  // mid-loop, and that frame legitimately repaints everything (it is the landing frame).
+  // Asserting on it was the Windows failure; the claim here is about the frames painted
+  // *while the fold is in force*.
   const written = []
-  tui.write = chunk => written.push(chunk)
+  tui.write = chunk => written.push({ frame: String(chunk), folding: tui.resizeTailNarrowed })
   for (let index = 0; index < 6; index += 1) {
     process.stdout.columns = 120 + index
     tui.onDirectResize()
@@ -486,8 +492,10 @@ test('a mid-drag frame paints the chrome, not the transcript', async () => {
   }
   assert.ok(written.length > 0, 'the drag painted something')
   assert.equal(tui.resizeTailNarrowed, true, 'and it is the folding kind of drag')
+  const dragFrames = written.filter(entry => entry.folding)
+  assert.ok(dragFrames.length > 0, 'the drag painted at least one frame while folding')
   const height = process.stdout.rows ?? 24
-  for (const frame of written) {
+  for (const { frame } of dragFrames) {
     const rows = addressedRowsOf(frame)
     if (rows.length === 0) continue
     assert.ok(
@@ -502,12 +510,13 @@ test('a mid-drag frame paints the chrome, not the transcript', async () => {
 test('a chrome-only drag frame is a fraction of the full one', async () => {
   const { tui } = await resizableTui(400)
   const drag = []
-  tui.write = chunk => drag.push(chunk)
+  tui.write = chunk => { if (tui.resizeTailNarrowed) drag.push(String(chunk)) }
   for (let index = 0; index < 4; index += 1) {
     process.stdout.columns = 120 + index
     tui.onDirectResize()
     await new Promise(resolve => setTimeout(resolve, 18))
   }
+  assert.ok(drag.length > 0, 'the drag painted a folding frame')
   const dragBytes = Math.max(...drag.map(frame => Buffer.byteLength(frame, 'utf8')))
   // The same width, painted whole, is what the drag would have sent every event.
   const full = []
