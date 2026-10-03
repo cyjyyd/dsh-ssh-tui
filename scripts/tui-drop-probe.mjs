@@ -54,6 +54,13 @@ const { sessionLockLookupPaths } = await import(
 const { closeWindow, windowDeathNote, IS_WINDOWS } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'pty-window.mjs')).href,
 )
+// The same grid the paint tests assert on. A byte tail cannot say what the
+// reader sees: "is the /status Screen up, or is the composer back?" was asked
+// of the last 2 kB of output, and one full-width frame is ~3 kB on its own, so
+// the window could hold a whole Screen and still answer "no Screen here".
+const { screen: newGrid } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../tests/screen.mjs')).href,
+)
 
 const USAGE = `usage: node scripts/tui-drop-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -184,11 +191,33 @@ async function runProbe({ sessionId, keep, home }) {
       cwd: process.cwd(),
       env,
     })
-    const window = { label, term, output: '', exited: undefined }
-    term.onData(chunk => { window.output += chunk })
+    const window = { label, term, output: '', exited: undefined, screen: newGrid(100, 30) }
+    window.gridReady = Promise.resolve()
+    term.onData(chunk => {
+      window.output += chunk
+      // Fed in order, and awaited by every reader, so the grid a probe asserts
+      // on is the one the bytes have already produced.
+      window.gridReady = window.gridReady.then(() => window.screen.write(chunk)).catch(() => {})
+    })
     term.onExit(({ exitCode }) => { window.exited = exitCode })
     windows.push(window)
     return window
+  }
+  /** The visible grid of a window right now, blank rows dropped. */
+  const screenNow = async window => {
+    await window.gridReady
+    return window.screen.grid().map(row => row.replace(/\s+$/u, '')).filter(row => row !== '').join('\n')
+  }
+  /** True while the `/status` Screen owns the workspace (it prints its own position line). */
+  const reportScreenUp = async window => /全文 \d+–\s?\d+\/\d+/u.test(await screenNow(window))
+  /** Poll a *screen* predicate: a state, not "something arrived at some point". */
+  const waitForScreen = async (window, predicate, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (predicate(await screenNow(window))) return true
+      if (Date.now() >= deadline) return false
+      await delay(100)
+    }
   }
   const waitForOutput = async (window, predicate, timeoutMs, what) => {
     const deadline = Date.now() + timeoutMs
@@ -323,13 +352,14 @@ async function runProbe({ sessionId, keep, home }) {
     // `/exit` in step 7. Measured: 2 failures in 7 runs, both exactly that shape.
     //
     // Two state tests, both about *now* rather than everything that ever arrived:
-    // `screenVisibleNow` looks at the tail (the last frame or two), and `arrived`
-    // looks only at what came back since this attempt's request.
-    const screenVisibleNow = () => /全文 \d+–\d+\/\d+/u.test(plain(b.output.slice(-2_000)))
+    // `reportScreenUp` reads the grid (the Screen is up iff it is on screen), and
+    // `arrived` looks only at what came back since this attempt's request.
     const closeScreen = async () => {
-      for (let close = 0; close < 4 && screenVisibleNow(); close += 1) {
+      for (let close = 0; close < 4 && await reportScreenUp(b); close += 1) {
         b.term.write('\x1b')
-        await delay(800)
+        // Esc has to come back as a frame before the next one is sent: wait for
+        // the grid to lose the report instead of for a fixed delay to pass.
+        await waitForScreen(b, text => !/全文 \d+–\s?\d+\/\d+/u.test(text), 2_000)
       }
     }
     let recovered = false
@@ -349,13 +379,19 @@ async function runProbe({ sessionId, keep, home }) {
     // keyboard while it is up, so a key typed after it — including `/exit` — reaches
     // the Screen, not the composer. Step 7 below types a command, so the Screen has to
     // be dismissed first, and this is the assertion that was flaking: it is closed
-    // until it is gone, with a settle afterwards in case a frame was still travelling.
-    await closeScreen()
-    await delay(1_200)
-    await closeScreen()
+    // until the grid says it is gone, and the composer is waited for after that.
+    await closeScreen(b)
+    // Positive state, not "enough time passed": the workspace is back when the
+    // report is off the grid *and* its composer row is on it. Step 7 types a
+    // command, and a key typed at a Screen is explained, not run.
+    const workspaceBack = await waitForScreen(
+      b,
+      text => !/全文 \d+–\s?\d+\/\d+/u.test(text) && /[❯>]/u.test(text),
+      8_000,
+    )
     check(
-      !screenVisibleNow(),
-      `the /status Screen must close on Esc: ${JSON.stringify(plain(b.output.slice(-160)))}`,
+      workspaceBack,
+      `the /status Screen must close on Esc and give the composer back: ${JSON.stringify(await screenNow(b))}`,
     )
     check(
       b.exited === undefined,
@@ -366,13 +402,26 @@ async function runProbe({ sessionId, keep, home }) {
     // 7. And the window itself still exits cleanly.
     const beforeExit = b.output.length
     b.term.write('\x15')
-    b.term.write('/exit\r')
+    b.term.write('/exit')
+    // The keys reaching the composer is a state, so it is asserted rather than
+    // hoped for: with it, a timeout below means the command did not run; without
+    // it, something still owned the keyboard. The bare timeout could not tell
+    // the two apart, and the Windows leg showed the second shape as a screen
+    // holding nothing but a status row.
+    const typed = await waitForScreen(b, text => /\/exit/u.test(text), 5_000)
+    check(
+      typed,
+      `the keys must reach the composer after the Screen closes: ${JSON.stringify(await screenNow(b))}`,
+    )
+    b.term.write('\r')
     const exitCode = await waitForExit(b, 15_000)
     // A timeout here has two very different shapes — the key never reached the
     // command path, or the launcher stayed up — and the bare timeout cannot tell
-    // them apart. The screen can.
+    // them apart. The grid can: the composer still holding the text means the
+    // Enter never ran, a dialog or a Screen means something swallowed it, and a
+    // prompt back with the process alive is the lingering-handle shape.
     const exitTail = exitCode === undefined
-      ? `\n--- screen at the timeout ---\n${plain(b.output.slice(beforeExit)).split('\n').slice(-6).join('\n')}`
+      ? `\n--- screen at the timeout ---\n${await screenNow(b)}`
       : ''
     check(exitCode === 0, `the resumed window must exit on /exit (got ${exitCode ?? 'no exit within 15s'})${exitTail}`)
     check(

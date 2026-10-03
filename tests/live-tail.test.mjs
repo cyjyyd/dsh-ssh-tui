@@ -37,7 +37,12 @@ function fixture(options = {}) {
     session: { id: 'main-session', events: [] },
     cancel() {},
   }
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, headlessDisplay: true })
+  const tui = new SshTui(ctx, agent, {
+    sessionId: 'main-session',
+    color: false,
+    headlessDisplay: true,
+    ...(options.resume === true ? { resume: true } : {}),
+  })
   tui.displayHost = { attached: true, pendingBytes: () => 0, sendStdout() {}, sendGoodbye() {}, close: async () => {} }
   tui.write = () => {}
   for (let index = 0; index < (options.history ?? 60); index += 1) {
@@ -541,4 +546,62 @@ test('live lines are never written into a row cache entry', async () => {
   assert.equal(cached(), beforeCache, 'the row cache is exactly what it was before the live tick')
   assert.equal(cached().includes('这段文字只属于 live'), false, 'the streaming text is not in any row entry')
   assert.equal(/处理中/u.test(cached()), false, 'and neither is the wait card')
+})
+
+// ── G. what the reader is looking at while the log is read ──────────────────
+
+test('the screen entry a relay asks for waits for the log, so the splash is not wiped', () => {
+  // Reported from the field as 1–3 s of black screen on a resume. The sequence:
+  // the launcher paints its splash ("正在载入历史会话…") into the alternate
+  // screen, the relay attaches, and `attachRelayDisplay` writes `?1049h` — which
+  // a terminal that is *already* in the alternate screen answers by clearing it.
+  // The replay is still running, so `paint` composes nothing and the reader is
+  // left with an empty window until the log has been read (measured on a
+  // 20k-event session: entry at 9.1 s, first frame at 12.6 s).
+  const { tui } = fixture({ resume: true, history: 12 })
+  const written = []
+  tui.write = chunk => { written.push(chunk) }
+  tui.loadingHistory = true
+  tui.attachRelayDisplay()
+  assert.equal(
+    written.some(chunk => chunk.includes('\u001b[?1049h')),
+    false,
+    'the attach must not enter the screen while the splash is all there is to show',
+  )
+
+  // The load ends: the entry rides the first frame, in the same tick, so the
+  // clear and the content it clears for reach the terminal together.
+  tui.loadingHistory = false
+  tui.paint()
+  const entry = written.findIndex(chunk => chunk.includes('\u001b[?1049h'))
+  assert.notEqual(entry, -1, 'the deferred entry is written with the first frame')
+  assert.equal(
+    written.filter(chunk => chunk.includes('\u001b[?1049h')).length,
+    1,
+    'exactly one entry: the relay asked once',
+  )
+  assert.equal(
+    written.slice(0, entry).some(chunk => chunk.includes('\u001b[')),
+    false,
+    'and nothing was painted before it',
+  )
+  assert.equal(written[entry].startsWith('\u001b[?1049h'), true, 'the entry leads the frame it rides')
+  assert.equal(written.length > entry + 1, true, 'the frame itself follows')
+  for (const chunk of written.slice(entry + 1)) {
+    assert.equal(chunk.includes('\u001b[?1049h'), false, 'and the entry is not repeated per frame')
+  }
+
+  // A Host that is not loading anything is unchanged: the relay that attaches to
+  // a session with content already on screen enters immediately.
+  const live = fixture({ history: 12 })
+  const immediate = []
+  live.tui.write = chunk => { immediate.push(chunk) }
+  live.tui.attachRelayDisplay()
+  assert.equal(
+    immediate.some(chunk => chunk.includes('\u001b[?1049h')),
+    true,
+    'a reattach with nothing to wait for still enters the screen at once',
+  )
+  live.tui.dispose?.()
+  tui.dispose?.()
 })

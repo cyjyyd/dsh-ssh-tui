@@ -2192,6 +2192,11 @@ export class SshTui {
    * that is still growing is the rolling resume this flag exists to prevent.
    */
   private loadingHistory = false
+  /**
+   * A relay attached while the log was still being read, so the screen entry it
+   * asks for has not been written yet (see `attachRelayDisplay` and `paint`).
+   */
+  private screenEntryPending = false
   /** A relay claimed the display while a hangup was still cancelling/flushing. */
   private reattachedDuringHangup = false
   private scrollOffset = 0
@@ -3919,7 +3924,23 @@ export class SshTui {
       void this.onReattach?.()
       return
     }
-    this.write(this.enterScreenSequence())
+    // `?1049h` does not only switch buffers: a terminal that is already in the
+    // alternate screen clears it on the way in, and the launcher's splash is
+    // sitting in that screen. That is free when a frame follows in the same tick
+    // and expensive when none may: a relay attaches *before* `replayHistory` has
+    // read the log, and no frame is composed until it has, so entering here wipes
+    // "正在载入历史会话…" and leaves a black window for as long as the rebuild
+    // takes (measured on a 20k-event session: the entry at 9.1 s, the first frame
+    // at 12.6 s, the splash gone in between). The entry rides the first frame
+    // instead — `paint` writes it there, in the same tick as the content it
+    // belongs to.
+    if (this.loadingHistory) this.screenEntryPending = true
+    else {
+      // An entry a previous attach left pending is superseded, not repeated:
+      // two entries would clear the screen twice.
+      this.screenEntryPending = false
+      this.write(this.enterScreenSequence())
+    }
     this.forceFullPaint = true
     this.dirty = true
     // The user is back: say so, with how many times this Host has been
@@ -5740,6 +5761,14 @@ export class SshTui {
     // resumed process interacts with afterwards — a frame must still be paintable
     // then.
     if (this.loadingHistory) return
+    // The screen entry a relay asked for while the log was still being read
+    // (`attachRelayDisplay`). Written here, immediately before the frame, so the
+    // alternate screen is cleared and repainted in one tick: the reader never
+    // sees the splash's line disappear into an empty window.
+    if (this.screenEntryPending) {
+      this.screenEntryPending = false
+      this.write(this.enterScreenSequence())
+    }
     const width = Math.max(10, this.screenColumns())
     const height = Math.max(6, this.screenRows())
     // One clock reading per frame, kept because the resize pacing is the only
