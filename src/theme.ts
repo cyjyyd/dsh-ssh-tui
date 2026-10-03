@@ -78,7 +78,12 @@ const DEFAULT_THEME: Theme = {
   tokens: {
     user: '36',
     assistant: '',
-    reasoning: '2;3',
+    // `2` (faint) is not implemented everywhere — a 256-colour terminal that
+    // ignores it draws the reasoning rows in the *default* foreground, i.e. as
+    // bright as the reply beside them, which is how the card was reported as
+    // white. The colour is what carries "muted"; the attributes only sharpen it
+    // where the terminal honours them.
+    reasoning: '2;3;90',
     brand: '1;38;2;77;107;253',
     tool: '',
     'tool-result': '',
@@ -132,7 +137,7 @@ const CATPPUCCIN_THEME: Theme = {
   tokens: {
     user: '38;2;137;180;250',
     assistant: '',
-    reasoning: '2;3',
+    reasoning: '2;3;38;2;166;173;200',
     brand: '1;38;2;203;166;247',
     tool: '',
     'tool-result': '',
@@ -186,7 +191,7 @@ const GRUVBOX_THEME: Theme = {
   tokens: {
     user: '38;2;131;165;152',
     assistant: '',
-    reasoning: '2;3',
+    reasoning: '2;3;38;2;168;153;132',
     brand: '1;38;2;211;134;155',
     tool: '',
     'tool-result': '',

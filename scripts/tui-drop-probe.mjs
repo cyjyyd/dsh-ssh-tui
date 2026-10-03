@@ -389,14 +389,33 @@ async function runProbe({ sessionId, keep, home }) {
     // be dismissed first, and this is the assertion that was flaking: it is closed
     // until the grid says it is gone, and the composer is waited for after that.
     await closeScreen(b)
+    // A *settle*, not one dismissal. `recovered` is satisfied by the session id
+    // appearing anywhere in the output, not by the report having landed, so the
+    // loop can stop while the last `/status` is still painting — and a check made
+    // then sees no Screen, sends nothing, and declares the workspace back. That is
+    // how the Windows leg typed `/exit` into a report that arrived a moment later:
+    // the Screen answered with its own "press Esc" hint and the window never
+    // exited. Two readings in a row have to agree that the composer is back, and
+    // any report that shows up in between is stood down and the count restarts.
+    const settleWorkspace = async () => {
+      let settled = 0
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        if (await reportScreenUp(b)) {
+          settled = 0
+          b.term.write('q')
+          await waitForScreen(b, text => !/全文 \d+–\s?\d+\/\d+/u.test(text), 2_000)
+          continue
+        }
+        settled = /[❯>]/u.test(await screenNow(b)) ? settled + 1 : 0
+        if (settled >= 2) return true
+        await delay(700)
+      }
+      return false
+    }
     // Positive state, not "enough time passed": the workspace is back when the
     // report is off the grid *and* its composer row is on it. Step 7 types a
     // command, and a key typed at a Screen is explained, not run.
-    const workspaceBack = await waitForScreen(
-      b,
-      text => !/全文 \d+–\s?\d+\/\d+/u.test(text) && /[❯>]/u.test(text),
-      8_000,
-    )
+    const workspaceBack = await settleWorkspace()
     check(
       workspaceBack,
       `the /status Screen must close on Esc and give the composer back: ${JSON.stringify(await screenNow(b))}`,

@@ -196,3 +196,22 @@ test('a painted frame follows the selected palette', () => {
     assert.ok(mono.includes(text), `mono frame lost ${text}`)
   }
 })
+
+test('a muted role names a colour, so a terminal that ignores faint still mutes it', () => {
+  // Reported from the field: the thinking card drew in the terminal's *default*
+  // foreground — as bright as the reply beside it, i.e. white on a dark theme — on
+  // a 256-colour terminal. The role was `2;3`, attributes only: `faint` is what
+  // made it grey, and a terminal that does not implement it falls back to the
+  // default foreground. The colour is the part every palette can carry; the
+  // attributes stay for the terminals that do honour them. `mono` is the one
+  // palette that must not name a colour (its own case above pins that).
+  for (const name of themeNames()) {
+    const token = themeToken(resolveTheme(name), 'reasoning')
+    assert.match(token, /\b2\b/u, `${name}: the faint attribute stays`)
+    if (name === 'mono') {
+      assert.doesNotMatch(token, /\b(?:3[0-9]|9[0-7]|38)\b/u, 'mono must not name a colour')
+      continue
+    }
+    assert.match(token, /\b(?:3[0-9]|9[0-7]|38)\b/u, `${name}: reasoning must name a colour, not only attributes`)
+  }
+})
