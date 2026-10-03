@@ -295,6 +295,14 @@ dsh --profile tui
 
 ## 官方 Harness Desktop
 
+> ⚠ **不要把本插件加进 Desktop（或 `web`）profile。** 这不是"装了没用"，是**会让应用崩**：
+> Desktop 的宿主命令行走的是 web app 的语法（它传 `--no-open`），而命令行在 dsh 里没有仲裁——profile 里每个 app
+> 都会用**自己的**语法解析同一份 argv，遇到不认识的旗标直接退出进程。0.8.2 起本插件的 startup 行会在识别到
+> "这条命令行不属于我"（Desktop 启动器，或 web app 已接管）时**不认领**它；0.8.1 及更早则会以
+> `error: unknown option '--no-open'` 让宿主退出 1，应用随即报 `dsh desktop host exited with 1` 并崩。
+> 万一已经加进去了：从 `profiles\desktop\cordis.patch.yml` 里删掉 `ssh-tui-startup` / `ssh-tui` /
+> `ssh-tui-routes` / `ssh-tui-subagent` 四行（或从备份恢复该文件），应用立刻恢复。
+
 官方 Desktop 是 GUI 应用，本身**不需要这个 TUI**。
 
 Desktop 内部的 Harness Host 和真正的 console runtime 也不是一回事。

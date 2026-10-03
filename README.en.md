@@ -122,6 +122,19 @@ suite and the real-PTY probes — not "no errors, so it probably works". Many te
 stranded on the 0.1.5 line; few terminal UIs install on the 0.2.0-rc line at all, which is why the window is
 maintained this tightly.
 
+## A warning before the Desktop section
+
+> ⚠ **Do not add this plugin to a Desktop (or `web`) profile.** It is not "installed but
+> idle" — it crashes the application. The desktop host's command line belongs to the web
+> app (it passes `--no-open`), and dsh does not arbitrate: every app plugin parses the
+> same argv with *its own* grammar, and an unknown flag exits the process. From 0.8.2 the
+> plugin's startup row declines a command line that is not its own (the desktop launcher,
+> or a web app that has already taken over); 0.8.1 and earlier exited 1 with
+> `error: unknown option '--no-open'`, and the app reported
+> `dsh desktop host exited with 1` and died. If it is already in there, remove the four
+> `ssh-tui-*` rows from `profiles\desktop\cordis.patch.yml` (or restore that file from a
+> backup) and the application works again.
+
 ## Desktop Harness users, read this first
 
 **The official desktop app (<https://www.deepseek.com/harness/>) does not need this plugin** — use its own UI
