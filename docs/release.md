@@ -2,6 +2,13 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **当前状态（2026-10-03）：B2 冻结完成，`main` 上未发布的下一个版本是 0.8.2 的候选。**
+> 全量套件 1361 项 1357 通过 / 0 失败 / 4 跳过，`tsc --noEmit` 干净，`npm run freeze` 八条不变量全绿、
+> 七条退役路径 0 命中（B2 最终审计，见 [`checkpoints.md`](checkpoints.md) 末节与
+> [`decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20）。
+> **发布前必须补的两件人工事**见下方"发布前人工门槛"——fresh-home 首启在本沙箱内未能跑通，
+> Windows 实机未覆盖。
+
 > **0.8.1 已发布（2026-09-30，`latest` + `next`）**：版本提交 `5edb033` → 推 `main` → tag `v0.8.1` →
 > CI 五条腿全 success（`test (0.2.0-rc.2)` / `0.2.0-rc.1` / `0.1.7-rc.2` / `0.1.7-rc.1` / `test-windows`）→
 > GitHub Release <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.1> → `npm publish --tag latest`
@@ -163,6 +170,57 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 
 等 `0.1.6-rc.1` 出现时按上面那份清单走即可（切版本 → 跑全套与探针 → 绿了才放宽范围、加 CI 腿、
 写 `dshReleases`；红了就修，修不动就记 `incompatible`，用户那边仍然是明确的拒绝而不是误装）。
+
+## 发布前人工门槛（0.8.2 RC 起）
+
+**CI 的 Windows 腿不是 ConPTY 人工通过。** `test-windows` 跑的是脚本化探针（boot、drop、busy-drop、
+term、stdio）与单元套件：它能证明生命周期代码在 win32 上不炸，**不能**证明一个人用起来没问题。
+下面两栏是自动化覆盖不到的，发布前必须有人做，并在发版说明里写清结论（做了 / 没做 / 部分）：
+
+### 一、Windows / ConPTY 实机（至少 Windows Terminal + conhost）
+
+逐条走，每条记「通过 / 不通过 / 未测」：
+
+- [ ] **启动**：`dsh --profile tui` 在 Windows Terminal 里正常进入工作区，字形与颜色正确
+- [ ] **IME 组合**：微软拼音输入中文时，**预输入串不得**出现在处理中卡片或计划卡上；
+      组合上屏后文本完整、光标位置正确
+- [ ] **粘贴**：多行粘贴进 composer（含中文与换行），不被截断、不触发意外提交
+- [ ] **鼠标拖选 + 复制**：拖选一段回复 → 复制键 / `/copy` 拿到的是拖选内容；点击卡片可折叠/展开
+- [ ] **resize**：拖动窗口改变大小时重画正确，光标行（composer）始终在屏
+- [ ] **字形回退**：`conhost` 与 `dumb` 控制台下状态行不出现替换字符（`DSH_TUI_ASCII=1` 也对）
+- [ ] **Screen 开/关**：`/status`、`/help` 打开报告屏，`PgUp/PgDn` 翻页不整屏闪，Esc 回工作区
+- [ ] **picker**：`/model`、`/view` 菜单能用上下键选、Esc 取消，取消后 composer 还在
+- [ ] **流式**：一轮对话流式输出期间画面持续更新、**不逐 tick 整屏重画**（弱链路上尤其明显）
+- [ ] **setup**：`/setup` 能打开向导并走完（首启自动出现见第二栏）
+- [ ] **SSH detach / reattach**：关闭窗口再重开（ConPTY teardown）→ Host 还活着，重接后正在跑的一轮没丢
+- [ ] **ConPTY 断链恢复**：`tui-drop-probe.mjs` 对应的路径在实机上手工验一遍（本机 CI 只跑脚本版）
+
+背景与已知差异见 [`windows.md`](windows.md)、[`terminals.md`](terminals.md)。
+
+### 二、fresh-home 首启（没有任何配置的 `DSH_HOME`）
+
+```sh
+node scripts/probe-home.mjs --keep --unconfigured    # 建一份**未配置**的 home
+PROBE_HOME=<上面打印的路径> node scripts/tui-setup-probe.mjs
+```
+
+探针断言两件事：向导**自动**出现（不画工作区 composer）、列表步按键只重画正文、字段步打字只重画一行
+且**不清屏**、resize 后字段与按键仍在、Esc 交还工作区；随后写入一份凭据再启动，断言**第二次启动不再
+出现向导**。若向导没有出现，探针会打印 `SKIP: this home is already configured` —— **那不是通过，是没有覆盖**。
+
+> **为什么这条必须人工确认**：它曾经是一条真实缺陷（0.8.1 及以前）。前端拉起的 Host 永远带
+> `--resume=<id>`（连它自己刚铸的 id 也带），而首启判定把 `resume` 当成「这台机器配置过」，于是
+> **全新安装永远不会出现向导**、也没有任何提示。修复见 `src/tui.ts` 的 `maybeRunOnboarding`。
+
+### 三、B2 冻结自检（任何平台，一条命令）
+
+```sh
+npm run build && npm run freeze      # 八条不变量 + 七条退役路径，必须 exit 0
+npm run bench                        # 五个动作的中位数 + 「无全清」断言
+```
+
+数字写进发版说明；`unclassified / unknown destination / live source rows / duplicate primary`
+有一项不是 0，就不要发版。
 
 ## 发版窗口怎么定
 

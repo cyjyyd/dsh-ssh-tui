@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.8.1",
+  "version": "0.8.2-rc.1",
   "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
@@ -62,7 +62,8 @@
     "docs/display-mode.md",
     "docs/terminals.md",
     "docs/windows.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/release-notes-*.md"
   ],
   "license": "MIT",
   "dsh": {
