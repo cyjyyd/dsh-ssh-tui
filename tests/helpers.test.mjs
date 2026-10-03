@@ -4088,8 +4088,110 @@ test('a body the slow-link budget would cut opens in the overlay instead', () =>
   assert.equal(open.row.expanded, true)
 })
 
-test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
+test('a frame hands the caret straight back after every row it writes', () => {
+  // The caret is where a terminal draws an IME pre-edit. Writing a row parks the caret
+  // at the end of that row's text, and a turn repaints the live region — which sits
+  // above the input box — on every tick, so the composition flashed at the end of the
+  // 处理中 row (reported twice, Windows Terminal with the Microsoft IME). The frame now
+  // returns the caret to the composer after each row, so there is no moment at which it
+  // is parked somewhere else.
   const ctx = { get: () => undefined, on() { return () => {} } }
+  const agent = {
+    id: 'main-session',
+    options: {},
+    status: 'running',
+    session: { id: 'main-session', events: [] },
+    cancel() {},
+    followup() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, headlessDisplay: true })
+  const written = []
+  const real = tui.write.bind(tui)
+  tui.write = chunk => { written.push(String(chunk)); real(chunk) }
+  try {
+    for (let index = 0; index < 30; index += 1) {
+      tui.pushRow(represent('fixture', { kind: index % 2 === 0 ? 'assistant' : 'user', text: `第 ${index} 行` }))
+    }
+    tui.waitStartedAt = Date.now()
+    tui.handleChar('你')          // what an IME commit looks like to the TUI
+    tui.markDirty?.()
+    const frame = (() => {
+      const before = written.length
+      process.stdout.columns = 100
+      process.stdout.rows = 30
+      tui.paint()
+      return written.slice(before).join('')
+    })()
+    const moves = [...frame.matchAll(/\x1b\[(\d+);(\d+)H/gu)].map(match => ({ row: Number(match[1]), column: Number(match[2]) }))
+    assert.ok(moves.length > 2, `the frame addresses rows: ${moves.length} moves`)
+    const caretRow = tui.lastPaintCursorRow
+    const caretColumn = tui.lastPaintCursorColumn
+    assert.ok(caretRow > 1, 'the composer is on a real row')
+    moves.forEach((move, index) => {
+      // The composer's own row, and the caret returns themselves, are the two moves
+      // that are allowed to end anywhere other than the composer.
+      if (move.row === caretRow || move.column !== 1) return
+      const next = moves[index + 1]
+      assert.equal(next?.row, caretRow, `row ${move.row} left the caret behind (moves: ${moves.map(m => `${m.row};${m.column}`).join(' ')})`)
+      assert.equal(next?.column, caretColumn, 'and back at the composer column')
+    })
+  } finally {
+    tui.write = real
+  }
+})
+
+test('no painted row ever carries a line break, whatever the card contains', () => {
+  // A row is a row: a newline inside one moves the terminal to the next line, and a
+  // frame that addresses rows absolutely then writes everything below one row off —
+  // the reader sees tool-card content on top of the composer and the footer, and two
+  // texts spliced on one row (the 0.8.2 report: "tool cards with multi-line code
+  // bleed into the input area"). A `bash` summary is the command as written, so a
+  // heredoc is exactly how this got in.
+  const heredoc = [
+    "cd /root/dsh-ssh-tui && python3 - <<'PY'",
+    "p='tests/paint-budget.test.mjs'",
+    's=open(p).read()',
+    '# ── a comment line, long enough to be truncated somewhere',
+    'PY',
+  ].join('\n')
+  for (const [label, options] of [
+    ['collapsed', {}],
+    ['expanded', { expanded: true }],
+  ]) {
+    const ctx = { get: () => undefined, on() { return () => {} } }
+    const agent = {
+      id: 'main-session',
+      options: {},
+      status: 'running',
+      session: { id: 'main-session', events: [] },
+      cancel() {},
+      followup() {},
+    }
+    const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, headlessDisplay: true })
+    tui.write = () => {}
+    tui.waitStartedAt = Date.now()
+    tui.handleSessionEvent(agent.session, {
+      type: 'tool/call',
+      time: Date.now(),
+      data: { callId: `call-${label}`, name: 'bash', arguments: JSON.stringify({ command: heredoc }) },
+    })
+    const card = tui.rows.findLast(row => row.kind === 'tool')
+    if (options.expanded === true && card !== undefined) card.expanded = true
+    for (const [columns, rows] of [[100, 24], [60, 12], [140, 40]]) {
+      const frame = tui.captureFrame(columns, rows)
+      assert.equal(frame.length, rows, `${label} at ${columns}x${rows}: the frame is the terminal`)
+      frame.forEach((line, index) => {
+        assert.equal(
+          /[\r\n]/u.test(line),
+          false,
+          `${label} at ${columns}x${rows}: row ${index + 1} carries a line break: ${JSON.stringify(line.slice(0, 120))}`,
+        )
+      })
+    }
+  }
+})
+
+test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => {
   const agent = {
     id: 'main-session',
     options: { provider: 'xai', model: 'grok-4.6' },
@@ -4097,7 +4199,14 @@ test('captureFrame paints a bounded SSH-sized frame for README fixtures', () => 
     session: { id: 'main-session', events: [] },
     cancel() {},
   }
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, provider: 'xai' })
+  // "SSH-sized" is the claim, so the link and the roster are pinned rather than taken
+  // from whoever runs the suite — a runner has neither, and the frame it measures is
+  // a different one (see the helpers in `./wait.mjs`).
+  const tui = withSshSession(() => new SshTui(
+    ctxWithCredentials({ agentPresets: {}, settings: { get: () => undefined } }),
+    agent,
+    { sessionId: 'main-session', color: false, provider: 'xai' },
+  ))
   tui.handleSessionEvent(agent.session, {
     type: 'user/message',
     data: { content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } },
@@ -4881,7 +4990,8 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { activeTheme, themeExtraToken, themeThresholdToken, themeToken } from '../lib/theme.js'
-import { errorText, feedbackText, lastFeedback } from './wait.mjs'
+import { ctxWithCredentials, errorText, feedbackText, lastFeedback, withSshSession } from './wait.mjs'
+import { represent } from '../lib/representation.js'
 
 test('parseSuperGrokAuthFile reads grok-bridge auth.json', () => {
   const now = 1_700_000_000_000

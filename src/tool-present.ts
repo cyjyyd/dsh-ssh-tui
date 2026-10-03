@@ -552,7 +552,13 @@ export function buildToolHeader(input: {
   const flipping = input.flipping === true
   const marker = flipping ? '◇' : input.expanded ? '▾' : '▸'
   const lead = `${prefix}${marker} ● ${input.title}`
-  const summaryText = input.summary === '' ? '' : `  ${input.summary}`
+  // The summary is a *row*: a `bash` call hands over the command as written, so a
+  // heredoc arrives with its newlines intact and would break the frame's absolute
+  // row addressing (see `truncateToWidth`). Collapsed here rather than at paint time
+  // so the colour offsets below are computed against the text that is actually
+  // drawn.
+  const summary = input.summary.replace(/\s+/gu, ' ').trim()
+  const summaryText = summary === '' ? '' : `  ${summary}`
   const statToken = input.diffStat === undefined ? '' : diffStatToken(input.diffStat.add, input.diffStat.del)
   const statText = statToken === '' ? '' : `  ${statToken}`
   const stateGap = stateToken === '' ? '' : '  '

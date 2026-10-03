@@ -1414,9 +1414,21 @@ export function renderMarkdownLines(
 
 
 
-/** Cut one line to fit a width, appending an ellipsis when truncated. */
+/**
+ * Cut **one line** to fit a width, appending an ellipsis when truncated.
+ *
+ * A line break is not a character in a row: it moves the terminal to the next row,
+ * and a frame that addresses its rows absolutely (`ESC[row;1H`) then writes every
+ * following row one line off — content lands on the composer, on the footer, and on
+ * top of whatever was already there. `sanitizeTerminalText` keeps LF/CR on purpose
+ * (it also sanitizes multi-line bodies), so the collapse happens here, where the
+ * contract is "one row": each break becomes a single space, which keeps the string
+ * the same *length* — callers that pass this result into `paintSegmentedLine` rely
+ * on character offsets into the text they built, and a collapsing replacement would
+ * silently move every colour segment.
+ */
 export function truncateToWidth(text: string, width: number): string {
-  const safe = sanitizeTerminalText(text)
+  const safe = sanitizeTerminalText(text).replace(/[\r\n]/gu, ' ')
   if (width <= 0) return ''
   if (displayWidth(safe) <= width) return safe
   if (width === 1) return mapAsciiChrome('…')
