@@ -232,14 +232,17 @@ async function probeProfile(pty, { env: extra, name, expect }) {
 function checkStatusRow(profile, output) {
   const problems = []
   const want = (condition, message) => { if (!condition) problems.push(message) }
-  const painted = [...screenRows(output).entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([, line]) => plain(String(line)))
+  const chunks = output
+    .split(/\x1b\[\d+;\d+H/u)
+    .map(plain)
     // The status row is the one carrying the link chip and the group separator, in
     // whichever glyph set that terminal decodes (`│` on UTF-8, `|` on an ASCII console —
-    // the same swap the rest of the chrome makes), and it is one *row*: the screen is
-    // reconstructed rather than the stream split, so a multi-line chunk cannot pose as it.
-    .filter(line => !line.includes('\n') && /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+    // the same swap the rest of the chrome makes). Single-line matches win: a frame that
+    // arrives as one newline-separated batch also contains the row, and answering with
+    // that batch would be answering with the whole screen.
+    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  const single = chunks.filter(line => !line.includes('\n'))
+  const painted = single.length > 0 ? single : chunks
   want(painted.length > 0, 'the status row never painted')
   const row = painted.at(-1) ?? ''
   // `DSH_TUI_ASCII=1` in the environment covers every profile at once, which is

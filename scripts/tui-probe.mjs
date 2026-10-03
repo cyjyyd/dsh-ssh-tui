@@ -74,11 +74,19 @@ const OSC = /\x1b\][^\x07]*\x07/gu
  * looks like the status row is what the assertion is actually about.
  */
 function statusRowOf(buffer) {
-  const rows = [...screenRows(buffer).entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([, line]) => line.replace(/\s+$/u, ''))
-    .filter(line => !line.includes('\n') && /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
-  return rows.at(-1) ?? ''
+  const chunks = buffer
+    .split(/\x1b\[\d+;\d+H/u)
+    .map(plain)
+    .map(line => line.replace(/\s+$/u, ''))
+    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  // A chunk is usually one row: the split is on cursor addresses, and the painter
+  // addresses every row it writes. The *first* frame of a session arrives as one batch
+  // with its rows separated by newlines, and that batch contains the status row too —
+  // taking it returned a whole screen (logo, composer, footer) as "the row", which is
+  // what the Windows leg reported. Single-line matches win; the batch is the fallback
+  // for a terminal whose frames only arrive that way.
+  const single = chunks.filter(line => !line.includes('\n'))
+  return (single.length > 0 ? single : chunks).at(-1) ?? ''
 }
 
 /**
@@ -366,10 +374,18 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     term.write('\x1b')
     await new Promise(resolve => setTimeout(resolve, 600))
     check(
-      // The reconstructed screen, not a tail of the stream: a frame is denser now (the
-      // caret returns after every row), so 3000 characters can still hold the *previous*
-      // Screen's position line while the Screen itself is already gone.
-      ![...screenRows(output).values()].some(line => /全文 \d+–\s?\d+\/\d+/u.test(plain(line))),
+      // Asked as "which came last", not "is there a position line in the last N
+      // characters": a frame is denser now (the caret returns after every row), so a fixed
+      // window can still hold the *previous* Screen's line while the Screen itself is
+      // gone, and a reconstructed screen can hold a row the next frame did not repaint.
+      // The composer is what the workspace puts back, and it must be the newer of the two.
+      (() => {
+        const tail = plain(output.slice(beforeDiag))
+        const lastPosition = tail.lastIndexOf('全文 ')
+        if (lastPosition === -1) return true
+        const lastComposer = Math.max(tail.lastIndexOf('╭'), tail.lastIndexOf('❯'))
+        return lastComposer > lastPosition
+      })(),
       `Esc must leave the report Screen: ${JSON.stringify(plain(output.slice(-200)))}`,
     )
 
