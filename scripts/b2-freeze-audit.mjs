@@ -36,11 +36,15 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import process from 'node:process'
 
 import { auditRepresentations, auditQuestionPrimaries } from '../lib/representation.js'
 
-const ROOT = new URL('..', import.meta.url).pathname
+// `fileURLToPath`, never `URL.pathname`: on Windows the latter is `/D:/a/…` — a leading
+// slash in front of the drive — and `join` then builds `D:\D:\a\…`, which the first CI
+// run on the Windows leg reported as `ENOENT: scandir 'D:\D:\a\…\src'`.
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(ROOT, 'src')
 const JSON_OUT = process.argv.slice(2).includes('--json')
 
