@@ -25,13 +25,37 @@
  *
  * @module dsh-ssh-tui/question-state
  */
-import type {
-  AskUserQuestionAnswerItem,
-  AskUserQuestionItem,
-  PendingUserQuestion,
-  SettledUserQuestion,
-  UserQuestionProjectionView,
-} from '@deepseek-ai/dsh-user-questions'
+import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
+
+/**
+ * The projection's two halves, declared here as the *shape this plugin reads*
+ * rather than imported by name.
+ *
+ * `PendingUserQuestion`, `SettledUserQuestion` and `UserQuestionProjectionView` are
+ * named exports of `dsh-user-questions` only from 0.2.0-rc.2 on: the same module on
+ * 0.1.7-rc.x and 0.2.0-rc.1 exports a different surface, and importing the names made
+ * the plugin fail to *compile* there — which is how three CI legs went red at 0.8.2's
+ * first push. Nothing here needs the host's names: every field below is already read
+ * defensively (`questionViewOf` takes `unknown` and parses it), and the two item types
+ * are exported by every line the plugin declares.
+ */
+export interface QuestionViewPending {
+  readonly callId: string
+  readonly questions: readonly AskUserQuestionItem[]
+  /** `open` while the window is live, `continued` once it closed but still accepts. */
+  readonly state?: string
+}
+
+export interface QuestionViewSettled {
+  readonly callId: string
+  readonly answers?: readonly AskUserQuestionAnswerItem[]
+}
+
+/** Both halves of one Session's timed `ask_user_question` state. */
+export interface QuestionView {
+  readonly active: readonly QuestionViewPending[]
+  readonly settled: readonly QuestionViewSettled[]
+}
 import { t } from './i18n/index.js'
 
 /** One question as the transcript should show it, live or replayed. */
@@ -50,18 +74,18 @@ export interface DurableQuestionRecord {
 }
 
 /** The projection view, or the empty one when nothing is registered. */
-export function questionViewOf(value: unknown): UserQuestionProjectionView | undefined {
+export function questionViewOf(value: unknown): QuestionView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const view = (value as { questions?: unknown }).questions
   if (typeof view !== 'object' || view === null) return undefined
   const active = (view as { active?: unknown }).active
   const settled = (view as { settled?: unknown }).settled
   if (!Array.isArray(active) || !Array.isArray(settled)) return undefined
-  return { active: active as PendingUserQuestion[], settled: settled as SettledUserQuestion[] }
+  return { active: active as QuestionViewPending[], settled: settled as QuestionViewSettled[] }
 }
 
 /** Whether the projection has anything to say about this session's questions. */
-export function questionViewIsEmpty(view: UserQuestionProjectionView | undefined): boolean {
+export function questionViewIsEmpty(view: QuestionView | undefined): boolean {
   return view === undefined || (view.active.length === 0 && view.settled.length === 0)
 }
 
@@ -78,7 +102,7 @@ export function questionViewIsEmpty(view: UserQuestionProjectionView | undefined
  * @returns one record per question, newest last.
  */
 export function durableQuestionRecords(
-  view: UserQuestionProjectionView | undefined,
+  view: QuestionView | undefined,
   questionsOf: (callId: string) => readonly AskUserQuestionItem[] | undefined,
 ): DurableQuestionRecord[] {
   if (view === undefined) return []
