@@ -495,3 +495,31 @@ test('every report opens a Screen with a title and a body', async () => {
     await tick(0)
   }
 })
+
+test('every closing key the overlay documents leaves the Screen, `q` included', async () => {
+  // `inspectClosesOn` accepts Esc, Ctrl-C, `q`/`Q` and Enter, and the dispatcher
+  // says so in its own comment — but the printable-key hint used to be answered
+  // first, and it returns, so `q` and `Q` only ever produced the hint: the
+  // documented keys were unreachable. A reader who typed `q` at a report, the way
+  // every pager answers, was told to press Esc instead.
+  for (const key of ['q', 'Q']) {
+    const { tui } = fixture()
+    openInspect(tui)
+    await waitFor(() => tui.screen?.kind === 'inspect', { describe: 'the inspect Screen' })
+    tui.handleChar(key)
+    await tick(0)
+    assert.equal(tui.screen, undefined, `${JSON.stringify(key)} leaves the Screen`)
+  }
+
+  // And the hint is still what every other printable key gets, once.
+  const { tui } = fixture()
+  tui.input = '草稿'
+  openInspect(tui)
+  await waitFor(() => tui.screen?.kind === 'inspect', { describe: 'the inspect Screen' })
+  tui.handleChar('x')
+  const hint = tui.screen?.notice
+  assert.match(String(hint ?? ''), /报告视图|report view|Esc/u, 'a printable key still explains itself')
+  tui.handleChar('y')
+  assert.equal(tui.screen?.notice, hint, 'and repeated keys do not pile up')
+  assert.equal(tui.input, '草稿', 'while the draft behind the Screen is untouched')
+})

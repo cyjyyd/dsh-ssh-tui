@@ -12321,6 +12321,15 @@ export class SshTui {
       else this.scrollScreen(1)
       return
     }
+    // Closing keys are answered *before* the printable-key hint below, or `q` and
+    // `Q` — which `inspectClosesOn` accepts, and which a full-screen report is
+    // expected to answer to — would only ever produce the hint: `PRINTABLE`
+    // matches them, and that branch returns. Esc, Ctrl-C, Enter and `q` all leave
+    // the Screen; every other printable key still explains itself.
+    if (inspectClosesOn(combined)) {
+      this.closeScreen()
+      return
+    }
     // A printable key is not silently swallowed: a Screen has no composer (AD-8), and
     // a reader who starts typing a command here has to be told why nothing happens —
     // the alternative is a terminal that looks broken. It becomes the Screen's own
@@ -12337,7 +12346,6 @@ export class SshTui {
     else if (combined === '\x1b[6~') this.scrollScreen(-this.screenPage())
     else if (combined === '\x1b[H' || combined === '\x1b[1~') this.scrollScreenTo(0)
     else if (combined === '\x1b[F' || combined === '\x1b[4~') this.scrollScreenTo(Number.MAX_SAFE_INTEGER)
-    else if (inspectClosesOn(combined)) this.closeScreen()
   }
 
   /**
