@@ -579,23 +579,40 @@ export function pickerWindowStart(cursor: number, total: number, windowSize = PI
  */
 export function writeBootSplash(message: string, color = true): void {
   if (lineModeEnabled()) return
-  const width = Math.max(20, process.stdout.columns || 80)
-  const title = t('boot.banner')
-  const line = color
-    ? `\x1b[1m${truncateToWidth(title, width)}\x1b[0m`
-    : truncateToWidth(title, width)
-  const detail = color
-    ? `\x1b[${themeExtraToken(activeTheme(), 'notice')}m${truncateToWidth(message, width)}\x1b[0m`
-    : truncateToWidth(message, width)
   // The capability table, not the raw switch: a Linux virtual console has no
   // alternate screen to return to, and entering one there costs the scrollback
   // the user navigates with.
   const useAlt = terminalCapabilities().alternateScreen
+  const splash = bootSplashText(message, color, process.stdout.columns || 80, useAlt)
   try {
-    const rule = mapAsciiChrome('─').repeat(width)
-    process.stdout.write(`${useAlt ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${rule}\n${pinEmojiCells(detail)}\n`)
+    process.stdout.write(splash)
   } catch {
     // TTY may already be gone.
   }
+}
+
+/**
+ * The splash as bytes, for a caller that owns a *channel* rather than stdout.
+ *
+ * The Host's stdout is a log file when the launcher spawned it detached, so a notice
+ * painted there reaches nobody: the Host has to send it the way it sends frames (the
+ * display socket, or the terminal it was given). Same text, same geometry — see
+ * `paint`'s loading frame.
+ * @param message - one line, e.g. "正在载入历史会话…".
+ * @param color - whether the terminal takes the emphasis and the notice colour.
+ * @param width - columns to fit.
+ * @param alternateScreen - whether to enter it first (the launcher's splash does).
+ */
+export function bootSplashText(message: string, color: boolean, width: number, alternateScreen: boolean): string {
+  const inner = Math.max(20, width)
+  const title = t('boot.banner')
+  const line = color
+    ? `\x1b[1m${truncateToWidth(title, inner)}\x1b[0m`
+    : truncateToWidth(title, inner)
+  const detail = color
+    ? `\x1b[${themeExtraToken(activeTheme(), 'notice')}m${truncateToWidth(message, inner)}\x1b[0m`
+    : truncateToWidth(message, inner)
+  const rule = mapAsciiChrome('─').repeat(inner)
+  return `${alternateScreen ? '\x1b[?1049h' : ''}\x1b[?25l\x1b[H\x1b[J${pinEmojiCells(line)}\n${rule}\n${pinEmojiCells(detail)}\n`
 }
 

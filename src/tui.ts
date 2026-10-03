@@ -373,6 +373,7 @@ import {
   type PaintLinkKind,
   RTT_HISTORY,
   medianRtt,
+  bootSplashText,
 } from './paint.js'
 import { TerminalInputGuard } from './terminal-input.js'
 import {
@@ -2192,6 +2193,8 @@ export class SshTui {
    * that is still growing is the rolling resume this flag exists to prevent.
    */
   private loadingHistory = false
+  /** Whether the loading splash was already painted for this load (see `paint`). */
+  private loadingSplashPainted = false
   /** A relay claimed the display while a hangup was still cancelling/flushing. */
   private reattachedDuringHangup = false
   private scrollOffset = 0
@@ -2613,6 +2616,14 @@ export class SshTui {
     detachFromSshSession()
     captureHangupSignals(this.handleHangupSignal)
     this.bindAgentEvents()
+    // The launcher's splash is gone by now (entering the alternate screen clears that
+    // buffer), and the log this session is about to replay can take seconds to rebuild
+    // (`replayHistory` clears this when it is done). Without the flag the first frame is
+    // an *empty workspace* — header, input box, footer and no transcript — which is what
+    // the reader reported as a black screen on resume; with it, that frame says what the
+    // launcher had just said. Set here rather than at the first paint, because the Host
+    // takes the headless branch below and never reaches that point.
+    if (this.resume) this.loadingHistory = true
     void this.ensureDisplayHost().catch((error: unknown) => {
       if (this.disposed) return
       this.pushRow(represent('boot', { kind: 'error', text: t('boot.displayFailed', { error: errorChain(error) }) }))
@@ -3093,6 +3104,7 @@ export class SshTui {
     } finally {
       this.replaying = false
       this.loadingHistory = false
+      this.loadingSplashPainted = false
       this.replayQueue = undefined
       // Replay synthesizes chips from parent spawn tools; it never sees
       // `subagent/start`, so those descriptions must not sit in the live queue
@@ -5739,7 +5751,26 @@ export class SshTui {
     // from the log rather than from the live host", and it stays true for events a
     // resumed process interacts with afterwards — a frame must still be paintable
     // then.
-    if (this.loadingHistory) return
+    if (this.loadingHistory) {
+      // …but not a black screen. The launcher prints its splash *before* this process
+      // mounts, and entering the alternate screen clears that buffer — so withholding
+      // every frame left the reader staring at nothing for as long as the log takes to
+      // rebuild (measured: 1–3 s on a 20k-event session). The splash is repainted here,
+      // once, with the message the launcher had just shown, and the landing frame
+      // replaces it. One frame, not one per event: the rebuild is the expensive part.
+      if (!this.loadingSplashPainted) {
+        this.loadingSplashPainted = true
+        // Through `this.write`, not stdout: in a relayed session that is the display
+        // socket, and this process's stdout is the launcher's log file.
+        this.write(bootSplashText(
+          this.resume ? t('boot.resume') : t('boot.starting'),
+          this.color,
+          Math.max(10, this.screenColumns()),
+          this.useAlternateScreen,
+        ))
+      }
+      return
+    }
     const width = Math.max(10, this.screenColumns())
     const height = Math.max(6, this.screenRows())
     // One clock reading per frame, kept because the resize pacing is the only
