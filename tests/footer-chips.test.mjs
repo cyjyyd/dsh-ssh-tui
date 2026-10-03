@@ -58,7 +58,7 @@ setLocale('zh')
 const chip = (id, long, short, priority) => ({ id, long, short, priority })
 const strip = [
   chip('health', '⚠ 名单缺席（/doctor）', '⚠', 0),
-  chip('link', 'SSH ○○○○ 160ms', '○○○○', 1),
+  chip('link', 'SSH ○○○○ 未测', '○○○○', 1),
   chip('context', '⣿⣿⣀⣀⣀⣀⣀⣀ 12K/1M 3%', '⣿⣿', 2),
   chip('tokens', '输入 35.6K · 输出 3.8K', '', 3),
   chip('quota', 'pro ███████░ 84%', '███████░', 4),

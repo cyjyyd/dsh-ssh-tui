@@ -66,6 +66,9 @@ export const en: Record<string, string> = {
   'footer.effortDefault': 'follow provider default',
 
   'strip.link': 'SSH',
+  // Never measured (see the zh note): the chip must not print the paint cadence
+  // where a round-trip would go.
+  'strip.linkUnmeasured': 'n/a',
   'strip.ctx': 'CTX',
   'strip.ctxShort': 'ctx',
   'strip.ctxDetail': '{used}/{window}',

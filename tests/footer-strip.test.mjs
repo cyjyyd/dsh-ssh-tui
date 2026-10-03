@@ -519,11 +519,20 @@ test("link health reuses the project's existing pips and thresholds", () => {
   assert.match(plain(runtimeStrip(stripInput({ link: { ...LINK, rttMs: 90 } }), 200)), /SSH ●●●○ 90ms/)
   assert.match(plain(runtimeStrip(stripInput({ link: { ...LINK, rttMs: 180 } }), 200)), /SSH ●●○○ 180ms/)
   assert.match(plain(runtimeStrip(stripInput({ link: { ...LINK, rttMs: 420 } }), 200)), /SSH ●○○○ 420ms/)
-  // An unprobed SSH link keeps the empty pips and the paint cadence, exactly as
-  // `formatLinkQualityChip` has always painted it.
+  // An unprobed SSH link keeps the empty pips — `unknown` is the honest level —
+  // and says it was never measured instead of printing the paint cadence where a
+  // round-trip goes. Reported from the field: xterm over SSH, a terminal that
+  // mostly does not answer DSR, sat on `SSH ○○○○ 160ms` for whole sessions and
+  // read it as "my link is 160ms" rather than "nothing was measured".
   assert.match(
     plain(runtimeStrip(stripInput({ link: { kind: 'ssh', intervalMs: 160, probed: false } }), 200)),
-    /SSH ○○○○ 160ms/,
+    /SSH ○○○○ 未测/,
+  )
+  // A measured link still reports the measurement, unchanged.
+  assert.match(
+    plain(runtimeStrip(stripInput({ link: { kind: 'ssh', intervalMs: 160, probed: true, rttMs: 4 } }), 200)),
+    /SSH ●●●● 4ms/,
+    'a measured link reports the measurement',
   )
 })
 

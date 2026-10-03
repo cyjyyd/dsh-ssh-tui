@@ -412,7 +412,7 @@ function footerStripChips(
 }
 
 /**
- * `SSH ●●●● 31ms` → `SSH 31ms` → `SSH`.
+ * `SSH ●●●● 31ms` → `SSH 31ms` → `SSH`; `SSH ○○○○ 未测` when nothing was measured.
  *
  * The dots are the last thing to go, after even the throughput number: they are
  * this project's signature component and the only cell on the row that reports
@@ -450,12 +450,12 @@ function linkPips(link: FooterStripLink, color: boolean, depth: ColorDepth, asci
 }
 
 
-/** The measured round-trip, or the paint cadence when the probe never answered. */
+/** The measured round-trip, or the marker that says there is not one. */
 function linkDelay(link: FooterStripLink): string {
   if (link.probed && link.rttMs !== undefined && Number.isFinite(link.rttMs)) {
     return `${Math.round(link.rttMs)}ms`
   }
-  return `${link.intervalMs}ms`
+  return t('strip.linkUnmeasured')
 }
 
 /**

@@ -66,6 +66,11 @@ export const zh: Record<string, string> = {
   'footer.effortDefault': '跟随提供商默认',
 
   'strip.link': 'SSH',
+  // An SSH link whose round trip was never measured (a terminal that does not
+  // answer DSR, reported from the field as "hollow pips and 160ms forever"). The
+  // number the chip used to print there was the *paint cadence*, which reads as a
+  // measured latency; the chip says `未测` instead.
+  'strip.linkUnmeasured': '未测',
   'strip.ctx': 'CTX',
   'strip.ctxShort': 'ctx',
   'strip.ctxDetail': '{used}/{window}',
