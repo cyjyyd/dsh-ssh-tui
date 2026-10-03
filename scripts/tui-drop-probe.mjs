@@ -354,17 +354,17 @@ async function runProbe({ sessionId, keep, home }) {
     // Two state tests, both about *now* rather than everything that ever arrived:
     // `reportScreenUp` reads the grid (the Screen is up iff it is on screen), and
     // `arrived` looks only at what came back since this attempt's request.
-    // Leaving a report Screen is `inspectClosesOn`: Esc, Ctrl-C, Enter or `q`.
-    // Enter is the one that survives ConPTY. A lone `\x1b` written to a ConPTY
-    // input pipe is the start of a sequence the parser has to wait on, and on the
-    // Windows leg four of them in a row left the Screen up while `/exit` — typed
-    // later, as text — reached it and was answered with the Screen's own "press
-    // Esc" hint. That is a platform property of writing a bare Esc, not of the
-    // key: `tui-probe.mjs` is where "Esc leaves the report Screen" is asserted,
-    // and it passes on the same leg. This probe only needs the Screen *gone*.
+    // Leaving a report Screen is `inspectClosesOn`: Esc, Ctrl-C, Enter or `q`/`Q`.
+    // `q` is the one that survives ConPTY, and that is a property of the *byte*, not
+    // of the key: a bare control byte written to a ConPTY input pipe is held as the
+    // start of a sequence the parser still has to see the end of, so the Windows leg
+    // showed four `\x1b` — and then four `\r` — leaving the Screen up while
+    // `/exit`, written as text, reached it and was answered with the Screen's own
+    // "press Esc" hint. A printable key arrives as itself; `q` closes the Screen
+    // (`tui-probe.mjs` is where Esc's own promise is asserted).
     const closeScreen = async () => {
       for (let close = 0; close < 4 && await reportScreenUp(b); close += 1) {
-        b.term.write('\r')
+        b.term.write('q')
         // The close has to come back as a frame before the next key is sent: wait
         // for the grid to lose the report instead of for a fixed delay to pass.
         await waitForScreen(b, text => !/全文 \d+–\s?\d+\/\d+/u.test(text), 2_000)
