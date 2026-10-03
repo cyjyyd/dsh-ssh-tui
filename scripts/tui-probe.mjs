@@ -74,19 +74,25 @@ const OSC = /\x1b\][^\x07]*\x07/gu
  * looks like the status row is what the assertion is actually about.
  */
 function statusRowOf(buffer) {
-  const chunks = buffer
-    .split(/\x1b\[\d+;\d+H/u)
+  return statusRowsOf(buffer).at(-1) ?? ''
+}
+
+/**
+ * Every row in the stream that looks like the status row, oldest first.
+ *
+ * Split on cursor addresses *or* newlines: a frame normally arrives one addressed row at
+ * a time, but a session's first frame — and, per the Windows leg, every frame ConPTY
+ * hands over — arrives as one batch with the rows separated by newlines. Splitting only
+ * on addresses answered with that whole batch (logo, composer and footer) as "the row",
+ * and preferring single-line chunks answered with nothing at all when every chunk was a
+ * batch. Both shapes reduce to rows this way.
+ */
+function statusRowsOf(buffer) {
+  return buffer
+    .split(/\x1b\[\d+;\d+H|\r?\n/u)
     .map(plain)
     .map(line => line.replace(/\s+$/u, ''))
     .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
-  // A chunk is usually one row: the split is on cursor addresses, and the painter
-  // addresses every row it writes. The *first* frame of a session arrives as one batch
-  // with its rows separated by newlines, and that batch contains the status row too —
-  // taking it returned a whole screen (logo, composer, footer) as "the row", which is
-  // what the Windows leg reported. Single-line matches win; the batch is the fallback
-  // for a terminal whose frames only arrive that way.
-  const single = chunks.filter(line => !line.includes('\n'))
-  return (single.length > 0 ? single : chunks).at(-1) ?? ''
 }
 
 /**

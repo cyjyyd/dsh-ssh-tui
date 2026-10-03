@@ -139,16 +139,14 @@ function screenRows(text) {
  * caret after every row it writes (a multi-line logo row arrives as one chunk).
  */
 function statusRow(buffer) {
-  const chunks = buffer
-    .split(/\x1b\[\d+;\d+H/u)
+  // Addresses *or* newlines: see the same reader in `tui-probe` (a frame may arrive as an
+  // addressed row or as a newline-separated batch, depending on the terminal in front).
+  return buffer
+    .split(/\x1b\[\d+;\d+H|\r?\n/u)
     .map(plain)
     .map(line => line.replace(/\s+$/u, ''))
     .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
-  // Single-line matches win: the first frame arrives as one batch with newline-separated
-  // rows and would otherwise answer with a whole screen instead of the row (see the same
-  // helper in `tui-probe`, where the Windows leg caught it).
-  const single = chunks.filter(line => !line.includes('\n'))
-  return (single.length > 0 ? single : chunks).at(-1) ?? ''
+    .at(-1) ?? ''
 }
 
 function locateOnScreen(text, needle) {

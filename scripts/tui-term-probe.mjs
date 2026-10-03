@@ -232,17 +232,14 @@ async function probeProfile(pty, { env: extra, name, expect }) {
 function checkStatusRow(profile, output) {
   const problems = []
   const want = (condition, message) => { if (!condition) problems.push(message) }
-  const chunks = output
-    .split(/\x1b\[\d+;\d+H/u)
+  const painted = output
+    .split(/\x1b\[\d+;\d+H|\r?\n/u)
     .map(plain)
     // The status row is the one carrying the link chip and the group separator, in
     // whichever glyph set that terminal decodes (`│` on UTF-8, `|` on an ASCII console —
-    // the same swap the rest of the chrome makes). Single-line matches win: a frame that
-    // arrives as one newline-separated batch also contains the row, and answering with
-    // that batch would be answering with the whole screen.
+    // the same swap the rest of the chrome makes). Addresses *or* newlines, because a
+    // frame may arrive as an addressed row or as a newline-separated batch.
     .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
-  const single = chunks.filter(line => !line.includes('\n'))
-  const painted = single.length > 0 ? single : chunks
   want(painted.length > 0, 'the status row never painted')
   const row = painted.at(-1) ?? ''
   // `DSH_TUI_ASCII=1` in the environment covers every profile at once, which is
