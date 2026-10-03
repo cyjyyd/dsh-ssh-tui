@@ -114,6 +114,22 @@ const PROFILES = [
   },
 ]
 
+/**
+ * The screen as the terminal holds it, rebuilt from the byte stream.
+ *
+ * The painter addresses rows absolutely (`\x1b[<row>;1H`) and a later write wins, so the
+ * whole output reconstructs the current screen. Splitting the stream on addresses — the
+ * older way — assumed one chunk is one row, which stopped being true when the painter
+ * began returning the caret after every row it writes (a multi-line logo row arrives as
+ * a single chunk).
+ */
+function screenRows(text) {
+  const rows = new Map()
+  const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
+  for (const match of text.matchAll(pattern)) rows.set(Number(match[1]), plain(match[2] ?? ''))
+  return rows
+}
+
 function plain(text) {
   return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/gu, '').replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/gu, '')
 }
@@ -216,13 +232,14 @@ async function probeProfile(pty, { env: extra, name, expect }) {
 function checkStatusRow(profile, output) {
   const problems = []
   const want = (condition, message) => { if (!condition) problems.push(message) }
-  const painted = output
-    .split(/\x1b\[\d+;\d+H/u)
-    .map(plain)
-    // The status row is the one carrying the link chip and the group separator,
-    // in whichever glyph set that terminal decodes (`│` on UTF-8, `|` on an
-    // ASCII console — the same swap the rest of the chrome makes).
-    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  const painted = [...screenRows(output).entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([, line]) => plain(String(line)))
+    // The status row is the one carrying the link chip and the group separator, in
+    // whichever glyph set that terminal decodes (`│` on UTF-8, `|` on an ASCII console —
+    // the same swap the rest of the chrome makes), and it is one *row*: the screen is
+    // reconstructed rather than the stream split, so a multi-line chunk cannot pose as it.
+    .filter(line => !line.includes('\n') && /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
   want(painted.length > 0, 'the status row never painted')
   const row = painted.at(-1) ?? ''
   // `DSH_TUI_ASCII=1` in the environment covers every profile at once, which is

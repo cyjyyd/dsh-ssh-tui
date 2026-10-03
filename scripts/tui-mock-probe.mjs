@@ -132,16 +132,17 @@ function screenRows(text) {
  * The status row as the terminal received it.
  *
  * Rows are addressed absolutely and the frame never contains a newline, so the
- * stream is split on the cursor-position sequences: taking the last
+ * screen the terminal holds, reconstructed from the stream: taking the last
  * newline-delimited line would concatenate the transcript, both footer rows and
- * the prompt into one string.
+ * the prompt into one string, and splitting the raw stream on addresses assumes a
+ * chunk is one row — which stopped being true when the painter began returning the
+ * caret after every row it writes (a multi-line logo row arrives as one chunk).
  */
 function statusRow(buffer) {
-  const rows = buffer
-    .split(/\x1b\[\d+;\d+H/u)
-    .map(plain)
-    .map(line => line.replace(/\s+$/u, ''))
-    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  const rows = [...screenRows(buffer).entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([, line]) => plain(String(line)).replace(/\s+$/u, ''))
+    .filter(line => !line.includes('\n') && /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
   return rows.at(-1) ?? ''
 }
 

@@ -63,37 +63,21 @@ const OSC = /\x1b\][^\x07]*\x07/gu
  * delimited chunk is the whole screen and would match anything.
  */
 /**
- * The status row, read from a frame that has stopped moving.
+ * The status row, off the screen the terminal holds.
  *
- * A fixed sleep and then one read is a race on a slow runner: the frame being composed
- * when the read happens may hold the logo, or half of the next row, and the *string*
- * that comes back is not the one the reader sees. It settles here first — two agreeing
- * readings 200 ms apart — and only then is the row taken.
+ * Splitting the raw stream on *absolute addresses* was enough while a frame addressed
+ * every row exactly once. The painter now hands the caret back after each row it writes
+ * (so an IME cannot draw its pre-edit on a content row), which means a chunk between two
+ * addresses is not necessarily one row — a multi-line logo row arrives with newlines
+ * inside it, and the "row" that came back was a blob containing the logo, the composer
+ * and the footer. Reconstructing the screen (`screenRows`) and taking the last row that
+ * looks like the status row is what the assertion is actually about.
  */
-async function settledStatusRow(buffer, timeoutMs = 6_000) {
-  const deadline = Date.now() + timeoutMs
-  let previous = ''
-  let stableFor = 0
-  while (Date.now() < deadline) {
-    const row = statusRowOf(buffer())
-    if (row !== '' && row === previous) {
-      stableFor += 1
-      if (stableFor >= 1) return row
-    } else {
-      stableFor = 0
-    }
-    previous = row
-    await new Promise(resolve => setTimeout(resolve, 200))
-  }
-  return statusRowOf(buffer())
-}
-
 function statusRowOf(buffer) {
-  const rows = buffer
-    .split(/\x1b\[\d+;\d+H/u)
-    .map(plain)
-    .map(line => line.replace(/\s+$/u, ''))
-    .filter(line => /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
+  const rows = [...screenRows(buffer).entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([, line]) => line.replace(/\s+$/u, ''))
+    .filter(line => !line.includes('\n') && /\bSSH\b|本机|本地|local/u.test(line) && (line.includes('│') || line.includes('|')))
   return rows.at(-1) ?? ''
 }
 
@@ -340,7 +324,7 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       term.resize(columns, rows)
       await new Promise(resolve => setTimeout(resolve, 1_000))
       const bytes = output.length - mark
-      sweep.push({ columns, bytes, row: await settledStatusRow(() => output) })
+      sweep.push({ columns, bytes, row: statusRowOf(output) })
       check(bytes > 0, `the resize to ${columns}x${rows} produced no repaint`)
       check(sweep.at(-1).row !== '', `no status row after resizing to ${columns}x${rows}`)
     }
@@ -382,7 +366,10 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     term.write('\x1b')
     await new Promise(resolve => setTimeout(resolve, 600))
     check(
-      !/全文 \d+–\s?\d+\/\d+/u.test(plain(output.slice(-3000))),
+      // The reconstructed screen, not a tail of the stream: a frame is denser now (the
+      // caret returns after every row), so 3000 characters can still hold the *previous*
+      // Screen's position line while the Screen itself is already gone.
+      ![...screenRows(output).values()].some(line => /全文 \d+–\s?\d+\/\d+/u.test(plain(line))),
       `Esc must leave the report Screen: ${JSON.stringify(plain(output.slice(-200)))}`,
     )
 
