@@ -90,6 +90,51 @@ test('the newest echo replaces the previous one, and a submit clears it', async 
   assert.equal(tui.currentFooterEcho(), undefined, 'the reader moved on: the echo is spent')
 })
 
+test('an acknowledgement expires on its own, and the row goes back to the session', async () => {
+  // B2.3b kept these until the next submit, on purpose and with no timer. Against
+  // real use that is the wrong trade: a "copied 412 characters" chip is read in a
+  // second, and until the reader types the row is a sentence about the past instead
+  // of the telemetry it replaced. 0.8.2 gives them a clock.
+  const { tui } = fixture()
+  tui.feedbackTtlMs = 150
+  tui.runCommand('/theme mono')
+  await tick(30)          // the command itself settles on a microtask chain
+  assert.match(String(tui.currentFooterEcho()), /配色已切换|mono/u, 'the acknowledgement is there to read')
+
+  await tick(250)
+  assert.equal(tui.currentFooterEcho(), undefined, 'and it leaves on its own')
+  // The row is the session's again: one frame later it carries the ordinary stats.
+  const lines = frame(tui)
+  assert.equal(lines.some(line => /配色已切换/u.test(line)), false, 'the chip is gone from the frame')
+  assert.ok(
+    lines.some(line => /空闲|运行中/u.test(line)),
+    `and the row is back to telemetry: ${JSON.stringify(lines.at(-2))}`,
+  )
+})
+
+test('the queued-message notice waits for the message, not for a clock', async () => {
+  // It is the only sign the reader has that a message is waiting, and it is true
+  // until the step claims it — so its lifetime is the queue's, not the timer's.
+  const { tui, agent } = fixture()
+  agent.status = 'running'
+  tui.feedbackTtlMs = 40
+  tui.input = '加一句说明'
+  tui.cursor = tui.input.length
+  tui.handleChar('\r')
+  await tick(10)
+  assert.match(String(tui.currentNotice()), /下个步骤|next step/u, 'the notice says it is queued')
+
+  await tick(90)
+  assert.match(String(tui.currentNotice()), /下个步骤|next step/u, 'a clock does not take it away')
+
+  const queued = [...tui.pendingMessages.keys()][0]
+  assert.equal(typeof queued, 'string', 'the message is in the queue')
+  // The event the Host delivers on `agent/inbox/claimed` (the fixture's `ctx.on` is a
+  // no-op, so the handler is called the way the wiring calls it).
+  tui.handleInboxClaimed({ agent, message: { id: queued } })
+  assert.equal(tui.currentNotice(), undefined, 'it goes when the message is really submitted')
+})
+
 test('an echo survives a detach and does not survive a resume', async () => {
   const { tui } = fixture()
   tui.runCommand('/theme mono')

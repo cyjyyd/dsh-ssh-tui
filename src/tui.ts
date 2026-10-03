@@ -291,9 +291,9 @@ import {
   durableQuestionRecords,
   answerSummaryText,
   questionViewOf,
+  type QuestionView,
   type DurableQuestionRecord,
 } from './question-state.js'
-import type { UserQuestionProjectionView } from '@deepseek-ai/dsh-user-questions'
 
 import type {
   CollapsibleBlock,
@@ -1152,6 +1152,14 @@ function formatShortDuration(ageMs: number): string {
   const minutes = Math.round(seconds / 60)
   return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`
 }
+
+/**
+ * How long a footer echo / notice lives before the row goes back to normal (0.8.2).
+ *
+ * Six seconds: long enough to read a line that just appeared, short enough that the
+ * chrome is the session's again by the time the reader looks up from the keyboard.
+ */
+const FEEDBACK_TTL_MS = 6_000
 
 const PLUGIN_VERSION = ((): string => {
   try {
@@ -2207,22 +2215,22 @@ export class SshTui {
    *
    * Host-local and deliberately not history (AD-13): "theme switched" is an
    * acknowledgement, not a fact about the session. It lives in the footer's own row
-   * as the lowest-priority chip, is replaced by the next echo, and is cleared by the
-   * next submit — the reader has moved on, and the acknowledgement has done its job.
+   * as the lowest-priority chip, is replaced by the next echo, and leaves the row
+   * again when the reader submits — or after `feedbackTtlMs`, whichever comes first.
    * A detach keeps it (the Host never died); a resume does not restore it (it was
    * never in the log).
    */
-  private footerEcho: { text: string } | undefined
+  private footerEcho: { text: string; at: number } | undefined
   /**
    * The ephemeral notice: feedback that needs reading now, and is not history.
    *
    * A failed command, an operational warning — messages with too much in them for a
    * footer chip. It takes the telemetry row for its lifetime: no geometry change, no
    * content hidden, always visible. It does not steal input, and the next notice
-   * replaces it while the next submit clears it. No NotificationManager: one field,
+   * replaces it while the next submit (or its own expiry) clears it. No NotificationManager: one field,
    * one row.
    */
-  private notice: { text: string } | undefined
+  private notice: { text: string; at: number; holds?: 'queue' } | undefined
 
   /**
    * The Screen that is up, if any. At most one, and never a dialog.
@@ -2320,6 +2328,19 @@ export class SshTui {
   private reasoningExpandedChoice: boolean | undefined
   private escapeBuffer = ''
   private escapeTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * How long an acknowledgement or a warning stays on the chrome.
+   *
+   * B2.3b kept them until the next submit, with no timer, so a reader who came back
+   * after a while still saw what happened. Measured against the actual use — a
+   * "copied 412 characters" chip and a "applies at the next step" notice — that is
+   * the wrong trade: the reader has read them within seconds, and until they type
+   * something the row is occupied by a sentence about the past instead of the
+   * telemetry it replaced. They now expire on their own (and a submit still clears
+   * them at once).
+   */
+  private feedbackTtlMs = FEEDBACK_TTL_MS
+  private feedbackTimer: ReturnType<typeof setTimeout> | undefined
   /**
    * Cursor-position replies removed from the relay's stdin stream. A launcher
    * from an older release (or a reply that raced its own probe) would otherwise
@@ -3244,6 +3265,7 @@ export class SshTui {
     if (this.renderTimer !== undefined) clearInterval(this.renderTimer)
     this.renderTimer = undefined
     if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
+    if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
     this.escapeTimer = undefined
     this.inputGuard.stop()
     process.stdin.removeListener('data', this.handleData)
@@ -4069,8 +4091,10 @@ export class SshTui {
         this.appendRow(representation)
         return
       }
-      if (representation.meta.destination === 'echo') this.footerEcho = { text }
-      else this.notice = { text }
+      const at = Date.now()
+      if (representation.meta.destination === 'echo') this.footerEcho = { text, at }
+      else this.notice = { text, at }
+      this.armFeedbackExpiry()
       this.markDirty()
       return
     }
@@ -4758,13 +4782,48 @@ export class SshTui {
     return auditQuestionPrimaries(this.rows)
   }
 
+  /**
+   * Drop an acknowledgement or a warning whose time is up.
+   *
+   * Called before a frame is built and by the expiry timer, so every reader — the
+   * footer, the Screen strip, `/diag` and the tests — sees the same thing at the same
+   * moment: the row is the session's again once the sentence has been readable.
+   */
+  private expireFeedback(now: number = Date.now()): void {
+    const stale = (feedback: { at: number; holds?: 'queue' } | undefined): boolean =>
+      feedback !== undefined && feedback.holds === undefined && now - feedback.at >= this.feedbackTtlMs
+    if (stale(this.footerEcho)) this.footerEcho = undefined
+    if (stale(this.notice)) this.notice = undefined
+  }
+
+  /**
+   * Repaint when the newest feedback expires, so the row goes back by itself.
+   *
+   * Unref'd: this timer exists to refresh a UI that is already running, and a Host
+   * with nothing else pending (no window attached, no turn) may exit instead — the
+   * expiry is evaluated against the timestamp on the next frame anyway, so nothing
+   * depends on the callback being reached.
+   */
+  private armFeedbackExpiry(): void {
+    if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
+    if (this.notice?.holds === 'queue' && this.footerEcho === undefined) return
+    this.feedbackTimer = setTimeout(() => {
+      this.feedbackTimer = undefined
+      this.expireFeedback()
+      this.markDirty()
+    }, this.feedbackTtlMs)
+    this.feedbackTimer.unref?.()
+  }
+
   /** The footer echo the reader can see right now, if any (a test/`/diag` seam). */
   currentFooterEcho(): string | undefined {
+    this.expireFeedback()
     return this.footerEcho?.text
   }
 
   /** The ephemeral notice the reader can see right now, if any. */
   currentNotice(): string | undefined {
+    this.expireFeedback()
     return this.notice?.text
   }
 
@@ -5590,7 +5649,7 @@ export class SshTui {
       // may well be in the session log, and the reader has to know local `/find` is not
       // looking there (AD-9). Said where it is asked, and it replaces the miss notice
       // rather than piling up beside it.
-      if (this.clearedRows > 0) this.notice = { text: t('find.scopeHint') }
+      if (this.clearedRows > 0) { this.notice = { text: t('find.scopeHint'), at: Date.now() }; this.armFeedbackExpiry() }
       this.searchIndex = -1
       this.pushRow(represent('find-feedback', {
         kind: 'system',
@@ -6409,6 +6468,9 @@ export class SshTui {
     }
     const inputRows = Math.max(1, inputDisplayLines.length)
 
+    // Time-based feedback is judged here, once per frame, so the footer and the strip
+    // cannot disagree about whether it is still current.
+    this.expireFeedback()
     const yieldPlanDock = this.dialog !== undefined || suggestionLines.length > 0
     // The workspace: every row between the header and the composer's boundary. The
     // three things that compete for it, in the order they win: the interaction
@@ -8009,6 +8071,14 @@ export class SshTui {
         // "重试 n/m" on an idle footer until the next turn).
         this.llmRetry = undefined
         this.pendingMessages.clear()
+        // The queue is gone with the turn, so the notice that spoke for it is too.
+        if (this.notice?.holds === 'queue') {
+          this.notice = undefined
+          if (this.feedbackTimer !== undefined) {
+            clearTimeout(this.feedbackTimer)
+            this.feedbackTimer = undefined
+          }
+        }
         // Aborted/errored turns may close without an assembled
         // assistant/message; never leave a half-streamed thinking block behind.
         this.streaming = undefined
@@ -8115,12 +8185,46 @@ export class SshTui {
 
   private readonly handleInboxClaimed = ({ agent, message }: { agent: Agent; message: { id: string } }): void => {
     if (agent !== this.agent) return
-    if (this.pendingMessages.delete(message.id)) this.markDirty()
+    if (this.pendingMessages.delete(message.id)) this.noteQueueDrained()
   }
 
   private readonly handleInboxDiscarded = ({ agent, message }: { agent: Agent; message: { id: string } }): void => {
     if (agent !== this.agent) return
-    if (this.pendingMessages.delete(message.id)) this.markDirty()
+    if (this.pendingMessages.delete(message.id)) this.noteQueueDrained()
+  }
+
+  /**
+   * Say that a message is queued, and hold the notice until it is really submitted.
+   *
+   * The one notice that must outlive its clock: it is the only sign the reader has that
+   * something is waiting, and it stays true until the step claims it — so it lives as
+   * long as the queue does (`noteQueueDrained` clears it), not as long as a timer says.
+   */
+  private showQueuedNotice(text: string): void {
+    this.pushRow(represent('steer-notice', { kind: 'system', text }))
+    const notice = this.notice as { text: string; at: number; holds?: 'queue' } | undefined
+    if (notice !== undefined) notice.holds = 'queue'
+  }
+
+  /**
+   * The last queued message was claimed (or dropped): the acknowledgement goes with it.
+   *
+   * This is what "until it is really submitted" means — the notice is not about the
+   * keystroke that queued the message, it is about the message still waiting, so it
+   * ends where the waiting does.
+   */
+  private noteQueueDrained(): void {
+    if (this.pendingMessages.size > 0) return
+    if (this.notice?.holds !== 'queue') {
+      this.markDirty()
+      return
+    }
+    this.notice = undefined
+    if (this.feedbackTimer !== undefined) {
+      clearTimeout(this.feedbackTimer)
+      this.feedbackTimer = undefined
+    }
+    this.markDirty()
   }
 
   private readonly handleDisposed = ({ agent }: { agent: Agent }): void => {
@@ -9567,7 +9671,7 @@ export class SshTui {
    * `{ active, settled }`. Absent in a bare Context — a test, an embedder without
    * the projection package — which is why every caller here has a live fallback.
    */
-  private questionProjection(): UserQuestionProjectionView | undefined {
+  private questionProjection(): QuestionView | undefined {
     const registry = this.ctx.get('sessionProjections') as unknown as
       | { stateOf?: (session: unknown, key: string) => unknown }
       | undefined
@@ -9690,7 +9794,12 @@ export class SshTui {
       : t('sub.agentLabel', { name: this.subagentNameFor(String(request.agent.id)) })
     // The request carries the call for a timed question, which is what the Session
     // records; a legacy blocking call has none, and its card is the live path's.
-    const callId = request.wait?.callId === undefined ? undefined : String(request.wait.callId)
+    // `wait` is how a *timed* question names its call, and it exists from
+    // 0.2.0-rc.2 on: the older lines type `AskUserQuestionRequest` without it (and
+    // never set it, which is why a legacy blocking call's card is the live path's).
+    // Read structurally so the same source compiles against every declared line.
+    const wait = (request as { wait?: { callId?: unknown } }).wait
+    const callId = wait?.callId === undefined ? undefined : String(wait.callId)
     if (callId !== undefined) this.askedByCall.set(callId, request.questions)
     const cards = request.questions
       .map(question => this.ensureQuestionCard(callId, question))
@@ -14160,9 +14269,10 @@ export class SshTui {
       return
     }
     // The reader has moved on: an acknowledgement or a warning from their last action
-    // has done its job, and it is not history to keep. This is the *only* thing that
-    // clears them besides a newer one replacing them — no timer, so a reader who
-    // comes back after a while still sees what happened (B2.3b §4).
+    // has done its job, and it is not history to keep. A submit is the earliest exit
+    // (0.8.2 also expires them on their own after `feedbackTtlMs` — the row is the
+    // session's again once the sentence has been readable, whether or not anyone
+    // typed in the meantime).
     if (this.footerEcho !== undefined || this.notice !== undefined) {
       this.footerEcho = undefined
       this.notice = undefined
@@ -14227,7 +14337,7 @@ export class SshTui {
       // turn running that row is exactly that — so a reader who typed mid-turn saw
       // no confirmation at all (B2.4). The notice row is always on screen and costs
       // no geometry.
-      this.pushRow(represent('steer-notice', { kind: 'system', text: t('steer.queued', { text }) }))
+      this.showQueuedNotice(t('steer.queued', { text }))
       this.agent.steer(message)
     } else {
       this.beginWait()
@@ -14410,7 +14520,8 @@ export class SshTui {
         // Said as a notice rather than a row: the reader asked for a clearer screen,
         // and answering with a line the cutoff immediately hides would be absurd —
         // or worse, a line that survives and makes `/clear` look like it failed.
-        this.notice = { text: t('clear.cutoff') }
+        this.notice = { text: t('clear.cutoff'), at: Date.now() }
+        this.armFeedbackExpiry()
         this.forceFullPaint = true
         this.markDirty()
         break
