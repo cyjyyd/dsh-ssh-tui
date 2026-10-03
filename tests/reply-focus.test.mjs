@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
+import { terminalCapabilities } from '../lib/terminal-caps.js'
 import { SshTui } from '../lib/tui.js'
 import { lastFeedback } from './wait.mjs'
 
@@ -47,6 +48,13 @@ function makeTui({ withCards = true, keys } = {}) {
     sessionId: 'main-session',
     color: false,
     headlessDisplay: true,
+    // The copy notice differs by terminal: where OSC 52 is not implemented the reader
+    // gets the "this terminal cannot take a clipboard write" caveat instead of 已复制,
+    // and a CI runner has no TERM at all. The capability table is a pure function of an
+    // env, so the terminal is named here rather than inherited (same shape as
+    // mouse-selection.test.mjs) — Konsole from 24.12 is one that really does implement
+    // OSC 52, which is the assumption this case is about.
+    terminalCaps: terminalCapabilities({ env: { TERM: 'xterm-256color', KONSOLE_VERSION: '241200' }, platform: 'linux' }),
     ...(keys === undefined ? {} : { keys }),
   })
   tui.write = () => {}

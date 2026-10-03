@@ -16,6 +16,7 @@ import {
   FRAME_BYTE_BUDGETS,
 } from '../lib/paint.js'
 import { screen } from './screen.mjs'
+import { ctxWithCredentials, withSshSession } from './wait.mjs'
 
 const WIDTH = 40
 const HEIGHT = 20
@@ -217,7 +218,6 @@ async function resizableTui(count = 60) {
   const { SshTui } = await import('../lib/tui.js')
   process.stdout.columns = 100
   process.stdout.rows = 24
-  const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
     options: {},
@@ -225,7 +225,17 @@ async function resizableTui(count = 60) {
     session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
     cancel() {},
   }
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // The wire this file is about is an SSH one (the 160 ms tier is what makes a frame
+  // skippable at all), and the machine it runs on has been set up. Both are read from
+  // the environment at construction, so they are pinned here rather than inherited: a
+  // bare runner has no `SSH_*` and no home, and its roster check pushes a "rows are
+  // missing" row into the transcript — one extra line, which is enough to move
+  // `lastTranscriptStart` by one and fail every absolute assertion below.
+  const tui = withSshSession(() => new SshTui(
+    ctxWithCredentials({ agentPresets: {}, settings: { get: () => undefined } }),
+    agent,
+    { sessionId: 'main-session', color: false },
+  ))
   let frames = 0
   tui.write = () => { frames += 1 }
   for (let index = 0; index < count; index += 1) {

@@ -190,3 +190,52 @@ export function waitForLastSystem(tui, needle, options = {}) {
     ...options,
   })
 }
+
+/**
+ * A credential service that says "this machine is set up".
+ *
+ * The first-run check (`maybeRunOnboarding`) opens the setup Screen when nothing is
+ * configured — and it reads that from the *environment*, not from the test: a
+ * developer's `$DSH_HOME/.credentials.yaml` hides it, a bare CI runner has nothing,
+ * which is how eight tests passed here and failed there at 0.8.2's first push. A
+ * fixture that drives the TUI and asserts on painted frames must say which machine
+ * it is simulating; this is that statement.
+ */
+export const configuredCredentials = {
+  async describe() { return { configured: true, writable: true, source: 'file' } },
+  async resolve() { return { value: 'stub-key', source: 'file' } },
+  async set() {},
+  async unset() {},
+}
+
+/** The `ctx.get` a fixture wants when it simulates a machine that has been set up. */
+export const ctxWithCredentials = (services = {}) => ({
+  get: name => (name === 'credentials' ? configuredCredentials : services[name]),
+  on() { return () => {} },
+})
+
+/**
+ * Build something as an SSH-attached session, whatever terminal runs the suite.
+ *
+ * `detectSshSession` reads `process.env` at construction, so anything asserting the
+ * SSH tier (the `SSH ●●●●` chip, or the 160 ms cadence that tier picks) passes on a
+ * developer's SSH session and fails on a CI runner, which has no `SSH_*` at all.
+ * The three variables the detector reads are set for the build and put back after.
+ * @param build - called with the environment pinned; its return value is returned.
+ */
+export function withSshSession(build) {
+  const names = ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY']
+  const previous = names.map(name => process.env[name])
+  process.env.SSH_CONNECTION = '203.0.113.4 53210 203.0.113.9 22'
+  process.env.SSH_CLIENT = '203.0.113.4 53210 22'
+  process.env.SSH_TTY = '/dev/pts/9'
+  try {
+    return build()
+  } finally {
+    names.forEach((name, index) => {
+      const value = previous[index]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    })
+  }
+}

@@ -15,6 +15,7 @@ import { FORMS_PATCH_BLOCK } from '../lib/preset-rows.js'
 import { statsRowOf } from '../lib/stats.js'
 import { displayWidth, stripAnsi, visibleWidth } from '../lib/term-text.js'
 import { formatQuotaBar } from '../lib/tui.js'
+import { ctxWithCredentials, withSshSession } from './wait.mjs'
 
 /**
  * A colourless TUI with nothing but the footer chrome on it.
@@ -25,7 +26,6 @@ import { formatQuotaBar } from '../lib/tui.js'
  */
 async function makeFooterTui() {
   const { SshTui } = await import('../lib/tui.js')
-  const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = {
     id: 'main-session',
     options: {},
@@ -33,7 +33,16 @@ async function makeFooterTui() {
     session: { id: 'main-session', events: [], header: { cwd: '/tmp' } },
     cancel() {},
   }
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  // Two facts every case below depends on are read from the environment when the TUI
+  // is constructed: the link tier (`detectSshSession` — a runner has no `SSH_*`, so the
+  // chip says 本地) and the roster health (`refreshRosterHealth` — a runner has no home,
+  // so a "rows are missing" chip takes the slot the row is asserting). Pinned here
+  // rather than inherited; see the helpers in `./wait.mjs`.
+  const tui = withSshSession(() => new SshTui(
+    ctxWithCredentials({ agentPresets: {}, settings: { get: () => undefined } }),
+    agent,
+    { sessionId: 'main-session', color: false },
+  ))
   tui.write = () => {}
   return tui
 }

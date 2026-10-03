@@ -19,6 +19,17 @@ import { REPRESENTATION_POLICY, auditRepresentations, isRepresentation, represen
 import { SshTui } from '../lib/tui.js'
 import { pushRow, tick, waitFor } from './wait.mjs'
 
+/**
+ * `src/tui.ts` with LF endings, whatever the checkout did to them.
+ *
+ * Both guards below locate a method and then a boundary with `\n`-anchored patterns.
+ * A CRLF checkout (the Windows runner) has `{\r\n`, so the boundary never matches,
+ * `end` stays -1, and the "reducer" silently becomes the *rest of the file* — which is
+ * how one of these cases counted two `case 'user/message'` labels and failed on
+ * Windows only. Normalizing here keeps the assertions about the code, not the checkout.
+ */
+const sourceText = () => readFileSync(new URL('../src/tui.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n')
+
 setLocale('zh')
 
 function fixture(options = {}) {
@@ -172,7 +183,7 @@ test('a source with no policy cannot be named (the table is the only vocabulary)
 test('every pushRow call site goes through the policy (static guard)', () => {
   // The type system already refuses a bare row; this reads the source so the guard
   // is visible in the suite too, and so an `as any` escape hatch would be caught.
-  const source = readFileSync(new URL('../src/tui.ts', import.meta.url), 'utf8')
+  const source = sourceText()
   const calls = [...source.matchAll(/this\.pushRow\(([\s\S]{0,40})/gu)]
   assert.ok(calls.length > 200, `the transcript is built from many sites (${calls.length})`)
   const bare = calls.filter(match => !match[1].startsWith('represent('))
@@ -282,7 +293,7 @@ test('a log with no user turn leaves the flag alone', async () => {
 test('the reducer has exactly one reachable user/message case', () => {
   // A duplicate `case 'user/message'` in one switch is dead code — the second label
   // is never reached — and that is how the flag came to be un-derivable.
-  const source = readFileSync(new URL('../src/tui.ts', import.meta.url), 'utf8')
+  const source = sourceText()
   const start = source.indexOf('private applySessionEvent')
   // The reducer's switch ends at the next method boundary after it.
   const after = source.slice(start)

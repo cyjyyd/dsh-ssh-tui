@@ -9,6 +9,7 @@ import { PassThrough } from 'node:stream'
 import { DisplayHost, displaySockExists, isPipePath, runDisplayRelay, sessionSockPath } from '../lib/display-sock.js'
 import { CURSOR_POSITION_REQUEST } from '../lib/terminal-input.js'
 import { SshTui } from '../lib/tui.js'
+import { ctxWithCredentials } from './wait.mjs'
 
 /**
  * A dropped link repaints the screen; it must never rewrite the transcript.
@@ -110,9 +111,11 @@ async function withLiveTui(t) {
     await rm(home, { recursive: true, force: true })
   })
   const sessionId = 'main-session-transcript'
-  const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: sessionId, options: {}, status: 'idle', session: { id: sessionId, events: [] }, cancel() {} }
-  const tui = new SshTui(ctx, agent, { sessionId, color: false, headlessDisplay: true })
+  // `ctxWithCredentials`: without it the first-run check opens the setup Screen and
+  // covers the transcript these cases are about — which is what a CI runner, with no
+  // `$DSH_HOME/.credentials.yaml`, would have done all along.
+  const tui = new SshTui(ctxWithCredentials(), agent, { sessionId, color: false, headlessDisplay: true })
   t.after(() => tui.dispose())
   const sock = sessionSockPath(sessionId, home)
   if (!isPipePath(sock)) await mkdir(dirname(sock), { recursive: true, mode: 0o700 })
