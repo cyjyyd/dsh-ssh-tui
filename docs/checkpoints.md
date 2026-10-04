@@ -1465,17 +1465,20 @@ Screen/Esc 路径本轮未改，且 `screen-contract` / `tui-probe` 的同一组
 | 干净检出 `verify-batch`（自建 home 的八步） | PASS（typecheck、home、term、**link**、mock、busy、busycrash、footer） |
 | 干净检出 `verify-batch` 中需读 `~/.dsh` 的四步 | 沙箱内 `~/.dsh` 只读（`EROFS …/cordis.yml`），**未测**——非产品缺陷 |
 
-### 4. 剩余门槛（打 tag 之前必须走完）
+### 4. 剩余门槛（本节写于 Windows 轮之前；逐条现状见下）
 
-1. **Windows / ConPTY 实机 12 项清单**（`docs/release.md` 第一节）：仍未做，只有 CI 上的脚本化探针。
-2. **链路 chip 在读者 256 色终端上的间歇性空圆**：读者报告"不稳定、未能稳定复现"；本轮把该形状做成
-   了门（见 §2），但未在读者终端上闭合。若再次出现，需要 `/diag` 的 link `probeState` 与
-   `DSH_TUI_DEBUG=1` 的 relay 探测日志。
-3. **链路探针只在默认 Linux 腿跑**：ConPTY 上的 DSR 行为与 POSIX 不同，未在 Windows 腿覆盖
-   （加进去需要实机证据，否则是在赌一条腿的颜色）。
+1. ~~**Windows / ConPTY 实机 12 项清单**~~ —— **已完成**（2026-10-03，维护者，见下一节「Windows 实机轮」：
+   12 PASS · 2 SKIP · 0 FAIL，两目人眼项确认通过）。
+2. ~~**链路 chip 在读者 256 色终端上的间歇性空圆**~~ —— **已定案**：`/diag` 显示 `探测 未知（终端未回
+   DSR）`，即那台终端多数时候不回答 `CSI 6n`；空心圆是正确表态，真正的缺陷是**旁边印着绘制节奏
+   `160ms`**（看起来像延迟），已修（`52417b9` → `SSH ○○○○ 未测`），并由
+   `scripts/tui-unmeasured-probe.mjs` 覆盖"从没测到过"这条形状（CI 两条腿）。
+3. ~~**链路探针只在默认 Linux 腿跑**~~ —— Windows 腿现在跑 `tui-unmeasured-probe.mjs`（管道父进程）；
+   `tui-rtt-probe.mjs` 的**第一段**（慢链路形状）在 ConPTY 上按 `SKIP:` 处理，因为它无法被扮演。
 4. 4 个 `.xdg-*` 文件自 `6be9960` 起被跟踪，属遗留清理，未在本轮处理。
 
-**结论**：`RC PREP COMPLETE, BLOCKED BEFORE TAG` —— 自动化门全绿，剩两件只能人工完成的门槛（上面 1、2）。
+**结论（本节写于当轮）**：`RC PREP COMPLETE, BLOCKED BEFORE TAG` —— 自动化门全绿，当时还剩两件只能人工
+完成的门槛（上面 1、2）。**两件都已闭合**，见下一节。
 
 ## Windows 实机轮 · 0.8.2 RC 前的五处探针缺陷（2026-10-03）
 
@@ -1522,11 +1525,15 @@ ConPTY 上根本摸不到**，而这个形状是被读者报过两次的那个�
 |---|---|
 | `npm run typecheck` | 0 错 |
 | 全套测试（本机 Windows） | 1376 项 · **1365 通过 · 0 失败 · 11 跳过**（跳过均为平台互斥用例；`python3` 用运行时自带 Python 的 shim 后，原先那条环境性失败也过了） |
-| `npm run freeze` | 八条不变量 + 七条退役路径全绿 |
-| `npm run bench` | 五个动作 0 次全清 |
+| 全套测试（Linux，发版候选 `c2fe073` 复跑） | 1376 项 · **1372 通过 · 0 失败 · 4 跳过** |
+| `npm run freeze` | 八条不变量 + 七条退役路径全绿（0 命中） |
+| `npm run bench` | 五个动作 **0 次全清**：1.43 / 1.25 / 1.19 / 0.97 / 0.22 ms |
+| `npm pack --dry-run`（`c2fe073` + 本文档提交） | **243 个文件** · tarball **1.4 MB** · 解包 **4.2 MB** · shasum `92b7f517…` · 无凭据 / 无 home / 无 sqlite |
 | `verify-batch --home F:\dsh-win-verify-home` | **12 PASS · 2 SKIP · 0 FAIL**（SKIP = `link` 第一段、`linemode`，均为 ConPTY 盲区并附理由） |
 | 12 项人工清单中可自动化的部分 | 启动 / resize / 字形回退 / Screen / picker / 流式（clear 数）/ setup 向导 / detach-reattach / 断链恢复 全部通过 |
-| 仍需人眼 | 微软拼音 IME 组合、多行中文粘贴（无自动化）；"拖选高亮是否从按下的字开始"（Windows 上无法用脚本模拟指针） |
+| 12 项人工清单中**只能人眼**的两目 | **已确认通过**（2026-10-03，维护者实机）：微软拼音 IME 组合（预输入串不出现在处理中卡片/计划卡上，上屏完整、光标位置正确）、多行中文粘贴（含换行与中文，不截断、不误提交） |
+| 拖选高亮起点 | 由修好后的 `tui-mock-probe` 按**真实终端网格**逐格断言（此前那条"拖选偏移"是探针在 ConPTY 字节流里解出的伪行，见上表第 5 条） |
 
-**结论**：Windows 实机门从"12 项无法闭环"推进到"可自动化的部分全绿、盲区有名字有理由、其中一个盲区
-用管道形状补上了新覆盖"。发版前仍欠两目人眼确认（IME、粘贴）。
+**结论**：Windows 实机人工验收**已完成**——12 项清单逐条走过，可自动化部分全绿、两处 ConPTY 盲区有名字有
+理由（这两个形状在 Linux 腿上真跑，`SKIP` 不算 PASS）、两目人眼确认通过。**发版前不再欠人眼项**；剩下的
+两条 `SKIP` 是**覆盖边界**，同时写在 [`release.md`](release.md) 与发版说明里。

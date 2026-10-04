@@ -2,12 +2,15 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **当前状态（2026-10-03）：B2 冻结完成，`main` 上未发布的下一个版本是 0.8.2 的候选。**
-> 全量套件 1361 项 1357 通过 / 0 失败 / 4 跳过，`tsc --noEmit` 干净，`npm run freeze` 八条不变量全绿、
-> 七条退役路径 0 命中（B2 最终审计，见 [`checkpoints.md`](checkpoints.md) 末节与
-> [`decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20）。
-> **发布前必须补的两件人工事**见下方"发布前人工门槛"——fresh-home 首启在本沙箱内未能跑通，
-> Windows 实机未覆盖。
+> **当前状态（2026-10-03）：`main` 上未发布的下一个版本是 `0.8.2-rc.1`（候选）。**
+> 发版候选 `c2fe073` 自检：全量套件（Linux）1376 项 **1372 通过 / 0 失败 / 4 跳过**、（Windows 实机）
+> 1376 项 **1365 通过 / 0 失败 / 11 跳过**；`tsc --noEmit` 干净；`npm run freeze` 八条不变量全绿、
+> 七条退役路径 **0 命中**；`npm run bench` 五个动作 **0 次整屏清屏**；`npm pack --dry-run` **243 个
+> 文件 / tarball 1.4 MB / 解包 4.2 MB，shasum `92b7f517…`**。逐条证据见 [`checkpoints.md`](checkpoints.md) 末两节与
+> [`decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20。
+> **发布前的两件人工事都已闭合**：fresh-home 首启有探针（`tui-setup-probe.mjs` +
+> `probe-onboarding.mjs`，见下「发布前人工门槛」第二节），Windows / ConPTY 实机人工验收已完成
+> （2026-10-03，12 PASS · 2 SKIP · 0 FAIL，两目人眼项确认通过；`SKIP` 是覆盖边界、不算通过）。
 
 > **0.8.1 已发布（2026-09-30，`latest` + `next`）**：版本提交 `5edb033` → 推 `main` → tag `v0.8.1` →
 > CI 五条腿全 success（`test (0.2.0-rc.2)` / `0.2.0-rc.1` / `0.1.7-rc.2` / `0.1.7-rc.1` / `test-windows`）→
@@ -19,7 +22,7 @@
 
 > **0.8.0 已发布（2026-09-29，只上 `next`）**：tag `v0.8.0` → CI 全绿 → GitHub Release
 > <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.0> → npm `next` = `0.8.0`。
-> **`latest` 仍是 0.7.4，按用户要求等 2026-10-01 再提升**（见下方"待办"）。
+> **`latest` 仍是 0.7.4，按用户要求等 2026-10-01 再提升**（已完成，见下一节）。
 > 发版说明：[`release-notes-0.8.0.md`](release-notes-0.8.0.md)；更早一版的草稿留在
 > [`release-notes-0.7.4.md`](release-notes-0.7.4.md)。
 
@@ -32,8 +35,9 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
 ```
 
 > **上游随后又发了 `0.2.0-rc.2`，并把 `latest` 与 `next` 都指向它。** 该版本已按完整流程验过并进声明表与
-> CI（默认腿）；`0.2.0-rc.1` 仍保留兼容表态与轻量腿。当前窗口 `>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1`
-> 已覆盖这两个 rc，**不含 0.1.5**。上游再发 `0.2.0` 正式版时按同样流程跑一遍再决定是否加 comparator。
+> CI（现在是**默认腿**：提交的 manifest 与锁、`test-windows` 都装它）；`0.2.0-rc.1` 仍保留兼容表态与腿。
+> 当前窗口 `>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1` 已覆盖这两个 rc，**不含 0.1.5**。上游再发
+> `0.2.0` 正式版时按同样流程跑一遍再决定是否加 comparator。
 
 ## 三条规则
 
@@ -43,12 +47,19 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    修完 bug、跑完验收、推送到 GitHub 分支——到此为止，然后等指令。
 
 2. **顺序固定：先 GitHub，后 npm。**
-   发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag。
+   发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag → GitHub Release。
+   **候选版（`-rc.N`）只上 `next`**：`npm publish --tag next`（`latest` 留给正式版；把 rc 提成
+   `latest` 会让所有默认安装的用户拿到候选）。正式版才 `npm publish --tag latest`，并按需
+   `npm dist-tag add dsh-ssh-tui@X.Y.Z next`。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   tag 推上去后确认 CI（`test (0.1.5-rc.3)`、`test (0.1.5-rc.1)`、
-   `test (0.1.7-rc.1)`、`test-windows`）**全部 success**，再 `npm publish`。
+   当前五条腿（2026-10-03 起）：`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、`test (0.1.7-rc.2)`、
+   `test (0.1.7-rc.1)`、`test-windows` —— **全部 success** 才 `npm publish`。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
+   **tag 不触发 CI**：workflow 只监听 `main` 的 push 与 PR（`.github/workflows/ci.yml` 的 `on:`），
+   所以打 tag 前后要做的是**核对 tag 所指的那个 SHA 的 run 是否 success**（`main` 上的推送已经跑过
+   一次同一个 SHA），而不是指望推 tag 自己长出一轮。查法：
+   `curl -s "https://api.github.com/repos/cyjyyd/dsh-ssh-tui/actions/runs?head_sha=$(git rev-parse vX.Y.Z)"`。
 
 ## 允许 / 不允许
 
@@ -94,9 +105,11 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   cordis/loader/schemastery 之后，当时最老的 0.1.2-rc.1 腿又因为 **cordis-plugin-include 被 npm 拿到 1.0.9**
   而挂——1.0.9 的 peer 是 `cordis ~4.0.4`，与钉住的 4.0.2 天然冲突（rc.3 族里它是被精确钉成 1.0.7 的，
   老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：默认线（2026-09-26 起是
-  `0.1.7-rc.1`）写死 `cordis 4.0.4`、`cordis-plugin-{include 1.0.9, loader 1.0.5, hmr 1.0.17, timer 1.1.6}`、
-  `cordis-plugin-group 1.0.4`（launcher 组装用，不是我们 import 的）、`schemastery 3.18.2 || ~3.18.4`；
-  0.1.5 的两条腿由 `scripts/ci-pin-line.mjs` 改写成那一族的 `4.0.2` / `1.0.7` / `1.0.3` / `1.1.4`。
+  `0.1.7-rc.1`，2026-10-03 起是 **`0.2.0-rc.2`**）写死 `cordis 4.0.4`、
+  `cordis-plugin-{include 1.0.9, loader 1.0.5, hmr 1.0.17, timer 1.1.6}`、
+  `cordis-plugin-group 1.0.4`（launcher 组装用，不是我们 import 的）、`schemastery 3.18.2 || ~3.18.4`。
+  （0.1.5 的两条腿曾由 `scripts/ci-pin-line.mjs` 改写成那一族的 `4.0.2` / `1.0.7` / `1.0.3` / `1.1.4`；
+  该线已摘除，改写表里不再有它们的条目。）
   `peerDependencies` 里保持区间（消费者那边由宿主提供）。`tests/bundle-patch.test.mjs` 钉住树上实际装到
   的那条线，`tests/ci-pin-line.test.mjs` 钉住改写表；要动它们就跟族一起动。
 - **范围不要提前放宽。** 只有在真跑绿之后才把新版本纳入范围与 CI 腿；没跑过的版本宁可让
@@ -106,35 +119,41 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   我们的范围——node-semver 只在某个 comparator 带有**同一** `[major, minor, patch]` 的 prerelease 时
   才放行 prerelease。所以 `>=0.1.5-alpha.1 <0.1.6` 既排除 `0.1.6-alpha.x`，也排除 `0.1.7-alpha.x`；
   这条已被 `tests/bundle-patch.test.mjs` 钉住，别靠感觉改。
-- **CI 腿的取舍**：`matrix.dsh` 里每个"能启动宿主"的版本都跑全套单元测试 + 真 PTY 探针；
-  最老的一条（0.1.5-rc.1 的 peer 解析不了）只跑 typecheck 与单元套件。
-  默认腿跟着 `package.json` 的 pin 走（= 当前要重点验的那一版，现在是 `0.1.7-rc.1`；这条腿原样安装提交的
-  manifest，`test-windows` 也是），`latest`（`0.1.5-rc.3`）单独留一条完整腿；其余线由
-  `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装（顺带删锁），改写的正确性由
-  `tests/ci-pin-line.test.mjs` + `tests/workflow.test.mjs` 的守卫断言守住。
+- **CI 腿的取舍**：`matrix.dsh` 里每个"能启动宿主"的版本都跑全套单元测试 + 真 PTY 探针。当前四条
+  （`0.2.0-rc.2` / `0.2.0-rc.1` / `0.1.7-rc.2` / `0.1.7-rc.1`）+ `test-windows`：默认腿跟着
+  `package.json` 的 pin 走（= 当前要重点验的那一版，现在是 **`0.2.0-rc.2`**；这条腿原样安装提交的
+  manifest，`test-windows` 也是），其余线由 `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装
+  （顺带删锁），改写的正确性由 `tests/ci-pin-line.test.mjs` + `tests/workflow.test.mjs` 的守卫断言守住。
+  **0.1.5 的两条腿已随该线摘除**（`--legacy-peer-deps` 安装步骤、复数 `dsh-agent-presets` 的 peer 一并
+  删除）：`matrix.dsh` 里不再有 `0.1.5-*`，`dshReleases` 里它们仍留 `incompatible` 表态。
 - **摘除一条旧线要成套做**（0.1.2-rc 的先例）：范围里的 comparator、`dshReleases` 表态、CI 腿、
   固定装置（`tests/` 里的合成 facts）、只服务该线的源码分支、文档里的腿列表，一次改完。
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 当前快照（2026-09-29 · 0.8.0 = `latest` + `next`）
+### 当前快照（2026-10-03 · `0.8.1` = `latest` + `next`）
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
-| `latest` | `0.1.7-rc.2` | `compatible`：进 CI 腿（完整探针） |
-| `next` | **`0.2.0-rc.1`**（09-29 发布） | `compatible`：见 [upstream-0.2.0.md](upstream-0.2.0.md)（干净树安装、`tsc` 0 错、套件 1009 通过 / 0 失败、七条真 PTY 探针全过）。它是 **0.8.0 的默认线**：提交的 manifest、锁与 Windows 腿都装它 |
-| `0.1.7` 线 | `0.1.7-rc.1` / **`0.1.7-rc.2`** | `compatible`：rc.2 跑完整探针，rc.1 跑 typecheck + 套件（同一代际，代码路径相同） |
-| 旧线 | `0.1.5-rc.1` / `0.1.5-rc.3` | **`incompatible`**：0.8.0 随用户决定摘除（范围不再有 comparator、CI 两条腿与 legacy-peers 安装步骤删除、复数 `dsh-agent-presets` 的 peer 删除；`dshReleases` 保留明确表态） |
-| 已摘 | `0.1.2-rc.1` | `incompatible`：**支持已取消**（0.1.7 适配完成后按用户决定摘除；范围不再有它的 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
+| `latest` | **`0.2.0-rc.2`** | `compatible`：**默认线**（提交的 manifest、锁与 `test-windows` 腿都装它），跑完整探针 |
+| `next` | **`0.2.0-rc.2`** | 同上（上游把 `latest` 与 `next` 都指向它） |
+| `0.2.0` 线 | `0.2.0-rc.1` | `compatible`：见 [upstream-0.2.0.md](upstream-0.2.0.md)（干净树安装、`tsc` 0 错、真 PTY 探针全过）；CI 里由 `ci-pin-line.mjs` 改写 manifest 后从零安装 |
+| `0.1.7` 线 | `0.1.7-rc.1` / **`0.1.7-rc.2`** | `compatible`：两条都在 CI 里（rc.2 完整探针，rc.1 typecheck + 套件；同一代际） |
+| 旧线 | `0.1.5-alpha.1` … `0.1.5-rc.3` | **`incompatible`**：0.8.0 随用户决定摘除（范围不再有 comparator、CI 两条腿与 legacy-peers 安装步骤删除、复数 `dsh-agent-presets` 的 peer 删除；`dshReleases` 保留明确表态） |
+| 已摘 | `0.1.2-rc.1`、`0.1.3-alpha.1`/`alpha.2` | `incompatible`：**支持已取消**（范围不再有 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
+
+当前声明窗口：`>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1`（**不含 0.1.5 与更早**）。上游再发 `0.2.0`
+正式版时，按同样流程跑一遍（干净树安装 → `tsc` → 全套 → 探针）再决定是否加 comparator。
 
 > **2026-09-28**：上游 `next` 的 **`0.1.7-rc.2`** 已按完整流程验过并声明 `compatible`：干净树安装（族全部 rc.2）、
 > `tsc --noEmit` 0 错、套件 988 项 985 通过 / 0 失败 / 3 skip、六个真 PTY 探针（boot / drop / cut / rtt / busy-drop）全过。
 > 它不是重钉版：272 个族包里 59 个类型面有变化，其中 14 个落在本插件自己的接缝上（dsh-agent-loop、dsh-llm、
 > dsh-session、dsh-subagent、dsh-user-approval、dsh-tools、dsh-agent-default-model、dsh-agent-preset-registry、
 > dsh-atomic-write、dsh-sandbox 等，均为新增：新错误码 `ACCOUNT_QUOTA_EXCEEDED_CODE`、`projectToolUpdates`、原生工具声明等）。
-> 因此 CI 里 **另开一条 rc.2 腿**（默认腿仍是 rc.1，也就是提交的 manifest 与本机在跑的那条）；rc.2 那一线唯一装不上的东西是
+> 因此 CI 里 **另开一条 rc.2 腿**（当时默认腿仍是 rc.1；**自 `0.2.0-rc.2` 起它成了默认腿**——提交的
+> manifest、锁与 `test-windows` 都装它）；rc.2 那一线唯一装不上的东西是
 > `@deepseek-ai/dsh-llm-mock-server`（该线没发这个包），由 `scripts/ci-pin-line.mjs` 把它钉在 rc.1（独立 HTTP mock，无族内 peer）。
 
 **0.1.7 与旧线的三处结构性差异（适配期踩过的）：**
@@ -181,13 +200,34 @@ term、stdio）与单元套件：它能证明生命周期代码在 win32 上不�
 
 逐条走，每条记「通过 / 不通过 / 未测」：
 
-> 这一步在 2026-10-03 用一份**单独安装的 CLI dsh**（`npm i @deepseek-ai/dsh@0.2.0-rc.2` 到独立前缀）
-> 走过一轮，逐项结论、五处探针缺陷与 ConPTY 盲区记在
-> [`checkpoints.md`](checkpoints.md)「Windows 实机轮」一节。可自动化的部分现在由
-> `verify-batch --home <dir>` 一次跑完（12 PASS · 2 SKIP · 0 FAIL）；**下面两条没有自动化，必须人眼**：
-> IME 组合、多行中文粘贴。
+> **本轮（2026-10-03）已完成**，用的是单独安装的一份 CLI dsh（`npm i @deepseek-ai/dsh@0.2.0-rc.2` 到
+> 独立前缀）。逐项结论、五处探针缺陷与两处 ConPTY 盲区记在 [`checkpoints.md`](checkpoints.md)
+> 「Windows 实机轮」一节。汇总：可自动化的部分由 `verify-batch --home <dir>` 一次跑完
+> （**12 PASS · 2 SKIP · 0 FAIL**）；**没有自动化、只能人眼的两目（IME 组合、多行中文粘贴）已确认
+> 通过**；两处 `SKIP` 是覆盖边界（ConPTY 自己回 `CSI 6n`，慢链路与"静默但没断连"扮演不了——这两个形状
+> 在 Linux 腿上真跑），**`SKIP` 不算通过**。下一轮仍按下面的清单走，并把结论追加到同一节。
+>
+> 剩下的勾选状态保持"未勾"，因为它们是**模板**：每一轮实机验收都从这份清单开始，勾选记在 checkpoints
+> 的那一节里，而不是把模板永久勾上。
 
 - [ ] **启动**：`dsh --profile tui` 在 Windows Terminal 里正常进入工作区，字形与颜色正确
+- [ ] **IME 组合**：微软拼音输入中文时，**预输入串不得**出现在处理中卡片或计划卡上；
+      组合上屏后文本完整、光标位置正确
+- [ ] **粘贴**：多行粘贴进 composer（含中文与换行），不被截断、不触发意外提交
+- [ ] **鼠标拖选 + 复制**：拖选一段回复 → 复制键 / `/copy` 拿到的是拖选内容；点击卡片可折叠/展开
+- [ ] **resize**：拖动窗口改变大小时重画正确，光标行（composer）始终在屏
+- [ ] **字形回退**：`conhost` 与 `dumb` 控制台下状态行不出现替换字符（`DSH_TUI_ASCII=1` 也对）
+- [ ] **Screen 开/关**：`/status`、`/help` 打开报告屏，`PgUp/PgDn` 翻页不整屏闪，Esc 回工作区
+- [ ] **picker**：`/model`、`/view` 菜单能用上下键选、Esc 取消，取消后 composer 还在
+- [ ] **流式**：一轮对话流式输出期间画面持续更新、**不逐 tick 整屏重画**（弱链路上尤其明显）
+- [ ] **setup**：`/setup` 能打开向导并走完（首启自动出现见第二栏）
+- [ ] **SSH detach / reattach**：关闭窗口再重开（ConPTY teardown）→ Host 还活着，重接后正在跑的一轮没丢
+- [ ] **ConPTY 断链恢复**：`tui-drop-probe.mjs` 对应的路径在实机上手工验一遍（本机 CI 只跑脚本版）。
+      **"终端静默但没断连"这一半自动化覆盖不到**：ConPTY 代答 `CSI 6n`，`tui-cut-probe.mjs` 在本机
+      会打印 `SKIP:`（它只验了"应答的终端读作 attached"）。要人眼确认的是：把网络掐掉（不要关窗口，
+      让宿主以为窗口还在），再恢复时正在跑的一轮没丢、画面自己回来
+
+背景与已知差异见 [`windows.md`](windows.md)、[`terminals.md`](terminals.md)。
 - [ ] **IME 组合**：微软拼音输入中文时，**预输入串不得**出现在处理中卡片或计划卡上；
       组合上屏后文本完整、光标位置正确
 - [ ] **粘贴**：多行粘贴进 composer（含中文与换行），不被截断、不触发意外提交

@@ -113,16 +113,18 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ### 已知问题
 
-- Windows / ConPTY **实机**已在 2026-10-03 走了一轮（逐项结论见
-  [`docs/checkpoints.md`](checkpoints.md)「Windows 实机轮」）：可自动化的部分由
-  `verify-batch --home <dir>` 覆盖（12 PASS · 2 SKIP · 0 FAIL），**输入法组合与多行中文粘贴仍无
-  自动化**，发布前需人眼确认，清单在 [`docs/release.md`](release.md)。
-- fresh-home 首启的真 PTY 走查在只读 pnpm store 的沙箱里建不出 home，未跑通；探针
-  `scripts/tui-setup-probe.mjs` 已就位，命令在 [`docs/release.md`](release.md)。
+- Windows / ConPTY **实机人工验收已完成**（2026-10-03，维护者逐条走过 12 项清单，结论见
+  [`docs/checkpoints.md`](checkpoints.md)「Windows 实机轮」）：可自动化的部分由 `verify-batch --home
+  <dir>` 覆盖（12 PASS · 2 SKIP · 0 FAIL），**没有自动化、只能人眼的两目（输入法组合、多行中文粘贴）
+  已确认通过**。两处 `SKIP` 是覆盖边界、不是通过：ConPTY 自己回 `CSI 6n`，"慢链路"与"静默但没断连"
+  这两个形状它扮演不了（这两个形状在 Linux 腿上真跑）。
+- fresh-home 首启有两条探针覆盖（`scripts/tui-setup-probe.mjs` 断言向导自动出现 + 第二次启动不再出现；
+  `scripts/probe-onboarding.mjs` 供工作区探针识别"这是首启"并 `SKIP:` 而不是误报），命令在
+  [`docs/release.md`](release.md)。只读 pnpm store 的沙箱建不出 home，那是环境限制，不是覆盖缺口。
 - ~~`scripts/tui-drop-probe.mjs` 约 1/7 概率因自身的 `/status` 重试竞态误报~~ —— **本版已修**：
   改为一次请求在飞、按每次请求的输出判定、并按"当前是否真有 Screen"决定关闭，连跑 20 次无失败。
-- 打包：`npm pack` 239 个文件 / 1.36 MB（tarball），CHANGELOG 随包发布；无凭据、无 home、无 sqlite、
-  无 scratch（`npm pack --dry-run` 实测）。
+- 打包：`npm pack --dry-run` 实测 **243 个文件 / 1.4 MB（tarball）/ 解包 4.2 MB**，CHANGELOG 随包发布；
+  无凭据、无 home、无 sqlite、无 scratch。
 
 ---
 
