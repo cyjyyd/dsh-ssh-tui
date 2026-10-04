@@ -97,11 +97,26 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
   live 源行与重复 primary 表示各自计数，四个数字都必须为 0。
 - 退役并在 CI 上禁止复活：`dedicated` Surface 角色、onboarding 的对话框渲染路径、
   `upsertPlanRow`（计划行的第二个写入者）、`ask_user_question` 的通用工具卡。
+- **Windows 实机轮（2026-10-03）修掉五处探针缺陷，产品代码未改**：`verify-batch` 在 Windows 上
+  因 `spawn('npm')` 必然 `ENOENT`（改用 `$npm_execpath`）；`tui-route-probe` 的 `/tmp` 字面量
+  （改 `os.tmpdir()`）与目录符号链接（Windows 改 junction）；`footer-windows-probe` 补了**未测量
+  链路**档案并逐格断言时长槽（`未测` 而非 `160ms`）；`tui-mock-probe` 的鼠标坐标改由真实终端网格
+  给出（此前从字节流解析 `ESC[<row>;1H`，ConPTY 下拼出伪行，拖选看起来偏了两格——**是探针缺陷，
+  不是选择缺陷**）。
+- **新增 `scripts/tui-unmeasured-probe.mjs`**（管道父进程，进 `verify-batch` 与 CI）：ConPTY 自己回
+  `CSI 6n`，所以"终端不回 DSR"这一格在 Windows 本机摸不到，而这个形状正是读者报过两次的那个。两条腿
+  分别断言 `SSH ○○○○ 未测`（绘制节奏只留在 `/diag`）与 `SSH ●●●● <n>ms`。
+- **ConPTY 盲区改为显式 `SKIP:`**（不再是"读错就判红"）：`tui-cut-probe` 的静默半场、
+  `tui-rtt-probe` 的慢链路半场、`tui-setup-probe`/`--line-mode` 的字节形状检查。SKIP 仍收尾
+  `INCOMPLETE`。真实 home 未配置时（会进配置向导）同样 `SKIP:` 而不是超时报红；
+  `verify-batch --home <dir>` 可把读 profile 的三步指向自建 home。
 
 ### 已知问题
 
-- Windows / ConPTY **实机**未在本轮覆盖（CI 只跑探针）：发布前需按
-  [`docs/release.md`](release.md) 的清单人工走一遍。
+- Windows / ConPTY **实机**已在 2026-10-03 走了一轮（逐项结论见
+  [`docs/checkpoints.md`](checkpoints.md)「Windows 实机轮」）：可自动化的部分由
+  `verify-batch --home <dir>` 覆盖（12 PASS · 2 SKIP · 0 FAIL），**输入法组合与多行中文粘贴仍无
+  自动化**，发布前需人眼确认，清单在 [`docs/release.md`](release.md)。
 - fresh-home 首启的真 PTY 走查在只读 pnpm store 的沙箱里建不出 home，未跑通；探针
   `scripts/tui-setup-probe.mjs` 已就位，命令在 [`docs/release.md`](release.md)。
 - ~~`scripts/tui-drop-probe.mjs` 约 1/7 概率因自身的 `/status` 重试竞态误报~~ —— **本版已修**：

@@ -8,7 +8,8 @@
 一键复核全部证据：
 
 ```bash
-node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + 四条真机探针
+node scripts/verify-batch.mjs --batch <A|B|C>     # typecheck + 全量测试 + 真机探针
+node scripts/verify-batch.mjs --home <dir>        # 把读 profile 的三步指向这个 DSH_HOME
 ```
 
 ## A 批 · 界面基础（已交付）
@@ -1475,3 +1476,57 @@ Screen/Esc 路径本轮未改，且 `screen-contract` / `tui-probe` 的同一组
 4. 4 个 `.xdg-*` 文件自 `6be9960` 起被跟踪，属遗留清理，未在本轮处理。
 
 **结论**：`RC PREP COMPLETE, BLOCKED BEFORE TAG` —— 自动化门全绿，剩两件只能人工完成的门槛（上面 1、2）。
+
+## Windows 实机轮 · 0.8.2 RC 前的五处探针缺陷（2026-10-03）
+
+在 Windows 实机上用**单独拉的一份 CLI dsh**（`npm i @deepseek-ai/dsh@0.2.0-rc.2` 到一份独立前缀，不动
+PATH、不用桌面版 runtime）逐条走 12 项清单，跑出一批"看起来像产品缺陷、其实是探针"的失败。逐条定位与
+修法如下；**产品代码零改动**，改的全是探针与门。
+
+| # | 现象（实机） | 定位 | 修法 |
+|---|---|---|---|
+| 1 | `verify-batch` 的 `typecheck`/`full suite` 在 0 秒内 `FAIL (exit 127)` | `spawn('npm', …)`：Windows 上装的是 `npm.cmd`，Node 不带 shell 不会执行它（CVE-2024-27980） | 优先用 `$npm_execpath` + `process.execPath`，退路是整行交给 shell（单字符串，避开 DEP0190） |
+| 2 | `tui-route-probe` 直接崩：`mkdtemp '\tmp\…' ENOENT` | `join(process.env.TMPDIR ?? '/tmp', …)`：`/tmp` 在 Windows 是**驱动器相对路径** | 换 `os.tmpdir()`（`tui-mock-probe` 早就修过同一处，这个漏了） |
+| 3 | `tui-route-probe` 接着崩：`symlink … EPERM` | 目录符号链接要 `SeCreateSymbolicLinkPrivilege` | Windows 用 `junction`（与 `tui-mock-probe` 一致） |
+| 4 | `footer-windows-probe` 的 8 个档案全是"已测量" | 该探针从没喂过 `probed: false` | 加两个档案（SSH/旧代码页 × 未测量），并逐格断言 chip 的**时长槽**：`未测` 而非 `160ms`；旧代码页下空心圆是 `o`（`○→o`） |
+| 5 | `tui-mock-probe`：拖选复制偏移、`160→…→160` 行不相等 | ① 拖选坐标由**字节流里解析 `ESC[<row>;1H`** 得来，而 ConPTY 把帧重发成换行批次 ⇒ 回复被"找到"在字符 8065、按下列 8151；② 行恒等断言把链路芯片的**活值**（8 秒时的重测）算进去了 | ① 坐标改由**真实终端网格**（`tests/screen.mjs`）给出，按单元格映射；② 比对前把 chip 的活值归一化（`SSH ●●●● …`），并在日志里保留对比力 |
+
+**这不是"探针运气不好"**：第 5 条的前半曾经被我报成产品缺陷（`selection.ts` 的 gutter/列走查）。实际是
+探针读了一行被 ConPTY 拼出来的伪行——把坐标交给真实网格后，同一次拖选逐字复制出
+`TOKEN-ALPHA-9 --dry-ru`，`/copy` 与 Alt+4 选中复制本来就是精确的。定位手段：临时打开
+`DSH_TUI_SELECTION_DEBUG=1`（调试补丁**未提交**，只在本地编译过、随即 `git checkout` 还原）。
+
+### ConPTY 盲区：显式 SKIP，而不是硬判
+
+同一份字节流经 ConPTY 会被改形（一次 boot 加 `/diag`：`ESC[<row>;1H` **3** 个 vs 管道 **95** 个，
+`ESC[2J` **1** vs **0**），而且 ConPTY **自己回 `CSI 6n`**。于是四类断言在 Windows 上无信号，四者现在都
+打印 `SKIP:` 并附理由（`SKIP` 永远不算 PASS，整轮收尾 `INCOMPLETE`）：
+
+- `tui-cut-probe`：无法扮"终端静默但没断连"（live 那一半照跑）
+- `tui-rtt-probe` 第一段：无法扮慢链路（第二段"带历史的 resume"照跑，且它才是有回归历史的那段）
+- `tui-setup-probe` / `tui-probe --line-mode` / `tui-probe` 的流式帧粒度：读不到逐行寻址与清屏
+
+**新增覆盖**：`scripts/tui-unmeasured-probe.mjs`（管道父进程，两条腿）——**"从没测到过"这一格本机在
+ConPTY 上根本摸不到**，而这个形状是被读者报过两次的那个。它断言：不回 DSR ⇒ `SSH ○○○○ 未测` 且
+`/diag` 的 `绘制间隔 160ms` 另起一行；每条必答 ⇒ `SSH ●●●● <n>ms` 且 `/diag` 写"已测量"。已进
+`verify-batch`（`unmeasured`）与 CI 两条腿。
+
+**另一个真发现的同类问题**：真实 home 未配置时，0.8.2 会（正确地）进配置向导，于是 `tui-probe` /
+`tui-drop-probe` / `tui-route-probe` 的断言全部打在"没有工作区"上而超时报红。三处改为识别向导并
+`SKIP:`（`scripts/probe-onboarding.mjs` 一处判定），并在需要真跑时用 `verify-batch --home <dir>` 把
+`probe`/`drop`/`linemode` 三步指向自建 home。
+
+### 本机验收（`52417b9` + 本轮改动）
+
+| 门 | 结果 |
+|---|---|
+| `npm run typecheck` | 0 错 |
+| 全套测试（本机 Windows） | 1376 项 · **1365 通过 · 0 失败 · 11 跳过**（跳过均为平台互斥用例；`python3` 用运行时自带 Python 的 shim 后，原先那条环境性失败也过了） |
+| `npm run freeze` | 八条不变量 + 七条退役路径全绿 |
+| `npm run bench` | 五个动作 0 次全清 |
+| `verify-batch --home F:\dsh-win-verify-home` | **12 PASS · 2 SKIP · 0 FAIL**（SKIP = `link` 第一段、`linemode`，均为 ConPTY 盲区并附理由） |
+| 12 项人工清单中可自动化的部分 | 启动 / resize / 字形回退 / Screen / picker / 流式（clear 数）/ setup 向导 / detach-reattach / 断链恢复 全部通过 |
+| 仍需人眼 | 微软拼音 IME 组合、多行中文粘贴（无自动化）；"拖选高亮是否从按下的字开始"（Windows 上无法用脚本模拟指针） |
+
+**结论**：Windows 实机门从"12 项无法闭环"推进到"可自动化的部分全绿、盲区有名字有理由、其中一个盲区
+用管道形状补上了新覆盖"。发版前仍欠两目人眼确认（IME、粘贴）。

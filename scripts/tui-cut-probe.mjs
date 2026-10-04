@@ -31,6 +31,8 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const { queryDisplayAttachment } = await import(pathToFileURL(join(REPO, 'lib/display-sock.js')).href)
 const { sessionLockLookupPaths } = await import(pathToFileURL(join(REPO, 'lib/session-lock.js')).href)
+// The pty in front may not let the probe play the terminal at all (see the export).
+const { PTY_IS_CONPTY } = await import(pathToFileURL(join(REPO, 'scripts', 'pty-window.mjs')).href)
 
 const home = process.env.PROBE_HOME ?? process.env.DSH_HOME ?? join(process.env.HOME ?? '/root', '.dsh')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -119,15 +121,19 @@ if (sock !== undefined) {
     await delay(500)
   }
   if (live !== 'attached') problems.push(`an answering terminal must read as attached (got ${live})`)
-  if (answered === 0) problems.push('the relay never probed the terminal at all')
+  // ConPTY answers `CSI 6n` on the app's behalf: the request never reaches this
+  // probe, so `answered` is 0 for a reason that is not the relay's. See `SKIP`.
+  if (!PTY_IS_CONPTY && answered === 0) problems.push('the relay never probed the terminal at all')
 }
 
 // The cut: every process still runs, only the far end stops answering.
 answering = false
-const silent = sock === undefined ? undefined : await queryDisplayAttachment(sock)
-const again = sock === undefined ? undefined : await queryDisplayAttachment(sock)
-if (silent !== 'detached') problems.push(`a silent terminal must read as detached (got ${silent})`)
-if (again !== 'detached') problems.push(`and stay detached (got ${again})`)
+const silent = sock === undefined || PTY_IS_CONPTY ? undefined : await queryDisplayAttachment(sock)
+const again = sock === undefined || PTY_IS_CONPTY ? undefined : await queryDisplayAttachment(sock)
+if (!PTY_IS_CONPTY) {
+  if (silent !== 'detached') problems.push(`a silent terminal must read as detached (got ${silent})`)
+  if (again !== 'detached') problems.push(`and stay detached (got ${again})`)
+}
 
 term.kill()
 try {
@@ -139,6 +145,15 @@ try {
 }
 
 if (problems.length === 0) {
+  if (PTY_IS_CONPTY) {
+    // Not a pass: half of this probe did not run. The live half did — the relay
+    // read an answering terminal as attached, and the link chip's measurement on
+    // this platform is the same evidence — but "a terminal that goes quiet reads
+    // as detached" cannot be driven when the terminal answers for us.
+    console.log('SKIP: ConPTY answers `CSI 6n` itself, so the probe cannot stop answering for the relay;')
+    console.log(`      the live half ran (${answered} cursor requests reached this probe, attach read as attached)`)
+    process.exit(0)
+  }
   console.log(`OK: live reads attached (${answered} cursor requests answered), a cut reads detached`)
   process.exit(0)
 }

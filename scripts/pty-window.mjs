@@ -78,6 +78,28 @@ export function windowDeathNote(kind) {
 export const WINDOW_DEATHS_DIFFER = !IS_WINDOWS
 
 /**
+ * Whether the pty in front of a probe is a ConPTY.
+ *
+ * node-pty's Windows backend is ConPTY (winpty was pre-1.0; this checkout is on
+ * 1.2), and ConPTY is not a transparent terminal for two of the things these
+ * probes assert on:
+ *
+ * 1. it answers `CSI 6n` itself, so a probe can never *be* the terminal's
+ *    timing. A simulated slow link, or a terminal that stays silent, cannot be
+ *    driven at all (`tui-rtt-probe`'s phase 1, `tui-cut-probe`);
+ * 2. it re-emits the app's output as newline-separated batches and adds clears
+ *    of its own, so the painter's row addressing is not in the stream the probe
+ *    reads (`tui-setup-probe`'s repaint rows, `tui-probe --line-mode`'s shape
+ *    checks). Measured on this machine, one boot plus `/diag`: 3
+ *    `ESC[<row>;1H` over ConPTY against 95 of them over a pipe.
+ *
+ * Both are facts about the platform, not about the product. A probe that needs
+ * either prints `SKIP:` with the reason and keeps every assertion that *is*
+ * portable — a skip is never a pass (`verify-batch` closes the run `INCOMPLETE`).
+ */
+export const PTY_IS_CONPTY = IS_WINDOWS
+
+/**
  * Re-exported so the probes never write a raw `process.platform` comparison:
  * `src/platform.ts` is the one decision point, and a script that branches on
  * the platform is exactly where the two halves drift apart unnoticed.

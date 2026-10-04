@@ -118,6 +118,19 @@ Host 的 stderr 记在 `%USERPROFILE%\.dsh\tui-socks\`，锁在 `%USERPROFILE%\.
 **终端能力。** Windows Terminal 与老的 conhost 能力不同（剪贴板写入、超链接只在 Windows Terminal 上承诺）。
 判定写在 `/diag` 的「终端」一行，判错了用 `DSH_TUI_TERM_CAPS` 覆盖，详见 [terminals.md](terminals.md)。
 
+## ConPTY 会替你的终端回答两件事
+
+这两件事在 Windows 上按"实测"读会读错，写在这里免得当成缺陷追：
+
+1. **`CSI 6n`（问光标位置）由 ConPTY 代答。** 所以底栏链路芯片在 Windows 本机永远是"已测量"
+   （`SSH ●●●● 0–12ms`），**看不到 `未测`**——`未测` 是"终端不回 DSR"的形状，在你的 Linux/SSH 会话
+   里才会出现。要看这一格，用管道父进程的形状：
+   `node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs`（两条腿：不回话读 `未测`、
+   每条必答读真值）。
+2. **输出流不是插件写出去的那份。** ConPTY 把每一帧重新发成以换行分隔的批次，还会自己写清屏和回车：
+   同一次 boot 加 `/diag`，`ESC[<row>;1H` 在 ConPTY 上是 3 个、在管道上是 95 个。所以"逐行寻址""不许
+   清屏"这类检查在 ConPTY 上会打印 `SKIP:`（不是通过，也不是失败），详见 [release.md](release.md)。
+
 ## CI 证明不了、需要你自己看一眼的
 
 这两项在自动化里只能证明一半：

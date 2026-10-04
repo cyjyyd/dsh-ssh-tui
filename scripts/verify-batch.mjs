@@ -19,13 +19,36 @@
  * because a gate that reports success for work it did not do is not a gate.
  */
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import process from 'node:process'
+
+/**
+ * How to run `npm` on this machine.
+ *
+ * `spawn('npm', …)` works on POSIX and never on Windows: what is installed there
+ * is `npm.cmd`, which Node refuses to spawn without a shell (CVE-2024-27980),
+ * and the step failed with `spawn npm ENOENT` — reported as a red `typecheck`
+ * and a red `full suite` in zero seconds, which reads like a code defect and is
+ * not one. `npm_execpath` is the npm that is already running this (set under
+ * `npm run`, the normal invocation), and it is the same npm either way.
+ */
+function npmInvocation(args) {
+  const execpath = process.env.npm_execpath
+  if (execpath !== undefined && execpath !== '' && existsSync(execpath)) {
+    return { command: process.execPath, args: [execpath, ...args], shell: false }
+  }
+  // No `npm_execpath` means this was started as `node scripts/verify-batch.mjs`.
+  // Windows has no `npm` executable — only `npm.cmd`, which Node refuses to spawn
+  // without a shell (CVE-2024-27980); the whole line goes in as one string so
+  // Node does not also warn about args passed alongside `shell: true` (DEP0190).
+  if (process.platform === 'win32') return { command: `npm.cmd ${args.join(' ')}`, args: [], shell: true }
+  return { command: 'npm', args, shell: false }
+}
 
 const STEPS = [
   { id: 'typecheck', label: 'typecheck', command: 'npm', args: ['run', 'typecheck'], timeoutMs: 300_000 },
   { id: 'test', label: 'full suite', command: 'npm', args: ['test'], timeoutMs: 900_000 },
-  { id: 'probe', label: 'pty probe (real profile)', command: 'node', args: ['scripts/tui-probe.mjs'], timeoutMs: 300_000 },
+  { id: 'probe', label: 'pty probe (real profile)', command: 'node', args: ['scripts/tui-probe.mjs'], timeoutMs: 300_000, realProfile: true },
   // The same probe on a profile this repo built itself: the path CI and a fresh
   // machine take, and the only one Windows can take.
   { id: 'home', label: 'pty probe (throwaway home)', command: 'node', args: ['scripts/probe-home.mjs', '--probe'], timeoutMs: 900_000 },
@@ -37,7 +60,12 @@ const STEPS = [
   // where no frame may be composed until the log has been read — the window the
   // relay attaches inside, and the one a fix there can silently break.
   { id: 'link', label: 'pty link-quality probe (fresh + resume)', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-rtt-probe.mjs'], timeoutMs: 900_000 },
-  { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000 },
+  // The unmeasured link chip, in the shape the field reported it: a parent that
+  // relays stdin/stdout is the terminal, so it can stay silent — which is the one
+  // thing a ConPTY cannot be made to do (`CSI 6n` is answered for the app there).
+  // Both legs run: silent reads `未测`, answering reads a measurement.
+  { id: 'unmeasured', label: 'pipe link-chip probe (unmeasured + measured)', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-unmeasured-probe.mjs'], timeoutMs: 900_000 },
+  { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000, realProfile: true },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },
   // Both halves of the busy drop: the window closing under a running turn (the
@@ -46,16 +74,36 @@ const STEPS = [
   // — so the assertion there is the surviving Host, not the manner of death.
   { id: 'busy', label: 'pty busy-drop probe (window closed)', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy'], timeoutMs: 300_000 },
   { id: 'busycrash', label: 'pty busy-drop probe (TUI crashed)', command: 'node', args: ['scripts/tui-mock-probe.mjs', '--busy', '--crash'], timeoutMs: 300_000 },
-  { id: 'linemode', label: 'pty line-mode probe', command: 'node', args: ['scripts/tui-probe.mjs', '--line-mode'], timeoutMs: 300_000 },
+  { id: 'linemode', label: 'pty line-mode probe', command: 'node', args: ['scripts/tui-probe.mjs', '--line-mode'], timeoutMs: 300_000, realProfile: true },
   // Rendered footer frames: the escape-body leak of B-1 passed every unit test
   // (they fed the fitter unstyled chips) and was only visible on a frame.
   { id: 'footer', label: 'footer frame check', command: 'node', args: ['scripts/capture-footer-frames.mjs', '--check-only'], timeoutMs: 300_000 },
 ]
 
-function runStep(step) {
+function runStep(step, probeHome) {
   return new Promise(resolve => {
     const started = Date.now()
-    const child = spawn(step.command, step.args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    // `npm` is not an executable on Windows; resolve it rather than assume it.
+    const invocation = step.command === 'npm'
+      ? npmInvocation(step.args)
+      : { command: step.command, args: step.args, shell: false }
+    /**
+     * The steps that read a *profile* rather than building one.
+     *
+     * Their default is the machine's own `~/.dsh`, which is the point — that is
+     * the installation a reader has. Where that home cannot be probed at all (a
+     * first run: the setup wizard owns the screen, so `/diag` and `/status` never
+     * answer), `--home <dir>` points them at a home this repo built. Without it
+     * the run closes `INCOMPLETE`, which is honest but not evidence.
+     */
+    const env = step.realProfile === true && probeHome !== undefined
+      ? { ...process.env, PROBE_HOME: probeHome }
+      : process.env
+    const child = spawn(invocation.command, invocation.args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: invocation.shell,
+      env,
+    })
     let output = ''
     child.stdout.on('data', chunk => { output += String(chunk) })
     child.stderr.on('data', chunk => { output += String(chunk) })
@@ -112,13 +160,19 @@ function revision() {
 }
 
 function parseArgs(argv) {
-  const parsed = { batch: undefined, only: undefined }
+  const parsed = { batch: undefined, only: undefined, home: undefined }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--batch') parsed.batch = argv[++index]
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
+    else if (arg === '--home') parsed.home = argv[++index]
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--only typecheck,test,probe,home,term,link,drop,mock,route,busy,busycrash,linemode,footer]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--home <dir>] [--only typecheck,test,probe,home,term,link,unmeasured,drop,mock,route,busy,busycrash,linemode,footer]')
+      console.log('')
+      console.log('  --home <dir>  point the *real profile* steps (probe, drop, linemode) at this')
+      console.log('                DSH_HOME instead of the machine\'s own. Use it when that home is')
+      console.log('                a first run — the setup wizard owns the screen there, so those')
+      console.log('                steps skip and the run closes INCOMPLETE.')
       process.exit(0)
     } else {
       console.error(`unknown argument: ${arg}`)
@@ -128,7 +182,7 @@ function parseArgs(argv) {
   return parsed
 }
 
-const { batch, only } = parseArgs(process.argv.slice(2))
+const { batch, only, home: probeHome } = parseArgs(process.argv.slice(2))
 const steps = only === undefined ? STEPS : STEPS.filter(step => only.includes(step.id))
 if (steps.length === 0) {
   console.error(`no steps selected; known ids: ${STEPS.map(step => step.id).join(', ')}`)
@@ -136,12 +190,13 @@ if (steps.length === 0) {
 }
 
 console.log(`acceptance evidence${batch === undefined ? '' : ` for batch ${batch}`} — ${revision()}`)
+if (probeHome !== undefined) console.log(`real-profile steps are pointed at ${probeHome}`)
 console.log('')
 
 const results = []
 for (const step of steps) {
   process.stdout.write(`${step.label} … `)
-  const result = await runStep(step)
+  const result = await runStep(step, probeHome)
   const skipped = result.code === 0 && /^SKIP:/mu.test(result.output)
   const verdict = result.code === 0 ? (skipped ? 'SKIP' : 'PASS') : 'FAIL'
   console.log(`${verdict}  (${(result.ms / 1000).toFixed(1)}s)  ${summarize(step, result)}`)

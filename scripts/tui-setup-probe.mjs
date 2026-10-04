@@ -28,6 +28,8 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 import { provisionProbeCredential } from './probe-home.mjs'
+// The pty in front may rewrite the frame shape these row checks read (see the export).
+import { PTY_IS_CONPTY } from './pty-window.mjs'
 
 const require = createRequire(import.meta.url)
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -144,10 +146,18 @@ async function runProbe(argv) {
     term.write('d')
     await delay(500)
     const listed = output.slice(beforeList)
-    check(!/\x1b\[[HJ]|\x1b\[2J/u.test(listed), `a keystroke must not clear the screen: ${JSON.stringify(plain(listed).slice(0, 120))}`)
+    // The shape checks below read the painter's row addressing and its clears out
+    // of the stream. ConPTY re-emits frames as newline-separated batches and adds
+    // clears of its own, so neither is in the stream it hands over: measured on
+    // this machine, the same boot arrives with 3 `ESC[<row>;1H` over ConPTY and 95
+    // over a pipe. What the wizard *does* is asserted either way; what the frame
+    // *looks like* on the wire is skipped, and said out loud at the end.
     const listRows = rowsOf(listed)
-    check(listRows.length > 0, 'the list step repaints the row the highlight moved to')
-    check(Math.min(...listRows) >= 2, `the repaint starts at the body, never the title (rows ${listRows.join(',')})`)
+    if (!PTY_IS_CONPTY) {
+      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(listed), `a keystroke must not clear the screen: ${JSON.stringify(plain(listed).slice(0, 120))}`)
+      check(listRows.length > 0, 'the list step repaints the row the highlight moved to')
+      check(Math.min(...listRows) >= 2, `the repaint starts at the body, never the title (rows ${listRows.join(',')})`)
+    }
 
     // 3. Enter walks to the next step — which is a *field*. That is where "a
     //    keystroke repaints a few rows" is measurable: the list step repaints its
@@ -156,17 +166,18 @@ async function runProbe(argv) {
     const beforeStep = output.length
     term.write('\r')
     await delay(900)
-    check(!/\x1b\[[HJ]|\x1b\[2J/u.test(output.slice(beforeStep)), 'walking a step must not clear the screen')
     const stepRows = rowsOf(output.slice(beforeStep))
-    check(stepRows.length > 0, 'the new step painted something')
-
     const beforeType = output.length
     term.write('x')
     await delay(500)
     const typed = output.slice(beforeType)
-    check(!/\x1b\[[HJ]|\x1b\[2J/u.test(typed), `a keystroke must not clear the screen: ${JSON.stringify(plain(typed).slice(0, 120))}`)
     const rows = rowsOf(typed)
-    check(rows.length > 0 && rows.length <= 8, `typing in the field repaints a few rows (${rows.length})`)
+    if (!PTY_IS_CONPTY) {
+      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(output.slice(beforeStep)), 'walking a step must not clear the screen')
+      check(stepRows.length > 0, 'the new step painted something')
+      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(typed), `a keystroke must not clear the screen: ${JSON.stringify(plain(typed).slice(0, 120))}`)
+      check(rows.length > 0 && rows.length <= 8, `typing in the field repaints a few rows (${rows.length})`)
+    }
 
     // 4. Resize keeps the field and the counter.
     term.resize(72, 20)
@@ -243,6 +254,15 @@ async function runProbe(argv) {
     console.error('FAIL')
     for (const problem of problems) console.error(`  - ${problem}`)
     return 1
+  }
+  if (PTY_IS_CONPTY) {
+    // Not a pass: the frame-shape half did not run. Everything the wizard *does*
+    // did (it opens by itself, steps, types, survives a resize, hands the
+    // workspace back), and the incremental-repaint contract is covered
+    // headlessly by `tests/setup-screen.test.mjs` and `npm run bench`.
+    console.log('SKIP: ConPTY re-emits frames as newline batches and adds clears of its own, so the')
+    console.log('      row-addressed repaint checks cannot be read here; the wizard itself was walked')
+    return 0
   }
   console.log('OK: the setup wizard is a Screen — it paints its own frame, owns its field,')
   console.log('    survives a resize, and hands the workspace back on Esc')

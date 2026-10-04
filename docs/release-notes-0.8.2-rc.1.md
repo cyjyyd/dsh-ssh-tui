@@ -134,9 +134,14 @@ dsh plugin --profile tui add dsh-ssh-tui@0.8.2-rc.1
 
 ## 已知限制
 
-- **Windows / ConPTY 实机尚未人工确认**（本版发布前的必做项）。CI 的 Windows 腿跑的是脚本探针与单元
-  套件，**不等于**人工通过：输入法组合、鼠标拖选、宿窗口关闭后重接这些仍要人在真机上走一遍，
-  清单见 [`release.md`](release.md)「发布前人工门槛」。
+- **Windows / ConPTY 实机已在 2026-10-03 走了一轮**（用一份单独安装的 CLI dsh；逐项结论见
+  [`checkpoints.md`](checkpoints.md)「Windows 实机轮」）。结论分三类：**可自动化的部分全绿**
+  （`verify-batch --home <dir>`：12 PASS · 2 SKIP · 0 FAIL）；**两处 ConPTY 盲区**明确打印 `SKIP:`
+  并附理由（ConPTY 自己回 `CSI 6n`，"慢链路"与"终端静默但没断连"这两个形状它无法扮演）；
+  **两条仍需人眼**——输入法组合、多行中文粘贴，清单见 [`release.md`](release.md)「发布前人工门槛」。
+- **`未测` 那一格在 Windows 本机看不到**：ConPTY 代答光标位置，本机链路芯片因此永远是"已测量"。
+  该形状由 `scripts/tui-unmeasured-probe.mjs` 用管道父进程覆盖（两条腿：不回话读 `未测`、每条必答读
+  真值），已进 CI 两条腿。
 - **拖放探针此前约 1/7 概率误报**（探针自身与自己的 `/status` 重试竞态，不是产品行为）。本版已修，
   并连跑 20 次验证。
 - `--resume` 与首启的关系见上文：本版修的是"新机器不显示向导"，不是"resume 不再触发向导"。

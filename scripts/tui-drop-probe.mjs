@@ -61,6 +61,10 @@ const { closeWindow, windowDeathNote, IS_WINDOWS } = await import(
 const { screen: newGrid } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../tests/screen.mjs')).href,
 )
+// A home with nothing configured boots the wizard, not the workspace.
+const { isFirstRun, printFirstRunSkip } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'probe-onboarding.mjs')).href,
+)
 
 const USAGE = `usage: node scripts/tui-drop-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -266,12 +270,30 @@ async function runProbe({ sessionId, keep, home }) {
     await waitForOutput(a, text => /空闲|idle/u.test(text), 60_000, 'the idle status line')
     const beforeStatus = a.output.length
     a.term.write('/status\r')
-    await waitForOutput(
-      a,
-      text => text.slice(beforeStatus).includes(createdSessionId),
-      30_000,
-      'the /status report naming the session',
-    )
+    try {
+      await waitForOutput(
+        a,
+        text => text.slice(beforeStatus).includes(createdSessionId),
+        30_000,
+        'the /status report naming the session',
+      )
+    } catch (error) {
+      // A home with nothing configured boots the setup wizard, which owns the
+      // keyboard: `/status` cannot answer and there is no workspace to drop. That
+      // is the wizard's contract, and it has its own probe — see
+      // `probe-onboarding.mjs`. A *configured* home that cannot answer still
+      // fails here, because the markers below are the wizard's own.
+      if (!isFirstRun(plain(a.output))) throw error
+      printFirstRunSkip('the drop/reattach contract')
+      // Drain before leaving. The launcher's ConPTY is being torn down and the
+      // Host is still writing its first frames; exiting inside that window
+      // crashed this probe on Windows (`0xC0000374`, heap corruption in the pty
+      // teardown). The normal path never exits this early — it has a whole
+      // scenario to play out first, and that is what drains the pty.
+      try { a.term.kill() } catch { /* already gone */ }
+      await delay(2_000)
+      return 0
+    }
     const aShowsSession = plain(a.output).includes(createdSessionId)
     check(aShowsSession, 'window A must show the session id in its transcript')
 

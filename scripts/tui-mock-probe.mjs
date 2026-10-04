@@ -64,6 +64,10 @@ const { hostBootstrapCommand } = await import(
 const { displayWidth } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../lib/term-text.js')).href,
 )
+// A real terminal grid, which is what says where a cell *is* (see `locateOnScreen`).
+const { screen: newGrid } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../tests/screen.mjs')).href,
+)
 
 const USAGE = `usage: node scripts/tui-mock-probe.mjs [--busy [--crash]] [--keep] [--cols N] [--rows N]
 
@@ -107,27 +111,67 @@ function clipboardWrites(text) {
 }
 
 /**
- * The last painted content of each screen row.
+ * The visible screen as rows of glyphs, straight out of the terminal grid.
  *
- * The painter addresses rows absolutely (`\x1b[<row>;1H`), so the transcript can
- * be reconstructed from the raw stream: that is how the probe knows where the
- * reply sits, which the mouse reports need as coordinates.
+ * Each entry carries its 1-based screen row, the text the reader sees, and — per
+ * character — the cell it starts in, because rows are *cells*: a wide glyph is
+ * two cells, and a coordinate has to name the cell its first half is in.
  */
-function screenRows(text) {
-  // Accumulate across frames: the painter only rewrites dirty rows, so the
-  // newest frame usually holds the status line and nothing else. Restricting
-  // the parse to it (tried in 92cad48) lost the reply entirely — the acceptance
-  // run caught it. A row's content ends at the next row marker or at the frame
-  // close, which is what keeps a chunk's tail out of the row.
-  const rows = new Map()
-  const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
-  for (const match of text.matchAll(pattern)) {
-    rows.set(Number(match[1]), plain(match[2] ?? ''))
+async function gridRows(grid) {
+  await grid.write('')
+  const buffer = grid.term.buffer.active
+  const rows = grid.term.rows
+  const columns = grid.term.cols
+  const out = []
+  for (let y = buffer.baseY; y < buffer.baseY + rows; y += 1) {
+    const line = buffer.getLine(y)
+    if (line === undefined) continue
+    let text = ''
+    const cellOfCharacter = []
+    for (let x = 0; x < columns; x += 1) {
+      const cell = line.getCell(x)
+      if (cell === undefined) break
+      // A wide glyph's second cell is a continuation, not a character: skipping
+      // it keeps `text` the glyph sequence the reader sees, and `cellOfCharacter`
+      // maps every one of those characters back to the cell it starts in.
+      if (cell.getWidth() === 0) continue
+      const chars = cell.getChars()
+      const value = chars === '' ? ' ' : chars
+      for (let index = 0; index < value.length; index += 1) cellOfCharacter.push(x)
+      text += value
+    }
+    out.push({ row: y - buffer.baseY + 1, text, cellOfCharacter })
   }
-  return rows
+  return out
 }
 
-/** Where `needle` is on the reconstructed screen: a 1-based row and cell column. */
+/**
+ * Where `needle` sits on the screen, as a 1-based row and cell column.
+ *
+ * The coordinates come from a real terminal grid fed by the same bytes the probe
+ * received, not from parsing `ESC[<row>;1H` out of the stream. Two reasons, and
+ * the second one cost a Windows acceptance run:
+ *
+ * 1. rows are *cells*, and only the grid knows which cell a glyph occupies;
+ * 2. ConPTY does not hand the painter's addressing over. It re-emits each frame
+ *    as a batch of newline-separated rows (the same difference `statusRow` reads
+ *    around), so the address parse saw one enormous pseudo-row: on Windows the
+ *    reply was "found" at character 8065 with a press column of 8151, and the
+ *    drag copied text three cells away from the pointer — a probe defect that
+ *    looked exactly like a selection defect for two acceptance runs.
+ *
+ * The search is limited to the visible viewport: a row in the scrollback is not
+ * a row the reader can point at (that is what `gridRows` returns).
+ */
+async function locateOnScreen(grid, needle) {
+  for (const row of await gridRows(grid)) {
+    const at = row.text.indexOf(needle)
+    if (at === -1) continue
+    return { row: row.row, column: (row.cellOfCharacter[at] ?? 0) + 1 }
+  }
+  return undefined
+}
+
 /**
  * The status row as the terminal received it.
  *
@@ -149,25 +193,16 @@ function statusRow(buffer) {
     .at(-1) ?? ''
 }
 
-function locateOnScreen(text, needle) {
-  for (const [row, line] of screenRows(text)) {
-    const at = line.indexOf(needle)
-    if (at !== -1) return { row, column: cellWidth(line.slice(0, at)) + 1 }
-  }
-  return undefined
-}
-
 /**
- * The cells `text` spends on the real terminal.
+ * The cells `text` spends on the real terminal, for the string-level checks.
  *
- * `displayWidth` is the painter's table, and the painter's rows are what the
- * bytes carry — with one exception it has to undo: symbols an emoji font would
- * draw too wide are pinned to their text form, which inserts `VS15` and a
- * *reserving* space (`▶` becomes `▶︎ `). Those two cells are budgeted once, by
- * the base glyph, so the reserving space is not a cell of its own — counting it
- * (or counting characters, as a naive `indexOf` column does) reports a column
- * one cell too far right, and a mouse report built from it lands one character
- * off inside a selected row.
+ * The mouse coordinates no longer come from here — they come from the terminal
+ * grid, which is the only thing that knows where a cell is (`locateOnScreen`).
+ * What is left is the status row's width: `displayWidth` is the painter's table,
+ * with one exception it has to undo. Symbols an emoji font would draw too wide
+ * are pinned to their text form, which inserts `VS15` and a *reserving* space
+ * (`▶` becomes `▶︎ `); those two cells are budgeted once, by the base glyph, so
+ * the reserving space is not a cell of its own.
  */
 function cellWidth(text) {
   let width = 0
@@ -532,7 +567,16 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     env,
   })
   let output = ''
-  term.onData(chunk => { output += chunk })
+  // The terminal's own picture of the screen. Everything the probe reads back —
+  // where the reply sits, and therefore the coordinates it reports — comes from
+  // here, because the bytes are not a reliable row map (see `locateOnScreen`).
+  const grid = newGrid(cols, rows)
+  let gridReady = Promise.resolve()
+  term.onData(chunk => {
+    output += chunk
+    gridReady = gridReady.then(() => grid.write(chunk)).catch(() => {})
+  })
+  const settledGrid = async () => { await gridReady }
 
   const waitFor = async (predicate, timeoutMs, what) => {
     const deadline = Date.now() + timeoutMs
@@ -602,7 +646,8 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     )
 
     // 3. Drag across the reply: press on the token, move right, release.
-    const at = locateOnScreen(output, REPLY_TOKEN)
+    await settledGrid()
+    const at = await locateOnScreen(grid, REPLY_TOKEN)
     check(at !== undefined, 'the reply must be locatable on the painted screen')
     if (at !== undefined) {
       // Nine cells past the token: the copy must be the dragged range itself,
@@ -641,11 +686,20 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     //    reply with no tool or thinking card in it.
     const beforeSelect = output.length
     term.write('\x1b4')
-    await waitFor(
-      text => plain(text.slice(beforeSelect)).includes('▶'),
-      15_000,
-      'the selection marker on the newest reply',
-    )
+    // The marker is a *state*, not a repaint: the newest reply is the focused row,
+    // and it usually already is one — the key then changes nothing and no bytes
+    // follow, which a byte-slice assertion reads as a failure (it passed or failed
+    // depending on whether some unrelated repaint happened to re-emit the row).
+    // Ask the screen what it shows instead.
+    const marked = await (async () => {
+      const deadline = Date.now() + 15_000
+      while (Date.now() < deadline) {
+        if ((await gridRows(grid)).some(row => row.text.includes('▶'))) return true
+        await delay(100)
+      }
+      return false
+    })()
+    check(marked, 'the newest reply carries the selection marker')
     term.write('\x1b[99;6u')
     await waitFor(
       text => /52;[^;]*;[A-Za-z0-9+/=]+\x1b/u.test(text.slice(beforeSelect)),
@@ -675,6 +729,7 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     for (const [columns, rows] of GEOMETRIES) {
       const before = output.length
       term.resize(columns, rows)
+      await grid.resize(columns, rows)
       await delay(900)
       const repainted = output.length - before
       const row = statusRow(output)
@@ -692,8 +747,19 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
       rowsSeen[0].width > rowsSeen[4].width,
       `the row must be wider at 160 (${rowsSeen[0].width}) than at 72 (${rowsSeen[4].width})`,
     )
-    check(rowsSeen[0].row === rowsSeen[8].row, '160 → … → 160 did not come back to the same row')
-    check(rowsSeen[1].row === rowsSeen[7].row, '120 → … → 120 did not come back to the same row')
+    /**
+     * The row with its *live* readings blanked, for the geometry comparison.
+     *
+     * The link chip carries a measurement the relay re-takes on its own cadence
+     * (first recheck at 8s, then every 20s), and this sweep takes ~8s — so the
+     * same geometry can legitimately read `●●●● 0ms` one pass and `●●●● 1ms` the
+     * next. That is the feature this batch is about, not a reflow defect; it was
+     * reported as `160 → … → 160 did not come back to the same row` on Windows
+     * and the two rows differed by exactly that number.
+     */
+    const layoutOf = row => row.replace(/(SSH [●○*]{4} )\S+/u, '$1…')
+    check(layoutOf(rowsSeen[0].row) === layoutOf(rowsSeen[8].row), '160 → … → 160 did not come back to the same row')
+    check(layoutOf(rowsSeen[1].row) === layoutOf(rowsSeen[7].row), '120 → … → 120 did not come back to the same row')
 
     // 6. The window still exits on its own terms.
     term.write('\x15')

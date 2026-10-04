@@ -72,9 +72,20 @@ if (pty === undefined) {
 /** Control sequences the probe watches for. */
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 const plain = text => text.replace(CSI, '')
-/** Every `SSH ●●●○ 90ms` the footer painted, in order. */
-const chips = text => [...plain(text).matchAll(/SSH ([●○]{4}) (\d+)ms/gu)]
-  .map(match => ({ pips: match[1], ms: Number(match[2]) }))
+/**
+ * Every `SSH ●●●○ 90ms` the footer painted, in order.
+ *
+ * Both shapes count: a chip that was never measured reads `SSH ○○○○ 未测`, and
+ * counting only the measured form reported "the footer never painted a link
+ * chip" for a chip that was painted and honestly unmeasured — which is a
+ * different failure, and the one `52417b9` is about.
+ */
+const chips = text => [...plain(text).matchAll(/SSH ([●○]{4}) (\d+ms|未测|n\/a)/gu)]
+  .map(match => ({
+    pips: match[1],
+    measured: /^\d+ms$/u.test(match[2]),
+    ms: /^\d+ms$/u.test(match[2]) ? Number(match[2].slice(0, -2)) : undefined,
+  }))
 
 /**
  * How long the simulated link is bad in phase 1; the relay's first recheck is at
@@ -175,6 +186,11 @@ function openWindow(sessionId, replyDelayFor) {
 
 const problems = []
 const check = (condition, message) => { if (!condition) problems.push(message) }
+// ConPTY answers `CSI 6n` itself, so this probe can neither delay the answer (the
+// slow link phase 1 plays) nor withhold it. Phase 1's *simulation* is what has no
+// signal there; its chip assertions still run, and the skip is said out loud at
+// the end so the batch closes `INCOMPLETE` instead of green.
+const { PTY_IS_CONPTY } = await import(pathToFileURL(join(REPO, 'scripts', 'pty-window.mjs')).href)
 
 // ── phase 1: a fresh session on a link that starts slow and gets fast ────────
 
@@ -190,23 +206,29 @@ for (let wait = 0; wait < 60; wait += 1) {
 {
   // The first chip of all is the placeholder painted before any measurement lands
   // (four hollow pips); the measurement itself is the first one after it.
-  const first = freshSeen.find(chip => chip.pips !== '○○○○')
+  const first = freshSeen.find(chip => chip.measured)
   const last = freshSeen.at(-1)
   if (freshSeen.length === 0) problems.push('the footer never painted a link chip')
   if (first === undefined) problems.push('the chip never showed a measured link')
-  if (last === undefined || last.ms > 50 || last.pips !== '●●●●') {
+  if (last === undefined || !last.measured || last.ms > 50 || last.pips !== '●●●●') {
     problems.push(`the chip never caught up with the fast link (last ${JSON.stringify(last)})`)
   }
   if (plain(fresh.output).includes('[17;1R')) problems.push('a cursor reply leaked onto the screen as text')
-  if (fresh.answered < 2) problems.push('the link was never re-measured at all')
-  if (first !== undefined && first.ms < 300) {
-    // Not an assertion: a slow attach can also be missed outright, and the recheck
-    // filling it in is the same fix. Seeing it is the more informative run.
-    console.log(`(phase 1 caught the slow attach measurement: ${first.ms}ms)`)
+  if (!PTY_IS_CONPTY) {
+    if (fresh.answered < 2) problems.push('the link was never re-measured at all')
+    if (first !== undefined && first.ms < 300) {
+      // Not an assertion: a slow attach can also be missed outright, and the recheck
+      // filling it in is the same fix. Seeing it is the more informative run.
+      console.log(`(phase 1 caught the slow attach measurement: ${first.ms}ms)`)
+    }
   }
 }
 console.log(`phase 1 — cursor requests answered: ${fresh.answered}`)
 console.log(`phase 1 — chips: ${JSON.stringify(freshSeen.slice(0, 6))}`)
+if (PTY_IS_CONPTY) {
+  console.log('phase 1 — the simulated link is not driven here: ConPTY answers the cursor probe itself,')
+  console.log('          so the timing this phase measures belongs to ConPTY, not to the probe')
+}
 fresh.kill()
 await killHostByLock(freshSessionId)
 
@@ -279,8 +301,16 @@ if (landedAt === undefined && corruptAt === undefined) {
 if (landedAt !== undefined && loadingLineAt === undefined) {
   problems.push('the launcher\'s loading line was never on screen, so this run had no load window to test in')
 }
-if (blankAfterDraw > 0) {
+if (blankAfterDraw > 0 && !PTY_IS_CONPTY) {
   problems.push(`the screen went blank ${blankAfterDraw} time(s) while the log was being read: ${timeline.slice(0, 3).join(', ')}`)
+} else if (blankAfterDraw > 0) {
+  // Not asserted through ConPTY: it delivers a frame's clear and the content it
+  // clears for in *different* batches (measured on this machine), so a sampling
+  // window that opens between the two reads as a blank nobody saw. The entry
+  // check below is the one that stays armed here, and it carries the same
+  // contract with a tolerance that no batch boundary can fake.
+  console.log(`phase 2 — ${blankAfterDraw} blank sample(s) through ConPTY, where a frame's clear and its`)
+  console.log('          content can arrive in different batches: not asserted here (see the entry check)')
 }
 // The launcher draws the first entry — the splash lives in that screen — and the
 // Host draws every one after it. A Host entry *is* a clear on a terminal already
@@ -299,14 +329,25 @@ if (resumed.entries.length < 2) {
 }
 if (finalChip === undefined) {
   problems.push('the resumed session never painted a link chip after its transcript landed')
+} else if (!finalChip.measured) {
+  // The unmeasured shape, which is what a chip stuck on its placeholder now
+  // reads — say it that way rather than as a number nobody took.
+  problems.push(`the chip was left unmeasured after the resume (${JSON.stringify(finalChip)})`)
 } else if (finalChip.pips !== '●●●●' || finalChip.ms >= 100) {
   problems.push(`the chip was left on its placeholder after the resume (${JSON.stringify(finalChip)}; a measurement lands well under 100ms on this simulated link)`)
 }
 
-if (problems.length === 0) {
-  console.log('OK: the link chip follows the link instead of the attach moment')
+if (problems.length > 0) {
+  console.log('FAIL')
+  for (const problem of problems) console.log(`  - ${problem}`)
+  process.exit(1)
+}
+if (PTY_IS_CONPTY) {
+  // Not a pass: phase 1's simulation did not run. Everything else did, including
+  // phase 2 (no blank window while the log is read, the transcript lands, and the
+  // chip is *measured* afterwards).
+  console.log('SKIP: ConPTY answers `CSI 6n` itself, so the probe cannot play a slow link; phase 2 ran')
   process.exit(0)
 }
-console.log('FAIL')
-for (const problem of problems) console.log(`  - ${problem}`)
-process.exit(1)
+console.log('OK: the link chip follows the link instead of the attach moment')
+process.exit(0)

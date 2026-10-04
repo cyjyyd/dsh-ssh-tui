@@ -181,6 +181,12 @@ term、stdio）与单元套件：它能证明生命周期代码在 win32 上不�
 
 逐条走，每条记「通过 / 不通过 / 未测」：
 
+> 这一步在 2026-10-03 用一份**单独安装的 CLI dsh**（`npm i @deepseek-ai/dsh@0.2.0-rc.2` 到独立前缀）
+> 走过一轮，逐项结论、五处探针缺陷与 ConPTY 盲区记在
+> [`checkpoints.md`](checkpoints.md)「Windows 实机轮」一节。可自动化的部分现在由
+> `verify-batch --home <dir>` 一次跑完（12 PASS · 2 SKIP · 0 FAIL）；**下面两条没有自动化，必须人眼**：
+> IME 组合、多行中文粘贴。
+
 - [ ] **启动**：`dsh --profile tui` 在 Windows Terminal 里正常进入工作区，字形与颜色正确
 - [ ] **IME 组合**：微软拼音输入中文时，**预输入串不得**出现在处理中卡片或计划卡上；
       组合上屏后文本完整、光标位置正确
@@ -193,7 +199,10 @@ term、stdio）与单元套件：它能证明生命周期代码在 win32 上不�
 - [ ] **流式**：一轮对话流式输出期间画面持续更新、**不逐 tick 整屏重画**（弱链路上尤其明显）
 - [ ] **setup**：`/setup` 能打开向导并走完（首启自动出现见第二栏）
 - [ ] **SSH detach / reattach**：关闭窗口再重开（ConPTY teardown）→ Host 还活着，重接后正在跑的一轮没丢
-- [ ] **ConPTY 断链恢复**：`tui-drop-probe.mjs` 对应的路径在实机上手工验一遍（本机 CI 只跑脚本版）
+- [ ] **ConPTY 断链恢复**：`tui-drop-probe.mjs` 对应的路径在实机上手工验一遍（本机 CI 只跑脚本版）。
+      **"终端静默但没断连"这一半自动化覆盖不到**：ConPTY 代答 `CSI 6n`，`tui-cut-probe.mjs` 在本机
+      会打印 `SKIP:`（它只验了"应答的终端读作 attached"）。要人眼确认的是：把网络掐掉（不要关窗口，
+      让宿主以为窗口还在），再恢复时正在跑的一轮没丢、画面自己回来
 
 背景与已知差异见 [`windows.md`](windows.md)、[`terminals.md`](terminals.md)。
 
@@ -227,6 +236,7 @@ npm run bench                        # 五个动作的中位数 + 「无全清�
 ```sh
 node scripts/verify-batch.mjs                    # typecheck + 全套 + 全部真 PTY 探针
 node scripts/verify-batch.mjs --only link --batch RC   # 只跑某一项，迭代用
+node scripts/verify-batch.mjs --home <dir>       # 把读 profile 的三步指向这个 DSH_HOME
 ```
 
 它按顺序跑完 typecheck、全套测试与真 PTY 探针，每步一行结论，最后给一条 `RESULT:`。两种"不是通过"
@@ -236,10 +246,24 @@ node scripts/verify-batch.mjs --only link --batch RC   # 只跑某一项，迭�
 - `RESULT: INCOMPLETE`（exit 2）：有步骤打印了 `SKIP:`（例如机器上没有 node-pty），**这条不是通过、
   也不是失败，是"没测到"**。修好环境重跑，别把 INCOMPLETE 当成 PASS 引用。
 
+**`--home <dir>` 的用途**：`probe` / `drop` / `linemode` 三步默认读**本机真实的 `~/.dsh`**——那才是
+读者手里的安装。但一个**没配置过**的 home 开机进的是配置向导（0.8.2 起，这是修好"向导永远不出现"的
+结果），向导占着键盘，`/diag` 和 `/status` 都不应答，这三步只能打印 `SKIP:`，整轮收尾 `INCOMPLETE`。
+`--home` 把它们指向 `probe-home.mjs` 建好的 home，于是"工作区契约"与"断链重连契约"是**真跑过**而不是
+跳过；**不带** `--home` 跑一遍仍然有意义——它测的是本机那份安装。同一台机器上两次都值得跑。
+
 其中 **链路探针（`tui-rtt-probe.mjs`）** 覆盖两种形状，缺一不可：新会话在"先慢后快"的链路上让
 chip 追上真实值；以及**带历史的 resume**——回放期间不合成任何帧（B2.4），relay 恰好在这个窗口里接入，
 所以这一段既可能被别的写入清成黑屏，也可能让 chip 永远停在 `○○○○ 160ms`。两个断言都做过变异校验：
 把进屏序列改回"接入即写"会报 4 秒黑屏，把 RTT 应用关掉会报 chip 停在占位值。
+
+**"从没测到过"是第三种形状，由 `tui-unmeasured-probe.mjs` 覆盖**（管道父进程，两条腿：不回 DSR 读
+`未测`、每条必答读真值）。它必须单列，因为**PTY 探针在 ConPTY 上摸不到这个状态**：ConPTY 自己回
+`CSI 6n`，探针既看不到请求、也没法扮一个沉默的终端（`tui-cut-probe.mjs` 同理，它在本机只能报
+`SKIP:`）。同一份字节流经 ConPTY 还会被改形——一次 boot 加 `/diag`，`ESC[<row>;1H` 在 ConPTY 上是
+**3** 个、在管道上是 **95** 个，`ESC[2J` 是 **1** 对 **0**——所以断言"逐行寻址""不许清屏""只重画高亮
+那一行"的检查（`tui-setup-probe.mjs` 的 list 步、`tui-probe.mjs --line-mode`）在 ConPTY 上会打印
+`SKIP:` 而不是硬判。**`SKIP` 永远不是通过**：`verify-batch` 见到它收尾 `INCOMPLETE`。
 
 ## 发版窗口怎么定
 

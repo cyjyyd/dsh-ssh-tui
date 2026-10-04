@@ -26,14 +26,16 @@
  */
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import process from 'node:process'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const { IS_WINDOWS } = await import(pathToFileURL(join(ROOT, 'scripts', 'pty-window.mjs')).href)
 
 const USAGE = `usage: node scripts/tui-route-probe.mjs [--keep]
 
@@ -52,7 +54,10 @@ async function loadModule(name) {
 
 /** A profile that mounts this plugin and nothing else, plus a global default. */
 async function synthesizeHome() {
-  const home = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'dsh-tui-route-'))
+  // `tmpdir()`, not a `/tmp` literal: on Windows that literal is drive-relative
+  // (`\tmp` on the current drive), which need not exist, and `mkdtemp` does not
+  // create parents — the probe died with ENOENT before it asserted anything.
+  const home = await mkdtemp(join(tmpdir(), 'dsh-tui-route-'))
   const profile = join(home, 'profiles', 'tui')
   await mkdir(join(profile, 'node_modules'), { recursive: true })
   await writeFile(join(profile, 'package.json'), `${JSON.stringify({
@@ -63,7 +68,10 @@ async function synthesizeHome() {
   }, null, 2)}\n`)
   await writeFile(join(profile, 'cordis.yml'), '[]\n')
   await writeFile(join(profile, 'cordis.patch.yml'), '[]\n')
-  await symlink(ROOT, join(profile, 'node_modules', 'dsh-ssh-tui'), 'dir')
+  // A directory symlink needs SeCreateSymbolicLinkPrivilege on Windows; a
+  // junction needs none and resolves identically (`ROOT` is absolute) — the same
+  // call `tui-mock-probe.mjs` makes, and the one this probe was missing (EPERM).
+  await symlink(ROOT, join(profile, 'node_modules', 'dsh-ssh-tui'), IS_WINDOWS ? 'junction' : 'dir')
   // The global default deliberately differs from the session's record: the
   // notice must name the record, or precedence is broken.
   await writeFile(join(home, 'settings.yaml'), [
@@ -160,6 +168,25 @@ async function runProbe({ keep }) {
     const mark = output.length
     return () => strip(output.slice(mark))
   }
+  /**
+   * Poll a `since()` slice for text, instead of sleeping a fixed time and asking
+   * once.
+   *
+   * Some of these claims wait on the *Host's settings watcher* — a file this
+   * probe rewrote, which the host learns about asynchronously. On Windows that
+   * notification arrives measurably later than on Linux, and a fixed 2.5s window
+   * reported "the session pin survives another writer" as a failure while the
+   * pin itself was intact and the next assertion (the record still names xai)
+   * passed. The contract is "the pin is what gets shown", not "within 2.5s".
+   */
+  const waitSince = async (mark, needle, timeoutMs = 20_000) => {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (strip(output.slice(mark)).includes(needle)) return Date.now() - (deadline - timeoutMs)
+      if (Date.now() >= deadline) return undefined
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+  }
 
   let failures = 0
   const check = (ok, what) => {
@@ -195,6 +222,7 @@ async function runProbe({ keep }) {
     // children. Without the session-owned flag the host's settings watcher puts
     // the file's value on the ref and the pin quietly disappears.
     const afterPin = since()
+    const afterPinMark = output.length
     await writeFile(join(home, 'settings.yaml'), [
       'agent-default-model:',
       '  provider: deepseek-official',
@@ -205,7 +233,8 @@ async function runProbe({ keep }) {
       '',
     ].join('\n'))
     term.write('/view detailed\r')
-    await new Promise(resolve => setTimeout(resolve, 2_500))
+    const pinnedAt = await waitSince(afterPinMark, 'sub:xai/grok-4.5')
+    if (pinnedAt !== undefined) console.log(`   (the pin was on screen ${pinnedAt}ms after the write)`)
     check(afterPin().includes('sub:xai/grok-4.5'), 'the session pin survives another writer')
     check((await readRoute())?.subagent?.provider === 'xai', 'the record keeps the session pin')
     // And the pin is what a bare `/submodel <model>` acts on, not the file's.
