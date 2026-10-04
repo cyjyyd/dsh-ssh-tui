@@ -2,11 +2,22 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **当前状态（2026-10-03）：`main` 上未发布的下一个版本是 `0.8.2-rc.1`（候选）。**
-> 发版候选 `c2fe073` 自检：全量套件（Linux）1376 项 **1372 通过 / 0 失败 / 4 跳过**、（Windows 实机）
-> 1376 项 **1365 通过 / 0 失败 / 11 跳过**；`tsc --noEmit` 干净；`npm run freeze` 八条不变量全绿、
-> 七条退役路径 **0 命中**；`npm run bench` 五个动作 **0 次整屏清屏**；`npm pack --dry-run` **243 个
-> 文件 / tarball 1.4 MB / 解包 4.2 MB，shasum `92b7f517…`**。逐条证据见 [`checkpoints.md`](checkpoints.md) 末两节与
+> **0.8.2-rc.1 已发布（2026-10-04，只上 `next`）**：候选树 `7c0f3b2` → tag `v0.8.2-rc.1` →
+> CI 五条腿全 success（run [37180154532](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/37180154532)，
+> `head_sha` = tag 所指 SHA；**推 tag 不触发新的一轮**，这是核对来的那条）→ GitHub Release
+> <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.2-rc.1>（prerelease）→
+> `npm publish --tag next`：立即回 `+ dsh-ssh-tui@0.8.2-rc.1`，约 90 秒后 packument 出现该版本；
+> **shasum `8ea5e24111d29718e6b6b71ef65963e9bb5a403e`**、integrity `sha512-7VT5BXeyZ…`、
+> **243 个文件 / tarball 1.4 MB / 解包 4.2 MB**。发布后从 registry 重新下载 tarball，sha1 与上面**逐字节
+> 相同**。dist-tags：`next` = `0.8.2-rc.1`，**`latest` 保持 `0.8.1`**（候选版不动 `latest`）。
+> 发版说明：[`release-notes-0.8.2-rc.1.md`](release-notes-0.8.2-rc.1.md)。
+> 本版头等事：**全新安装第一次就会出现配置向导**；此外 resume 不再黑屏、思考卡片不再发白、
+> 链路芯片不再把绘制节奏当延迟。
+
+> **上一候选版前的状态（2026-10-03，留档）**：发版候选 `c2fe073` 自检：全量套件（Linux）1376 项
+> **1372 通过 / 0 失败 / 4 跳过**、（Windows 实机）1376 项 **1365 通过 / 0 失败 / 11 跳过**；
+> `tsc --noEmit` 干净；`npm run freeze` 八条不变量全绿、七条退役路径 **0 命中**；`npm run bench`
+> 五个动作 **0 次整屏清屏**。逐条证据见 [`checkpoints.md`](checkpoints.md) 末两节与
 > [`decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20。
 > **发布前的两件人工事都已闭合**：fresh-home 首启有探针（`tui-setup-probe.mjs` +
 > `probe-onboarding.mjs`，见下「发布前人工门槛」第二节），Windows / ConPTY 实机人工验收已完成
