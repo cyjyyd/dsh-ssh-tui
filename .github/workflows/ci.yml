@@ -120,6 +120,13 @@ jobs:
       - name: Link-quality probe
         if: matrix.dsh == '0.2.0-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-rtt-probe.mjs
+      # The link chip with nothing measured — the shape the field reported twice
+      # (`SSH ○○○○ 160ms`, where 160ms was the paint cadence, not a latency). A
+      # PTY cannot play that terminal on Windows (ConPTY answers `CSI 6n` itself),
+      # and no pty is needed anyway: the parent *is* the terminal here, so it can
+      # simply stay silent. Runs on both legs.
+      - name: Unmeasured link-chip probe (pipe parent)
+        run: node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs
       # The keep-alive promise, mid-turn: the window closes (SIGHUP here) and the
       # Host has to outlive it so the running turn is not lost. The same probe
       # runs on the Windows leg, where the window close is a ConPTY teardown.
@@ -198,3 +205,8 @@ jobs:
       # launcher is an Electron-as-Node process with none.
       - name: Stdio pipe probe (no PTY, desktop shape)
         run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
+      # Windows is where the unmeasured chip is reachable at all: ConPTY answers
+      # `CSI 6n` for the app, so the PTY probes see a measurement and cannot play
+      # a silent terminal — the pipe parent can, and does, on this leg too.
+      - name: Unmeasured link-chip probe (pipe parent)
+        run: node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs
