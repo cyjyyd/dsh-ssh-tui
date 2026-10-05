@@ -35,13 +35,38 @@ English: [README.en.md](README.en.md)
 
 ---
 
+## 已测，不是号称
+
+<!-- bench:begin -->
+在 100×20 下实测，每个动作 40 次取中位（`npm run bench`；本节由 `npm run bench:report` 生成，
+不是手抄的）：
+
+| 动作 | 毫秒 | 字节 | 寻址行 | 整屏清屏 |
+|---|---|---|---|---|
+| 流式输出时的一次重绘 | 1.64 | 501 | 3 | **0** |
+| 等待卡片时钟走一格 | 1.28 | 465 | 3 | **0** |
+| 报告屏翻一页（PgDn / PgUp） | 1.41 | 2457 | 17 | **0** |
+| 菜单里移动一次光标 | 1.27 | 588 | 4 | **0** |
+| 向导字段里打一个字符 | 0.38 | 140 | 1 | **0** |
+
+五个动作合计 **0 次整屏清屏**。这条是这一版的性能承诺：不管终端多慢、链路多差，
+画面按行增量重绘，不会因为一次 tick 把整屏重画一遍。
+<!-- bench:end -->
+
+跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 与 Windows、四个宿主版本）。
+链路上的承诺另有真 PTY 探针：断链重接、断线后宿主存活、带历史的 resume、以及"终端不回光标位置"
+时的链路显示，各自一个脚本，全部在 CI 里跑（`npm run freeze` 会把它们列出来）。
+
+**你在我们没覆盖过的终端上试过 DSH Relay 吗？**
+[提一份终端兼容报告](https://github.com/cyjyyd/dsh-ssh-tui/issues/new?template=terminal-compatibility.yml) —— 不用读代码，填一张表就行，
+结果会进 [`docs/terminals.md`](docs/terminals.md) 的「社区实测」区。
+
+如果 DSH Relay 让你的远程会话更可靠了，
+[给仓库点个 star](https://github.com/cyjyyd/dsh-ssh-tui) 能帮别的终端用户找到它。
+
 ## 30 秒开始
 
-```bash
-npm i -g @deepseek-ai/dsh
-dsh plugin --profile tui add dsh-ssh-tui@latest
-dsh --profile tui
-```
+上面三条命令装好就进工作区。之后常用的几条：
 
 恢复旧会话：
 
@@ -203,35 +228,6 @@ docs/screenshots/slow-link.json
 > **链路越差，界面可以降级；任务本身不能跟着失去可用性。**
 
 ---
-
-## 已测，不是号称
-
-<!-- bench:begin -->
-在 100×20 下实测，每个动作 40 次取中位（`npm run bench`；本节由 `npm run bench:report` 生成，
-不是手抄的）：
-
-| 动作 | 毫秒 | 字节 | 寻址行 | 整屏清屏 |
-|---|---|---|---|---|
-| 流式输出时的一次重绘 | 1.64 | 501 | 3 | **0** |
-| 等待卡片时钟走一格 | 1.28 | 465 | 3 | **0** |
-| 报告屏翻一页（PgDn / PgUp） | 1.41 | 2457 | 17 | **0** |
-| 菜单里移动一次光标 | 1.27 | 588 | 4 | **0** |
-| 向导字段里打一个字符 | 0.38 | 140 | 1 | **0** |
-
-五个动作合计 **0 次整屏清屏**。这条是这一版的性能承诺：不管终端多慢、链路多差，
-画面按行增量重绘，不会因为一次 tick 把整屏重画一遍。
-<!-- bench:end -->
-
-跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 与 Windows、四个宿主版本）。
-链路上的承诺另有真 PTY 探针：断链重接、断线后宿主存活、带历史的 resume、以及"终端不回光标位置"
-时的链路显示，各自一个脚本，全部在 CI 里跑（`npm run freeze` 会把它们列出来）。
-
-**你在我们没覆盖过的终端上试过 DSH Relay 吗？**
-[提一份终端兼容报告](https://github.com/cyjyyd/dsh-ssh-tui/issues/new?template=terminal-compatibility.yml) —— 不用读代码，填一张表就行，
-结果会进 [`docs/terminals.md`](docs/terminals.md) 的「社区实测」区。
-
-如果 DSH Relay 让你的远程会话更可靠了，
-[给仓库点个 star](https://github.com/cyjyyd/dsh-ssh-tui) 能帮别的终端用户找到它。
 
 ## 核心能力
 

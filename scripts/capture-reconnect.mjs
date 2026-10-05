@@ -32,6 +32,12 @@
  * Requires: node-pty (ships in the harness tree), `@deepseek-ai/dsh-llm-mock-server`,
  * and python3 + ImageMagick for the frames. A machine without any of them gets a
  * `SKIP:` line, never a fabricated GIF.
+ *
+ * Run it from a checkout whose `node_modules` matches the pin. A workspace carrying an
+ * old mock server resolves it happily and then answers every request with 404 on
+ * `/messages` (the provider posts the Messages API; the 0.1.5-era mock only served
+ * `/chat/completions`), which surfaces as "the turn never started" — measured, and the
+ * reason a clean `npm install` is the supported way to regenerate this asset.
  */
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { mkdtemp } from 'node:fs/promises'
