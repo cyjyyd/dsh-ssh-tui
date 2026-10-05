@@ -1537,3 +1537,76 @@ ConPTY 上根本摸不到**，而这个形状是被读者报过两次的那个�
 **结论**：Windows 实机人工验收**已完成**——12 项清单逐条走过，可自动化部分全绿、两处 ConPTY 盲区有名字有
 理由（这两个形状在 Linux 腿上真跑，`SKIP` 不算 PASS）、两目人眼确认通过。**发版前不再欠人眼项**；剩下的
 两条 `SKIP` 是**覆盖边界**，同时写在 [`release.md`](release.md) 与发版说明里。
+
+---
+
+## DSH Relay 软品牌（P0/P1，2026-10-04）
+
+**性质**：命名与呈现层，**不改运行时行为、不改发布坐标**。ADR 与冻结原则：
+[`decisions/brand-dsh-relay.md`](decisions/brand-dsh-relay.md)。
+
+### 1. P0 基线（改动前实测）
+
+| 项 | 值 |
+|---|---|
+| HEAD / 版本 | `0fb8156` · `0.8.2-rc.1` |
+| 工作树 | 干净 |
+| GitHub slug | `cyjyyd/dsh-ssh-tui`（P1 不动） |
+| npm 包名 | `dsh-ssh-tui`（P1 不动） |
+| 安装命令 | `dsh plugin --profile tui add dsh-ssh-tui@latest`（P1 不动） |
+| `description` | `SSH-friendly interactive terminal TUI plugin for DeepSeek Harness` |
+| `keywords` | `deepseek-harness` `dsh` `dsh-plugin` `plugin` `tui` `terminal` `ssh` `cordis` |
+| README 首屏 | `# dsh-ssh-tui` + 徽章 + "A resilient terminal frontend for DeepSeek Harness." |
+| 截图/动图脚本 | `capture-readme-frames.mjs`（`screenshots`）、`capture-slow-link.mjs`（`screenshots:slow`）、`capture-footer-frames.mjs` |
+| issue 模板 | **一个都没有**（`.github/` 下只有 `workflows/`） |
+| `docs/terminals.md` | 179 行：为什么需要它 / 矩阵 / 覆盖方式 / 键盘与输入 / 已知限制 / 字符宽度 |
+
+### 2. 命名出现审计（A/B/C/D）
+
+口径：`git grep` 全树（tracked 文件），分类规则见 ADR「Naming boundary」。
+
+| 类 | 含义 | 数量（改动前） | 处置 |
+|---|---|---|---|
+| **A** | 安装/包坐标：`package.json.name`、`src/update-check.ts` 的 `PLUGIN_PACKAGE`、`scripts/install-npm.mjs`、README/文档里的 `dsh plugin add dsh-ssh-tui@…`、i18n 的模块副本提示、对应测试断言 | **35 行 / 16 个文件** | **不动**（原则 2、9） |
+| **B** | GitHub URL：`repository.url`、`homepage`、`bugs.url`、徽章、文档链接 | **15 行 / 7 个文件** | **P1 冻结**（原则 3） |
+| **C** | 人读到的产品名：README 首屏与正文、发版说明、About、本 ADR、本文件 | README 18 + README.en 21 + 文档若干 | **P1 改为 DSH Relay**（只改这一类） |
+| **D** | 协议/配置标识：`cordis.patch.yml` 的 4 条 entry id（`dsh-ssh-tui/startup` 等）、`TUI_SOURCE_KIND`、日志包装器 `kind`、设置行 `dsh-ssh-tui/settings-*`、`DSH_TUI_*`（96 处）、错误前缀 `dsh-ssh-tui: `（30 处）、`@module dsh-ssh-tui/…`（31 处） | 约 **165 处** | **不动**（原则 9）：改了会破坏老会话日志、profile 文件与既有 bug report 的可搜索性 |
+
+`src/` 的 88 处里**没有一处是人读的产品名**——全部是 doc 标签、错误前缀、标识符字面量与注释里的包名。
+这正是"改 C 不动 D"能成立的原因：**运行时不认识产品名，只认识坐标。**
+
+### 3. P1 改了什么
+
+| 项 | 内容 |
+|---|---|
+| README 首屏（中/英） | `# DSH Relay` + `A resilient terminal workspace for DeepSeek Harness.`；紧跟"npm 包名与安装命令未变"的提示；安装命令原样 |
+| Hero 语义 | 中：**SSH 断了。会话还在跑。接回来就是了。** 英：**SSH drops. The agent keeps working. Reconnect. Reattach. Continue.** |
+| 重连演示 | `docs/screenshots/reconnect.gif`（**4 帧 · 11.8 秒 · 824×660 · 106 KB**），由 `scripts/capture-reconnect.mjs` 真机拍摄：真 PTY、真宿主、真 SIGHUP、真 `--resume`；`npm run screenshots:reconnect` 可重放 |
+| 实测块 | README 中英各一段，由 `scripts/bench-report.mjs` 从 `npm run bench -- --json` 生成（`npm run bench:report`）；`--check` 只比字节/行数/清屏数，**毫秒列不比**（否则就是一个 flaky 门） |
+| CTA | 每条 README 一个：提交终端兼容报告；外加一句点 star（不弹窗、不遥测、CLI 内不求 star） |
+| 贡献入口 | `.github/ISSUE_TEMPLATE/terminal-compatibility.yml`（9 字段：OS / 终端 / 本地或 SSH / TERM / dsh 版本 / Relay 版本 / 8 项能力自选 / 备注 / 可选 `/diag`） |
+| 兼容矩阵 | `docs/terminals.md` 新增「证据等级」：作者/CI 实测与社区实测**分两栏**，社区栏附贡献方式与升级规则 |
+| 包元数据 | `description` 改为 remote-first；`keywords` 加 `coding-agent` `cli` `remote-development` `windows-terminal` `conpty`，保留原有 8 个 |
+| GitHub 元数据 | `docs/github-metadata.md`：建议 About 描述 + 10 个 topics，标注**需维护者在 UI/API 手工应用** |
+| 观察模板 | `docs/brand-metrics.md`：字段、star conversion 定义、采集节奏；**无数据、无遥测** |
+| 发版说明政策 | `docs/release.md` §三：0.8.x 后续版本首次带一句"presented as DSH Relay；包名与安装命令未变"，明确**不要叫 rename**、不要制造 breaking 感 |
+
+### 4. 门（改动后实测）
+
+| 门 | 结果 |
+|---|---|
+| `npm run typecheck` | 0 错 |
+| `npm test` | 1376 项 · **1372 通过 · 0 失败 · 4 跳过**（与改动前逐项相同） |
+| `npm run freeze` | 八条不变量 + 七条退役路径全绿（0 命中） |
+| `npm run bench` | 五个动作 **0 次整屏清屏** |
+| `npm run bench:report -- --check` | 两条 README 的数字与当前树一致 |
+| `npm pack --dry-run` | **244 个文件**（243 + `reconnect.gif`） · tarball **1.5 MB** · 解包 **4.3 MB** · shasum `cfbde58b…`；ADR / brand-metrics / github-metadata **不进包** |
+| 运行时 | **零改动**：本轮没有触碰 `src/` 的任何执行路径 |
+
+### 5. 未做（P2/P3）
+
+1. **P2 观察**：`docs/brand-metrics.md` 是空模板，需维护者手工填 GitHub Insights 数据；集满一个窗口前不评估 P3。
+2. **P3 GitHub relaunch**（若 P2 支持）：repo rename + 徽章/链接/About 一次性改写。
+3. **P4 npm 迁移**：独立决策，不与 P3 绑定。
+4. **CLI 里的产品名**（`/diag` 的 `plugin: dsh-ssh-tui <version>`、启动横幅、错误前缀）**故意保留**：它们属于 D 类，是搜索结果与既有 bug report 的锚点。
+5. `npm run bench:report` 由人工在发布前跑一次（不进 CI：它比较的是提交内容，放进 CI 只会在毫秒抖动上浪费时间）。

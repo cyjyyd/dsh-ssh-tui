@@ -1,0 +1,14 @@
+{
+  "cols": 88,
+  "rows": 30,
+  "frames": 4,
+  "durationMs": 11800,
+  "scenario": [
+    "the session runs with `/disconnect continue`, typed in the captured window: the policy is what makes the turn outlive the display (the default `pause` cancels it on detach, while the Host survives either way)",
+    "a real turn is in flight (mock model, no provider key)",
+    "the window is closed: SIGHUP to the launcher",
+    "the Host answers afterwards (checked against the lock pid)",
+    "the same session is resumed and the same turn finishes"
+  ],
+  "captured": "real PTY, real painter, real hangup, real resume; captions state what was measured"
+}

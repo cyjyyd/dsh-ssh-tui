@@ -1,16 +1,19 @@
 {
   "name": "dsh-ssh-tui",
   "version": "0.8.2-rc.1",
-  "description": "SSH-friendly interactive terminal TUI plugin for DeepSeek Harness",
+  "description": "Remote-first terminal UI for DeepSeek Harness with SSH reconnect, Windows/ConPTY and incremental ANSI rendering.",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
-    "plugin",
     "tui",
     "terminal",
     "ssh",
-    "cordis"
+    "coding-agent",
+    "cli",
+    "remote-development",
+    "windows-terminal",
+    "conpty"
   ],
   "author": "cyjyyd",
   "repository": {
@@ -58,6 +61,7 @@
     "docs/screenshots/headless.png",
     "docs/screenshots/workspace.png",
     "docs/screenshots/slow-link.gif",
+    "docs/screenshots/reconnect.gif",
     "LICENSE",
     "docs/display-mode.md",
     "docs/terminals.md",
@@ -108,7 +112,9 @@
     "probe:home": "node scripts/probe-home.mjs --probe",
     "probe:home:drop": "node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs",
     "screenshots": "npm run build && node scripts/capture-readme-frames.mjs",
-    "screenshots:slow": "npm run build && node scripts/capture-slow-link.mjs"
+    "screenshots:slow": "npm run build && node scripts/capture-slow-link.mjs",
+    "screenshots:reconnect": "npm run build && node scripts/capture-reconnect.mjs",
+    "bench:report": "node scripts/bench-report.mjs"
   },
   "engines": {
     "node": ">=22.19"

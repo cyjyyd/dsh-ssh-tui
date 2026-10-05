@@ -1,0 +1,117 @@
+name: Terminal compatibility report
+description: Report how DSH Relay behaves on your terminal, so others can see whether it is covered
+title: "[terminal] "
+labels: ["terminal-compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks — this is the lowest-effort way to contribute: no code, no build, one form.
+
+        The results are collected into the **community reported** area of
+        [`docs/terminals.md`](https://github.com/cyjyyd/dsh-ssh-tui/blob/main/docs/terminals.md),
+        kept separate from what the maintainer and CI have verified.
+
+        **Please do not paste anything private** — no hostnames, IPs, usernames, tokens or
+        session transcripts. Paste `/diag`'s terminal block if you like; it contains no
+        secrets, but read it once before posting.
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Where DSH Relay runs (the machine you SSH *into*, if you are remote).
+      placeholder: e.g. Debian 13 (server), Windows 11 24H2 (client)
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: Name and version. For a terminal emulator, what it calls itself; for a bare console, say so.
+      placeholder: e.g. Windows Terminal 1.22, iTerm2 3.5, xterm 390, conhost, tmux 3.4 inside kitty
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Local or SSH
+      options:
+        - SSH (I am connected to the machine)
+        - Local terminal on the same machine
+        - Local terminal plus a jump host (`ProxyJump` / `ssh -J`)
+        - tmux / screen (inside it, or over SSH)
+        - Other (say so in the notes)
+    validations:
+      required: true
+
+  - type: input
+    id: term
+    attributes:
+      label: TERM (and COLORTERM, if set)
+      description: '`echo $TERM $COLORTERM`, or `/diag`''s terminal block.'
+      placeholder: e.g. xterm-256color, COLORTERM=truecolor
+    validations:
+      required: false
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DeepSeek Harness version
+      placeholder: e.g. 0.2.0-rc.2 (`dsh --version`)
+    validations:
+      required: true
+
+  - type: input
+    id: relay-version
+    attributes:
+      label: DSH Relay version
+      description: 'The plugin line in `/diag`, or `dsh plugin --profile tui list`.'
+      placeholder: e.g. 0.8.2-rc.1
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### What works, what does not
+
+        Tick what you actually tried. "Untested" is a fine answer — an untested row is
+        still useful, and it is more useful than a guess. Anything you tick as broken:
+        one line about what happened in the notes at the end.
+
+  - type: checkboxes
+    id: capabilities
+    attributes:
+      label: Capabilities
+      options:
+        - label: Startup — the workspace comes up, the layout is right, no garbage characters
+        - label: Resize — dragging the window repaints correctly and the input row stays visible
+        - label: Paste — multi-line paste arrives intact and does not submit by itself
+        - label: Clipboard — `/copy` or the copy key reaches my clipboard (OSC 52)
+        - label: Mouse — click, drag-select, wheel scrolling behave
+        - label: CJK / IME — Chinese (or another IME) composes correctly, nothing lands on a card
+        - label: Detach / reattach — closing the window and resuming keeps the session
+        - label: Reports — `/status`, `/help` open, page with PgUp/PgDn, and Esc returns
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that went wrong, and anything that surprised you.
+      placeholder: |
+        - Wave underline for the 🔍 emoji renders as a box.
+        - `SSH ○○○○ n/a` on my terminal: it does not answer the cursor-position request.
+    validations:
+      required: false
+
+  - type: textarea
+    id: diag
+    attributes:
+      label: /diag output (optional)
+      description: Run `/diag` in the session and paste the **terminal** and **link** lines. No credentials, no paths.
+      render: text
+    validations:
+      required: false

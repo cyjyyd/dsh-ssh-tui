@@ -1,23 +1,41 @@
-# dsh-ssh-tui
+# DSH Relay
+
+**A resilient terminal workspace for DeepSeek Harness.**
+远端优先 · 可重连 · 就在终端里
 
 [![npm](https://img.shields.io/npm/v/dsh-ssh-tui?style=flat-square&color=4b6fff)](https://www.npmjs.com/package/dsh-ssh-tui)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-ssh-tui?style=flat-square)](https://www.npmjs.com/package/dsh-ssh-tui)
 [![CI](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml)
 [![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
 
-**A resilient terminal frontend for DeepSeek Harness.**
+**SSH 断了。会话还在跑。接回来就是了。**
 
-纯 ANSI · 增量重绘 · SSH 断线重接 · Windows / ConPTY · Host-aware activation · 无需浏览器
+“Relay” 说的是这件事：**显示可以消失，工作不必跟着消失**。宿主进程活着、当前这一轮继续跑，
+同一句命令接回来就回到原来的会话 —— 转写、计划、审批、排队中的消息都在原处。
+这是远程优先的终端工作区，不只是“一个 SSH 风格的界面”。
 
-**连接可以断，终端可以换，Harness 可以升级；正在工作的会话不应该因此变得脆弱。**
+> **npm 包名没有变，安装命令也没有变。** 发布坐标仍然是 `dsh-ssh-tui`；
+> `DSH Relay` 是产品展示名。见 [`docs/decisions/brand-dsh-relay.md`](docs/decisions/brand-dsh-relay.md)。
+
+```bash
+npm i -g @deepseek-ai/dsh
+dsh plugin --profile tui add dsh-ssh-tui@latest
+dsh --profile tui
+```
+
+需要 Node.js ≥ 22.19 和 DeepSeek Harness CLI。断开之后接回来：`dsh --profile tui --resume`。
+
+![重连演示：一轮正在流式输出时窗口关闭，宿主进程继续跑，同一条命令接回来，这一轮在原来的会话里跑完](docs/screenshots/reconnect.gif)
+
+*实拍，不是摆拍：真 PTY、真宿主、真 SIGHUP、真 resume（`npm run screenshots:reconnect` 可重放）。
+演示里的会话用的是 `/disconnect continue`：**默认 `pause` 策略下窗口消失会取消当前这一轮**，
+宿主无论如何都不退出。*
 
 English: [README.en.md](README.en.md)
 
 ---
 
 ## 30 秒开始
-
-需要 Node.js ≥ 22.19 和 DeepSeek Harness CLI。
 
 ```bash
 npm i -g @deepseek-ai/dsh
@@ -185,6 +203,35 @@ docs/screenshots/slow-link.json
 > **链路越差，界面可以降级；任务本身不能跟着失去可用性。**
 
 ---
+
+## 已测，不是号称
+
+<!-- bench:begin -->
+在 100×20 下实测，每个动作 40 次取中位（`npm run bench`；本节由 `npm run bench:report` 生成，
+不是手抄的）：
+
+| 动作 | 毫秒 | 字节 | 寻址行 | 整屏清屏 |
+|---|---|---|---|---|
+| 流式输出时的一次重绘 | 1.64 | 501 | 3 | **0** |
+| 等待卡片时钟走一格 | 1.28 | 465 | 3 | **0** |
+| 报告屏翻一页（PgDn / PgUp） | 1.41 | 2457 | 17 | **0** |
+| 菜单里移动一次光标 | 1.27 | 588 | 4 | **0** |
+| 向导字段里打一个字符 | 0.38 | 140 | 1 | **0** |
+
+五个动作合计 **0 次整屏清屏**。这条是这一版的性能承诺：不管终端多慢、链路多差，
+画面按行增量重绘，不会因为一次 tick 把整屏重画一遍。
+<!-- bench:end -->
+
+跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 与 Windows、四个宿主版本）。
+链路上的承诺另有真 PTY 探针：断链重接、断线后宿主存活、带历史的 resume、以及"终端不回光标位置"
+时的链路显示，各自一个脚本，全部在 CI 里跑（`npm run freeze` 会把它们列出来）。
+
+**你在我们没覆盖过的终端上试过 DSH Relay 吗？**
+[提一份终端兼容报告](https://github.com/cyjyyd/dsh-ssh-tui/issues/new?template=terminal-compatibility.yml) —— 不用读代码，填一张表就行，
+结果会进 [`docs/terminals.md`](docs/terminals.md) 的「社区实测」区。
+
+如果 DSH Relay 让你的远程会话更可靠了，
+[给仓库点个 star](https://github.com/cyjyyd/dsh-ssh-tui) 能帮别的终端用户找到它。
 
 ## 核心能力
 

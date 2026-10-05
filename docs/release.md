@@ -272,7 +272,28 @@ PROBE_HOME=<上面打印的路径> node scripts/tui-setup-probe.mjs
 > `--resume=<id>`（连它自己刚铸的 id 也带），而首启判定把 `resume` 当成「这台机器配置过」，于是
 > **全新安装永远不会出现向导**、也没有任何提示。修复见 `src/tui.ts` 的 `maybeRunOnboarding`。
 
-### 三、B2 冻结自检（任何平台，一条命令）
+### 三、发版说明的写法（0.8.x 软品牌期）
+
+后续 0.8.x 的发版说明**首次**要带一句（只带一次，不要每版重复）：
+
+> `dsh-ssh-tui` is now presented as DSH Relay.
+> The npm package name and the install command have not changed.
+
+中文版对应一句：**`dsh-ssh-tui` 现在以 DSH Relay 为产品名展示；npm 包名与安装命令没有变化。**
+
+三条约束：
+
+1. **不要叫 rename**（不是改名，是展示名），也不要用 "formerly known as" / "we renamed" 这类措辞；
+2. **不要制造 breaking change 感**：没有迁移动作，没有弃用窗口，没有"请尽快升级"；
+3. 安装命令、包名、GitHub 链接**一个字都不改**，发版说明里的安装示例保持原样。
+
+依据：[`decisions/brand-dsh-relay.md`](decisions/brand-dsh-relay.md)（原则 2、4、9）。
+
+同一版还要更新 README 的实测块：`npm run bench:report`（数字来自真跑），
+`npm run bench:report -- --check` 用来验证提交的数字与当前树一致（只比字节/行数/清屏数，
+毫秒列不参与比较——见脚本头部说明）。
+
+### 四、B2 冻结自检（任何平台，一条命令）
 
 ```sh
 npm run build && npm run freeze      # 八条不变量 + 七条退役路径，必须 exit 0
@@ -282,7 +303,7 @@ npm run bench                        # 五个动作的中位数 + 「无全清�
 数字写进发版说明；`unclassified / unknown destination / live source rows / duplicate primary`
 有一项不是 0，就不要发版。
 
-### 四、一条命令跑完验收（`verify-batch`）
+### 五、一条命令跑完验收（`verify-batch`）
 
 ```sh
 node scripts/verify-batch.mjs                    # typecheck + 全套 + 全部真 PTY 探针
