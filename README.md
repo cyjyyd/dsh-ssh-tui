@@ -8,11 +8,16 @@
 [![CI](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/cyjyyd/dsh-ssh-tui/actions/workflows/ci.yml)
 [![dshfind](https://dshfind.com/api/badge/cyjyyd/dsh-ssh-tui)](https://dshfind.com/zh/plugins/cyjyyd/dsh-ssh-tui?ref=badge)
 
-**SSH 断了。会话还在跑。接回来就是了。**
+**SSH 断了。会话还在。接回来继续。**
 
-“Relay” 说的是这件事：**显示可以消失，工作不必跟着消失**。宿主进程活着、当前这一轮继续跑，
-同一句命令接回来就回到原来的会话 —— 转写、计划、审批、排队中的消息都在原处。
+“Relay” 说的是这件事：**显示可以消失，会话不必跟着消失**。宿主进程活着，同一句命令接回来
+就回到原来的会话 —— 转写、计划卡片、审批、排队中的消息都在原处。
 这是远程优先的终端工作区，不只是“一个 SSH 风格的界面”。
+
+> **断线时正在跑的那一轮会怎样？取决于 `/disconnect`：**
+> 默认 `pause` —— **当前这一轮在窗口离开时停下**，会话本身不丢，接回来接着用；
+> 显式设成 `continue` —— 当前这一轮在显示端离开后**继续在后台跑完**。
+> 两种策略下宿主都不退出。演示动图用的是 `continue`（字幕里标了），别把它当成默认行为。
 
 > **npm 包名没有变，安装命令也没有变。** 发布坐标仍然是 `dsh-ssh-tui`；
 > `DSH Relay` 是产品展示名。见 [`docs/decisions/brand-dsh-relay.md`](docs/decisions/brand-dsh-relay.md)。
@@ -25,11 +30,11 @@ dsh --profile tui
 
 需要 Node.js ≥ 22.19 和 DeepSeek Harness CLI。断开之后接回来：`dsh --profile tui --resume`。
 
-![重连演示：一轮正在流式输出时窗口关闭，宿主进程继续跑，同一条命令接回来，这一轮在原来的会话里跑完](docs/screenshots/reconnect.gif)
+![重连演示：一轮正在流式输出时窗口关闭，宿主进程不退出，同一条命令接回来，这个会话还在原处；演示用 continue 策略，所以这一轮也在后台跑完了](docs/screenshots/reconnect.gif)
 
 *实拍，不是摆拍：真 PTY、真宿主、真 SIGHUP、真 resume（`npm run screenshots:reconnect` 可重放）。
-演示里的会话用的是 `/disconnect continue`：**默认 `pause` 策略下窗口消失会取消当前这一轮**，
-宿主无论如何都不退出。*
+演示显式设了 `/disconnect continue`，所以画面上这一轮在窗口消失后跑完了；换成默认的 `pause`，
+同一段会停在中断处，会话照样接得回来。*
 
 English: [README.en.md](README.en.md)
 
@@ -280,7 +285,8 @@ docs/screenshots/slow-link.json
 - 调工具；
 - 运行子代理；
 
-TUI 可以保留 Host，并允许重新接入。
+TUI 可以保留 Host，并允许重新接入（保留的是**宿主**；这一轮本身是否在断线期间继续跑，看
+[`/disconnect`](#ssh-断了之后) 的策略）。
 
 ```bash
 dsh --profile tui --resume

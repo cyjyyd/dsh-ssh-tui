@@ -8,13 +8,20 @@
 **A resilient terminal workspace for DeepSeek Harness.**
 remote-first · reconnectable · in your terminal
 
-**SSH drops. The agent keeps working. Reconnect. Reattach. Continue.**
+**SSH drops. The session survives.**
+**Reconnect. Reattach. Continue.**
 
 That is the whole idea behind the name: the *display* can disappear without the
-*work* disappearing. The host process stays up and the running turn keeps going;
-the same command attaches back to the same session — transcript, plan cards,
-approvals, queued messages, all where you left them. It is a remote-first terminal
-workspace, not just an SSH-flavoured screen.
+*session* disappearing. The host process stays up, and the same command attaches
+back to the same session — transcript, plan cards, approvals, queued messages, all
+where you left them. It is a remote-first terminal workspace, not just an
+SSH-flavoured screen.
+
+> **What happens to the turn that was running? That depends on `/disconnect`:**
+> the default `pause` stops the in-flight turn when the display goes away and keeps
+> the session — you reconnect and carry on; `continue` lets that turn keep running
+> in the background and finish without you. The host survives under both. The demo
+> below runs `continue` (the caption says so); do not read it as the default.
 
 > **The npm package name has not changed, and neither has the install command.**
 > The published coordinate is still `dsh-ssh-tui`; `DSH Relay` is the product's
@@ -28,12 +35,13 @@ dsh --profile tui
 
 Reconnect with `dsh --profile tui --resume`.
 
-![Reconnect demo: a turn streams, the window is closed, the host keeps running, the same command attaches back, and the turn finishes in the same session](docs/screenshots/reconnect.gif)
+![Reconnect demo: a turn streams, the window is closed, the host keeps running, the same command attaches back, and the session is where it was; the demo runs the continue policy, so that turn also finished in the background](docs/screenshots/reconnect.gif)
 
 *Recorded, not staged: a real PTY, a real host, a real SIGHUP, a real resume
-(`npm run screenshots:reconnect` regenerates it). The session in the demo runs
-`/disconnect continue` — on the default `pause` policy a disappearing display
-cancels the in-flight turn, while the host survives either way.*
+(`npm run screenshots:reconnect` regenerates it). The demo sets `/disconnect
+continue`, which is why the turn finishes on screen after the window is gone; under
+the default `pause` the same run would stop mid-turn and the session would still be
+there to attach back to.*
 
 中文部署指南：[README.md](README.md)
 
@@ -802,8 +810,10 @@ at the slowest tier. `DSH_TUI_PAINT_MS` always wins (40–1000). The stats line
 starts with `SSH ●●●○ 90ms` (1 pip red, 2 yellow, 3+ green). The probe
 does not write into the transcript.
 
-Idle hangup exits the Host. A busy turn keeps it; `--resume` attaches to that
-process. Do not start a second Host.
+Idle hangup exits the Host. A *busy* session keeps the Host alive so you can attach
+back; whether the turn itself keeps running across the gap is the `/disconnect`
+policy (`pause` stops it by default, `continue` finishes it in the background).
+`--resume` attaches to that process. Do not start a second Host.
 
 ## Troubleshooting (Q&A)
 

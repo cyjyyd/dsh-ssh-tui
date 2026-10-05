@@ -46,7 +46,11 @@ them may be violated by a later phase without a new ADR:
    turns one risky move into two at once.
 7. **SSH is demoted from "product definition" to a signature capability.** It stays
    prominent — it is the environment most of this project's hardest bugs came from —
-   but the definition is no longer "the SSH TUI".
+   but the definition is no longer "the SSH TUI". The claim the brand makes is
+   **session continuity**, not unattended execution: a dropped display keeps the
+   *session*, while what happens to the turn that was running is the `/disconnect`
+   policy (`pause` by default, which stops that turn; `continue` to let it finish in the
+   background). No user-facing text may imply the default is `continue`.
 8. **The positioning is: remote-first / reconnectable / terminal workspace.**
    Everything user-facing should be readable as one of those three.
 9. **No migration step may break an old install coordinate.** `dsh plugin add
@@ -63,7 +67,7 @@ Phase table (the plan this ADR authorizes):
 |---|---|---|---|
 | **P0** | baseline | record the current state: coordinates, README first screen, naming audit A/B/C/D, metric template. No file changes beyond the record itself | reverting the commit |
 | **P1** | soft brand | README/hero/product wording says `DSH Relay`; package `description`/`keywords` updated; GitHub About/Topics + a compatibility issue template proposed; compatibility matrix gets a community-reported area; asset: a regenerable reconnect demo | reverting the commit; npm metadata via `npm publish` of the next version |
-| **P2** | observation | no code or naming change: collect the metrics in [`brand-metrics.md`](../brand-metrics.md) and decide from data whether P3 is worth it | nothing to revert |
+| **P2** | observation | **frozen**: no code, wording or metadata change; collect the metrics in [`brand-metrics.md`](../brand-metrics.md) at `T0`/`T1`/`T2` (+optional `T3`/`T4`) and read them against the two-axis model there | nothing to revert |
 | **P3** | GitHub relaunch | *only if P2 says so*: rename the repo (GitHub redirects the old slug), update badges/links/About | rename back; GitHub keeps a redirect |
 | **P4** | optional npm migration | *separate decision*: publish under a new package name, keep `dsh-ssh-tui` as a deprecated pointer for at least one minor | keep publishing the old name; deprecation is a dist-tag/`deprecated` field, reversible |
 
@@ -108,6 +112,31 @@ a machine resolves.** P1 edits only C.
 | Community-reported evidence, kept separate from CI evidence | [`terminals.md`](../terminals.md) |
 | Release-notes sentence for 0.8.x | [`release.md`](../release.md) §三 |
 | Observation template (no data invented) | [`brand-metrics.md`](../brand-metrics.md) |
+
+## P2 observation freeze (in force from P1.1)
+
+Once P1.1 lands, the project is in **P2 observation**. Until the observation window closes,
+none of these may be changed on purpose:
+
+- the README hero positioning (both languages), and the tagline semantics;
+- the `DSH Relay` display name;
+- the reconnect demo (`docs/screenshots/reconnect.gif` and its captions);
+- the verification block and its CTAs;
+- the star CTA and the terminal-compatibility CTA;
+- the GitHub About description, the topic list, the repository slug;
+- the npm package name.
+
+**Exceptions, and only these:** a factual error, a broken link, or a release/compatibility
+problem that has to be fixed. Fixing one of those is maintenance, not a brand change — say
+so in the commit message.
+
+**If a brand experiment has to run during the window** (a different CTA, a changed hero
+line, a post), its start date goes into the `notes` column of the metrics log at the next
+collection point, so the traffic it may have moved is attributable. An unmarked experiment
+makes the whole window unreadable.
+
+Release maintenance is explicitly allowed and expected; see the marking rules in
+[`brand-metrics.md`](../brand-metrics.md) §"P2 observation contract".
 
 ## Not in this ADR
 
