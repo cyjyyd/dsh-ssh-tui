@@ -136,7 +136,10 @@ collection point, so the traffic it may have moved is attributable. An unmarked 
 makes the whole window unreadable.
 
 Release maintenance is explicitly allowed and expected; see the marking rules in
-[`brand-metrics.md`](../brand-metrics.md) §"P2 observation contract".
+[`brand-metrics.md`](../brand-metrics.md) §"P2 observation contract". The first one inside
+this window is **0.8.2** (2026-10-05, `latest` + `next`): an rc promotion with `lib/`
+byte-identical to `0.8.2-rc.1`, whose only user-visible additions are the docs that shipped
+with the soft brand.
 
 ## Not in this ADR
 

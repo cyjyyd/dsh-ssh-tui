@@ -3,7 +3,9 @@
 > **发布方式：`latest` + `next`。** 上一次发版：**0.8.1**（2026-09-30，`latest` + `next`）。
 > 本版由 **0.8.2-rc.1**（2026-10-04 只上 `next`）沉淀一周后转正：候选版期间没有收到新的回归报告，
 > CI 五条腿与全部真 PTY 探针持续全绿，Windows / ConPTY 实机人工验收也已完成（见
-> [`checkpoints.md`](checkpoints.md)「Windows 实机轮」）。**内容与 0.8.2-rc.1 完全相同**，
+> [`checkpoints.md`](checkpoints.md)「Windows 实机轮」）。**运行时内容与候选版逐字节相同**（转正后从 registry 分别取回两个 tarball，`lib/` 整目录
+> `diff -r` 无差异）；自候选版以来新增的只有 README 与文档（DSH Relay 软品牌那一批）以及
+> `docs/screenshots/reconnect.gif`。
 > 逐项说明见 [`release-notes-0.8.2-rc.1.md`](release-notes-0.8.2-rc.1.md)。
 
 > `dsh-ssh-tui` is now presented as DSH Relay.

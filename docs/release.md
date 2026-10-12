@@ -2,9 +2,17 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **0.8.2 已发布（2026-10-05，`latest` + `next`）**：由 `0.8.2-rc.1` 沉淀一周后转正，
-> **包内 `lib/` 与候选版逐字节相同**（只改版本号与发版材料）。发版说明：
-> [`release-notes-0.8.2.md`](release-notes-0.8.2.md)。候选版记录保留在下一段。
+> **0.8.2 已发布（2026-10-05，`latest` + `next`）**：版本提交与 tag 所指 `584fb8c` → CI 五条腿
+> 全 success（run [38250232526](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/38250232526)，
+> `head_branch: main`；**推 tag 不触发新的一轮，这条是核对 tag 所指 SHA 得来的**）→ GitHub Release
+> <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.2>（非 prerelease）→
+> `npm publish --tag latest`（回 `+ dsh-ssh-tui@0.8.2`，约 40 秒后 packument 出现）→
+> `npm dist-tag add dsh-ssh-tui@0.8.2 next`。实收：**shasum `8395fd4a83da02bdbc5f0004e431940fd3fd2d7f`**、
+> integrity `sha512-3h4tTngj75o5H…36SLTj3vRhE9w==`、**245 个文件 / tarball 1.5 MB / 解包 4.4 MB**。
+> 发布后从 registry 取回 tarball，sha1 与上传值**逐字节相同**；再取回 `0.8.2-rc.1` 的 tarball 对比，
+> **`lib/` 整目录 `diff -r` 无差异**（转正只改版本号与发版材料；README / 文档另因软品牌更新）。
+> dist-tags：**`latest` = `0.8.2`，`next` = `0.8.2`**。
+> 发版说明：[`release-notes-0.8.2.md`](release-notes-0.8.2.md)；候选版记录保留在下一段。
 
 > **0.8.2-rc.1 已发布（2026-10-04，只上 `next`）**：候选树 `7c0f3b2` → tag `v0.8.2-rc.1` →
 > CI 五条腿全 success（run [37180154532](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/37180154532)，
