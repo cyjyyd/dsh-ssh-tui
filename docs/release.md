@@ -2,6 +2,10 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.2 已发布（2026-10-05，`latest` + `next`）**：由 `0.8.2-rc.1` 沉淀一周后转正，
+> **包内 `lib/` 与候选版逐字节相同**（只改版本号与发版材料）。发版说明：
+> [`release-notes-0.8.2.md`](release-notes-0.8.2.md)。候选版记录保留在下一段。
+
 > **0.8.2-rc.1 已发布（2026-10-04，只上 `next`）**：候选树 `7c0f3b2` → tag `v0.8.2-rc.1` →
 > CI 五条腿全 success（run [37180154532](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/37180154532)，
 > `head_sha` = tag 所指 SHA；**推 tag 不触发新的一轮**，这是核对来的那条）→ GitHub Release

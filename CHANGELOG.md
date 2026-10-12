@@ -10,9 +10,15 @@
 
 ---
 
-## 0.8.2-rc.1 — 2026-10-04（候选版，只上 `next`；`latest` 保持 0.8.1）
+## 0.8.2 — 2026-10-05（`latest` + `next`）
 
-发版说明：[`docs/release-notes-0.8.2-rc.1.md`](release-notes-0.8.2-rc.1.md)。
+发版说明：[`docs/release-notes-0.8.2.md`](release-notes-0.8.2.md)；候选版说明保留在
+[`docs/release-notes-0.8.2-rc.1.md`](release-notes-0.8.2-rc.1.md)。
+本版由 **0.8.2-rc.1**（2026-10-04，只上 `next`）沉淀一周后转正，**内容与候选版相同**，
+下列变更即候选版以来累积的全部变更。
+
+> `dsh-ssh-tui` is now presented as DSH Relay. The npm package name and the install command
+> have not changed. —— `dsh-ssh-tui` 现在以 DSH Relay 为产品名展示；包名与安装命令没有变化。
 
 B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过最终审计，本节汇总用户能看到的
 部分。详细证据与冻结记录见 [`docs/checkpoints.md`](checkpoints.md) 与
@@ -113,6 +119,8 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ### 已知问题
 
+- **0.8.2-rc.1 → 0.8.2 无代码变更**：转正只改版本号与发版材料，包内 `lib/` 与候选版逐字节相同
+  （候选版沉淀期间未收到新的回归报告）。
 - Windows / ConPTY **实机人工验收已完成**（2026-10-03，维护者逐条走过 12 项清单，结论见
   [`docs/checkpoints.md`](checkpoints.md)「Windows 实机轮」）：可自动化的部分由 `verify-batch --home
   <dir>` 覆盖（12 PASS · 2 SKIP · 0 FAIL），**没有自动化、只能人眼的两目（输入法组合、多行中文粘贴）
