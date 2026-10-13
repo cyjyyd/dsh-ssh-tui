@@ -1322,6 +1322,26 @@ const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick
 const SETUP_FIELD_STEPS: ReadonlySet<string> = new Set(['provider', 'id', 'base-url', 'key', 'models', 'context'])
 
 /**
+ * Whether one data chunk is a paste rather than keystrokes.
+ *
+ * Bracketed paste says so outright, and that is the path every modern terminal
+ * takes. A console without it sends the content as one burst instead, and a burst
+ * carrying more than one line break is not a human pressing Enter twice — they
+ * cannot press it twice inside one read. This is the fallback's one rule, kept
+ * here so every surface that can take a paste applies the same one.
+ */
+function looksLikePasteBurst(text: string): boolean {
+  let breaks = 0
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (char === '\r' && text[index + 1] !== '\n') breaks += 1
+    else if (char === '\n' && text[index - 1] !== '\r') breaks += 1
+    if (breaks > 1) return true
+  }
+  return false
+}
+
+/**
  * The durable event types the plan projection reads (B2.5).
  *
  * `tool/call`/`tool/result` are here for the `exit_plan_mode` review; the recorder
@@ -12278,11 +12298,24 @@ export class SshTui {
   private handleScreenInput(combined: string, moved: string | undefined): void {
     const screen = this.screen
     if (screen === undefined) return
+    // Ctrl+L repaints the frame and belongs to the terminal rather than to any
+    // surface that happens to be up: a Screen replaces the workspace entirely, so a
+    // reader with a garbled terminal would otherwise have to leave the Screen to
+    // clear it. The next paint is a full one, exactly as the composer's Ctrl+L is.
+    if (combined === '\x0c') {
+      this.screenNeedsFullPaint = true
+      this.markDirty()
+      return
+    }
     // The setup Screen owns its own field, its own navigation and its own keys: it
     // consumes everything while it is up, and nothing reaches the workspace's
     // composer, history or transcript (B2.6 §4).
     if (screen.kind === 'setup') {
-      this.handleSetupKey(combined, moved)
+      // A burst of line breaks in one read is a paste from a console that cannot say
+      // so (`looksLikePasteBurst`): it belongs in the field as one edit, which is how
+      // a pasted key or model list survives a terminal without bracketed paste.
+      if (looksLikePasteBurst(combined)) this.pasteIntoScreen(combined)
+      else this.handleSetupKey(combined, moved)
       return
     }
     // The Screen's own confirmation owns the keys while it is up: it is a question
@@ -12630,13 +12663,22 @@ export class SshTui {
    * A paste is text input, so it goes through the same ownership question ordinary
    * typing does: into the composer's draft when the composer owns the keyboard, and
    * into a borrowed field when a surface that has one does. A surface without a
-   * text field (a confirmation, the inspect overlay) takes no paste at all — the
+   * text field (a confirmation, a menu, a report) takes no paste at all — the
    * alternative was writing the composer's hidden draft behind it, which is how a
    * paste into an approval dialog could silently rewrite the message being written.
+   *
+   * A **Screen** is that same question with a different answer, and it is asked
+   * first because `textIsEditable()` only ever answers for the composer's field: the
+   * setup Screen keeps a field of its own, which the composer's helpers cannot see
+   * and must never be handed (B2.6 §4).
    */
   private handlePasteText(text: string): void {
     const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     if (normalized === '') return
+    if (this.screen !== undefined) {
+      this.pasteIntoScreen(normalized)
+      return
+    }
     if (!this.textIsEditable()) return
     this.leaveHistoryBrowse()
     const current = this.fieldText()
@@ -12651,27 +12693,49 @@ export class SshTui {
   }
 
   /**
+   * Give a paste to the field the Screen owns, or to nobody.
+   *
+   * The setup Screen is the only Screen with a field, and it is the one place a
+   * paste matters most: an API key, a base URL and a model list are all copied from
+   * somewhere else, and a first run that could only be typed by hand is the
+   * difference between a working session and an empty one. A step without a field —
+   * the model pickers, the confirmation — is not a text field, so the paste is
+   * dropped exactly as a menu drops it: a paste is text, never an answer.
+   */
+  private pasteIntoScreen(text: string): void {
+    const state = this.onboarding
+    if (this.screen?.kind !== 'setup' || state === undefined || state.saving) return
+    if (!SETUP_FIELD_STEPS.has(state.step)) return
+    // The field is drawn on one row, so it takes the value and not the line breaks
+    // around it: a key copied off a web page carries the newline that ended its
+    // line, and a pasted list or `.env` block means the breaks as separators. Both
+    // are folded here rather than inserted literally, which would leave the field
+    // holding text no step can parse and no row can draw.
+    const flat = text.split('\n').map(part => part.trim()).filter(part => part !== '').join(' ')
+    if (flat === '') return
+    this.setupInsert(state, flat)
+    this.markDirty()
+  }
+
+  /**
    * Whether the keys that edit text belong to a field right now.
    *
    * The composer always has one; an open surface only has one when it borrowed it
-   * (a free-text answer, a setup field). Everything else — a confirmation, a menu,
-   * the inspect overlay — owns the keyboard without owning text, and those keys
-   * must do nothing rather than reach the draft behind the surface.
+   * (a free-text answer). Everything else — a confirmation, a menu, the inspect
+   * overlay, every Screen — owns the keyboard without owning the composer's text,
+   * and those keys must do nothing rather than reach the draft behind the surface.
+   * A Screen is included by name: the setup Screen has a field of its own, and it
+   * is reached through the Screen's own keys, never through the composer's.
    */
   private textIsEditable(): boolean {
+    if (this.screen !== undefined) return false
     return this.dialog === undefined || this.borrowedText !== undefined
   }
 
   private handlePlainText(text: string): void {
     // Fallback for terminals without bracketed paste: a burst of multiple line
     // breaks in one chunk is a paste, not repeated Enter presses.
-    let newlines = 0
-    for (let index = 0; index < text.length; index += 1) {
-      const char = text[index]
-      if (char === '\r' && text[index + 1] !== '\n') newlines += 1
-      else if (char === '\n' && text[index - 1] !== '\r') newlines += 1
-    }
-    if (newlines > 1) {
+    if (looksLikePasteBurst(text)) {
       this.handlePasteText(text)
       return
     }
@@ -12693,11 +12757,15 @@ export class SshTui {
   }
 
   private handleChar(char: string): void {
-    // A setup Screen owns every key, Enter included: it is the key that submits a
-    // step, and the composer behind the screen must never receive one (B2.6 §4).
-    // Ctrl+C is the exception — it is the terminal's own interrupt and keeps its
-    // global meaning.
-    if (this.screen?.kind === 'setup' && char !== '\x03') {
+    // A Screen owns every key outright, and the gate comes first for the same reason
+    // `handleInputText` puts it first: the switch below spends its keys on the
+    // composer — Enter submits the draft, Backspace/Ctrl+U/Ctrl+K edit it, Ctrl+R
+    // folds the transcript behind the Screen. A Screen is not a dialog, so none of
+    // the `dialog === undefined` guards in that switch ever saw it, and every one of
+    // those keys used to reach a draft the reader could not see. The Screen decides
+    // what it uses (Enter and Ctrl+C close it, Esc leaves it, the wizard answers with
+    // them); anything it does not use is dropped, never forwarded (B2.6 §4).
+    if (this.screen !== undefined) {
       this.handleScreenInput(char, this.keymap.sequences.get(char))
       return
     }
@@ -13142,13 +13210,6 @@ export class SshTui {
         return
       }
       this.setupBackspace(state)
-      this.markDirty()
-      return
-    }
-    if (combined === '\x0c') {
-      // Ctrl+L still repaints the whole frame: the field is a row like any other,
-      // and a forced repaint is how a reader clears a garbled terminal.
-      this.screenNeedsFullPaint = true
       this.markDirty()
       return
     }

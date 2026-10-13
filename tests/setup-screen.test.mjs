@@ -129,11 +129,56 @@ test('typing goes to the wizard’s field and cannot touch the workspace draft',
   assert.equal(tui.history.length, 0, 'nothing is written to the input history')
 })
 
-test('a multi-character paste lands in the wizard’s field as one edit', () => {
+test('a bracketed paste lands in the wizard’s field as one edit', () => {
   const { tui } = setup('key')
-  tui.handleData(Buffer.from('sk-pasted-value'))
-  assert.equal(tui.onboarding.field, 'sk-pasted-value')
-  assert.equal(tui.input, '', 'the workspace saw none of it')
+  tui.input = 'workspace draft'
+  tui.cursor = 5
+  // What a terminal actually sends for its paste shortcut: the content wrapped in
+  // the bracketed-paste markers the workspace has always understood. A paste is
+  // text input, so it belongs to whoever owns a field — and here that is the
+  // wizard, not the composer behind the Screen.
+  tui.handleData(Buffer.from('\x1b[200~sk-pasted-value\x1b[201~'))
+  assert.equal(tui.onboarding.field, 'sk-pasted-value', 'the wizard’s field takes the paste')
+  assert.equal(tui.input, 'workspace draft', 'and the composer draft is not a scratch buffer')
+  assert.equal(tui.cursor, 5, 'caret included')
+})
+
+test('a pasted line break folds into the field it is pasted into', () => {
+  // A key copied off a web page or out of a `.env` carries the newline that ended
+  // the line it was on. The field is one row: it takes the value, not the break.
+  const { tui } = setup('key')
+  tui.handleData(Buffer.from('\x1b[200~sk-live-1234\n\x1b[201~'))
+  assert.equal(tui.onboarding.field, 'sk-live-1234')
+})
+
+test('a multi-line burst from a terminal without bracketed paste lands there too', () => {
+  // The fallback path: no markers, several line breaks in one read. Conhost older
+  // than 2022-11 delivers exactly this, and so does a pipe.
+  const { tui } = setup('models')
+  tui.handleData(Buffer.from('deepseek-v4\ngrok-4.5\n'))
+  assert.equal(tui.onboarding.field, 'deepseek-v4 grok-4.5', 'the burst is a paste, not two Enters')
+  assert.equal(tui.input, '', 'and the workspace saw none of it')
+})
+
+test('a paste at a step with no field is not an answer and not a draft edit', () => {
+  const { tui } = setup('confirm')
+  tui.input = 'draft'
+  tui.cursor = 3
+  tui.handleData(Buffer.from('\x1b[200~y\x1b[201~'))
+  assert.equal(tui.onboarding.field, '', 'this step has no field')
+  assert.equal(tui.onboarding.step, 'confirm', 'and a paste is not an answer')
+  assert.equal(tui.onboarding.saving, false, 'so it cannot save a half-read configuration')
+  assert.equal(tui.input, 'draft', 'the workspace draft is still the workspace’s')
+  assert.equal(tui.cursor, 3)
+})
+
+test('a paste at the wizard’s pickers does not tick a box', () => {
+  const { tui } = setup('models-pick', {
+    modelCandidates: ['deepseek-v4', 'grok-4.5'], modelChecked: new Set(), modelCursor: 0,
+  })
+  tui.handleData(Buffer.from('\x1b[200~1\x1b[201~'))
+  assert.equal(tui.onboarding.modelChecked.size, 0, 'a picker answers by highlight and hotkey, not by paste')
+  assert.equal(tui.onboarding.field, '')
 })
 
 test('the secret step masks its field and never paints the key', () => {

@@ -49,6 +49,22 @@ const OSC = /\x1b\][^\x07]*\x07/gu
 const plain = text => text.replace(CSI, '').replace(OSC, '')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// The real grid the PTY's bytes produce: a phase that asks what the *reader* sees
+// cannot ask the byte stream, which spells a row only as far as it had to repaint.
+const { screen: newGrid } = await import(pathToFileURL(join(ROOT, '../tests/screen.mjs')).href)
+
+/** The rows the terminal is showing, replayed from the bytes the PTY handed over. */
+async function wizardRows(output) {
+  const grid = await newGrid(100, 30)
+  await grid.write(output)
+  return grid.lines()
+}
+
+/** The row the wizard draws its field on — the only one that opens with `›`. */
+function fieldRowOf(rows) {
+  return rows.find(row => row.trimStart().startsWith('›')) ?? ''
+}
+
 async function loadPty() {
   try {
     return await import(pathToFileURL(require.resolve('node-pty', { paths: [process.cwd()] })).href).then(mod => mod.default ?? mod)
@@ -179,6 +195,34 @@ async function runProbe(argv) {
       check(rows.length > 0 && rows.length <= 8, `typing in the field repaints a few rows (${rows.length})`)
     }
 
+    // 3b. A paste belongs to the field the wizard owns — which is the whole point
+    //     of the field being its own. An API key, a base URL and a model list are
+    //     copied, not typed, and the terminal delivers that as bracketed paste. The
+    //     field row is read off a real grid, because "what the field says" is not a
+    //     string in the stream: the wizard repaints the row it changed. The other
+    //     half — that none of it reached the composer behind the Screen — is phase 5,
+    //     where the workspace is visible again.
+    const PASTE = 'sk-probe-pasted-value'
+    const rowsBeforePaste = await wizardRows(output)
+    const beforePaste = output.length
+    term.write(`\x1b[200~${PASTE}\x1b[201~`)
+    await delay(700)
+    const rowsAfterPaste = await wizardRows(output)
+    const fieldBefore = fieldRowOf(rowsBeforePaste)
+    const fieldAfter = fieldRowOf(rowsAfterPaste)
+    // Both field kinds look different on purpose: the key step masks, the rest show
+    // what was typed. Whichever step the walk landed on, the paste has to be there.
+    const bullets = row => row.match(/•/gu)?.length ?? 0
+    const secretStep = /4\/9/u.test(plain(output))
+    if (secretStep) {
+      check(bullets(fieldAfter) === bullets(fieldBefore) + PASTE.length,
+        `the pasted key is masked in the field (${bullets(fieldBefore)} → ${bullets(fieldAfter)} bullets)`)
+      check(!plain(output.slice(beforePaste)).includes(PASTE), 'the pasted key is never painted')
+    } else {
+      check(fieldAfter.includes(PASTE), `the paste reaches the field (${JSON.stringify(fieldAfter)})`)
+    }
+    check(fieldAfter !== fieldBefore, 'the paste repainted the field row')
+
     // 4. Resize keeps the field and the counter.
     term.resize(72, 20)
     await delay(600)
@@ -187,13 +231,18 @@ async function runProbe(argv) {
     term.resize(120, 24)
     await delay(600)
 
-    // 5. Esc leaves the wizard; the workspace comes back.
+    // 5. Esc leaves the wizard; the workspace comes back — and the paste is not in
+    //    the composer waiting there. That is the failure this phase exists for: a
+    //    wizard that did not own the paste left it in the draft behind the Screen,
+    //    where it was invisible until the wizard closed and then looked like a
+    //    message the reader had written.
     const beforeEsc = output.length
     term.write('\x1b')
     await delay(900)
     const after = plain(output.slice(beforeEsc))
     check(after.includes('目录') || after.includes('❯'), `the workspace is back after Esc (${JSON.stringify(after.slice(-160))})`)
-    console.log(`setup Screen: painted, listed (${listRows.length} rows), stepped, typed (${rows.length} rows), resized and left`)
+    check(!after.includes(PASTE), 'the paste never reached the composer behind the wizard')
+    console.log(`setup Screen: painted, listed (${listRows.length} rows), stepped, typed (${rows.length} rows), pasted${secretStep ? ' (masked)' : ''}, resized and left`)
   } finally {
     try { term.kill() } catch { /* already gone */ }
     if (keep) console.log(`probe home kept: ${home}`)

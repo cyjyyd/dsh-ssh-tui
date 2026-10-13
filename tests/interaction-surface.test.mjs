@@ -412,6 +412,78 @@ test('one owner per key: the contract every surface keeps', async () => {
   }
 })
 
+// ── a Screen is an owner too ─────────────────────────────────────────────────
+
+/** A wizard parked on a field step, opened the way production opens it. */
+function openSetup(tui) {
+  tui.onboarding = {
+    step: 'key', providerType: 'official', providerId: 'deepseek-official', baseUrl: '', key: '',
+    models: [], catalogPresets: undefined, catalog: undefined, providerCursor: 0,
+    saving: false, field: '', fieldCursor: 0, resolve() {},
+  }
+  tui.openScreen({ kind: 'setup', title: '首次配置向导', lines: [], offset: 0 })
+}
+
+/** Every Screen kind, opened the way its command opens it. */
+const SCREENS = [
+  ['setup', openSetup],
+  ['report', tui => tui.openScreen({ kind: 'report', report: 'diag', title: '诊断', lines: [{ kind: 'system', text: '一行正文' }], offset: 0 })],
+  ['inspect', tui => tui.openScreen({ kind: 'inspect', title: 'diff', lines: [{ kind: 'diff-add', text: '+ 一行' }], offset: 0 })],
+]
+
+test('a Screen owns the composer’s own keys, not just the printable ones', () => {
+  // The leak this pins: a Screen is not a dialog, and every guard the composer's
+  // editing keys carry reads `this.dialog === undefined`. So Backspace, Ctrl+U,
+  // Ctrl+K, Ctrl+A/E, Ctrl+R, Ctrl+T and Enter all walked past the Screen and spent
+  // themselves on the draft behind it — invisibly, because a Screen paints none of
+  // that draft. One key per TUI and one delivery path, so a key that legitimately
+  // closes the Screen cannot leak into the next assertion.
+  const keys = [
+    ['\x7f', 'Backspace'], ['\x08', 'Ctrl+H'], ['\x15', 'Ctrl+U'], ['\x0b', 'Ctrl+K'],
+    ['\x01', 'Ctrl+A'], ['\x05', 'Ctrl+E'], ['\x12', 'Ctrl+R'], ['\x14', 'Ctrl+T'],
+    ['\r', 'Enter'], ['\x03', 'Ctrl+C'], ['\x04', 'Ctrl+D'], ['x', 'a printable key'],
+  ]
+  for (const [name, open] of SCREENS) {
+    for (const [key, label] of keys) {
+      for (const path of ['handleData', 'handleChar']) {
+        const { tui, exits } = fixture()
+        tui.input = 'the draft I was writing'
+        tui.cursor = 8
+        tui.history.push('an earlier prompt')
+        tui.historyIndex = 0
+        pushRow(tui, {
+          kind: 'tool', callId: 'c1', name: 'bash', title: 'bash', summary: 'ls',
+          args: '{}', output: 'ok', status: 'ok', expanded: false,
+        })
+        open(tui)
+        if (path === 'handleData') tui.handleData(Buffer.from(key))
+        else tui.handleChar(key)
+        const where = `${name} + ${label} via ${path}`
+        assert.equal(tui.input, 'the draft I was writing', `${where}: the draft belongs to the composer`)
+        assert.equal(tui.cursor, 8, `${where}: and so does its caret`)
+        assert.equal(tui.historyIndex, 0, `${where}: the browse position did not move`)
+        assert.equal(tui.rows.find(row => row.kind === 'tool')?.expanded, false, `${where}: no card was folded or unfolded`)
+        assert.equal(tui.focusedRow, null, `${where}: and no card was selected`)
+        assert.equal(tui.inputFolded, false, `${where}: the composer’s fold is the composer’s`)
+        assert.deepEqual(exits, [], `${where}: and the process was not told to exit`)
+      }
+    }
+  }
+})
+
+test('a paste at a Screen with no field goes nowhere at all', () => {
+  for (const [name, open] of SCREENS.slice(1)) {
+    const { tui } = fixture()
+    tui.input = 'the draft I was writing'
+    tui.cursor = 8
+    open(tui)
+    tui.handleData(Buffer.from('\x1b[200~rm -rf /\x1b[201~'))
+    assert.equal(tui.input, 'the draft I was writing', `${name}: a Screen without a field takes no paste`)
+    assert.equal(tui.cursor, 8, `${name}: caret included`)
+    assert.equal(tui.screen?.kind, name, `${name}: and it is still the Screen that is up`)
+  }
+})
+
 // ── Standard / Minimal / line mode share one semantic state ─────────────────
 
 test('both workspace views report the same interaction states', async () => {

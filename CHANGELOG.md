@@ -10,6 +10,21 @@
 
 ---
 
+## Unreleased（未发版；进哪个补丁版由发版时决定）
+
+### Fixed
+
+- **首启向导 / `/setup` 的粘贴**：终端粘贴（Ctrl+V / Cmd+V / 右键，即括号粘贴）此前落到 Screen
+  *背后*的工作区草稿里——向导字段一个字都收不到，读者只能手敲 API Key。现在粘贴归字段所有：字段步骤
+  直接落进字段（行尾换行折叠掉，多行按分隔拼接成一行），没有字段的步骤（模型多选、确认）不接收，
+  两种情况下草稿都不再被改写。
+- **Screen 打开时的 composer 编辑键**：`Enter` / `Backspace` / `Ctrl+H` / `Ctrl+U` / `Ctrl+K` /
+  `Ctrl+A` / `Ctrl+E` / `Ctrl+R` / `Ctrl+T` 不再作用于 `/diag`、`/status`、diff 全览等 Screen 背后
+  那个看不见的草稿（此前 `Enter` 会把草稿当消息发出去，`Ctrl+U` / `Ctrl+K` 会清空或截断它）。
+- **Screen 里的 `Ctrl+L`**：任意 Screen（不只是向导）都能整屏重画，用于清理花屏的终端；此前只有向导认这个键。
+
+---
+
 ## 0.8.2 — 2026-10-05（`latest` + `next`）
 
 发版说明：[`docs/release-notes-0.8.2.md`](release-notes-0.8.2.md)；候选版说明保留在

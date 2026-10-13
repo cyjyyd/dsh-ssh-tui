@@ -1610,3 +1610,72 @@ ConPTY 上根本摸不到**，而这个形状是被读者报过两次的那个�
 3. **P4 npm 迁移**：独立决策，不与 P3 绑定。
 4. **CLI 里的产品名**（`/diag` 的 `plugin: dsh-ssh-tui <version>`、启动横幅、错误前缀）**故意保留**：它们属于 D 类，是搜索结果与既有 bug report 的锚点。
 5. `npm run bench:report` 由人工在发布前跑一次（不进 CI：它比较的是提交内容，放进 CI 只会在毫秒抖动上浪费时间）。
+
+---
+
+## 粘贴被工作区草稿吞掉 · Screen 输入所有权补全（2026-10-05）
+
+现场报告：**首启向导里粘贴 API Key 没有反应，只能手敲。** 本轮把这一类问题一次查干净。
+
+**影响面**：首次安装（`stored === false` 时的首启向导）与 `/setup` 是**同一个 Screen**，所以首次安装
+一次不落地全部受影响 —— 而首启向导是唯一能把会话配置到可用的东西。粘贴与手敲的差别在这里不是
+便利性，是能不能装好。
+
+### 1. 根因
+
+向导自 0.8.2 起是 Screen（B2.6）：它有自己的字段（`OnboardingState.field`）和自己的按键处理
+（`handleSetupKey`）。但"文本输入归谁"此前只有两个答案：composer 的草稿，或对话框借来的字段。
+
+- `textIsEditable()` 只问 `this.dialog`：Screen 不是 dialog，于是它答"可编辑"（true）；
+- `handlePasteText()` 于是把粘贴交给 `fieldText()/setField()` —— 也就是 Screen **背后**那个
+  看不见的 composer 草稿。
+
+粘贴没有丢，它进了读者看不见的输入区；等向导结束，草稿里躺着一整串 Key。这正是"被输入区捕获"。
+
+### 2. 同类：`handleChar` 的控制键在 Screen 之前就分流了
+
+`handleChar()` 的 `switch` 在 Screen 分支**之前**，而那张表里的守卫全是 `this.dialog === undefined`
+—— Screen 不是 dialog，所以一个都拦不住：
+
+| 键 | 修复前（`/diag`、diff 全览等 Screen，经 burst/Alt 路径可达） |
+|---|---|
+| Enter | 把看不见的草稿**当消息发了出去**，并清空它 |
+| Ctrl+U / Ctrl+K | 清空 / 从光标处截断草稿 |
+| Backspace / Ctrl+H | 删掉草稿里的字 |
+| Ctrl+A / Ctrl+E | 移动草稿光标 |
+| Ctrl+R / Ctrl+T | 折叠背后转写的卡片 / 切换草稿折叠 |
+
+另外 `Ctrl+L`（整屏重画）此前只有向导认，其它 Screen 直接丢弃 —— 同一张所有权表里的不一致，本轮一并统一。
+
+### 3. 改动（`src/tui.ts`，无接口变更、无配置变更）
+
+1. `handlePasteText()`：**Screen 优先** —— 有字段的 Screen 收下，没有字段的 Screen 丢弃，绝不落到草稿；
+2. 新增 `pasteIntoScreen()`：只让 `SETUP_FIELD_STEPS` 的步骤收；行尾换行折叠（网页/`.env` 复制来的
+   Key 都带一个换行），多行按分隔拼接（模型列表、`.env` 块），字段永远是一行；
+3. `textIsEditable()`：Screen 一律 false —— "草稿可编辑"从此不对 Screen 成立；
+4. `handleChar()`：Screen 门提到 `switch` 之前，与 `handleInputText()` 的门位置一致 —— 两条能送字符
+   进来的路径由构造保持一致，而不是各写一份守卫；
+5. `looksLikePasteBurst()`：把 `handlePlainText()` 里"多换行即粘贴"的启发式提成一条规则，并让 Screen
+   路径也用它（老 conhost 不发括号粘贴时，粘贴的 Key 与模型列表同样进字段）；
+6. `handleScreenInput()`：`Ctrl+L` 归所有 Screen（从 `handleSetupKey` 移上来，不留两处实现）。
+
+### 4. 证据
+
+| 证据 | 结果 |
+|---|---|
+| 新增单测（`tests/setup-screen.test.mjs` 5 项 · `tests/interaction-surface.test.mjs` 2 项） | 修复前 **6 项红**，修复后全绿 |
+| 泄漏表（3 种 Screen × 13 键 × 2 条投递路径 = 78 格） | 修复前 **21 格命中**；修复后 **no leaks** |
+| 真机探针 `scripts/tui-setup-probe.mjs`（新增粘贴阶段，真 PTY 发括号粘贴） | 修复前 FAIL：`the pasted key is masked in the field (1 → 1 bullets)`、`the paste never reached the composer behind the wizard`；修复后 OK |
+| 真机探针 `scripts/tui-probe.mjs`（启动/缩放/报告/退出） | OK |
+| 门 | `npm run typecheck` 0 · `npm test` 1382 项 · **1378 通过 · 0 失败 · 4 跳过** · `npm run freeze` 八条不变量全绿 · `npm run bench:report -- --check` 两条 README 一致 |
+
+真机探针的粘贴阶段落在**密钥步（4/9，掩码字段）**，正是首次安装的场景：粘贴显示为圆点、明文从不出现在
+帧里、Esc 回到工作区后草稿里没有它。
+
+### 5. 未做
+
+1. **没有改版本号、没有发版**：`CHANGELOG.md` 的 `## Unreleased` 记了这一条，进哪个补丁版由发版时决定。
+2. 真机 drop 探针（`tui-drop-probe.mjs`）本轮未跑：它要 CI 那套洁净 checkout 里的固定 mock 模型，
+   本机 `node_modules` 是旧的符号链接农场；它与输入路由无关（CI 两条腿都会跑它）。
+3. 向导字段的**左右光标键**仍未实现（`handleSetupKey` 只认上下）：粘贴因此总是追加在末尾。这不是缺陷，
+   只是"掩码字段 + 中间光标"这条组合目前不存在；要做就得连掩码渲染一起补，不在本轮范围。
