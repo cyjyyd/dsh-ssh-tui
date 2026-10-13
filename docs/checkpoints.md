@@ -1768,8 +1768,10 @@ composer 路径一直就是这么做的（`handlePlainText` 逐字符），Scree
 | G-7 | focus 事件靠"未知序列"兜住 | `\x1b[I` / `\x1b[O` | `no change` ✅ 但**无测试** |
 | G-8 | Screen 内 rebind 的复制键同 read 失效 | 同 G-2 | 与 G-1 同源 |
 | G-9 | 两个 hold 窗口做同一件事 | Guard 30ms vs TUI 60ms | 代码审阅 |
+| G-10 | **任何复制路径都清空 composer 草稿** | `/copy`、复制键、Screen 内复制、拖拽选择、链接点击 | 输入 `我打了一半的消息` → 三条路径实测全变 `""`（`copyPlainText` 里的 `this.input = ''`，可追到 0.5.5） |
 
 **没有发现的泄漏**（当基线写下来）：Screen 打开时草稿不被任何键改写；dialog 打开时转写不滚；
-Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行。
+Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行（`handleMouseClick` 明确拒绝）。
+反过来，唯一一处**越权写**就是 G-10：复制是 Workspace/Surface 的动作，却改了 Composer 的草稿。
 
 本轮未做：不改 `src/`、不改测试、不改冻结审计、不发版（契约与路线图落地在 0.8.4）。

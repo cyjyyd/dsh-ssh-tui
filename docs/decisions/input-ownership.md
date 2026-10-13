@@ -104,7 +104,7 @@ stdin / FRAME_STDIN
 | PgUp/PgDn | 滚 Screen | 丢弃（不穿透） | 滚转写 | 滚转写 |
 | 滚轮 | 滚 Screen | 丢弃 | 滚转写 | 滚转写 |
 | 点击 | 无 | 无 | 链接/卡片 | 链接/卡片/聚焦 |
-| 拖拽选择 | **无**（G-5） | 无 | 有（`selection.ts`） | 有 |
+| 拖拽选择 | **无**（G-5） | 无 | 有（`selection.ts`） | 有（复制后清空草稿，G-10） |
 | 粘贴 | setup：进字段；其它：丢弃 | 有字段则进字段；否则丢弃 | 进草稿 | — |
 | Ctrl+L | 整屏重画 | 无 | 整屏重画（另一套实现，G-6） | 同左 |
 | resize | 任何 owner 都不拥有：Renderer 处理 | | | |
@@ -154,9 +154,9 @@ stdin / FRAME_STDIN
 | 滚轮（composer） | 阶梯 6 → `scrollActiveSurface` | Workspace | ✅ 上滚 3 行 |
 | 滚轮（Screen） | `handleScreenInput` 7 | Screen | ✅ 40→43 |
 | 滚轮（Surface 打开） | `scrollActiveSurface` 里 `dialog !== undefined` 直接返回 | Surface | ✅ 不穿透 |
-| 拖拽（composer，可复制行） | 阶梯 6 → `begin/extend/endMouseSelection` | Workspace | ✅ 见 `tests/mouse-selection.test.mjs` |
+| 拖拽（composer，可复制行） | 阶梯 6 → `begin/extend/endMouseSelection` → `copyPlainText` | Workspace | ✅ 选择语义见 `tests/mouse-selection.test.mjs`；**复制后草稿被清空**（G-10） |
 | 拖拽（Screen 内） | 两个分支都拒绝 | **无人** | ⚠️ 设计如此（G-5）：Screen 里只有 `/copy` 与 `Ctrl+Shift+C` |
-| 点击（composer） | 阶梯 6：链接优先，其次卡片展开 | Workspace | ✅ |
+| 点击（composer） | 阶梯 6：链接优先（复制链接），其次卡片展开 | Workspace | ✅（链接点击会清空草稿，G-10） |
 | 点击（Screen 内） | 显式拒绝 | 无人 | ✅ 设计（"Screen 背后不是目标"） |
 | Motion 无按键（`?1002h` 之外的 35+） | 无匹配 | 无人 | ⚠️ 未定义（当前终端只开 1002，不会发） |
 
@@ -194,6 +194,7 @@ stdin / FRAME_STDIN
 | **G-7** | focus 事件靠"未知序列"兜住 | `\x1b[I` / `\x1b[O`（composer、Screen、dialog 三种 owner 下） | `no change` ✅ | **无测试的隐式契约**：将来加一条 `CSI ... I` 分支就可能误吞/误判 |
 | **G-8** | Screen 内粘贴/复制的 rebind 键同 read 失效 | 同 G-2（`moved === 'copy'` 只在整段相等时成立） | 代码审阅 + G-1 同源 | 丢失 |
 | **G-9** | 两个 hold 窗口做同一种事 | Guard 30ms（CPR 尾） vs TUI 60ms（ESC 前缀） | 代码审阅 | 结构债：分片规则分散在两处 |
+| **G-10** | **任何复制路径都清空 composer 草稿** | `/copy`、rebind 的复制键、Screen 内的复制键、拖拽选择、链接点击（都汇到 `copyPlainText`） | 输入 `我打了一半的消息`（caret 3）→ 三条路径实测全部变成 `""` / caret 0 | **越权写**：Workspace/Surface 的动作改了 Composer 的状态。清空本是给"`/copy` 这条命令提交后别留在输入框里"写的（`git log -L` 追到 0.5.5 时代），但复制键与鼠标手势没有命令文本要清 |
 
 **没有发现的泄漏**（本轮逐格测过，值得写下来当基线）：Screen 打开时 composer 草稿不被任何键改写；
 dialog 打开时转写不滚动；Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行。
