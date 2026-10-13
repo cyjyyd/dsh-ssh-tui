@@ -2,6 +2,19 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.3 已发布（2026-10-13，`latest` + `next`，紧急修复）**：版本提交与 tag 所指 `8483538` → CI 五条腿
+> 全 success（run [38403856392](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/38403856392)，
+> `head_branch: main`；**推 tag 不触发新的一轮，这条是核对 tag 所指 SHA 得来的**）→ GitHub Release
+> <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.3>（非 prerelease）→
+> `npm publish --tag latest`（回 `+ dsh-ssh-tui@0.8.3`，约 3 分钟后 packument 出现）→
+> `npm dist-tag add dsh-ssh-tui@0.8.3 next`。实收：**shasum `616541ff7cb5826d8a4f30478b3bc98b0924f8ee`**、
+> integrity `sha512-GB/0cJ6WMvmiq…8wYNvCKFGUcyQ==`、**246 个文件 / tarball 1.5 MB / 解包 4.4 MB**。
+> 发布后从 registry 重新下载 tarball：sha1 与上传值**逐字节相同**，包内
+> `lib/tui.js` 与本地构建树 `diff` **无差异**（即 CI 测的那份就是这个包），`docs/release-notes-0.8.3.md` 在包内。
+> dist-tags：**`latest` = `0.8.3`，`next` = `0.8.3`**。
+> 发版说明：[`release-notes-0.8.3.md`](release-notes-0.8.3.md)。本版修的是 0.8.2 把首启向导改成 Screen 时
+> 引入的三个缺陷（粘贴进不了字段、走完向导不退回工作区、一次 read 只当一键），全部落在首次安装 / `/setup`。
+
 > **0.8.2 已发布（2026-10-05，`latest` + `next`）**：版本提交与 tag 所指 `584fb8c` → CI 五条腿
 > 全 success（run [38250232526](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/38250232526)，
 > `head_branch: main`；**推 tag 不触发新的一轮，这条是核对 tag 所指 SHA 得来的**）→ GitHub Release

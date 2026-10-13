@@ -1721,3 +1721,19 @@ composer 路径一直就是这么做的（`handlePlainText` 逐字符），Scree
 探针第 7 阶段是**真 resume**：用同一 home 里最新的 session id 启动 `--resume=<id>`（首启判定只看凭据，
 所以仍然进向导），粘贴 Key、走完九步、按 `y`，**之后不再发任何按键**，断言工作区自己回来。
 它把"保存成功却停在向导上"钉成了回归门。
+
+### 4. 发版（0.8.3，紧急补丁）
+
+| 项 | 值 |
+|---|---|
+| 修复提交 | `f1195fe`（修复 + 测试 + 探针第 7 阶段） |
+| 版本提交 / tag 所指 | `8483538`（`package.json` + `package-lock.json` 只动版本字段） |
+| CI | run [38403856392](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/38403856392) **五条腿全 success**（tag 不触发新的一轮，这是核对 tag 所指 SHA 得来的那条） |
+| tag | `v0.8.3` → `8483538` |
+| GitHub Release | <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.3>（非 prerelease） |
+| npm | `npm publish --tag latest` → `+ dsh-ssh-tui@0.8.3`；`npm dist-tag add dsh-ssh-tui@0.8.3 next` |
+| 实收 | shasum `616541ff7cb5826d8a4f30478b3bc98b0924f8ee` · integrity `sha512-GB/0cJ6WMvmiq…8wYNvCKFGUcyQ==` · **246 个文件 / tarball 1.5 MB / 解包 4.4 MB** |
+| 发布后校验 | 从 registry 重新下载 tarball，sha1 与上传值相同；包内 `lib/tui.js` 与本地构建树 `diff` 无差异；`docs/release-notes-0.8.3.md` 在包内 |
+| dist-tags | **`latest` = `0.8.3`，`next` = `0.8.3`** |
+
+完整回执同时写在 [`release.md`](release.md) 顶部（规则文件的第一段就是最近一次发版）。
