@@ -130,7 +130,7 @@ function oid(value) {
   return String(value)
 }
 
-function snapshot(tui) {
+function snapshot(tui, rowsAtStart) {
   return {
     input: tui.input,
     cursor: tui.cursor,
@@ -142,7 +142,10 @@ function snapshot(tui) {
     screenOffset: tui.screen?.offset ?? null,
     dialog: tui.dialog?.kind ?? null,
     focusedKind: tui.focusedRow?.kind ?? null,
-    rows: tui.rows.length,
+    // Rows *added*, not rows held: the boot transcript differs by environment (a
+    // CI run has one more notice than a developer's checkout), and the framing's
+    // business is what a fixture appended, not what boot happened to paint.
+    rowsAdded: tui.rows.length - rowsAtStart,
     yank: tui.copyYank ?? null,
     echo: tui.footerEcho?.text ?? null,
   }
@@ -166,13 +169,14 @@ export async function traceFixture(fixture) {
       return bound(...args)
     }
   }
+  const rowsAtStart = tui.rows.length
   for (const read of fixture.reads) {
     tui.handleData(Array.isArray(read) ? Buffer.from(read) : Buffer.from(read, 'utf8'))
   }
   // Both holds are timers (30 ms for a reply tail, 60 ms for an ESC prefix): wait
   // past them so a released key is part of the trace rather than a pending callback.
   await new Promise(resolve => setTimeout(resolve, 120))
-  const state = { ...snapshot(tui), sent: [...sent], exits: [...exits] }
+  const state = { ...snapshot(tui, rowsAtStart), sent: [...sent], exits: [...exits] }
   // Settle a Surface this fixture left open, so the run does not keep a pending
   // promise alive — but never wait on it: the trace is already recorded.
   if (tui.dialog !== undefined) {

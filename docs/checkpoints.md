@@ -1857,6 +1857,10 @@ Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行�
 （14 条 input 计数）· `npm run bench` 五个动作**字节/行数/清屏与基线逐项相同**（ms 只记录）·
 真机探针（setup 含 resume 阶段 + 主探针）全过。
 
+**CI 抓到的一件事（已修）**：等价测试第一次提交时五条腿全红——轨迹里记的是转写的**绝对行数**，
+而 CI 的启动转写比开发机多一行提示（3 → 4）。改成"本次 fixture 新增几行"（`rowsAdded`）后，
+本地注入一行额外启动提示的验证也通过。教训写进契约 §5：**轨迹必须与运行环境无关，否则它比的是环境。**
+
 **本轮未做**：InputRouter、owner 优先级、Screen/Surface 行为、keymap、G-1/G-2/G-3 修复、
 ESC/paste 语义、picker 架构、Completion/Search/Doctor、UI。
 `scripts/bench-b2.mjs` 的唯一改动是把 `tui.inputGuard.release()` 换成 `tui.reader.releaseReplyTail()`
