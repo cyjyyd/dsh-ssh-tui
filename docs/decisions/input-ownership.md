@@ -416,3 +416,24 @@ W-0 交付的是"**破坏归属就会红**"的能力，不是新的归属实现�
 
 M1/M4 是同一类破坏的两种形状（前者是"新写者"，后者是"回归旧写者"），分别由静态与行为两个门抓住；
 M3 抓的是门自身的盲区，这正是 mutation 检查存在的意义。
+
+---
+
+## 9. W-1 Status（2026-10-13）
+
+**W-1 把"读字节"搬进了唯一的 Reader**（[`input-reader.md`](input-reader.md)，AD-21）。
+`handleInputText` 的阶梯与 owner 优先级**一个字节没改**：本轮是搬家，不是装修。
+
+| 项 | 结果 |
+|---|---|
+| 新模块 | `src/input-reader.ts`：UTF-8 解码 · 设备回复过滤（30ms）· 转义组装（60ms）· 粘贴边界 · 单元分类 |
+| 事件 | `InputFrame`：`key` / `burst` / `literal` / `paste` / `escape` / `reply`（六个 tag 的 union，无框架） |
+| tui.ts 变化 | `decoder` / `inputGuard` / `escapeBuffer` / `escapeTimer` / `inPaste` / `processPasteChunk` / `looksLikePasteBurst` 移出；`handleInputText` = assemble → paste 帧 / `route()`，新增 `consumeFrame()` |
+| 行为等价 | **54 个 fixture 的消费者轨迹与终态逐字节相同**（参考轨迹取自抽取前的构建，`tests/fixtures/input-reader-traces.json`） |
+| 保住的东西 | G-1/G-2/G-3 三个已知缺口**保持坏的**（轨迹钉住；W-3 连同 fixture 一起改）；两个 hold 窗口数字不变（30 / 60） |
+| 新增门 | `readers` 1 · `rawRouters` 1（picker 债）· `rawDecoders` 4 · `pasteFraming` 0 · `escapeAssembly` 1（picker 债）；`pasteConsumers` 由 3 降到 2 |
+| Mutation | M1 第二 parser → ✗ `rawDecoders 5 > 4`；M2 改粘贴框架 → ✗ 轨迹 + 两个分片用例；M3 改 ESC 窗口 → ✗ 轨迹 + 两个数字 + 孤立 Esc 用例 |
+
+**W-1 之后仍未做**（W-2/W-3/W-7）：`route()` 里仍是 90 处 `this.screen`/`this.dialog` 读取（W-2 抽
+Router）；13 处原始序列分支与 `screenKeys()` 的按键迭代仍归消费者（W-2/W-3）；picker 仍自带 reader
+（W-7）；G-1/G-2/G-8/G-3 仍红（W-3）。

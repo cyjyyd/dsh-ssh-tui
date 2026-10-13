@@ -33,6 +33,8 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(ROOT, 'src')
 const TUI = 'src/tui.ts'
 const PICKER = 'src/picker.ts'
+const READER = 'src/input-reader.ts'
+const PAINT = 'src/paint.ts'
 const REGRESSION_TESTS = 'tests/input-ownership-regression.test.mjs'
 
 /** Every `.ts` file under `src/`, repo-relative — a router can live in a new file. */
@@ -66,10 +68,17 @@ export const BASELINE = {
   mouseParsers: { count: 2, sites: [TUI], what: 'a second SGR mouse parser (the two sites are recorded debt: W-1) — count may shrink, not grow' },
   rawBranches: { count: 13, sites: [TUI], what: 'an owner comparing a raw byte sequence itself (F-5: the reader splits, the owner sees keys) — 13 recorded at W-0, W-1/W-3 lower it' },
   ownerReads: { screen: 31, dialog: 59, what: 'reads of this.screen / this.dialog — recorded per method below; may shrink, not grow' },
-  pasteConsumers: { count: 3, sites: [TUI], what: 'a paste entry point (handlePasteText · pasteIntoScreen · processPasteChunk) — each one is a place paste could land on the wrong owner' },
+  pasteConsumers: { count: 2, sites: [TUI], what: 'a paste entry point (handlePasteText · pasteIntoScreen — the framing moved into the Reader in W-1, which is why this baseline could drop)' },
   mouseConsumers: { count: 3, sites: [TUI], what: 'a mouse entry point (begin · extend · endMouseSelection; `handleMouseClick` is public and counted by hand below)' },
   knownGaps: { count: 3, sites: [REGRESSION_TESTS], what: 'a `{ todo: … }` marker in the regression suite — gaps may close, not accumulate' },
   deadScreenGate: { count: 1, sites: [TUI], what: 'the unreachable second Screen gate in `handleChar` (recorded debt: W-2)' },
+  // Reader ownership (AD-21, W-1). `readers` + `rawRouters` is what `routers` counts:
+  // the picker still runs its own guard, which is the debt W-7 names.
+  readers: { count: 1, sites: [READER], what: 'a second Reader — bytes → frames happens in one place now' },
+  rawRouters: { count: 1, sites: [PICKER], what: 'a `TerminalInputGuard` built outside the Reader (picker.ts: recorded debt, W-7)' },
+  rawDecoders: { count: 4, sites: [READER], what: 'a UTF-8 decoder — the Reader, the picker\'s own reader, the probe pump and the relay\'s frame decoder; a *new* one is a second parser (M1)' },
+  pasteFraming: { count: 0, sites: [READER], what: 'a bracketed-paste marker outside the Reader — the framing has one owner' },
+  escapeAssembly: { count: 1, sites: [READER, PAINT], what: 'an `isEscapePrefix` call outside the Reader (paint.ts defines it, picker.ts assembles its own — recorded debt, W-7)' },
 }
 
 /** State an input handler must not write unless it owns it (AD-20 F-2/F-3). */
@@ -253,10 +262,19 @@ export function auditInputOwnership() {
   // `, { todo: '…' }` — the option syntax, not the prose that explains it.
   const knownGaps = find([REGRESSION_TESTS], /,\s*\{ todo: '/u)
   const deadScreenGate = find([TUI], /A Screen owns the keyboard here too/u, { comments: true })
+  const readers = find(ALL_SOURCES, /new InputReader\(/u)
+  const rawRouters = find(ALL_SOURCES.filter(path => path !== READER), /new TerminalInputGuard\(/u)
+  const rawDecoders = find(ALL_SOURCES, /new StringDecoder\(/u)
+  const pasteFraming = find(ALL_SOURCES.filter(path => path !== READER), /\\x1b\[20[01]~/u)
+  const escapeAssembly = find(
+    ALL_SOURCES.filter(path => path !== READER && path !== PAINT),
+    /isEscapePrefix\(/u,
+  )
   const writes = writerMap()
   const reads = ownerReads()
   return {
     routers, dispatchers, mouseParsers, rawBranches, pasteConsumers, mouseConsumers, knownGaps, deadScreenGate,
+    readers, rawRouters, rawDecoders, pasteFraming, escapeAssembly,
     writes, reads,
   }
 }
@@ -304,6 +322,11 @@ function main() {
   check('pasteConsumers', audit.pasteConsumers.length, BASELINE.pasteConsumers.count, BASELINE.pasteConsumers.what)
   check('mouseConsumers', audit.mouseConsumers.length, BASELINE.mouseConsumers.count, BASELINE.mouseConsumers.what)
   check('knownGaps', audit.knownGaps.length, BASELINE.knownGaps.count, BASELINE.knownGaps.what)
+  check('readers', audit.readers.length, BASELINE.readers.count, BASELINE.readers.what)
+  check('rawRouters', audit.rawRouters.length, BASELINE.rawRouters.count, BASELINE.rawRouters.what)
+  check('rawDecoders', audit.rawDecoders.length, BASELINE.rawDecoders.count, BASELINE.rawDecoders.what)
+  check('pasteFraming', audit.pasteFraming.length, BASELINE.pasteFraming.count, BASELINE.pasteFraming.what)
+  check('escapeAssembly', audit.escapeAssembly.length, BASELINE.escapeAssembly.count, BASELINE.escapeAssembly.what)
   check('ownerReads.screen', audit.reads.total.screen, BASELINE.ownerReads.screen, BASELINE.ownerReads.what)
   check('ownerReads.dialog', audit.reads.total.dialog, BASELINE.ownerReads.dialog, BASELINE.ownerReads.what)
 
@@ -334,7 +357,9 @@ function main() {
     console.log('recorded debt')
     console.log(`  · dead Screen gate   ${audit.deadScreenGate.length} — ${BASELINE.deadScreenGate.what}`)
     for (const hit of audit.deadScreenGate) console.log(`      ${hit}`)
-    console.log(`  · second router     ${audit.routers.length > 1 ? `${audit.routers.length - 1} extra (picker)` : 'none'}`)
+    console.log(`  · second router     ${audit.rawRouters.length > 0 ? `${audit.rawRouters.length} outside the Reader (picker)` : 'none'}`)
+    for (const hit of audit.escapeAssembly) console.log(`      escape assembly outside the Reader: ${hit}`)
+    for (const hit of audit.rawDecoders) console.log(`      decoder: ${hit}`)
     console.log(`  · paste consumers   ${audit.pasteConsumers.length} · mouse consumers ${audit.mouseConsumers.length}`)
     console.log('')
     console.log(problems.length === 0 ? 'OK: no input-ownership baseline was exceeded' : `FAIL: ${problems.join(' · ')}`)

@@ -1818,3 +1818,46 @@ Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行�
 
 本轮未做：不实现 InputRouter、不重构 Reader/ESC/paste 解析、不进 Completion/Search/Doctor、不发版；
 除 G-10 的护栏外无任何运行时改动。
+
+---
+
+## 0.8.4 W-1 · Reader 抽取（2026-10-13）
+
+> 目标：**搬家，不装修**。建立唯一 Reader，行为逐字节等价；不实现 Router、不改优先级、不修缺口。
+
+产出：
+
+| 件 | 内容 |
+|---|---|
+| `src/input-reader.ts` | **AD-21**：UTF-8 解码 · 设备回复过滤（Guard 30ms）· 转义组装（60ms 持有+释放判定）· 粘贴边界（标记/burst）· 单元分类 |
+| `InputFrame` | `key` / `burst` / `literal` / `paste` / `escape` / `reply`——六个 tag 的 union，没有事件框架 |
+| `tui.ts` | 移出 `decoder`/`inputGuard`/`escapeBuffer`/`escapeTimer`/`inPaste`/`processPasteChunk`/`looksLikePasteBurst`；`handleInputText` = assemble → paste 帧 / `route()`；新增 `consumeFrame()` |
+| `docs/decisions/input-reader.md` | Reader 契约：位置、责任表（13 行）、事件集与四条约束、两个 hold 窗口为何不合并、行为等价方式、相邻件（picker/探针/relay/`screenKeys`） |
+| `tests/input-trace.mjs` + `tests/fixtures/input-reader-traces.json` | 54 个 fixture 的**抽取前**消费者轨迹与终态指纹（参考答案） |
+| `tests/input-reader.test.mjs` | 8 项：逐 fixture 比对轨迹与终态 · 分片粘贴（三个）· "粘贴的 yes 不算作答" · 两个 hold 数字 · 孤立 Esc 释放 |
+| `scripts/input-freeze-audit.mjs` | 新增 `readers` / `rawRouters` / `rawDecoders` / `pasteFraming` / `escapeAssembly` 五行；`pasteConsumers` 由 3 降到 2 |
+
+**行为等价（本轮核心验收）**：以 HEAD 的 `tui.ts`（无 Reader）构建跑一遍 fixture 表，存下轨迹；
+抽取后重跑，**54/54 逐字节相同**（调用序列 + 参数 + 终态指纹）。G-1/G-2/G-3 三条缺口的轨迹
+**故意保持为坏**——在搬家轮里顺手修好它们，就是把行为变更藏在搬家底下。
+
+**补齐 W-0 指出的缺口**：`paste-split-*` 三个 fixture（标记跨 read 分片）现在有轨迹 + 专项断言；
+参考轨迹还纠正了一个假设——分开的 close marker 会被 Guard 的 30ms 尾窗**重新拼回**，
+所以碎片不会变成载荷内容（`paste-split-close-marker` 终态为 `pasted`）。
+
+**Mutation**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 新文件里再写一个 decoder/parser | ✗ `rawDecoders 5 > baseline 4` |
+| M2 | 改粘贴框架（close marker → 终端不会发的字节） | ✗ 轨迹比对 + 两个分片粘贴用例 |
+| M3 | 改 ESC 持有窗口（60 → 200） | ✗ 轨迹比对 + 两个窗口数字 + 孤立 Esc 释放用例 |
+
+**门**：`npm test` **1411 项 · 1404 通过 · 0 失败 · 4 跳过 · 3 todo** · `npm run freeze` 全绿
+（14 条 input 计数）· `npm run bench` 五个动作**字节/行数/清屏与基线逐项相同**（ms 只记录）·
+真机探针（setup 含 resume 阶段 + 主探针）全过。
+
+**本轮未做**：InputRouter、owner 优先级、Screen/Surface 行为、keymap、G-1/G-2/G-3 修复、
+ESC/paste 语义、picker 架构、Completion/Search/Doctor、UI。
+`scripts/bench-b2.mjs` 的唯一改动是把 `tui.inputGuard.release()` 换成 `tui.reader.releaseReplyTail()`
+（同一个操作，拥有者搬了家）。

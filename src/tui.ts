@@ -22,7 +22,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
-import { StringDecoder } from 'node:string_decoder'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
@@ -53,6 +52,8 @@ import {
 } from './dsh-compat.js'
 import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusArg, parseAutoApprovalMode, type AutoApprovalMode } from './auto-approval.js'
 import type { FooterActivityKind } from './footer-budget.js'
+import { InputReader } from './input-reader.js'
+import type { InputFrame } from './input-reader.js'
 import {
   auditQuestionPrimaries,
   auditRepresentations,
@@ -357,11 +358,9 @@ import {
   formatLinkQualityChip,
   HANGUP_CANCEL_TIMEOUT_MS,
   ignoreFurtherHangupSignals,
-  isEscapePrefix,
   isHangupErrno,
   linkQualityOf,
   linkRedrawBudgetMs,
-  parseCursorPositionReply,
   PICKER_WINDOW,
   pickerWindowStart,
   probeTerminalRttMs,
@@ -1322,26 +1321,6 @@ const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick
 const SETUP_FIELD_STEPS: ReadonlySet<string> = new Set(['provider', 'id', 'base-url', 'key', 'models', 'context'])
 
 /**
- * Whether one data chunk is a paste rather than keystrokes.
- *
- * Bracketed paste says so outright, and that is the path every modern terminal
- * takes. A console without it sends the content as one burst instead, and a burst
- * carrying more than one line break is not a human pressing Enter twice — they
- * cannot press it twice inside one read. This is the fallback's one rule, kept
- * here so every surface that can take a paste applies the same one.
- */
-function looksLikePasteBurst(text: string): boolean {
-  let breaks = 0
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]
-    if (char === '\r' && text[index + 1] !== '\n') breaks += 1
-    else if (char === '\n' && text[index - 1] !== '\r') breaks += 1
-    if (breaks > 1) return true
-  }
-  return false
-}
-
-/**
  * Split one read into the keys it carries.
  *
  * A terminal hands over whatever arrived together, which is not always one key: a
@@ -1781,7 +1760,6 @@ export class SshTui {
   private input = ''
   private cursor = 0
   private inputFolded = false
-  private inPaste = false
   private history: string[] = []
   private historyIndex = -1
   /** Live input parked while browsing history with ↑. Restored by ↓ past the newest item. */
@@ -2039,7 +2017,6 @@ export class SshTui {
   private readonly onReattach: (() => void | Promise<void>) | undefined
   private readonly onDetach: (() => void | Promise<void>) | undefined
   private renderTimer: ReturnType<typeof setInterval> | undefined
-  private readonly decoder = new StringDecoder('utf8')
   private readonly color: boolean
   private readonly maxToolOutputLines: number
   private readonly showReasoning: boolean
@@ -2416,8 +2393,6 @@ export class SshTui {
    * `turn/start` is the only thing that resets it.
    */
   private reasoningExpandedChoice: boolean | undefined
-  private escapeBuffer = ''
-  private escapeTimer: ReturnType<typeof setTimeout> | undefined
   /**
    * How long an acknowledgement or a warning stays on the chrome.
    *
@@ -2432,11 +2407,14 @@ export class SshTui {
   private feedbackTtlMs = resolveFeedbackTtlMs(process.env)
   private feedbackTimer: ReturnType<typeof setTimeout> | undefined
   /**
-   * Cursor-position replies removed from the relay's stdin stream. A launcher
-   * from an older release (or a reply that raced its own probe) would otherwise
-   * type `[17;1R` into the prompt or cancel a dialog with a bare ESC.
+   * The input Reader (AD-21): decoding, reply filtering, escape assembly, paste
+   * framing and unit classification live there; the frames come back through
+   * `handleInputText` / `consumeFrame`, which own the routing and the semantics.
    */
-  private readonly inputGuard = new TerminalInputGuard(text => this.handleInputText(text))
+  private readonly reader = new InputReader({
+    onRead: text => this.handleInputText(text),
+    onFrame: frame => this.consumeFrame(frame),
+  })
   private thinkingStartedAt: number | undefined
   private waitStartedAt: number | undefined
   /**
@@ -3354,10 +3332,8 @@ export class SshTui {
     if (this.displayDetached) return
     if (this.renderTimer !== undefined) clearInterval(this.renderTimer)
     this.renderTimer = undefined
-    if (this.escapeTimer !== undefined) clearTimeout(this.escapeTimer)
     if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
-    this.escapeTimer = undefined
-    this.inputGuard.stop()
+    this.reader.stop()
     process.stdin.removeListener('data', this.handleData)
     process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
@@ -12334,9 +12310,7 @@ export class SshTui {
   // ── keyboard ────────────────────────────────────────────────────────────
 
   private readonly handleData = (chunk: Buffer): void => {
-    const decoded = this.decoder.write(chunk)
-    if (decoded === '') return
-    this.inputGuard.push(decoded)
+    this.reader.push(chunk)
   }
 
   /**
@@ -12365,7 +12339,7 @@ export class SshTui {
     // pasted key or model list survives a terminal without bracketed paste. It is
     // asked *before* the split below, because splitting is what would turn one paste
     // into a step's worth of Enters.
-    if (looksLikePasteBurst(combined)) {
+    if (InputReader.looksLikePasteBurst(combined)) {
       this.pasteIntoScreen(combined)
       return
     }
@@ -12517,22 +12491,44 @@ export class SshTui {
     this.markDirty()
   }
 
+  /**
+   * One read, as the Reader framed it: paste traffic is dispatched per frame,
+   * everything else is routed (W-2 lifts the routing itself into a Router).
+   */
   private handleInputText(text: string): void {
-    const combined = this.escapeBuffer + text
-    this.escapeBuffer = ''
-    if (this.escapeTimer !== undefined) {
-      clearTimeout(this.escapeTimer)
-      this.escapeTimer = undefined
-    }
+    const combined = this.reader.assemble(text)
 
     // Bracketed paste: terminals wrap pasted content in \x1b[200~ ... \x1b[201~.
     // While inside a paste, CR/LF are literal input characters rather than
     // submit, so copying a multi-line error message arrives as one message.
-    if (this.inPaste || combined.includes('\x1b[200~') || combined.includes('\x1b[201~')) {
-      this.processPasteChunk(combined)
+    if (this.reader.isPasteTraffic(combined)) {
+      for (const frame of this.reader.frames(combined)) this.consumeFrame(frame)
       return
     }
 
+    this.route(combined)
+  }
+
+  /** One framed unit, at the owner that takes it. */
+  private consumeFrame(frame: InputFrame): void {
+    switch (frame.kind) {
+      case 'paste': this.handlePasteText(frame.text); return
+      // A sequence tail, an Alt remainder or a released hold: typed as it is, with
+      // no keymap lookup — which is what the inline version did at those three sites.
+      case 'literal': this.handlePlainText(frame.text); return
+      case 'escape': this.handleChar('\x1b'); return
+      // A device reply is the prober's input, never an owner's. W-1 keeps today's
+      // behaviour (dropped here); W-2 wires it to the prober that asked.
+      case 'reply': return
+      // `key` and `burst` reach the same routing today. The distinction is what W-2
+      // routes on (one key versus several in one read), so the Reader decides it.
+      case 'key': this.route(frame.sequence); return
+      case 'burst': this.route(frame.text); return
+    }
+  }
+
+  /** Today's ladder: one read, one owner (AD-20's priority order). */
+  private route(combined: string): void {
     // A key the user moved, and a key their move displaced. Consulted before any
     // routing so a plain control byte reaches it as readily as a CSI sequence;
     // everything else keeps the handling below, which is what makes the defaults
@@ -12637,7 +12633,10 @@ export class SshTui {
       this.scrollActiveSurface(-Math.max(3, Math.floor(this.screenRows() / 2)))
       return
     }
-    if (parseCursorPositionReply(combined) !== undefined) return
+    if (this.reader.isDeviceReply(combined)) {
+      this.consumeFrame({ kind: 'reply', sequence: combined })
+      return
+    }
     if (combined === '\x1b[H' || combined === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
     if (combined === '\x1b[F' || combined === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
     if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
@@ -12652,27 +12651,9 @@ export class SshTui {
       if (rest !== '') this.handlePlainText(rest)
       return
     }
-    if (isEscapePrefix(combined)) {
-      this.escapeBuffer = combined
-      this.escapeTimer = setTimeout(() => {
-        this.escapeTimer = undefined
-        const pending = this.escapeBuffer
-        this.escapeBuffer = ''
-        if (pending === '\x1b') {
-          this.handleChar('\x1b')
-        } else if (pending === '\x1bO') {
-          // ESC O without an SS3 final byte is an Alt+O keystroke, not a
-          // function key.
-          this.handlePlainText('O')
-        } else if (pending.startsWith('\x1b[') || pending.startsWith('\x1bO')) {
-          // An escape sequence that never completed: consume it silently
-          // instead of treating its ESC byte as a cancel.
-        } else if (pending !== '') {
-          this.handlePlainText(pending)
-        }
-      }, 60)
-      return
-    }
+    // A read that could still grow into a sequence is the Reader's to hold, and the
+    // window is the same 60 ms it always was (AD-21: moved, not changed).
+    if (this.reader.hold(combined)) return
     if (combined.startsWith('\x1b[') || combined.startsWith('\x1bO')) {
       // Unknown escape sequence (including SS3 function keys) — consume
       // without side effects.
@@ -12697,37 +12678,6 @@ export class SshTui {
       return
     }
     this.handlePlainText(combined)
-  }
-
-  /** Handle one data chunk that may contain bracketed-paste markers. */
-  private processPasteChunk(combined: string): void {
-    let index = 0
-    while (index < combined.length) {
-      if (combined.startsWith('\x1b[200~', index)) {
-        this.inPaste = true
-        index += 6
-        continue
-      }
-      if (combined.startsWith('\x1b[201~', index)) {
-        this.inPaste = false
-        index += 6
-        continue
-      }
-      let end = index
-      while (end < combined.length
-        && !combined.startsWith('\x1b[200~', end)
-        && !combined.startsWith('\x1b[201~', end)) {
-        end += 1
-      }
-      if (end > index) {
-        const part = combined.slice(index, end)
-        if (this.inPaste) this.handlePasteText(part)
-        else this.handlePlainText(part)
-        index = end
-      } else {
-        index += 1
-      }
-    }
   }
 
   /**
@@ -12809,7 +12759,7 @@ export class SshTui {
   private handlePlainText(text: string): void {
     // Fallback for terminals without bracketed paste: a burst of multiple line
     // breaks in one chunk is a paste, not repeated Enter presses.
-    if (looksLikePasteBurst(text)) {
+    if (InputReader.looksLikePasteBurst(text)) {
       this.handlePasteText(text)
       return
     }

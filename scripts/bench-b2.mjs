@@ -89,13 +89,14 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 /**
  * Feed one keystroke through the production entry and settle it.
  *
- * `handleData` is what a real read reaches, and it holds a half-arrived escape
- * sequence for `INPUT_HOLD_MS` — a PgDn or an arrow key is exactly that shape, so
- * the guard's window has to be closed before the action can be measured.
+ * `handleData` is what a real read reaches, and the Reader's guard holds a
+ * half-arrived escape sequence for `INPUT_HOLD_MS` — a PgDn or an arrow key is
+ * exactly that shape, so the window has to be closed before the action can be
+ * measured (AD-21 moved the guard into the Reader; the hatch is the same one).
  */
 async function feed(tui, input) {
   tui.handleData(Buffer.from(input))
-  tui.inputGuard.release()
+  tui.reader.releaseReplyTail()
   await settle()
 }
 

@@ -263,6 +263,11 @@ const inputRows = [
   ['knownGaps', input.knownGaps.length, INPUT_BASELINE.knownGaps.count],
   ['ownerReads.screen', input.reads.total.screen, INPUT_BASELINE.ownerReads.screen],
   ['ownerReads.dialog', input.reads.total.dialog, INPUT_BASELINE.ownerReads.dialog],
+  ['readers', input.readers.length, INPUT_BASELINE.readers.count],
+  ['rawRouters', input.rawRouters.length, INPUT_BASELINE.rawRouters.count],
+  ['rawDecoders', input.rawDecoders.length, INPUT_BASELINE.rawDecoders.count],
+  ['pasteFraming', input.pasteFraming.length, INPUT_BASELINE.pasteFraming.count],
+  ['escapeAssembly', input.escapeAssembly.length, INPUT_BASELINE.escapeAssembly.count],
 ]
 
 const problems = []

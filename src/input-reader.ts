@@ -1,0 +1,259 @@
+/**
+ * The input Reader: bytes in, framed input units out.
+ *
+ * This module owns everything between the wire and "here is what arrived":
+ *
+ *   - **byte decoding** — a UTF-8 code point split across two reads is one
+ *     character, not two replacement glyphs (`StringDecoder`)
+ *   - **device-reply filtering** — the `CSI row;col R` answers the link probe asks
+ *     for are not typing; the guard strips them and holds a possible tail for
+ *     `INPUT_HOLD_MS` so `ESC [ 1` + `7;1R` cannot become `[17;1R` in the draft
+ *   - **escape assembly** — a sequence may arrive in pieces (`ESC`, then `[A`;
+ *     `ESC[`, then `5~`), so a read that could still grow is held for
+ *     {@link ESCAPE_HOLD_MS} and released as what it turned out to be
+ *   - **paste framing** — `ESC[200~ … ESC[201~` markers, the payload between them,
+ *     and the console-without-bracketed-paste fallback (a burst carrying more than
+ *     one line break in one read is a paste, not repeated Enter presses)
+ *   - **unit classification** — whether a read is one complete terminal unit, a
+ *     burst of typing, paste traffic, or a device reply (shape only: this module
+ *     does not know which key does what)
+ *
+ * It owns **no** semantics. It does not look at `screen`, `dialog`, the composer or
+ * the workspace, does not consult the keymap, and never mutates owner state: the
+ * frames it emits are the input to the caller's routing, not a decision about it.
+ * That is the boundary the contract freezes (`docs/decisions/input-reader.md`,
+ * AD-21) — the same input bytes must produce the same frames, and the caller must
+ * be able to prove it (`tests/input-reader.test.mjs` compares the frames and the
+ * consumer calls against traces captured before this module existed).
+ *
+ * The two hold windows are deliberately separate and must not be merged:
+ * `INPUT_HOLD_MS` (30 ms, in the guard) guards a **reply** and hands the bytes back
+ * as input when the window passes; {@link ESCAPE_HOLD_MS} (60 ms, here) guards a
+ * **keystroke** and turns what it held into an Escape or into text. One is a filter
+ * with a fallback, the other an assembly step with two possible readings.
+ *
+ * @module dsh-ssh-tui/input-reader
+ */
+import { StringDecoder } from 'node:string_decoder'
+
+import { isEscapePrefix, parseCursorPositionReply } from './paint.js'
+import { TerminalInputGuard } from './terminal-input.js'
+
+/**
+ * How long a read that could still grow into a sequence is held.
+ *
+ * The window is what makes a lone `ESC` (the reader pressed Escape) different from
+ * the first byte of a sequence the terminal is still sending. W-1 moved the timer,
+ * not the number: changing it changes how Escape feels, and that is a separate
+ * decision with its own evidence.
+ */
+export const ESCAPE_HOLD_MS = 60
+
+/**
+ * One framed unit of input.
+ *
+ * The vocabulary is deliberately small — four kinds carry text, one carries the
+ * released Escape, one carries a device reply — because the Reader's job is to say
+ * *what arrived*, not what it means. `key` and `burst` reach the same routing today;
+ * they are distinguished because the Router (W-2) has to decide "one key" versus
+ * "several keys in one read" (the read-coalescing gaps G-1/G-2 live exactly there).
+ */
+export type InputFrame =
+  /** One complete terminal unit: a control byte, a full CSI sequence, or a lone ESC. */
+  | { kind: 'key'; sequence: string }
+  /** A read of ordinary typing. It may carry several keys — W-3 splits it. */
+  | { kind: 'burst'; text: string }
+  /** Text to be typed exactly as it is (a sequence tail, an Alt remainder, a release). */
+  | { kind: 'literal'; text: string }
+  /** The payload between paste markers. */
+  | { kind: 'paste'; text: string }
+  /** The held read turned out to be the Escape key itself. */
+  | { kind: 'escape' }
+  /** A device reply (cursor position) — input to the prober, never to an owner. */
+  | { kind: 'reply'; sequence: string }
+
+export interface InputReaderOptions {
+  /** A read that survived decoding and reply filtering. */
+  onRead: (text: string) => void
+  /** A frame the Reader produced on its own: paste traffic, or a released hold. */
+  onFrame: (frame: InputFrame) => void
+}
+
+/** Whether `text` is exactly one complete terminal unit (shape, not meaning). */
+const COMPLETE_CSI = /^\x1b\[[0-9;?<]*[ -/]*[@-~]$/u
+const COMPLETE_SS3 = /^\x1bO[@-~]$/u
+
+export class InputReader {
+  private readonly decoder = new StringDecoder('utf8')
+  private readonly guard: TerminalInputGuard
+  /** A read that may still grow (escape assembly). */
+  private held = ''
+  private holdTimer: ReturnType<typeof setTimeout> | undefined
+  /** Inside `ESC[200~ … ESC[201~`. */
+  private inPaste = false
+
+  constructor(private readonly options: InputReaderOptions) {
+    this.guard = new TerminalInputGuard(text => this.options.onRead(text))
+  }
+
+  /** One read of bytes: decode it, drop device replies, hand the rest on. */
+  push(chunk: Buffer): void {
+    const decoded = this.decoder.write(chunk)
+    if (decoded === '') return
+    this.guard.push(decoded)
+  }
+
+  /** The read with any held prefix in front of it. The hold window is over. */
+  assemble(text: string): string {
+    const combined = this.held + text
+    this.held = ''
+    this.cancelHold()
+    return combined
+  }
+
+  /**
+   * Whether this read is paste traffic: inside a paste, or carrying a marker.
+   *
+   * Asked before anything else, exactly as the inline check it replaces was: while
+   * inside a paste, CR/LF are literal characters rather than submit.
+   */
+  isPasteTraffic(combined: string): boolean {
+    return this.inPaste || combined.includes('\x1b[200~') || combined.includes('\x1b[201~')
+  }
+
+  /**
+   * The frames of one paste read, in order: payload inside the markers as `paste`,
+   * everything outside them as `literal` (which is what the inline version typed
+   * directly, without a keymap lookup).
+   *
+   * A marker split across reads stays split — the pieces are payload until both
+   * halves have arrived, which is what the trace fixture for it records.
+   */
+  frames(combined: string): InputFrame[] {
+    const frames: InputFrame[] = []
+    let index = 0
+    while (index < combined.length) {
+      if (combined.startsWith('\x1b[200~', index)) {
+        this.inPaste = true
+        index += 6
+        continue
+      }
+      if (combined.startsWith('\x1b[201~', index)) {
+        this.inPaste = false
+        index += 6
+        continue
+      }
+      let end = index
+      while (end < combined.length
+        && !combined.startsWith('\x1b[200~', end)
+        && !combined.startsWith('\x1b[201~', end)) {
+        end += 1
+      }
+      if (end > index) {
+        const part = combined.slice(index, end)
+        frames.push(this.inPaste ? { kind: 'paste', text: part } : { kind: 'literal', text: part })
+        index = end
+      } else {
+        index += 1
+      }
+    }
+    return frames
+  }
+
+  /**
+   * Keep a read that could still grow into a sequence.
+   * @returns true when it was held (the caller stops there), false when the read is
+   *   complete as it stands.
+   */
+  hold(combined: string): boolean {
+    if (!isEscapePrefix(combined)) return false
+    this.held = combined
+    this.cancelHold()
+    this.holdTimer = setTimeout(() => {
+      this.holdTimer = undefined
+      const pending = this.held
+      this.held = ''
+      this.releaseHold(pending)
+    }, ESCAPE_HOLD_MS)
+    return true
+  }
+
+  /**
+   * Whether one read is a paste from a console that cannot say so.
+   *
+   * A burst carrying more than one line break is not a human pressing Enter twice —
+   * they cannot press it twice inside one read. This is the fallback's one rule, and
+   * it lives here so every caller applies the same one.
+   */
+  static looksLikePasteBurst(text: string): boolean {
+    let breaks = 0
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]
+      if (char === '\r' && text[index + 1] !== '\n') breaks += 1
+      else if (char === '\n' && text[index - 1] !== '\r') breaks += 1
+      if (breaks > 1) return true
+    }
+    return false
+  }
+
+  /** Whether a complete read is a device reply rather than input. */
+  isDeviceReply(text: string): boolean {
+    return parseCursorPositionReply(text) !== undefined
+  }
+
+  /** Classify one complete read by shape. */
+  classify(text: string): InputFrame {
+    if (this.isDeviceReply(text)) return { kind: 'reply', sequence: text }
+    if (text === '\x1b') return { kind: 'key', sequence: text }
+    if (text.length === 1) {
+      const code = text.codePointAt(0) ?? 0
+      return code < 0x20 || code === 0x7f ? { kind: 'key', sequence: text } : { kind: 'burst', text }
+    }
+    if (COMPLETE_CSI.test(text) || COMPLETE_SS3.test(text)) return { kind: 'key', sequence: text }
+    return { kind: 'burst', text }
+  }
+
+  /**
+   * Hand over a held reply tail now.
+   *
+   * The guard releases on its own window; this is for a caller that already knows
+   * the tail is stale — `scripts/bench-b2.mjs` drives keystrokes faster than the
+   * hold, and a measurement that waited for the window would be measuring the wait.
+   */
+  releaseReplyTail(): void {
+    this.guard.release()
+  }
+
+  /** Drop the holds and the reply filter (display detached, teardown). */
+  stop(): void {
+    this.cancelHold()
+    this.guard.stop()
+  }
+
+  private cancelHold(): void {
+    if (this.holdTimer !== undefined) clearTimeout(this.holdTimer)
+    this.holdTimer = undefined
+  }
+
+  /**
+   * What a held read turned out to be.
+   *
+   * Verbatim from the inline timer it replaces: a lone `ESC` is the Escape key, an
+   * `ESC O` without its final byte is Alt+O, an escape sequence that never completed
+   * is consumed silently (its `ESC` must not read as a cancel), and anything else is
+   * typed. The last branch is unreachable for the shapes `isEscapePrefix` accepts —
+   * it is kept because "unreachable today" is not a reason to change a release.
+   */
+  private releaseHold(pending: string): void {
+    if (pending === '\x1b') {
+      this.options.onFrame({ kind: 'escape' })
+      return
+    }
+    if (pending === '\x1bO') {
+      this.options.onFrame({ kind: 'literal', text: 'O' })
+      return
+    }
+    if (pending.startsWith('\x1b[') || pending.startsWith('\x1bO')) return
+    if (pending !== '') this.options.onFrame({ kind: 'literal', text: pending })
+  }
+}

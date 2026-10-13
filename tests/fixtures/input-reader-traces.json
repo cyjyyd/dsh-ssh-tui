@@ -1,0 +1,1950 @@
+{
+  "printable": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello"
+      ],
+      [
+        "handlePlainText",
+        "hello"
+      ],
+      [
+        "handleChar",
+        "h"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "o"
+      ]
+    ],
+    "state": {
+      "input": "hello",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "printable-with-draft": {
+    "trace": [
+      [
+        "handleInputText",
+        "ab"
+      ],
+      [
+        "handlePlainText",
+        "ab"
+      ],
+      [
+        "handleChar",
+        "a"
+      ],
+      [
+        "handleChar",
+        "b"
+      ]
+    ],
+    "state": {
+      "input": "我打了ab一半的消息",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "utf8-multibyte": {
+    "trace": [
+      [
+        "handleInputText",
+        "思考一下"
+      ],
+      [
+        "handlePlainText",
+        "思考一下"
+      ],
+      [
+        "handleChar",
+        "思"
+      ],
+      [
+        "handleChar",
+        "考"
+      ],
+      [
+        "handleChar",
+        "一"
+      ],
+      [
+        "handleChar",
+        "下"
+      ]
+    ],
+    "state": {
+      "input": "思考一下",
+      "cursor": 4,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "utf8-split-code-point": {
+    "trace": [
+      [
+        "handleInputText",
+        "思"
+      ],
+      [
+        "handlePlainText",
+        "思"
+      ],
+      [
+        "handleChar",
+        "思"
+      ]
+    ],
+    "state": {
+      "input": "思",
+      "cursor": 1,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "control-bytes": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0015"
+      ],
+      [
+        "handlePlainText",
+        "\u0015"
+      ],
+      [
+        "handleChar",
+        "\u0015"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "backspace": {
+    "trace": [
+      [
+        "handleInputText",
+        ""
+      ],
+      [
+        "handlePlainText",
+        ""
+      ],
+      [
+        "handleChar",
+        ""
+      ]
+    ],
+    "state": {
+      "input": "我打一半的消息",
+      "cursor": 2,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "enter-submits": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello\r"
+      ],
+      [
+        "handlePlainText",
+        "hello\r"
+      ],
+      [
+        "handleChar",
+        "h"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "o"
+      ],
+      [
+        "handleChar",
+        "\r"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "hello"
+      ],
+      "exits": []
+    }
+  },
+  "crlf": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello\r\n"
+      ],
+      [
+        "handlePlainText",
+        "hello\r\n"
+      ],
+      [
+        "handleChar",
+        "h"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "o"
+      ],
+      [
+        "handleChar",
+        "\r"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "hello"
+      ],
+      "exits": []
+    }
+  },
+  "ctrl-c": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0003"
+      ],
+      [
+        "handlePlainText",
+        "\u0003"
+      ],
+      [
+        "handleChar",
+        "\u0003"
+      ],
+      [
+        "handleCtrlC"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": "再按一次 Ctrl+C 退出。",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "ctrl-d": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0004"
+      ],
+      [
+        "handlePlainText",
+        "\u0004"
+      ],
+      [
+        "handleChar",
+        "\u0004"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": [
+        0
+      ]
+    }
+  },
+  "ctrl-l": {
+    "trace": [
+      [
+        "handleInputText",
+        "\f"
+      ],
+      [
+        "handlePlainText",
+        "\f"
+      ],
+      [
+        "handleChar",
+        "\f"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "ctrl-v": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0016"
+      ],
+      [
+        "handlePlainText",
+        "\u0016"
+      ],
+      [
+        "handleChar",
+        "\u0016"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "arrow-up": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "arrow-down": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "arrow-left-right": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[C\u001b[D"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pgup": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "scrollActiveSurface",
+        12
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pgup-pgdn": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "scrollActiveSurface",
+        12
+      ],
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ],
+      [
+        "scrollActiveSurface",
+        -12
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pgup-twice-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~\u001b[5~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "home-end-delete": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[H"
+      ],
+      [
+        "handleInputText",
+        "\u001b[F"
+      ],
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 8,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "unknown-csi": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[1;5u"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "ss3-with-tail": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001bOAx"
+      ],
+      [
+        "handlePlainText",
+        "x"
+      ],
+      [
+        "handleChar",
+        "x"
+      ]
+    ],
+    "state": {
+      "input": "x",
+      "cursor": 1,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "ss3-unknown": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001bOZ"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "escape-prefix-split": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "escape-prefix-split-inside": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "scrollActiveSurface",
+        12
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "lone-escape": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b"
+      ],
+      [
+        "handleChar",
+        "\u001b"
+      ],
+      [
+        "handleEscape"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "escape-o-partial": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001bO"
+      ],
+      [
+        "handlePlainText",
+        "O"
+      ],
+      [
+        "handleChar",
+        "O"
+      ]
+    ],
+    "state": {
+      "input": "O",
+      "cursor": 1,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-1": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b1"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 55,
+      "yank": "",
+      "echo": "已跳到最新思考。",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-1-batched": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b1x"
+      ],
+      [
+        "handlePlainText",
+        "1x"
+      ],
+      [
+        "handleChar",
+        "1"
+      ],
+      [
+        "handleChar",
+        "x"
+      ]
+    ],
+    "state": {
+      "input": "1x",
+      "cursor": 2,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 55,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-f": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001bf"
+      ]
+    ],
+    "state": {
+      "input": "/find ",
+      "cursor": 6,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "mouse-press-release": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[<0;10;5M"
+      ],
+      [
+        "beginMouseSelection",
+        5,
+        10
+      ],
+      [
+        "handleInputText",
+        "\u001b[<0;10;5m"
+      ],
+      [
+        "endMouseSelection",
+        5,
+        10
+      ],
+      [
+        "handleMouseClick",
+        5,
+        10
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "mouse-drag": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[<0;10;5M"
+      ],
+      [
+        "beginMouseSelection",
+        5,
+        10
+      ],
+      [
+        "handleInputText",
+        "\u001b[<32;14;5M"
+      ],
+      [
+        "extendMouseSelection",
+        5,
+        14
+      ],
+      [
+        "handleInputText",
+        "\u001b[<0;14;5m"
+      ],
+      [
+        "endMouseSelection",
+        5,
+        14
+      ],
+      [
+        "handleMouseClick",
+        5,
+        10
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "mouse-wheel": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[<65;10;5M"
+      ],
+      [
+        "scrollActiveSurface",
+        -3
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "mouse-split-report": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[<0;1"
+      ],
+      [
+        "handleInputText",
+        "0;5M"
+      ],
+      [
+        "beginMouseSelection",
+        5,
+        10
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "cpr-reply": {
+    "trace": [],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-simple": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted text\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "pasted text"
+      ]
+    ],
+    "state": {
+      "input": "pasted text",
+      "cursor": 11,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-multiline": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~line one\nline two\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "line one\nline two"
+      ]
+    ],
+    "state": {
+      "input": "line one\nline two",
+      "cursor": 17,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": true,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-with-enter": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~\r"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handlePlainText",
+        "\r"
+      ],
+      [
+        "handleChar",
+        "\r"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "pasted"
+      ],
+      "exits": []
+    }
+  },
+  "paste-split-markers": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~"
+      ],
+      [
+        "handleInputText",
+        "pasted content"
+      ],
+      [
+        "handlePasteText",
+        "pasted content"
+      ],
+      [
+        "handleInputText",
+        "\u001b[201~"
+      ]
+    ],
+    "state": {
+      "input": "pasted content",
+      "cursor": 14,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-split-inside-marker": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ]
+    ],
+    "state": {
+      "input": "pasted",
+      "cursor": 6,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-split-close-marker": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handleInputText",
+        "\u001b[201~"
+      ]
+    ],
+    "state": {
+      "input": "pasted",
+      "cursor": 6,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-at-screen": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "pasteIntoScreen",
+        "pasted"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 20,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-burst-no-markers": {
+    "trace": [
+      [
+        "handleInputText",
+        "one\ntwo\nthree\n"
+      ],
+      [
+        "handlePlainText",
+        "one\ntwo\nthree\n"
+      ],
+      [
+        "handlePasteText",
+        "one\ntwo\nthree\n"
+      ]
+    ],
+    "state": {
+      "input": "one\ntwo\nthree\n",
+      "cursor": 14,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": true,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "yes-is-not-an-answer": {
+    "trace": [
+      [
+        "handleInputText",
+        "yes"
+      ],
+      [
+        "handlePlainText",
+        "yes"
+      ],
+      [
+        "handleChar",
+        "y"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "s"
+      ]
+    ],
+    "state": {
+      "input": "yes",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "yes-typed-at-dialog": {
+    "trace": [
+      [
+        "handleInputText",
+        "yes"
+      ],
+      [
+        "handlePlainText",
+        "yes"
+      ],
+      [
+        "handleChar",
+        "y"
+      ],
+      [
+        "handleDialogChar",
+        "y"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "s"
+      ]
+    ],
+    "state": {
+      "input": "我打了es一半的消息",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "yes-pasted-at-dialog": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~yes\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "yes"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handlePlainText",
+        "n"
+      ],
+      [
+        "handleChar",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-keys": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[B",
+        null
+      ],
+      [
+        "scrollScreen",
+        -1
+      ],
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[6~",
+        "pageDown"
+      ],
+      [
+        "scrollScreen",
+        -19
+      ],
+      [
+        "handleInputText",
+        "q"
+      ],
+      [
+        "handleScreenInput",
+        "q",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-paste-and-ctrl-u": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~text\u001b[201~\u0015"
+      ],
+      [
+        "handlePasteText",
+        "text"
+      ],
+      [
+        "pasteIntoScreen",
+        "text"
+      ],
+      [
+        "handlePlainText",
+        "\u0015"
+      ],
+      [
+        "handleChar",
+        "\u0015"
+      ],
+      [
+        "handleScreenInput",
+        "\u0015",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 20,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-copy-key": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[99;6u"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[99;6u",
+        "copy"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 20,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "屏幕上的正文",
+      "echo": "已复制 6 字到本机剪贴板（全文）",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "wizard-keys": {
+    "trace": [
+      [
+        "handleInputText",
+        "\r"
+      ],
+      [
+        "handleScreenInput",
+        "\r",
+        "toggleCard"
+      ],
+      [
+        "handleSetupKey",
+        "\r",
+        "toggleCard"
+      ],
+      [
+        "handleInputText",
+        "x"
+      ],
+      [
+        "handleScreenInput",
+        "x",
+        null
+      ],
+      [
+        "handleSetupKey",
+        "x",
+        null
+      ],
+      [
+        "handleInputText",
+        ""
+      ],
+      [
+        "handleScreenInput",
+        "",
+        null
+      ],
+      [
+        "handleSetupKey",
+        "",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "setup",
+      "screenOffset": 0,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-keys": {
+    "trace": [
+      [
+        "handleInputText",
+        "y"
+      ],
+      [
+        "handlePlainText",
+        "y"
+      ],
+      [
+        "handleChar",
+        "y"
+      ],
+      [
+        "handleDialogChar",
+        "y"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-paste": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handlePlainText",
+        "n"
+      ],
+      [
+        "handleChar",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "text-then-enter": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello\r"
+      ],
+      [
+        "handlePlainText",
+        "hello\r"
+      ],
+      [
+        "handleChar",
+        "h"
+      ],
+      [
+        "handleChar",
+        "e"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "l"
+      ],
+      [
+        "handleChar",
+        "o"
+      ],
+      [
+        "handleChar",
+        "\r"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 3,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "hello"
+      ],
+      "exits": []
+    }
+  },
+  "rebound-alone": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0010"
+      ],
+      [
+        "scrollActiveSurface",
+        12
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "rebound-coalesced": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0010\u0010"
+      ],
+      [
+        "handlePlainText",
+        "\u0010\u0010"
+      ],
+      [
+        "handleChar",
+        "\u0010"
+      ],
+      [
+        "handleChar",
+        "\u0010"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": "assistant",
+      "rows": 43,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  }
+}
