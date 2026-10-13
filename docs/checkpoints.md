@@ -1775,3 +1775,46 @@ Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行�
 反过来，唯一一处**越权写**就是 G-10：复制是 Workspace/Surface 的动作，却改了 Composer 的草稿。
 
 本轮未做：不改 `src/`、不改测试、不改冻结审计、不发版（契约与路线图落地在 0.8.4）。
+
+---
+
+## 0.8.4 W-0 · 输入归属安全网（2026-10-13）
+
+> 目标：**破坏 event ownership 就必须红**。本轮不实现 InputRouter、不重构 Reader、不改路由行为。
+
+产出：
+
+| 件 | 内容 |
+|---|---|
+| `tests/input-ownership-regression.test.mjs` | **18 项 · 15 绿 · 3 todo**。全部经 `handleData` 真实路径（解码 → 回复过滤 → ESC 持有 → 粘贴标记 → 路由）；不直接调 `handleSetupKey`/`handleChar`，不设 owner 状态凑断言 |
+| `scripts/input-freeze-audit.mjs` | 静态棘轮：router / dispatcher / owner 读取点 / **危险写者** / 粘贴与鼠标入口 / todo 计数，只降不升；`npm run freeze:input` |
+| `npm run freeze` 新增段 | CI 现有两条平台腿都会跑 input ownership 计数（不改 workflow） |
+| G-10 护栏 | `copyPlainText` 不再写 composer 草稿（删 4 行）；命令行消费仍归 `runCommand`，`/copy` 可见行为不变 |
+
+覆盖（G 系列）：
+
+| ID | 状态 | 说明 |
+|---|---|---|
+| G-1 | **todo（红）** | composer 路径一次 read 两个 PgUp/PgDn 仍会全丢；Screen 路径已能拆（绿灯对照用例） |
+| G-2/G-8 | **todo（红）** | rebind（`ctrl+p`）同 read 两次仍丢；单发正常，且不会被当文本 |
+| G-3 | **todo（红）** | `\x1b1x`：和弦丢失、`1x` 泄漏成文本 |
+| G-4 | 绿（锁定） | `0x16` 在 composer / Screen / dialog 三处都无副作用 |
+| G-5 | 绿（锁定） | Screen 内只认滚轮；press/motion/release 一律拒绝；向导（真 `runOnboarding` 入口）同样 |
+| G-6 | 静态 | 第二 router、死 Screen 门由棘轮记录（`deadScreenGate` 基线 1）；G-6 用例本身会跑一次棘轮 |
+| G-7 | 绿（锁定） | `CSI I` / `CSI O` 在 composer / Screen / dialog 全部无副作用（本轮只锁 ignore，不启用 focus） |
+| G-9 | 文档 | 契约 §8.3 说明 30ms（回复，超时**交还**输入）与 60ms（按键，超时**变成按键**）为何并存，本轮不合并 |
+| G-10 | **绿（护栏）** | 复制键 / Screen 复制键 / 拖拽 / 链接点击四条路径都不再动草稿；`/copy` 命令仍消费自己的命令行 |
+| 额外 | 绿 | "粘贴 + 控制键同 read"的 Screen 门（0.8.3 修的那个缺陷，走 char 路径） |
+
+门与 mutation：
+
+| 项 | 结果 |
+|---|---|
+| `npm run freeze:input` 基线 | routers 2 · dispatchers 1 · mouseParsers 2 · rawBranches 13 · pasteConsumers 3 · mouseConsumers 3 · knownGaps 3 · ownerReads screen 31 / dialog 59 |
+| M1 新写者（`handleMouseClick` 写草稿） | ✗ 棘轮红：`new writer: handleMouseClick writes the composer draft` |
+| M2 删 `handleChar` 的 Screen 门 | ✗ 新网 + 0.8.3 网同时红 |
+| M3 新文件里加第二 router | ✗ `routers 3 > baseline 2`；**首跑没红**（棘轮只扫两个已知文件）→ 已改成扫全 `src/`，mutation 即其回归证据 |
+| M4 恢复复制清空草稿 | ✗ 四条 G-10 用例 + 棘轮新写者同时红 |
+
+本轮未做：不实现 InputRouter、不重构 Reader/ESC/paste 解析、不进 Completion/Search/Doctor、不发版；
+除 G-10 的护栏外无任何运行时改动。

@@ -194,7 +194,7 @@ stdin / FRAME_STDIN
 | **G-7** | focus 事件靠"未知序列"兜住 | `\x1b[I` / `\x1b[O`（composer、Screen、dialog 三种 owner 下） | `no change` ✅ | **无测试的隐式契约**：将来加一条 `CSI ... I` 分支就可能误吞/误判 |
 | **G-8** | Screen 内粘贴/复制的 rebind 键同 read 失效 | 同 G-2（`moved === 'copy'` 只在整段相等时成立） | 代码审阅 + G-1 同源 | 丢失 |
 | **G-9** | 两个 hold 窗口做同一种事 | Guard 30ms（CPR 尾） vs TUI 60ms（ESC 前缀） | 代码审阅 | 结构债：分片规则分散在两处 |
-| **G-10** | **任何复制路径都清空 composer 草稿** | `/copy`、rebind 的复制键、Screen 内的复制键、拖拽选择、链接点击（都汇到 `copyPlainText`） | 输入 `我打了一半的消息`（caret 3）→ 三条路径实测全部变成 `""` / caret 0 | **越权写**：Workspace/Surface 的动作改了 Composer 的状态。清空本是给"`/copy` 这条命令提交后别留在输入框里"写的（`git log -L` 追到 0.5.5 时代），但复制键与鼠标手势没有命令文本要清 |
+| **G-10** | **任何复制路径都清空 composer 草稿**（**W-0 已修**，见 §8） | `/copy`、rebind 的复制键、Screen 内的复制键、拖拽选择、链接点击（都汇到 `copyPlainText`） | 修复前：`我打了一半的消息`（caret 3）→ 三条路径全变 `""` / caret 0；修复后原样保留 | **越权写**：Workspace/Surface 的动作改了 Composer 的状态。清空本是给"`/copy` 这条命令提交后别留在输入框里"写的（`git log -L` 追到 0.5.5 时代），但复制键与鼠标手势没有命令文本要清；命令行的消费现在只由 `runCommand` 负责 |
 
 **没有发现的泄漏**（本轮逐格测过，值得写下来当基线）：Screen 打开时 composer 草稿不被任何键改写；
 dialog 打开时转写不滚动；Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行。
@@ -339,5 +339,80 @@ interface InputOwner {
 | 表示（representation）路由不变 | 本契约只碰输入；输出仍走 `pushRow(represent(...))` |
 | `npm run freeze` 八条不变量 + 七条退役路径 | 不动；只**新增** F 系列计数器（T-6） |
 
-**本轮不动运行时**：以上全部是契约与要求，代码改动在 0.8.4 按
+**审计轮不动运行时**：以上全部是契约与要求，路由改动在 0.8.4 按
 [`../plans/0.8.4-input-ownership.md`](../plans/0.8.4-input-ownership.md) 的顺序执行。
+
+---
+
+## 8. W-0 Status（2026-10-13）
+
+**W-0 建立了可执行的安全网，没有实现 InputRouter。** 契约的判定逻辑（Reader / Router / owner
+adapter）一行未动：`handleInputText` 的阶梯、keymap 查表、ESC 前缀持有、粘贴标记解析全部原样。
+
+### 8.1 建立了什么
+
+| 件 | 位置 | 作用 |
+|---|---|---|
+| 行为安全网 | `tests/input-ownership-regression.test.mjs`（18 项 · 15 绿 · 3 todo） | 每个事件都走 `handleData` 真实路径；**不直接调 `handleSetupKey`/`handleChar`，不设 owner 状态来让断言通过** |
+| 静态棘轮 | `scripts/input-freeze-audit.mjs`（`npm run freeze:input`） | router / dispatcher / owner 读取点 / 危险写者 / 粘贴与鼠标入口 / 已知缺口计数，**只能降不能升** |
+| 门接线 | `npm run freeze` 新增 "input ownership" 段 | CI 现有的两条平台腿都会跑，不需要改 workflow |
+| 已知缺口登记 | 回归套件里的 `{ todo: … }`（3 条） | 今天**是红的**，node 报为 todo 而非失败；W-1/W-3 修好后必须去掉标记 |
+
+**W-0 唯一的行为改动**：G-10 的护栏——`copyPlainText` 不再写 composer 的草稿（`this.input` /
+`this.cursor` / `this.inputFolded` / `leaveHistoryBrowse` 四行删除）。这是"**状态写入所有权**"的
+修正（F-2），不是路由改动：哪个键归哪个 owner 一个字节没变。命令行的消费仍由 `runCommand` 负责
+（它对每条命令都清），所以 `/copy` 的可见行为不变。
+
+### 8.2 基线（`npm run freeze:input` 实测，2026-10-13）
+
+| 计数 | 基线 | 说明 |
+|---|---|---|
+| `routers` | 2 | `tui.ts` + `picker.ts`（G-6：第二套 router，W-7 处理） |
+| `dispatchers` | 1 | `handleInputText` |
+| `mouseParsers` | 2 | 同一份 SGR 解析存在两处（W-1 收进 Reader） |
+| `rawBranches` | 13 | owner 自己比较原始字节序列（F-5；W-1/W-3 降它） |
+| `ownerReads` | screen 31 · dialog 59 | **记录而非归零**：Router 抽取（W-2）之前它们本来就该在 |
+| `pasteConsumers` | 3 | `handlePasteText` · `pasteIntoScreen` · `processPasteChunk` |
+| `mouseConsumers` | 3 | `begin` · `extend` · `endMouseSelection`（`handleMouseClick` 是 public，人工计数） |
+| `knownGaps` | 3 | 回归套件里的 todo（G-1 · G-2/G-8 · G-3） |
+| `deadScreenGate` | 1 | `src/tui.ts` 里 `handleChar` 第二个 Screen 门（不可达；W-2 删） |
+
+### 8.3 两个 hold 窗口为什么都在（G-9）
+
+| 窗口 | 位置 | 守的是什么 | 合并的代价 |
+|---|---|---|---|
+| **30ms** | `TerminalInputGuard`（`INPUT_HOLD_MS`） | **探测回复**：`CSI r;c R` 可能被终端切成 `ESC [ 1` + `7;1R`，尾巴必须扣住，否则坐标会变成输入框里的 `[17;1R`（`tests/terminal-input.test.mjs` 有专项） | 它扣的是"**可能是回复**"的字节，超时后要**交还**给输入 |
+| **60ms** | TUI 的 `escapeTimer` | **按键**：孤立的 `ESC` 与"Alt 和弦 / 功能键的开头"只能靠时间区分；这条决定了 Alt+1…4、Alt+N/P、`/find` 的 Alt+F 是否成立 | 它扣的是"**可能是按键序列**"的字节，超时后按 ESC 或按文本处理 |
+
+两者**语义相反**（一个交还给输入、一个变成按键），只是都用了"等一小会儿"这个手段。合并需要
+Reader 先把"回复"与"按键"分成两类事件（W-1），在那之前合并只会把两种超时语义搅在一起。
+W-0 只记录，不合并。
+
+### 8.4 仍然存在的架构债（本轮只记录）
+
+1. **第二套 router**（`picker.ts` 自带 guard + escape 组装）——W-7，或至少共用 Reader。
+2. **`handleChar` 的第二个 Screen 门不可达**——W-2 删除（现在有计数钉住，删掉会让 `deadScreenGate`
+   变成 0，棘轮允许下降）。
+3. **13 处原始序列分支**（`combined === '\x1b…'`）——W-1/W-3 之后应显著下降。
+4. **owner 读取点 90 处**（screen 31 + dialog 59）——W-2 收敛到 Router 与 owner 白名单；本轮
+   **不要求归零**。
+5. **G-1/G-2/G-8/G-3 仍是红的**（3 条 todo）：一次 read 多键在 composer 路径仍会丢，Alt 和弦与下一
+   字符同 read 仍会泄漏成文本。W-3 修，修完删标记。
+
+### 8.5 W-0 ≠ Router 实现
+
+W-0 交付的是"**破坏归属就会红**"的能力，不是新的归属实现。判断标准：把 `handleChar` 的 Screen 门
+删掉、把 `copyPlainText` 的草稿写入加回来、在任何新文件里 `new TerminalInputGuard(`，三种破坏都会
+被门拦下（见 §8.6 的 mutation 记录）。
+
+### 8.6 Mutation 记录（本轮实测）
+
+| # | 变异 | 期望红的门 | 实测 |
+|---|---|---|---|
+| M1 | 让 `handleMouseClick` 写 composer 草稿 | 静态棘轮 | ✗ `FAIL: new writer: handleMouseClick writes the composer draft` |
+| M2 | 删掉 `handleChar` 顶部的 Screen 门 | 行为安全网 | ✗ 新网 `a Screen gate holds for keys that arrive beside a paste` + 0.8.3 网 `a Screen owns the composer's own keys` 同时红 |
+| M3 | 在**新文件**里 `new TerminalInputGuard(` | 静态棘轮 | ✗ `routers 3 > baseline 2`（第一次跑**没红**——棘轮只扫两个已知文件；已修成扫全 `src/`，这条 mutation 就是它的回归证据） |
+| M4 | 恢复 `copyPlainText` 清空草稿 | G-10 行为测试 + 静态棘轮 | ✗ 四条 G-10 用例全红 + `new writer: copyPlainText writes the composer draft` |
+
+M1/M4 是同一类破坏的两种形状（前者是"新写者"，后者是"回归旧写者"），分别由静态与行为两个门抓住；
+M3 抓的是门自身的盲区，这正是 mutation 检查存在的意义。
