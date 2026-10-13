@@ -1857,9 +1857,16 @@ Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行�
 （14 条 input 计数）· `npm run bench` 五个动作**字节/行数/清屏与基线逐项相同**（ms 只记录）·
 真机探针（setup 含 resume 阶段 + 主探针）全过。
 
-**CI 抓到的一件事（已修）**：等价测试第一次提交时五条腿全红——轨迹里记的是转写的**绝对行数**，
-而 CI 的启动转写比开发机多一行提示（3 → 4）。改成"本次 fixture 新增几行"（`rowsAdded`）后，
-本地注入一行额外启动提示的验证也通过。教训写进契约 §5：**轨迹必须与运行环境无关，否则它比的是环境。**
+**CI 抓到的两件事（都已修，且都是"证据自身"的问题，不是 Reader 的问题）**：
+
+1. **等价轨迹依赖运行环境**：第一次提交五条腿全红——轨迹记的是转写的**绝对行数**，CI 的启动转写比
+   开发机多一行提示（3 → 4）。改成"本次 fixture 新增几行"（`rowsAdded`），并用"本地多注入一行启动
+   提示"的验证钉住。教训进契约 §5：轨迹必须与运行环境无关，否则它比的是环境。
+2. **Windows 的反斜杠让归属过滤失效**：四条 Linux 腿转绿后 Windows 仍红——`relative()` 在 Windows 上
+   给 `src\input-reader.ts`，而过滤器比的是 `src/input-reader.ts`，于是 **Reader 自己的标记被算成
+   "Reader 之外"**（`rawRouters 2 > 1`、`pasteFraming 5 > 0`、`escapeAssembly 3 > 1`）。修法是把
+   归一化放到边界（`posix()`：读取与比较都过它），并用"让 walker 返回反斜杠"的本地模拟复现+验证
+   （模拟在修前就是 CI 的三个数字，修后全绿）。
 
 **本轮未做**：InputRouter、owner 优先级、Screen/Surface 行为、keymap、G-1/G-2/G-3 修复、
 ESC/paste 语义、picker 架构、Completion/Search/Doctor、UI。

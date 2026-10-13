@@ -26,7 +26,7 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { join, relative, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -44,7 +44,12 @@ function sourceFiles() {
     for (const entry of readdirSync(directory)) {
       const path = join(directory, entry)
       if (statSync(path).isDirectory()) walk(path)
-      else if (path.endsWith('.ts')) out.push(relative(ROOT, path))
+      // POSIX separators on purpose: the ownership filters below compare against
+      // `src/input-reader.ts`, and `relative` on Windows yields `src\input-reader.ts` —
+      // which silently counted the Reader's own markers as "outside the Reader" and
+      // failed the audit on the Windows leg (the file is built from `root + path`,
+      // so a `/` works on both platforms).
+      else if (path.endsWith('.ts')) out.push(relative(ROOT, path).replaceAll('\\', '/'))
     }
   }
   walk(SRC)
@@ -97,7 +102,19 @@ const INPUT_HANDLERS = [
   'extendMouseSelection', 'endMouseSelection', 'scrollActiveSurface', 'stepSearch', 'runKeyAction',
 ]
 
-const read = path => readFileSync(`${ROOT}${path}`, 'utf8')
+/**
+ * A repo-relative path with POSIX separators.
+ *
+ * `relative` spells paths the platform's way (`src\input-reader.ts` on Windows)
+ * while every comparison here is written against `src/input-reader.ts`. The first
+ * version of the ownership filters compared the raw value, so on the Windows leg
+ * the Reader's own markers counted as "outside the Reader" and the audit failed
+ * with `pasteFraming 5 > 0`. Normalising at the boundary — for reading *and* for
+ * comparing — is what makes the check platform-independent.
+ */
+const posix = path => path.split(sep).join('/')
+
+const read = path => readFileSync(`${ROOT}${posix(path)}`, 'utf8')
 
 /**
  * The same text with comments blanked out, offsets and line count preserved.
@@ -263,11 +280,11 @@ export function auditInputOwnership() {
   const knownGaps = find([REGRESSION_TESTS], /,\s*\{ todo: '/u)
   const deadScreenGate = find([TUI], /A Screen owns the keyboard here too/u, { comments: true })
   const readers = find(ALL_SOURCES, /new InputReader\(/u)
-  const rawRouters = find(ALL_SOURCES.filter(path => path !== READER), /new TerminalInputGuard\(/u)
+  const rawRouters = find(ALL_SOURCES.filter(path => posix(path) !== READER), /new TerminalInputGuard\(/u)
   const rawDecoders = find(ALL_SOURCES, /new StringDecoder\(/u)
-  const pasteFraming = find(ALL_SOURCES.filter(path => path !== READER), /\\x1b\[20[01]~/u)
+  const pasteFraming = find(ALL_SOURCES.filter(path => posix(path) !== READER), /\\x1b\[20[01]~/u)
   const escapeAssembly = find(
-    ALL_SOURCES.filter(path => path !== READER && path !== PAINT),
+    ALL_SOURCES.filter(path => posix(path) !== READER && posix(path) !== PAINT),
     /isEscapePrefix\(/u,
   )
   const writes = writerMap()
