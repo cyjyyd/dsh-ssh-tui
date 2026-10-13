@@ -26,7 +26,7 @@
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import process from 'node:process'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -342,4 +342,7 @@ function main() {
   process.exit(problems.length === 0 ? 0 : 1)
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main()
+// `resolve`, not a raw compare: on Windows `argv[1]` and `fileURLToPath` only
+// agree after normalisation, and a guard that silently fails would make
+// `npm run freeze:input` a no-op that exits 0.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()
