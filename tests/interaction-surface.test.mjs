@@ -415,13 +415,15 @@ test('one owner per key: the contract every surface keeps', async () => {
 // ── a Screen is an owner too ─────────────────────────────────────────────────
 
 /** A wizard parked on a field step, opened the way production opens it. */
-function openSetup(tui) {
+function openSetup(tui, step = 'key', overrides = {}) {
   tui.onboarding = {
-    step: 'key', providerType: 'official', providerId: 'deepseek-official', baseUrl: '', key: '',
+    step, providerType: 'official', providerId: 'deepseek-official', baseUrl: '', key: '',
     models: [], catalogPresets: undefined, catalog: undefined, providerCursor: 0,
     saving: false, field: '', fieldCursor: 0, resolve() {},
+    ...overrides,
   }
   tui.openScreen({ kind: 'setup', title: '首次配置向导', lines: [], offset: 0 })
+  return tui
 }
 
 /** Every Screen kind, opened the way its command opens it. */
@@ -482,6 +484,48 @@ test('a paste at a Screen with no field goes nowhere at all', () => {
     assert.equal(tui.cursor, 8, `${name}: caret included`)
     assert.equal(tui.screen?.kind, name, `${name}: and it is still the Screen that is up`)
   }
+})
+
+test('a read that carries several keys is not one key', () => {
+  // A terminal hands over whatever arrived together. `text\r` is a fast typist on a
+  // slow link, and the wizard used to take the whole read as one key: the text landed
+  // and the Enter was dropped, so the step never advanced — the reader pressed Enter
+  // again and blamed the keyboard.
+  const { tui } = fixture()
+  openSetup(tui)
+  tui.handleData(Buffer.from('sk-live-1234\r'))
+  assert.equal(tui.onboarding.field, '', 'the field was submitted, not left holding the key')
+  assert.equal(tui.onboarding.key, 'sk-live-1234', 'with what was typed')
+  assert.equal(tui.onboarding.step, 'models', 'and the step advanced on the Enter in that read')
+
+  // Two backspaces in one read are two backspaces.
+  const second = openSetup(fixture().tui, 'id', { field: 'deepseek', fieldCursor: 'deepseek'.length })
+  second.handleData(Buffer.from('\x7f\x7f'))
+  assert.equal(second.onboarding.field, 'deepse', 'each control byte is its own key')
+
+  // A CRLF is one Enter, not two.
+  const third = openSetup(fixture().tui)
+  third.handleData(Buffer.from('sk-live-1234\r\n'))
+  assert.equal(third.onboarding.step, 'models', 'the Windows pair is the one Enter it is')
+  assert.equal(third.onboarding.key, 'sk-live-1234')
+
+  // And a run of printable text is still one key: a paste without markers must not
+  // answer the confirmation by falling apart into `y` plus leftovers.
+  const fourth = openSetup(fixture().tui, 'confirm')
+  fourth.handleData(Buffer.from('yes'))
+  assert.equal(fourth.onboarding?.saving, false, 'a pasted "yes" is not an answer')
+  assert.equal(fourth.onboarding?.step, 'confirm')
+
+  // Two arrows in one read scroll twice, rather than being dropped whole.
+  const fifth = fixture().tui
+  fifth.screen = {
+    kind: 'report',
+    title: '诊断',
+    lines: Array.from({ length: 80 }, (_line, index) => ({ kind: 'system', text: `第 ${index} 行` })),
+    offset: 40,
+  }
+  fifth.handleData(Buffer.from('\x1b[B\x1b[B'))
+  assert.equal(fifth.screen.offset, 42, 'each arrow in the read moved the Screen')
 })
 
 // ── Standard / Minimal / line mode share one semantic state ─────────────────

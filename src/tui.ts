@@ -1342,6 +1342,59 @@ function looksLikePasteBurst(text: string): boolean {
 }
 
 /**
+ * Split one read into the keys it carries.
+ *
+ * A terminal hands over whatever arrived together, which is not always one key: a
+ * fast typist on a slow link sends `text\r`, a console without bracketed paste sends
+ * a whole line, and a paste is followed by Enter inside the same read. The composer
+ * has always taken a read apart (`handlePlainText` types it character by character),
+ * and a Screen has to see the same keys — a control byte is only itself when it
+ * stands alone, so a read handed to one step is a read whose Enter is dropped on the
+ * floor. That is what this returns: escape sequences whole (an arrow is one key),
+ * control bytes one each with CRLF read as the one Enter it is, and a run of
+ * printable text kept together, because a step that filters on what it is given
+ * wants the run and a paste without markers still must not answer a confirmation.
+ */
+function screenKeys(text: string): string[] {
+  const keys: string[] = []
+  let index = 0
+  while (index < text.length) {
+    const char = text[index]
+    if (char === '\x1b') {
+      // A CSI sequence (`\x1b[` params final), SS3 (`\x1bO` one char), or the lone
+      // Escape key itself when nothing follows it in this read.
+      const rest = text.slice(index)
+      const sequence = /^\x1b\[[0-9;?<]*[ -/]*[@-~]/u.exec(rest)?.[0] ?? /^\x1bO[@-~]/u.exec(rest)?.[0]
+      if (sequence !== undefined) {
+        keys.push(sequence)
+        index += sequence.length
+        continue
+      }
+      keys.push('\x1b')
+      index += 1
+      continue
+    }
+    if (char === '\r' || char === '\n') {
+      // Windows terminals send Enter as CRLF; both halves are one key.
+      const next = text[index + 1]
+      keys.push('\r')
+      index += (char === '\r' && next === '\n') || (char === '\n' && next === '\r') ? 2 : 1
+      continue
+    }
+    if (char < ' ' || char === '\x7f') {
+      keys.push(char)
+      index += 1
+      continue
+    }
+    let end = index
+    while (end < text.length && text[end] >= ' ' && text[end] !== '\x7f') end += 1
+    keys.push(text.slice(index, end))
+    index = end
+  }
+  return keys
+}
+
+/**
  * The durable event types the plan projection reads (B2.5).
  *
  * `tool/call`/`tool/result` are here for the `exit_plan_mode` review; the recorder
@@ -12307,15 +12360,36 @@ export class SshTui {
       this.markDirty()
       return
     }
+    // A burst of line breaks in one read is a paste from a console that cannot say so
+    // (`looksLikePasteBurst`): it belongs in the field as one edit, which is how a
+    // pasted key or model list survives a terminal without bracketed paste. It is
+    // asked *before* the split below, because splitting is what would turn one paste
+    // into a step's worth of Enters.
+    if (looksLikePasteBurst(combined)) {
+      this.pasteIntoScreen(combined)
+      return
+    }
+    // A read is not a key (`screenKeys`). This is the only path a Screen's input
+    // arrives on, so a read carrying several keys — `text\r` from a fast typist on a
+    // slow link, an arrow batched with the key after it — has to be taken apart here
+    // or the keys after the first are spent on a step that cannot read them. Each key
+    // is handed on its own, and the rest of the read is dropped once the Screen it was
+    // addressed to is gone: the keys after a dismissal belong to whatever comes next,
+    // and guessing that here is how a paste ended up in the composer in the first
+    // place.
+    const keys = screenKeys(combined)
+    if (keys.length > 1) {
+      for (const key of keys) {
+        if (this.screen === undefined) return
+        this.handleScreenInput(key, this.keymap.sequences.get(key))
+      }
+      return
+    }
     // The setup Screen owns its own field, its own navigation and its own keys: it
     // consumes everything while it is up, and nothing reaches the workspace's
     // composer, history or transcript (B2.6 §4).
     if (screen.kind === 'setup') {
-      // A burst of line breaks in one read is a paste from a console that cannot say
-      // so (`looksLikePasteBurst`): it belongs in the field as one edit, which is how
-      // a pasted key or model list survives a terminal without bracketed paste.
-      if (looksLikePasteBurst(combined)) this.pasteIntoScreen(combined)
-      else this.handleSetupKey(combined, moved)
+      this.handleSetupKey(combined, moved)
       return
     }
     // The Screen's own confirmation owns the keys while it is up: it is a question
@@ -13655,7 +13729,7 @@ export class SshTui {
           this.setupMessage(state, 'system', t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }))
         }
         if (saved) {
-          this.setupMessage(state, 'system', t('onboard.officialDone', { model }))
+          this.onboardDone(t('onboard.officialDone', { model }))
         }
       } else {
         const envRef = envRefForId(state.providerId)
@@ -13825,18 +13899,51 @@ export class SshTui {
           this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
-          this.setupMessage(state, 'system', t('onboard.customDone', { id: ownerId, model }))
+          this.onboardDone(t('onboard.customDone', { id: ownerId, model }))
         }
       }
     } catch (error) {
       saved = false
       this.setupMessage(state, 'error', t('onboard.saveFailed', { error: errorChain(error) }))
     } finally {
-      this.onboarding = undefined
       state.resolve(saved)
+      // The Screen's exit is the answer, and the answer is one of two things.
+      //
+      // **Saved**: the wizard has nothing left to ask, so it hands the workspace back
+      // in the same frame. Cancelling always did this; saving did not, so a completed
+      // setup left the reader on the wizard's own frame until they pressed a key —
+      // and only that key's "no wizard behind this Screen" fallback closed it. Every
+      // confirmation the wizard would have painted on its own row went with the
+      // Screen, which is why the completion line is a transcript row (`onboardDone`).
+      //
+      // **Failed**: the wizard keeps the screen, because the row it just wrote is the
+      // reason and the answer (an API key, a Base URL) has to stay editable to retry.
+      // Dropping the state here is what used to leave a Screen with no wizard behind
+      // it: the error was written and then thrown away with it, and the next keypress
+      // dismissed the whole flow as if nothing had been asked.
+      if (saved) {
+        this.onboarding = undefined
+        this.closeScreen()
+      } else {
+        state.saving = false
+      }
       this.showNextDialog()
       this.markDirty()
     }
+  }
+
+  /**
+   * Say the wizard is done, where the reader will still be able to read it.
+   *
+   * A saved wizard closes its Screen in the same frame, so its own notice row would
+   * be painted for no frames at all — and the credential line that goes with it is a
+   * footer echo (`command-feedback`), which expires. This is the durable half of the
+   * answer: `command-status` routes to the transcript, exactly like the boot line
+   * that asked for the setup in the first place.
+   */
+  private onboardDone(text: string): void {
+    this.pushRow(represent('command-status', { kind: 'system', text }))
+    this.markDirty()
   }
 
   /** Store one credential, falling back to a launch-environment override on shadow/absence. */

@@ -1679,3 +1679,45 @@ ConPTY 上根本摸不到**，而这个形状是被读者报过两次的那个�
    本机 `node_modules` 是旧的符号链接农场；它与输入路由无关（CI 两条腿都会跑它）。
 3. 向导字段的**左右光标键**仍未实现（`handleSetupKey` 只认上下）：粘贴因此总是追加在末尾。这不是缺陷，
    只是"掩码字段 + 中间光标"这条组合目前不存在；要做就得连掩码渲染一起补，不在本轮范围。
+
+---
+
+## 现场复测后的收尾 · 向导"存完要退场"与"一次 read 不是一键"（2026-10-13）
+
+用户复测 0.8.2 后报：**走完设置向导（从 resume 进入）没有退回工作区**。修这个的过程中，真机探针又逼出
+第三处同类缺陷（一次 read 里的多个按键）。三处都在向导 / Screen 的输入所有权这条线上，一并收掉，作为
+**0.8.3 紧急补丁**发布。
+
+### 1. 走完向导不退回工作区
+
+`saveOnboarding()` 的 `finally` 只清 `this.onboarding` 并 `showNextDialog()`，**没有 `closeScreen()`**；
+而 `cancelOnboarding()`（Esc 路径）有。于是保存成功后 Screen 仍然占着屏，读者要随便按一个键，才由
+`handleSetupKey()` 开头那句"Screen 背后没有向导 → 关掉它"兜底退场。**保存本身就是退场**，现在两条路径对称。
+
+同一处还修了失败路径：原来无论成功失败都清 `this.onboarding`，于是"保存失败"的错误写在了一个**立刻被丢掉**
+的 state 上——Screen 留着、错误没了、答案也没了，下一次按键还把这整套流程当作没发生过。现在失败**保留向导
+和错误**（`saving` 复位，可以改完重试），成功才关屏。
+
+配套：向导自己的提示行会随 Screen 一起消失，所以完成语改为**转写行**（`onboardDone` → `command-status`；
+`credSaved` 那条是 footer echo，会过期），读者在工作区还能读到"配置完成，已记住 X / Y"。
+
+### 2. 一次 read 不是一键（真机探针发现）
+
+`handleScreenInput()` 把一次 read 当成**一个键**：`text\r` 这样的读取（慢链路上的快速输入、终端合并写入）
+里那个 `\r` 会被丢掉——字段收下了文字、步骤却不动。实测探针在型号步骤卡住（帧里 `› deepseek-v4-pro_`、
+仍停在 5/9）。新增 `screenKeys()`：转义序列保持完整（一个方向键就是一个键）、CRLF 当作一个 Enter、
+控制字节各自成键、**可打印文本连成一段**（所以没有括号粘贴的 "yes" 仍然不会替读者按下确认）。
+composer 路径一直就是这么做的（`handlePlainText` 逐字符），Screen 现在与它一致。
+
+### 3. 证据
+
+| 证据 | 结果 |
+|---|---|
+| 新增单测 3 项（`tests/setup-screen.test.mjs` 2 · `tests/interaction-surface.test.mjs` 1） | 修复前红：`actual: { kind: 'setup', … }`（Screen 停在向导上）；修复后全绿 |
+| 真机探针 `scripts/tui-setup-probe.mjs` 新增第 7 阶段（**resume 进入 → 走完向导 → 保存**） | 修复前 FAIL（型号步骤卡在 5/9，`text\r` 的 Enter 被丢）；修复后 `resumed first run: wizard saved on step 9, workspace back with no extra keypress` |
+| 真机探针 `scripts/tui-probe.mjs`（启动/缩放/报告/退出） | OK |
+| 门 | `npm run typecheck` 0 · `npm test` **1385 项 · 1381 通过 · 0 失败 · 4 跳过** · `npm run freeze` 全绿 · `npm run bench:report -- --check` 两条 README 一致 |
+
+探针第 7 阶段是**真 resume**：用同一 home 里最新的 session id 启动 `--resume=<id>`（首启判定只看凭据，
+所以仍然进向导），粘贴 Key、走完九步、按 `y`，**之后不再发任何按键**，断言工作区自己回来。
+它把"保存成功却停在向导上"钉成了回归门。

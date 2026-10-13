@@ -21,8 +21,8 @@ import { screenLayout } from '../lib/screen.js'
 
 setLocale('zh')
 
-function makeTui(options = {}) {
-  const ctx = { get: () => undefined, on() { return () => {} } }
+function makeTui(options = {}, services = {}) {
+  const ctx = { get: name => services[name], on() { return () => {} } }
   const agent = {
     id: 'main-session', options: {}, status: 'idle',
     session: { id: 'main-session', events: [] }, cancel() {},
@@ -222,8 +222,57 @@ test('cancelling setup restores the workspace in place', () => {
   assert.equal(tui.scrollOffset, before.scroll)
 })
 
-// ── D. detach / reattach ────────────────────────────────────────────────────
+test('finishing the wizard hands the workspace back in the same frame', async () => {
+  // The asymmetry this pins: cancelling closed the Screen, saving did not — so a
+  // completed setup left the reader looking at the wizard's own frame until they
+  // pressed a key, and only that key's fallback handed the workspace back. Seen from
+  // a resumed session, where finishing setup is the *only* thing left to do.
+  const written = []
+  const { tui } = makeTui({}, {
+    credentials: { set: async (ref, key) => { written.push({ ref, key }) } },
+    settings: { mutate: async () => {}, replace: async () => {}, update: async () => {} },
+    agentDefaultModel: { saveSelection: async () => {} },
+  })
+  tui.input = 'a draft I was writing'
+  tui.cursor = 7
+  tui.onboarding = {
+    step: 'confirm', providerType: 'official', providerId: 'deepseek-official',
+    baseUrl: '', key: 'sk-live-1234', models: ['deepseek-v4-pro'],
+    catalogPresets: undefined, catalog: undefined, providerCursor: 0, saving: true,
+    field: '', fieldCursor: 0, resolve() {},
+  }
+  tui.openScreen({ kind: 'setup', title: t('onboard.title'), lines: [], offset: 0 })
+  await tui.saveOnboarding()
+  assert.equal(tui.onboarding, undefined, 'the wizard is done')
+  assert.equal(written.length, 1, 'and the key it collected was saved')
+  assert.equal(tui.screen, undefined, 'so the Screen is gone without another keypress')
+  // What the reader would have read on the wizard's own row is a transcript row now:
+  // the row outlives the Screen, and the Screen is what the confirmation was drawn on.
+  const done = tui.rows.filter(row => String(row.text).includes('配置完成'))
+  assert.equal(done.length, 1, `the confirmation reaches the workspace:\n${tui.rows.map(row => row.text).join('\n')}`)
+  assert.equal(tui.input, 'a draft I was writing', 'and the draft is exactly what it was')
+  assert.equal(tui.cursor, 7)
+})
 
+test('a wizard that failed to save stays up, with its error', async () => {
+  const { tui } = makeTui({}, {
+    credentials: { set: async () => { throw new Error('凭据服务离线') } },
+    settings: { mutate: async () => {} },
+  })
+  tui.onboarding = {
+    step: 'confirm', providerType: 'official', providerId: 'deepseek-official',
+    baseUrl: '', key: 'sk-live-1234', models: ['deepseek-v4-pro'],
+    catalogPresets: undefined, catalog: undefined, providerCursor: 0, saving: true,
+    field: '', fieldCursor: 0, resolve() {},
+  }
+  tui.openScreen({ kind: 'setup', title: t('onboard.title'), lines: [], offset: 0 })
+  await tui.saveOnboarding()
+  assert.equal(tui.screen?.kind, 'setup', 'the wizard keeps the screen: the answer has to stay editable')
+  assert.equal(tui.onboarding?.notice?.kind, 'error', 'and the reason is on it')
+  assert.match(String(tui.onboarding?.notice?.text), /凭据服务离线/u)
+})
+
+// ── D. detach / reattach ────────────────────────────────────────────────────
 test('a reattach mid-step keeps the step, the field and the message', async () => {
   const { tui } = setup('base-url', { field: 'https://gw.example/v1', fieldCursor: 20 })
   tui.onboarding.notice = { kind: 'error', text: '示例错误' }

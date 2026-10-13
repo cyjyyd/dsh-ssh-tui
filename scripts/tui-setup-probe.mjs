@@ -24,7 +24,7 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 import { provisionProbeCredential } from './probe-home.mjs'
@@ -63,6 +63,29 @@ async function wizardRows(output) {
 /** The row the wizard draws its field on — the only one that opens with `›`. */
 function fieldRowOf(rows) {
   return rows.find(row => row.trimStart().startsWith('›')) ?? ''
+}
+
+/** The newest session a home holds: what `--resume=<id>` needs. */
+function newestSessionId(home) {
+  const dir = join(home, 'sessions')
+  const entries = readdirSync(dir).filter(name => {
+    try {
+      return statSync(join(dir, name)).isDirectory()
+    } catch {
+      return false
+    }
+  })
+  if (entries.length === 0) return undefined
+  return entries
+    .map(name => ({ name, at: statSync(join(dir, name)).mtimeMs }))
+    .sort((a, b) => b.at - a.at)[0].name
+}
+
+/** The wizard frame the probe drives, and the step it is on. */
+function wizardOf(output) {
+  const text = plain(output)
+  const steps = [...text.matchAll(/安装向导\s*(\d+)\/9/gu)]
+  return { text, step: Number(steps.at(-1)?.[1] ?? '0') }
 }
 
 async function loadPty() {
@@ -299,6 +322,88 @@ async function runProbe(argv) {
     }
   }
 
+  // 7. The wizard that is *finished* hands the workspace back — on a **resumed**
+  //    session, which is where it was reported. A resume boot with nothing stored
+  //    still opens the wizard (the launch flag is not evidence of configuration),
+  //    so saving it is the last thing a reader does there; what is under test is
+  //    that the save is also the dismissal, with no keypress in between. Before the
+  //    fix the Screen stayed up until any key arrived — and that key's "no wizard
+  //    behind this Screen" fallback is what closed it, which is why it looked like
+  //    the wizard had simply forgotten to leave.
+  if (problems.length === 0 && pty !== undefined) {
+    const credentialFile = join(home, '.credentials.yaml')
+    let previousCredential
+    try {
+      previousCredential = readFileSync(credentialFile, 'utf8')
+    } catch {
+      previousCredential = undefined
+    }
+    const sessionId = newestSessionId(home)
+    if (sessionId === undefined) {
+      console.log('SKIP: the home holds no session to resume, so the saved-wizard phase did not run')
+    } else {
+      const resumed = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${sessionId}`], {
+        name: 'xterm-256color',
+        cols: 100,
+        rows: 30,
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          DSH_HOME: home,
+          TERM: 'xterm-256color',
+          DSH_TUI_NO_UPDATE_CHECK: '1',
+          DEEPSEEK_API_KEY: '',
+          SSH_CONNECTION: '10.0.0.2 55555 10.0.0.1 22',
+          SSH_TTY: '/dev/pts/9',
+        },
+      })
+      let thirdOutput = ''
+      resumed.onData(chunk => { thirdOutput += chunk })
+      const waitForStep = async (want, label) => {
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline) {
+          if (want.includes(wizardOf(thirdOutput).step)) return
+          await delay(100)
+        }
+        throw new Error(`timed out waiting for step ${want.join('/')} (${label}); at ${wizardOf(thirdOutput).step}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
+      }
+      try {
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline && wizardOf(thirdOutput).step === 0) await delay(100)
+        check(wizardOf(thirdOutput).step === 1, `a resumed first run opens the wizard at step 1 (at ${wizardOf(thirdOutput).step})`)
+        resumed.write('\r') // the highlighted provider
+        await waitForStep([4], 'the key step')
+        resumed.write('\x1b[200~sk-probe-saved-key\x1b[201~') // a key is pasted, not typed
+        await delay(400)
+        resumed.write('\r') // key → models
+        await waitForStep([5], 'the models step')
+        resumed.write('deepseek-v4-pro\r') // a typed list skips the picker
+        // Sized from the installed catalog, this lands on the confirmation; a model it
+        // cannot size gets the context step first. Both are the wizard's own path.
+        await waitForStep([8, 9], 'the context step or the confirmation')
+        if (wizardOf(thirdOutput).step === 8) {
+          resumed.write('\r') // keep the inferred window
+          await waitForStep([9], 'the confirmation')
+        }
+        const beforeSave = thirdOutput.length
+        resumed.write('y') // save — and nothing is pressed after this
+        const back = Date.now() + 30_000
+        while (Date.now() < back && !/❯|╭/u.test(plain(thirdOutput.slice(beforeSave)))) await delay(100)
+        const after = plain(thirdOutput.slice(beforeSave))
+        check(/❯|╭/u.test(after), `the workspace comes back on its own after the save (${JSON.stringify(after.slice(-160))})`)
+        check(!/安装向导\s*9\/9/u.test(after), 'and the wizard is not still on screen')
+        check(/配置完成/u.test(plain(thirdOutput)), 'the confirmation reaches the transcript, not just the Screen')
+        console.log(`resumed first run: wizard saved on step 9, workspace back with no extra keypress`)
+      } finally {
+        try { resumed.kill() } catch { /* already gone */ }
+        // The saved key is this phase's own doing: put the home back unconfigured, or
+        // the next run of this probe skips phase 1 as "already configured".
+        if (previousCredential === undefined) rmSync(credentialFile, { force: true })
+        else writeFileSync(credentialFile, previousCredential, { mode: 0o600 })
+      }
+    }
+  }
+
   if (problems.length > 0) {
     console.error('FAIL')
     for (const problem of problems) console.error(`  - ${problem}`)
@@ -314,7 +419,8 @@ async function runProbe(argv) {
     return 0
   }
   console.log('OK: the setup wizard is a Screen — it paints its own frame, owns its field,')
-  console.log('    survives a resize, and hands the workspace back on Esc')
+  console.log('    survives a resize, hands the workspace back on Esc, and hands it back again')
+  console.log('    when it is saved (on a resumed session, with no extra keypress)')
   return 0
 }
 
