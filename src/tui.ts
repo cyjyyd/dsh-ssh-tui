@@ -14303,10 +14303,14 @@ export class SshTui {
     // *what* went to the clipboard, and a second press of the copy key must be
     // idempotent. Clearing it here made the next `/copy` silently fall back to
     // "the latest reply" — a different row, with nothing on screen to say so.
-    this.input = ''
-    this.cursor = 0
-    this.inputFolded = false
-    this.leaveHistoryBrowse()
+    //
+    // **The composer's draft is not this function's to write** (input-ownership
+    // AD-20, F-2). It used to be: `this.input = ''` + caret + fold + the history
+    // browse reset sat here from the 0.5.5 era, when `/copy` was *text submitted
+    // from the composer* and clearing it was housekeeping. The command line is
+    // `runCommand`'s to consume (it clears the composer for every command), and the
+    // key, a drag, a link click and a Screen's copy are not commands at all — a
+    // reader who typed half a message and then copied a reply lost it.
     this.write(osc52Clipboard(text))
     this.pushRow(represent('copy-feedback', { kind: 'system', text: notice }))
     // The write is a request the terminal may ignore: VTE (GNOME/XFCE/…) has

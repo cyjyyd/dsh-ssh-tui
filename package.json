@@ -100,6 +100,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test \"tests/*.test.mjs\"",
     "freeze": "node scripts/b2-freeze-audit.mjs",
+    "freeze:input": "node scripts/input-freeze-audit.mjs",
     "bench": "node scripts/bench-b2.mjs",
     "clean": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
     "prepare": "npm run build",

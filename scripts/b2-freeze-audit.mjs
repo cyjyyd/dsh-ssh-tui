@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url'
 import process from 'node:process'
 
 import { auditRepresentations, auditQuestionPrimaries } from '../lib/representation.js'
+import { auditInputOwnership, BASELINE as INPUT_BASELINE } from './input-freeze-audit.mjs'
 
 // `fileURLToPath`, never `URL.pathname`: on Windows the latter is `/D:/a/…` — a leading
 // slash in front of the drive — and `join` then builds `D:\D:\a\…`, which the first CI
@@ -247,6 +248,23 @@ const PTY = [
   { id: 'setup-typing-clears', rule: '= 0', measured_by: 'npm test · tests/setup-screen.test.mjs + scripts/tui-setup-probe.mjs' },
 ]
 
+// The input-ownership ratchet (AD-20, W-0). `npm run freeze:input` runs the same
+// audit on its own; it is re-stated here so the CI step that already runs `npm run
+// freeze` (both platform legs) enforces it too, and so one command answers "did any
+// frozen boundary move".
+const input = auditInputOwnership()
+const inputRows = [
+  ['routers', input.routers.length, INPUT_BASELINE.routers.count],
+  ['dispatchers', input.dispatchers.length, INPUT_BASELINE.dispatchers.count],
+  ['mouseParsers', input.mouseParsers.length, INPUT_BASELINE.mouseParsers.count],
+  ['rawBranches', input.rawBranches.length, INPUT_BASELINE.rawBranches.count],
+  ['pasteConsumers', input.pasteConsumers.length, INPUT_BASELINE.pasteConsumers.count],
+  ['mouseConsumers', input.mouseConsumers.length, INPUT_BASELINE.mouseConsumers.count],
+  ['knownGaps', input.knownGaps.length, INPUT_BASELINE.knownGaps.count],
+  ['ownerReads.screen', input.reads.total.screen, INPUT_BASELINE.ownerReads.screen],
+  ['ownerReads.dialog', input.reads.total.dialog, INPUT_BASELINE.ownerReads.dialog],
+]
+
 const problems = []
 if (representation.unclassified !== 0) problems.push(`unclassified = ${representation.unclassified}`)
 if (representation.unknownDestination !== 0) problems.push(`unknown destination = ${representation.unknownDestination}`)
@@ -256,9 +274,18 @@ if (representation.genericToolRows !== 0) problems.push(`generic question tool r
 for (const entry of retired) {
   if (entry.hits.length > 0) problems.push(`${entry.id} = ${entry.hits.length} occurrence(s)`)
 }
+for (const [id, count, baseline] of inputRows) {
+  if (count > baseline) problems.push(`input ${id} = ${count} > baseline ${baseline}`)
+}
 
 if (JSON_OUT) {
-  console.log(JSON.stringify({ representation, retired, pty: PTY, problems }, null, 2))
+  console.log(JSON.stringify({
+    representation,
+    retired,
+    input: { rows: inputRows, writes: input.writes, reads: input.reads },
+    pty: PTY,
+    problems,
+  }, null, 2))
 } else {
   console.log('B2 freeze audit')
   console.log('')
@@ -275,6 +302,12 @@ if (JSON_OUT) {
     console.log(`  ${entry.hits.length === 0 ? '✓' : '✗'} ${entry.id.padEnd(28)} ${entry.hits.length} — ${entry.what}`)
     for (const hit of entry.hits) console.log(`      ${hit}`)
   }
+  console.log('')
+  console.log('input ownership (AD-20, W-0 — full report: `npm run freeze:input`)')
+  for (const [id, count, baseline] of inputRows) {
+    console.log(`  ${count > baseline ? '✗' : count < baseline ? '↓' : '✓'} ${id.padEnd(24)} ${String(count).padStart(3)} (baseline ${baseline})`)
+  }
+  console.log(`      recorded debt: ${input.deadScreenGate.length} dead Screen gate · ${input.knownGaps.length} known gap(s) marked todo`)
   console.log('')
   console.log('PTY facts (measured by the probes, restated here)')
   for (const entry of PTY) console.log(`  · ${entry.id} ${entry.rule} — ${entry.measured_by}`)
