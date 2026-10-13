@@ -1737,3 +1737,39 @@ composer 路径一直就是这么做的（`handlePlainText` 逐字符），Scree
 | dist-tags | **`latest` = `0.8.3`，`next` = `0.8.3`** |
 
 完整回执同时写在 [`release.md`](release.md) 顶部（规则文件的第一段就是最近一次发版）。
+
+---
+
+## 0.8.4 规划轮 · 输入归属审计与契约（2026-10-13）
+
+> **本轮不改运行时**：只审计、只写契约与路线图。`git diff` 里没有 `src/`。
+
+产出：
+
+| 文件 | 内容 |
+|---|---|
+| [`decisions/input-ownership.md`](decisions/input-ownership.md) | **AD-20 输入归属契约**：现状阶梯（照抄实测顺序）、事件 × 路由 × owner × 风险表、owner 能力矩阵、目标模型（Reader → Router → Owner）、禁止模式 F-1…F-6、测试要求 T-1…T-7、与 B2 不变量的接口 |
+| [`plans/0.8.4-input-ownership.md`](plans/0.8.4-input-ownership.md) | 0.8.4 路线图建议：W-0 安全网 → W-1 Reader → W-2 Router → W-3 合并 read 修复；W-4 Completion 迁移 / W-5 Search Screen / W-6 Terminal Doctor 只规划不实现 |
+
+审计方法与证据（`.pf/input-audit.mjs`、`.pf/input-audit2.mjs`，git 排除，不进仓库）：
+用真实 `SshTui`（0.8.3 构建）喂入具体字节序列，对
+`{input, cursor, historyIndex, scrollOffset, screen.offset, dialog, focusedRow}` 取前后快照。
+
+**本轮实测发现的缺陷**（契约 §3 有完整表）：
+
+| ID | 现象 | 触发序列 | 实测 |
+|---|---|---|---|
+| G-1 | composer 里一次 read 的多个键**全丢** | `\x1b[5~\x1b[5~` / `\x1b[B\x1b[B` | `no change`（单键 PgUp 滚 12 行） |
+| G-2 | rebind 的键与别的键同 read 时绑定失效 | `keys: {pageUp:'ctrl+p'}` + `\x10\x10` | `no change`（单发滚 12 行） |
+| G-3 | Alt 和弦与下一字符同 read：和弦丢失、字符泄漏成文本 | `\x1b1x` | 输入变成 `1x` |
+| G-4 | `0x16`（Ctrl+V）无处理 | `\x16` | `no change`（不泄漏） |
+| G-5 | Screen 内不能拖拽选择 | Screen 内 button 32/0 | `no change`（有意拒绝，`/copy` 是唯一路径） |
+| G-6 | 两份实现 / 死代码 | `handleChar` 第二个 Screen 门已不可达；Ctrl+L 两套；`picker.ts` 自带 guard | 代码审阅 |
+| G-7 | focus 事件靠"未知序列"兜住 | `\x1b[I` / `\x1b[O` | `no change` ✅ 但**无测试** |
+| G-8 | Screen 内 rebind 的复制键同 read 失效 | 同 G-2 | 与 G-1 同源 |
+| G-9 | 两个 hold 窗口做同一件事 | Guard 30ms vs TUI 60ms | 代码审阅 |
+
+**没有发现的泄漏**（当基线写下来）：Screen 打开时草稿不被任何键改写；dialog 打开时转写不滚；
+Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行。
+
+本轮未做：不改 `src/`、不改测试、不改冻结审计、不发版（契约与路线图落地在 0.8.4）。
