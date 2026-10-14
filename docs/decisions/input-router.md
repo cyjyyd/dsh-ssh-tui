@@ -9,17 +9,18 @@
 
 ---
 
-## 1. 三层调用链（W-2 之后）
+## 1. 三层调用链（W-2 之后，W-3a 补齐切分）
 
 ```text
 stdin / FRAME_STDIN
    │ bytes
    ▼
-InputReader（AD-21）            decode · 回复过滤 · ESC 组装 · 粘贴边界 · 单元分类
+InputReader（AD-21）            decode · 回复过滤 · ESC 组装 · 粘贴边界 · **单元切分**（W-3a）
    │ InputFrame: key | burst | literal | paste | escape | reply
+   │ 一个 read 可以出多帧：完整 CSI/SS3、Alt 和弦、控制字节、CR/LF、一段文本各一帧
    ▼
 tui.ts
-   ├─ handleInputText          assemble → 粘贴帧 / route()
+   ├─ handleInputText          assemble → read() → 逐帧 consumeFrame（Screen 关闭后余下丢弃）
    ├─ route()                  **绑定表与解析**（keymap、Alt 和弦、SS3 尾巴、hold、未知 CSI）
    │      │  每个单元问一次 Router
    │      ▼
@@ -32,6 +33,10 @@ tui.ts
                             现有执行体（handleScreenInput / handleDialogChar /
                             composerUnit / scrollWorkspace / 选区 …）
 ```
+
+**W-3a 之后**：切分只发生在 Reader，Router 看到的**永远是完整单元**——各 Owner 的适配器不再自己拆
+read（0.8.3 里只有 Screen 这么做，`screenKeys` 已在 W-3a 删除）。Screen 把整次 read 视为自己的：
+它关闭后，同一 read 里余下的单元丢弃；Surface 相反，答案之后的单元继续按 Owner 判定。
 
 **一次判定**：每个单元只问一次 Router；`route()` 在 Screen 归属时直接交给 Screen 适配器，
 其余情况才继续走绑定表与解析分支。绑定表不决定归属（AD-20 F-5：一个键只有一张表）。

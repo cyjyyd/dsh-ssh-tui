@@ -298,4 +298,40 @@ export const FIXTURES = [
   { name: 'text-then-enter', reads: ['hello\r'] },
   { name: 'rebound-alone', reads: ['\x10'], setup: ['rows'], keys: { pageUp: 'ctrl+p' } },
   { name: 'rebound-coalesced', reads: ['\x10\x10'], setup: ['rows'], keys: { pageUp: 'ctrl+p' } },
+  // ── W-3a: the same keys delivered in one read or in several ─────────────────
+  //
+  // Each pair is asserted to reach the same owners with the same end state (see
+  // `tests/input-reader.test.mjs`, "a read is not a key"): a coalesced read may not
+  // drop a key, may not run one twice, and may not change what a key means. The pairs
+  // whose halves end in different states on purpose — a Surface that closes on the
+  // first key, a Screen that does — are not here; they are their own cases below.
+  { name: 'pair-pgup-two-reads', reads: ['\x1b[5~', '\x1b[5~'], setup: ['rows'] },
+  { name: 'pair-pgdn-one-read', reads: ['\x1b[6~\x1b[6~'], setup: ['rows'] },
+  { name: 'pair-pgdn-two-reads', reads: ['\x1b[6~', '\x1b[6~'], setup: ['rows'] },
+  { name: 'pair-down-one-read', reads: ['\x1b[B\x1b[B'], setup: ['rows'] },
+  { name: 'pair-down-two-reads', reads: ['\x1b[B', '\x1b[B'], setup: ['rows'] },
+  { name: 'pair-arrows-mixed-one-read', reads: ['\x1b[A\x1b[B\x1b[A'], setup: ['rows'] },
+  { name: 'pair-arrows-mixed-two-reads', reads: ['\x1b[A\x1b[B', '\x1b[A'], setup: ['rows'] },
+  { name: 'pair-keys-three-one-read', reads: ['\x1b[5~\x1b[6~\x1b[5~'], setup: ['rows'] },
+  { name: 'pair-keys-three-three-reads', reads: ['\x1b[5~', '\x1b[6~', '\x1b[5~'], setup: ['rows'] },
+  { name: 'pair-typing-with-enter-one-read', reads: ['hello\r'], setup: ['draft'] },
+  { name: 'pair-typing-with-enter-two-reads', reads: ['hello', '\r'], setup: ['draft'] },
+  { name: 'rebound-split', reads: ['\x10', '\x10'], setup: ['rows'], keys: { pageUp: 'ctrl+p' } },
+  { name: 'rebound-with-text', reads: ['ab\x10cd'], setup: ['draft'], keys: { pageUp: 'ctrl+p' } },
+  { name: 'rebound-split-with-text', reads: ['ab', '\x10', 'cd'], setup: ['draft'], keys: { pageUp: 'ctrl+p' } },
+  { name: 'rebound-mixed-default', reads: ['\x1b[5~\x10'], setup: ['rows'], keys: { pageUp: 'ctrl+p' } },
+  { name: 'rebound-mixed-default-split', reads: ['\x1b[5~', '\x10'], setup: ['rows'], keys: { pageUp: 'ctrl+p' } },
+  { name: 'alt-1-then-key-one-read', reads: ['\x1b1\x1b[5~'], setup: ['thinking'] },
+  { name: 'alt-1-then-key-two-reads', reads: ['\x1b1', '\x1b[5~'], setup: ['thinking'] },
+  { name: 'alt-1-then-text-two-reads', reads: ['\x1b1', 'x'], setup: ['thinking'] },
+  { name: 'screen-keys-one-read', reads: ['\x1b[A\x1b[6~q'], setup: ['screen', 'draft'] },
+  { name: 'screen-copy-with-page', reads: ['\x1b[6~\x1b[99;6u'], setup: ['screen', 'draft'] },
+  { name: 'screen-copy-with-page-split', reads: ['\x1b[6~', '\x1b[99;6u'], setup: ['screen', 'draft'] },
+  { name: 'surface-keys-one-read', reads: ['\x1b[B\x1b[B'], setup: ['dialog', 'draft'] },
+  { name: 'surface-keys-split', reads: ['\x1b[B', '\x1b[B'], setup: ['dialog', 'draft'] },
+  // A paste is text, whatever it looks like: the key bytes inside the markers must
+  // arrive as payload, and a marker-less burst with line breaks stays one paste even
+  // when it carries something that looks like a key.
+  { name: 'paste-with-key-bytes', reads: ['\x1b[200~\x1b[5~ and yes\x1b[201~'], setup: ['draft'] },
+  { name: 'paste-burst-with-key-bytes', reads: ['one\n\x1b[5~ two\nthree\n'], setup: ['draft'] },
 ]

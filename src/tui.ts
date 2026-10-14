@@ -1325,59 +1325,6 @@ const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick
 const SETUP_FIELD_STEPS: ReadonlySet<string> = new Set(['provider', 'id', 'base-url', 'key', 'models', 'context'])
 
 /**
- * Split one read into the keys it carries.
- *
- * A terminal hands over whatever arrived together, which is not always one key: a
- * fast typist on a slow link sends `text\r`, a console without bracketed paste sends
- * a whole line, and a paste is followed by Enter inside the same read. The composer
- * has always taken a read apart (`handlePlainText` types it character by character),
- * and a Screen has to see the same keys — a control byte is only itself when it
- * stands alone, so a read handed to one step is a read whose Enter is dropped on the
- * floor. That is what this returns: escape sequences whole (an arrow is one key),
- * control bytes one each with CRLF read as the one Enter it is, and a run of
- * printable text kept together, because a step that filters on what it is given
- * wants the run and a paste without markers still must not answer a confirmation.
- */
-function screenKeys(text: string): string[] {
-  const keys: string[] = []
-  let index = 0
-  while (index < text.length) {
-    const char = text[index]
-    if (char === '\x1b') {
-      // A CSI sequence (`\x1b[` params final), SS3 (`\x1bO` one char), or the lone
-      // Escape key itself when nothing follows it in this read.
-      const rest = text.slice(index)
-      const sequence = /^\x1b\[[0-9;?<]*[ -/]*[@-~]/u.exec(rest)?.[0] ?? /^\x1bO[@-~]/u.exec(rest)?.[0]
-      if (sequence !== undefined) {
-        keys.push(sequence)
-        index += sequence.length
-        continue
-      }
-      keys.push('\x1b')
-      index += 1
-      continue
-    }
-    if (char === '\r' || char === '\n') {
-      // Windows terminals send Enter as CRLF; both halves are one key.
-      const next = text[index + 1]
-      keys.push('\r')
-      index += (char === '\r' && next === '\n') || (char === '\n' && next === '\r') ? 2 : 1
-      continue
-    }
-    if (char < ' ' || char === '\x7f') {
-      keys.push(char)
-      index += 1
-      continue
-    }
-    let end = index
-    while (end < text.length && text[end] >= ' ' && text[end] !== '\x7f') end += 1
-    keys.push(text.slice(index, end))
-    index = end
-  }
-  return keys
-}
-
-/**
  * The durable event types the plan projection reads (B2.5).
  *
  * `tool/call`/`tool/result` are here for the `exit_plan_mode` review; the recorder
@@ -2462,6 +2409,15 @@ export class SshTui {
   private cwdChipRow: number | undefined
   /** Set when a card expand/collapse moves chrome; next paint full-redraws. */
   private forceFullPaint = false
+  /**
+   * How many times the Screen has been dismissed.
+   *
+   * A read is not a key: its units are delivered one at a time, and a Screen owns the
+   * read it was sent — once it is gone the rest is dropped (0.8.3's rule, W-3a keeps
+   * it). Counting dismissals rather than comparing the Screen object keeps that check
+   * out of the owner-read ratchet, which exists to stop new *ownership* reads.
+   */
+  private screenDismissals = 0
   /** Highest row the last budgeted frame could not paint, resumed next tick. */
   private paintResume: number | undefined
   /** How many times a display has come back after a drop in this Host's life. */
@@ -5000,6 +4956,7 @@ export class SshTui {
   closeScreen(): void {
     if (this.screen === undefined) return
     this.screen = undefined
+    this.screenDismissals += 1
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
     // One full repaint when a Screen closes, and it is deliberate: the transcript
@@ -12354,27 +12311,11 @@ export class SshTui {
     }
     // A burst of line breaks in one read is a paste from a console that cannot say so
     // (`looksLikePasteBurst`): it belongs in the field as one edit, which is how a
-    // pasted key or model list survives a terminal without bracketed paste. It is
-    // asked *before* the split below, because splitting is what would turn one paste
-    // into a step's worth of Enters.
+    // pasted key or model list survives a terminal without bracketed paste. The Reader
+    // keeps such a read whole for exactly this check — splitting it is what would turn
+    // one paste into a step's worth of Enters.
     if (InputReader.looksLikePasteBurst(combined)) {
       this.pasteIntoScreen(combined)
-      return
-    }
-    // A read is not a key (`screenKeys`). This is the only path a Screen's input
-    // arrives on, so a read carrying several keys — `text\r` from a fast typist on a
-    // slow link, an arrow batched with the key after it — has to be taken apart here
-    // or the keys after the first are spent on a step that cannot read them. Each key
-    // is handed on its own, and the rest of the read is dropped once the Screen it was
-    // addressed to is gone: the keys after a dismissal belong to whatever comes next,
-    // and guessing that here is how a paste ended up in the composer in the first
-    // place.
-    const keys = screenKeys(combined)
-    if (keys.length > 1) {
-      for (const key of keys) {
-        if (this.screen === undefined) return
-        this.handleScreenInput(key, this.keymap.sequences.get(key))
-      }
       return
     }
     // The setup Screen owns its own field, its own navigation and its own keys: it
@@ -12516,15 +12457,26 @@ export class SshTui {
   private handleInputText(text: string): void {
     const combined = this.reader.assemble(text)
 
-    // Bracketed paste: terminals wrap pasted content in \x1b[200~ ... \x1b[201~.
-    // While inside a paste, CR/LF are literal input characters rather than
-    // submit, so copying a multi-line error message arrives as one message.
-    if (this.reader.isPasteTraffic(combined)) {
-      for (const frame of this.reader.frames(combined)) this.consumeFrame(frame)
-      return
+    // A read is not a key. The Reader decides where one unit ends — complete
+    // sequences, Alt chords, control bytes, CR/LF, and runs of typing — and each unit
+    // is framed once and routed once, whichever owner it belongs to (AD-20 §3, W-3a).
+    // Bracketed paste is framed there too: while inside a paste, CR/LF are literal
+    // characters rather than submit, so a copied multi-line error message arrives as
+    // one message.
+    //
+    // A Screen owns the read it was sent, including the units after it closes: 0.8.3
+    // dropped the rest of such a read (`handleScreenInput` returned as soon as its
+    // Screen was gone) and that rule is a safety one, not an artefact — the keys after
+    // a dismissal were addressed to the Screen, and letting them land on whatever is
+    // behind it is how a paste ended up in the composer. A Surface is the other way
+    // round, and deliberately: its answer is a character like any other, and the rest
+    // of the read is routed on (`yes` typed at a confirm is refused by the Surface and
+    // leaves the draft alone — pinned by `yes-typed-at-dialog`).
+    const dismissals = this.screenDismissals
+    for (const frame of this.reader.read(combined)) {
+      if (this.screenDismissals !== dismissals) return
+      this.consumeFrame(frame)
     }
-
-    this.route(combined)
   }
 
   /** One framed unit, at the owner that takes it. */
@@ -12705,10 +12657,11 @@ export class SshTui {
   /**
    * The Screen adapter: a Screen owns the keyboard outright (AD-20 §4.3 priority 3).
    *
-   * The whole read goes in — `handleScreenInput` is what splits it (`screenKeys`) and
-   * where the 0.8.3 paste-burst rule lives. Its own `screen === undefined` guard stays:
-   * a release raced by a teardown reaches it, and refusing there is the adapter's own
-   * business rather than a second ownership decision.
+   * One unit goes in — the Reader split the read, so a Screen sees the same keys the
+   * composer would (W-3a) and `handleScreenInput` is where the paste-burst rule stays.
+   * Its own `screen === undefined` guard stays too: a release raced by a teardown
+   * reaches it, and refusing there is the adapter's own business rather than a second
+   * ownership decision.
    */
   private ownerScreen(unit: string, moved: string | undefined): void {
     this.handleScreenInput(unit, moved ?? this.keymap.sequences.get(unit))

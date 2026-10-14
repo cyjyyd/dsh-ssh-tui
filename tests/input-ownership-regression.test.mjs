@@ -136,7 +136,7 @@ test('G-1: a page key scrolls a page, in one read or in two', () => {
   assert.equal(back.scrollOffset, 0, 'and two PgDns bring it back')
 })
 
-test('G-1: two page keys inside one read scroll two pages', { todo: 'G-1 — the composer path matches whole reads; W-3 splits them (AD-20 §3)' }, () => {
+test('G-1: two page keys inside one read scroll two pages', () => {
   const tui = fixture()
   transcript(tui)
   draft(tui)
@@ -152,9 +152,51 @@ test('G-1: two page keys inside one read scroll two pages', { todo: 'G-1 — the
   assertUnchanged(tui, before, 'two page keys in one read', ['scroll'])
 })
 
+test('G-1: every arrow and page key survives a coalesced read', () => {
+  // The gate's list, one case per shape: two of a key, two different keys, three keys,
+  // and the same presses split across reads — each compared against its own split twin
+  // rather than against a number written down here.
+  const cases = [
+    ['\x1b[5~\x1b[5~', ['\x1b[5~', '\x1b[5~']],
+    ['\x1b[6~\x1b[6~', ['\x1b[6~', '\x1b[6~']],
+    ['\x1b[A\x1b[A', ['\x1b[A', '\x1b[A']],
+    ['\x1b[B\x1b[B', ['\x1b[B', '\x1b[B']],
+    ['\x1b[A\x1b[B', ['\x1b[A', '\x1b[B']],
+    ['\x1b[5~\x1b[6~', ['\x1b[5~', '\x1b[6~']],
+    ['\x1b[5~\x1b[6~\x1b[5~', ['\x1b[5~', '\x1b[6~', '\x1b[5~']],
+  ]
+  const failures = []
+  for (const [coalesced, split] of cases) {
+    const one = fixture()
+    transcript(one)
+    draft(one)
+    one.handleData(Buffer.from(coalesced))
+    const apart = fixture()
+    transcript(apart)
+    draft(apart)
+    for (const read of split) apart.handleData(Buffer.from(read))
+    const [a, b] = [JSON.stringify(snapshot(one)), JSON.stringify(snapshot(apart))]
+    if (a !== b) failures.push(`${JSON.stringify(coalesced)} vs ${split.length} reads: ${a} vs ${b}`)
+  }
+  assert.deepEqual(failures, [], `a coalesced read lost a key:\n  ${failures.join('\n  ')}`)
+})
+
+test('G-1: an arrow coalesced with a page key keeps both owners apart', () => {
+  // Arrows in a composer with a draft are the composer's (history, then the caret);
+  // page keys are the workspace's. In one read each still goes where it belongs.
+  const tui = fixture()
+  transcript(tui)
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('\x1b[5~\x1b[D'))
+  assert.ok(tui.scrollOffset > before.scroll, 'the page key scrolled the workspace')
+  assert.equal(tui.cursor, before.cursor - 1, 'and the arrow moved the composer caret')
+  assert.equal(tui.input, before.input, 'without rewriting the draft')
+})
+
 test('G-1: two page keys inside one read scroll back in a Screen too', () => {
-  // The Screen path already splits reads (0.8.3, `screenKeys`): this is the shape the
-  // composer path is measured against, and it must not regress while W-1 moves it.
+  // A Screen still splits reads the same way it always did — now because the Reader
+  // does it for every owner (W-3a) rather than because the Screen had its own copy.
   const tui = fixture()
   tui.openScreen({
     kind: 'report', report: 'diag', title: '诊断',
@@ -189,7 +231,7 @@ test('G-2/G-8: a rebound key is consumed, not typed, and not lost', () => {
   assert.equal(twice.input, '我打了一半的消息')
 })
 
-test('G-2/G-8: a rebound key sent twice inside one read runs twice', { todo: 'G-2/G-8 — the keymap lookup compares the whole read; W-3 looks keys up one at a time' }, () => {
+test('G-2/G-8: a rebound key sent twice inside one read runs twice', () => {
   const tui = fixture({ keys: { pageUp: 'ctrl+p' } })
   transcript(tui)
   draft(tui)
@@ -197,6 +239,44 @@ test('G-2/G-8: a rebound key sent twice inside one read runs twice', { todo: 'G-
   tui.handleData(Buffer.from('\x10\x10'))
   assert.equal(tui.scrollOffset - before.scroll, 24, 'both presses ran (two pages of twelve lines)')
   assertUnchanged(tui, before, 'a rebound key twice in one read', ['scroll'])
+})
+
+test('G-2/G-8: a rebound key mixed with text and with default keys', () => {
+  // `ab\x10cd` — the rebound key runs once, between the two halves of the typing, and
+  // nothing is dropped or reordered. The same bytes split across reads are the
+  // reference, so the assertion is about equality rather than about a number.
+  const coalesced = fixture({ keys: { pageUp: 'ctrl+p' } })
+  transcript(coalesced)
+  draft(coalesced)
+  coalesced.handleData(Buffer.from('ab\x10cd'))
+  const apart = fixture({ keys: { pageUp: 'ctrl+p' } })
+  transcript(apart)
+  draft(apart)
+  for (const read of ['ab', '\x10', 'cd']) apart.handleData(Buffer.from(read))
+  const [a, b] = [JSON.stringify(snapshot(coalesced)), JSON.stringify(snapshot(apart))]
+  assert.equal(a, b, `a rebound key inside typing must mean the same thing in one read or three: ${a} vs ${b}`)
+  assert.ok(coalesced.scrollOffset > 0, 'and it ran its action')
+  assert.match(coalesced.input, /abcd/u, `the text around it is typed in order (${coalesced.input})`)
+})
+
+test('G-2/G-8: a rebind frees its default key, coalesced or alone', () => {
+  // `pageUp: 'ctrl+p'` frees `\x1b[5~` (the keymap reports it as suppressed): the old
+  // key is swallowed, the new one scrolls, and a read carrying both does exactly that.
+  const keys = { pageUp: 'ctrl+p' }
+  const old = fixture({ keys })
+  transcript(old)
+  draft(old)
+  const beforeOld = snapshot(old)
+  old.handleData(Buffer.from('\x1b[5~'))
+  assert.equal(old.scrollOffset, beforeOld.scroll, 'the freed default no longer scrolls')
+
+  const both = fixture({ keys })
+  transcript(both)
+  draft(both)
+  const beforeBoth = snapshot(both)
+  both.handleData(Buffer.from('\x1b[5~\x10'))
+  assert.equal(both.scrollOffset - beforeBoth.scroll, 12, 'in one read the freed key is swallowed and the rebound one runs once')
+  assertUnchanged(both, beforeBoth, 'a freed default beside a rebound key', ['scroll'])
 })
 
 // ── G-3 · an Alt chord batched with the next character ──────────────────────
@@ -213,16 +293,59 @@ test('G-3: an Alt chord alone reaches its action and types nothing', () => {
   assert.equal(tui.cursor, before.cursor, 'nor did it move the caret')
 })
 
-test('G-3: an Alt chord batched with the next character keeps the chord and drops the rest', { todo: 'G-3 — the Alt branch consumes the whole read; W-3 has the reader hand it the chord alone' }, () => {
-  const tui = fixture()
-  transcript(tui, 40, 'reasoning')
-  transcript(tui, 20)
-  draft(tui)
-  const before = snapshot(tui)
-  tui.handleData(Buffer.from('\x1b1x'))
-  assert.match(tui.footerEcho?.text ?? '', /已跳到最新/u, 'the chord still runs')
-  assert.equal(tui.input, '我打了一半的消息', 'and the character after it does not leak into the composer')
-  assert.equal(tui.cursor, before.cursor)
+test('G-3: an Alt chord batched with the next character keeps the chord, and the character is re-judged', () => {
+  // AD-20 §3, W-3a: a read is not a key. `ESC 1 x` is the chord Alt+1 *and then* the
+  // key `x`, which the owner of the moment decides on — in the composer that is a
+  // character typed at the caret, never the text `1x` and never a dropped key.
+  const composer = fixture()
+  transcript(composer, 40, 'reasoning')
+  transcript(composer, 20)
+  draft(composer)
+  const beforeComposer = snapshot(composer)
+  composer.handleData(Buffer.from('\x1b1x'))
+  assert.match(composer.footerEcho?.text ?? '', /已跳到最新/u, 'the chord runs')
+  assert.equal(composer.input, '我打了x一半的消息', 'and only the character behind it lands in the draft')
+  assert.equal(composer.cursor, beforeComposer.cursor + 1, 'at the caret')
+
+  // The same read against a Surface with no field: the chord runs, and the character
+  // is refused by the owner that has the keyboard — a refusal is a result, not a
+  // dropped event, so the draft behind the Surface is untouched either way.
+  const surface = fixture()
+  transcript(surface, 40, 'reasoning')
+  draft(surface)
+  const pending = surface.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } })
+  const beforeSurface = snapshot(surface)
+  surface.handleData(Buffer.from('\x1b1x'))
+  assert.match(surface.footerEcho?.text ?? '', /已跳到最新/u, 'the chord still runs while the Surface is up')
+  assert.equal(surface.input, beforeSurface.input, 'and the Surface refuses the character')
+  assert.equal(surface.cursor, beforeSurface.cursor)
+  assert.equal(surface.dialog?.kind, 'confirm', 'without the Surface closing')
+  surface.handleData(Buffer.from('n'))
+  void pending.catch(() => undefined)
+
+  // And the two-read form reaches exactly the same place: that equality is the rule.
+  const apart = fixture()
+  transcript(apart, 40, 'reasoning')
+  transcript(apart, 20)
+  draft(apart)
+  apart.handleData(Buffer.from('\x1b1'))
+  apart.handleData(Buffer.from('x'))
+  assert.equal(JSON.stringify(snapshot(apart)), JSON.stringify(snapshot(composer)), 'one read and two reads agree')
+})
+
+test('G-3: a chord batched with a key leaves the key to its own owner', () => {
+  // `ESC 1 ESC [ 5 ~`: the chord jumps, then the page key scrolls — the page key is not
+  // swallowed by the chord's read, and it is not typed either.
+  const coalesced = fixture()
+  transcript(coalesced, 40, 'reasoning')
+  coalesced.handleData(Buffer.from('\x1b1\x1b[5~'))
+  const apart = fixture()
+  transcript(apart, 40, 'reasoning')
+  apart.handleData(Buffer.from('\x1b1'))
+  apart.handleData(Buffer.from('\x1b[5~'))
+  assert.equal(JSON.stringify(snapshot(coalesced)), JSON.stringify(snapshot(apart)),
+    'a chord followed by a key means the same in one read or two')
+  assert.ok(coalesced.scrollOffset > 0, 'the page key ran')
 })
 
 // ── G-4 · Ctrl+V ────────────────────────────────────────────────────────────
@@ -330,6 +453,13 @@ test('G-6: the input boundary audit passes and reports the known debt', () => {
   assert.match(output, /input ownership audit \(AD-20, W-0\)/u)
   assert.match(output, /OK: no input-ownership baseline was exceeded/u)
   assert.match(output, /dead Screen gate\s+\d+ —/u, 'the unreachable Screen gate is recorded, not silently ignored')
+  // W-3a closed the last three gaps, and the ratchet says so: the audit counts no
+  // marker any more, and a new one would be a regression rather than a plan.
+  const audit = JSON.parse(execFileSync(process.execPath, [join(ROOT, 'scripts', 'input-freeze-audit.mjs'), '--json'], { cwd: ROOT, encoding: 'utf8' }))
+  const gaps = audit.rows.find(row => row.id === 'knownGaps')
+  assert.deepEqual({ count: gaps.count, baseline: gaps.baseline }, { count: 0, baseline: 0 },
+    'W-3a closed the last three gaps, and the baseline was lowered with them')
+  assert.deepEqual(audit.problems, [], 'and nothing is over its baseline')
 })
 
 // ── G-7 · focus sequences ───────────────────────────────────────────────────
@@ -447,4 +577,94 @@ test('G-10: the /copy command still consumes its own line', () => {
   tui.handleData(Buffer.from('\r'))
   assert.equal(tui.input, '', 'the command line is consumed by the command path')
   assert.equal(tui.copyYank, '一段可复制的回复', 'and the copy happened')
+})
+
+// ── W-3a · the boundaries the split must not cross ──────────────────────────
+
+test('W-3a: a coalesced read inside a Screen never reaches the composer behind it', () => {
+  // Splitting a read into keys is what makes a Screen see every key; it must not be
+  // what lets one past the Screen. Every key in the read is addressed to the Screen,
+  // including the ones it does not use, which are dropped rather than forwarded.
+  const keys = ['\x1b[B', '\x1b[6~', 'q', 'x', '\x15', '\x03', '\x1b[3~', '\x1b[99;6u', '\x0c']
+  const tui = fixture()
+  tui.openScreen({
+    kind: 'report', report: 'diag', title: '诊断',
+    lines: Array.from({ length: 200 }, (_line, index) => ({ kind: 'system', text: `第 ${index} 行` })),
+    offset: 100,
+  })
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from(keys.join('')))
+  assert.equal(tui.input, before.input, 'the draft behind the Screen is untouched by any key in the read')
+  assert.equal(tui.cursor, before.cursor, 'and its caret')
+  assert.equal(tui.scrollOffset, before.scroll, 'and the transcript did not scroll behind it')
+  assert.equal(tui.rows.length, before.rows, 'and nothing was pushed into the transcript')
+})
+
+test('W-3a: a coalesced read at a Surface reaches only the Surface', () => {
+  const tui = fixture()
+  transcript(tui)
+  draft(tui)
+  const pending = tui.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } })
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('x\x1b[B\x1b[5~'))
+  assert.equal(tui.input, before.input, 'the draft behind the Surface is untouched')
+  assert.equal(tui.cursor, before.cursor)
+  assert.equal(tui.scrollOffset, before.scroll, 'and the page key did not scroll the workspace behind it')
+  assert.equal(tui.dialog?.kind, 'confirm', 'the Surface is still asking')
+  tui.handleData(Buffer.from('n'))
+  void pending.catch(() => undefined)
+})
+
+test('W-3a: a bracketed paste is text even when it looks like keys', () => {
+  // The payload carries something that would be a page key outside the markers: inside
+  // them it is payload, and the markers are the only thing that decides that.
+  const pasted = fixture()
+  draft(pasted)
+  const before = snapshot(pasted)
+  pasted.handleData(Buffer.from('\x1b[200~\x1b[5~ and yes\x1b[201~'))
+  assert.equal(pasted.input, `${before.input.slice(0, before.cursor)}\x1b[5~ and yes${before.input.slice(before.cursor)}`,
+    'the payload lands as text, key bytes and all')
+  assert.equal(pasted.scrollOffset, before.scroll, 'and nothing in it ran as a key')
+
+  // A Screen owns the paste it receives: the payload goes to the Screen, not behind it.
+  const screen = fixture()
+  screen.openScreen({ kind: 'report', report: 'diag', title: '诊断', lines: [{ kind: 'system', text: '正文' }], offset: 0 })
+  draft(screen)
+  const beforeScreen = snapshot(screen)
+  screen.handleData(Buffer.from('\x1b[200~\x1b[6~\x1b[201~'))
+  assert.equal(screen.input, beforeScreen.input, 'the draft behind the Screen keeps its text')
+  assert.equal(screen.cursor, beforeScreen.cursor)
+})
+
+test('W-3a: a paste without markers is not split into Enters', () => {
+  // A console that cannot bracket a paste sends it as ordinary bytes with line breaks
+  // in them. Splitting that read into keys would turn one paste into a step's worth of
+  // Enters — the Reader keeps it whole for exactly this reason.
+  const tui = fixture()
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('one\ntwo\nthree\n'))
+  assert.match(tui.input, /one\ntwo\nthree\n/u, 'the whole burst arrived as one paste')
+  assert.equal(tui.rows.length, before.rows, 'and no line in it submitted anything')
+  assert.equal(tui.scrollOffset, before.scroll, 'nor scrolled the transcript')
+})
+
+test('W-3a: a coalesced read at the wizard stays in the wizard, not in the draft', async () => {
+  // The setup Screen owns its own field. A read carrying typing and a backspace is
+  // delivered key by key to that field — and none of it reaches the composer draft that
+  // was there when the wizard opened. (Enter is left out on purpose: at the wizard it is
+  // a step transition, and this case is about where the characters go.)
+  const tui = fixture()
+  const wizard = tui.runOnboarding()
+  assert.equal(tui.screen?.kind, 'setup', 'the production entry opened the wizard')
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('ab'))
+  assert.equal(tui.screen?.kind, 'setup', 'the wizard is still up')
+  assert.equal(tui.input, before.input, 'and the composer draft is untouched')
+  assert.equal(tui.cursor, before.cursor, 'including its caret')
+  assertUnchanged(tui, before, 'a coalesced read at the wizard', ['screen', 'screenOffset', 'rows'])
+  tui.handleData(Buffer.from('\x1b'))
+  await wizard.catch(() => undefined)
 })

@@ -75,7 +75,7 @@ export const BASELINE = {
   ownerReads: { screen: 25, dialog: 54, what: 'reads of this.screen / this.dialog — 31/59 at W-0, 25/54 after W-2 moved the routing reads into the Router; may shrink, not grow' },
   pasteConsumers: { count: 2, sites: [TUI], what: 'a paste entry point (handlePasteText · pasteIntoScreen — the framing moved into the Reader in W-1, which is why this baseline could drop)' },
   mouseConsumers: { count: 3, sites: [TUI], what: 'a mouse entry point (begin · extend · endMouseSelection; `handleMouseClick` is public and counted by hand below)' },
-  knownGaps: { count: 3, sites: [REGRESSION_TESTS], what: 'a `{ todo: … }` marker in the regression suite — gaps may close, not accumulate' },
+  knownGaps: { count: 0, sites: [REGRESSION_TESTS], what: 'a `{ todo: … }` marker in the regression suite — W-3a closed the last three (G-1, G-2/G-8, G-3); a new marker is a regression, not a plan' },
   deadScreenGate: { count: 0, sites: [TUI], what: 'the unreachable second Screen gate — removed by W-2 with the body it was buried in' },
   routers: { count: 1, sites: ['src/input-router.ts'], what: 'a second Router module (the one place an owner is decided)' },
   routerCallSites: { count: 3, sites: [TUI], what: 'a `this.router.route(` call site — the read in `route`, the per-unit dispatch, and the paste payload; a fourth would be a second dispatcher' },

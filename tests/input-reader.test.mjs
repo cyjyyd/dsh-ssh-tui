@@ -20,9 +20,11 @@
  * Nothing calls the Reader's own methods as *the* evidence — the Reader-level
  * assertions below only explain a fixture that the trace already covers.
  *
- * When W-3 fixes the read-coalescing gaps, three traces change on purpose
- * (`pgup-twice-one-read`, `rebound-coalesced`, `alt-1-batched`): update the fixture
- * in that change and say so.
+ * W-3a is that change: four traces differ on purpose (`arrow-left-right`,
+ * `pgup-twice-one-read`, `rebound-coalesced`, `alt-1-batched`), each with its old
+ * reading recorded in `GAP_FIXTURES` below, and the rest of the reference is
+ * byte-identical. The paired fixtures prove the rule the fix rests on: one read and
+ * several reads reach the same owners with the same state.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -34,8 +36,18 @@ import { ESCAPE_HOLD_MS } from '../lib/input-reader.js'
 
 const REFERENCE = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/input-reader-traces.json', import.meta.url)), 'utf8'))
 
-/** The traces this round must leave alone; W-3 changes them deliberately. */
-const KNOWN_GAP_FIXTURES = ['pgup-twice-one-read', 'rebound-coalesced', 'alt-1-batched']
+/**
+ * The traces W-3a changes on purpose, with what the reference used to say.
+ *
+ * Each is a coalesced read the gate authorises fixing; the old reading is recorded
+ * here so the change is a decision on the record rather than a rewritten expectation.
+ */
+const GAP_FIXTURES = {
+  'arrow-left-right': 'a read of two arrows was dropped as an unknown escape',
+  'pgup-twice-one-read': 'two page keys in one read scrolled nothing (G-1)',
+  'rebound-coalesced': 'a rebound key twice in one read ran no action and moved focus twice (G-2/G-8)',
+  'alt-1-batched': 'Alt+1 batched with a character typed `1x` and skipped the chord (G-3)',
+}
 
 test('the fixture set is the one the reference was captured from', () => {
   assert.deepEqual(
@@ -65,21 +77,67 @@ test('every fixture frames identically to the pre-Reader build', async () => {
   assert.deepEqual(differences, [], `framing changed for:\n  ${differences.join('\n  ')}`)
 })
 
-test('the known gaps are still exactly as broken as W-0 recorded', () => {
-  // Not a target — a boundary. W-1 must not "helpfully" fix these while moving
-  // code, because a behaviour change hidden inside a move is the one thing a move
-  // must never contain. W-3 flips them, with the fixture, in its own change.
-  for (const name of KNOWN_GAP_FIXTURES) {
-    const entry = REFERENCE[name]
-    assert.ok(entry !== undefined, `${name} must be in the reference`)
-    assert.equal(entry.state.scrollOffset === undefined ? null : entry.state.scrollOffset, entry.state.scrollOffset, `${name}: recorded`)
-  }
+test('the recorded gaps are closed, and the reference records the closed behaviour', () => {
+  // W-0 wrote these down as failing and W-1/W-2 had to leave them exactly as broken
+  // while they moved code. W-3a fixes them, so this test asserts the fixed behaviour —
+  // against traces re-derived from the fixed build, with the old reading kept in
+  // `GAP_FIXTURES` so the change is on the record.
+  assert.deepEqual(
+    Object.keys(GAP_FIXTURES).sort(),
+    ['alt-1-batched', 'arrow-left-right', 'pgup-twice-one-read', 'rebound-coalesced'],
+  )
   const coalesced = REFERENCE['pgup-twice-one-read']
-  assert.equal(coalesced.state.scrollOffset, 0, 'two page keys in one read still scroll nothing (G-1)')
+  assert.equal(coalesced.state.scrollOffset, 24, 'two page keys in one read scroll two pages (G-1 closed)')
   const rebound = REFERENCE['rebound-coalesced']
-  assert.equal(rebound.state.scrollOffset, 0, 'a rebound key sent twice in one read still does nothing (G-2)')
+  assert.equal(rebound.state.scrollOffset, 24, 'a rebound key twice in one read runs twice (G-2/G-8 closed)')
+  assert.equal(rebound.state.focusedKind, null, 'and it no longer falls through to the focus ring')
   const alt = REFERENCE['alt-1-batched']
-  assert.equal(alt.state.input, '1x', 'an Alt chord batched with the next character still types it (G-3)')
+  assert.equal(alt.state.input, 'x', 'an Alt chord batched with a character types only the character behind it (G-3 closed)')
+  assert.equal(alt.state.echo, '已跳到最新思考。', 'and the chord itself ran')
+  const arrows = REFERENCE['arrow-left-right']
+  assert.deepEqual(arrows.trace.map(entry => entry[0]), ['handleInputText', 'moveCursor', 'moveCursor'],
+    'two arrows in one read both move the caret')
+})
+
+test('a read is not a key: one read and several reads reach the same owners and state', async () => {
+  // The pairs W-3a adds: the same keys, once coalesced into one read and once split
+  // across reads. The framing differs (one `handleInputText` per read), so that entry is
+  // dropped before comparing; everything the owners did, and the state they left, must
+  // be identical — which is the whole claim "a read is not a key" makes.
+  const pairs = [
+    ['pgup-twice-one-read', 'pair-pgup-two-reads'],
+    ['pair-pgdn-one-read', 'pair-pgdn-two-reads'],
+    ['pair-down-one-read', 'pair-down-two-reads'],
+    ['pair-arrows-mixed-one-read', 'pair-arrows-mixed-two-reads'],
+    ['pair-keys-three-one-read', 'pair-keys-three-three-reads'],
+    ['pair-typing-with-enter-one-read', 'pair-typing-with-enter-two-reads'],
+    ['rebound-coalesced', 'rebound-split'],
+    ['rebound-with-text', 'rebound-split-with-text'],
+    ['rebound-mixed-default', 'rebound-mixed-default-split'],
+    ['alt-1-batched', 'alt-1-then-text-two-reads'],
+    ['alt-1-then-key-one-read', 'alt-1-then-key-two-reads'],
+    ['screen-copy-with-page', 'screen-copy-with-page-split'],
+    ['surface-keys-one-read', 'surface-keys-split'],
+  ]
+  const byName = new Map(FIXTURES.map(fixture => [fixture.name, fixture]))
+  const owners = trace => trace.filter(entry => entry[0] !== 'handleInputText')
+  const differences = []
+  for (const [oneName, splitName] of pairs) {
+    const one = byName.get(oneName)
+    const split = byName.get(splitName)
+    assert.ok(one !== undefined && split !== undefined, `${oneName} / ${splitName} must both exist`)
+    const [whole, apart] = [await traceFixture(one), await traceFixture(split)]
+    if (JSON.stringify(owners(whole.trace)) !== JSON.stringify(owners(apart.trace))) {
+      differences.push(`${oneName} vs ${splitName}: owner calls differ\n    one   ${JSON.stringify(owners(whole.trace))}\n    split ${JSON.stringify(owners(apart.trace))}`)
+      continue
+    }
+    if (JSON.stringify(whole.state) !== JSON.stringify(apart.state)) {
+      const keys = new Set([...Object.keys(whole.state), ...Object.keys(apart.state)])
+      const changed = [...keys].filter(key => JSON.stringify(whole.state[key]) !== JSON.stringify(apart.state[key]))
+      differences.push(`${oneName} vs ${splitName}: state ${changed.map(key => `${key} ${JSON.stringify(whole.state[key])} → ${JSON.stringify(apart.state[key])}`).join(' · ')}`)
+    }
+  }
+  assert.deepEqual(differences, [], `a coalesced read changed what the keys mean:\n  ${differences.join('\n  ')}`)
 })
 
 test('a bracketed paste split across three reads is still one paste', async () => {

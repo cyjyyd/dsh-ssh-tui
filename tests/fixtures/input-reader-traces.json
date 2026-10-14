@@ -470,6 +470,14 @@
       [
         "handleInputText",
         "\u001b[C\u001b[D"
+      ],
+      [
+        "moveCursor",
+        1
+      ],
+      [
+        "moveCursor",
+        -1
       ]
     ],
     "state": {
@@ -557,7 +565,7 @@
       "historyIndex": -1,
       "historyLength": 0,
       "folded": false,
-      "scrollOffset": 0,
+      "scrollOffset": 24,
       "screen": null,
       "screenOffset": null,
       "dialog": null,
@@ -830,8 +838,8 @@
         "\u001b1x"
       ],
       [
-        "insertIntoField",
-        "1"
+        "jumpToCategory",
+        "thinking"
       ],
       [
         "insertIntoField",
@@ -839,8 +847,8 @@
       ]
     ],
     "state": {
-      "input": "1x",
-      "cursor": 2,
+      "input": "x",
+      "cursor": 1,
       "historyIndex": -1,
       "historyLength": 0,
       "folded": false,
@@ -851,7 +859,7 @@
       "focusedKind": null,
       "rowsAdded": 0,
       "yank": "",
-      "echo": null,
+      "echo": "已跳到最新思考。",
       "sent": [],
       "exits": []
     }
@@ -2478,14 +2486,60 @@
       [
         "handleInputText",
         "\u0010\u0010"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 24,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-pgup-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
       ],
       [
-        "moveFocus",
-        -1
-      ],
+        "handleInputText",
+        "\u001b[5~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 24,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-pgdn-one-read": {
+    "trace": [
       [
-        "moveFocus",
-        -1
+        "handleInputText",
+        "\u001b[6~\u001b[6~"
       ]
     ],
     "state": {
@@ -2498,7 +2552,866 @@
       "screen": null,
       "screenOffset": null,
       "dialog": null,
-      "focusedKind": "assistant",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-pgdn-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-down-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B\u001b[B"
+      ],
+      [
+        "historyForward"
+      ],
+      [
+        "historyForward"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-down-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "historyForward"
+      ],
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "historyForward"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-arrows-mixed-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A\u001b[B\u001b[A"
+      ],
+      [
+        "historyBack"
+      ],
+      [
+        "historyForward"
+      ],
+      [
+        "historyBack"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-arrows-mixed-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A\u001b[B"
+      ],
+      [
+        "historyBack"
+      ],
+      [
+        "historyForward"
+      ],
+      [
+        "handleInputText",
+        "\u001b[A"
+      ],
+      [
+        "historyBack"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-keys-three-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~\u001b[6~\u001b[5~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-keys-three-three-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "pair-typing-with-enter-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello\r"
+      ],
+      [
+        "insertIntoField",
+        "h"
+      ],
+      [
+        "insertIntoField",
+        "e"
+      ],
+      [
+        "insertIntoField",
+        "l"
+      ],
+      [
+        "insertIntoField",
+        "l"
+      ],
+      [
+        "insertIntoField",
+        "o"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "我打了hello一半的消息"
+      ],
+      "exits": []
+    }
+  },
+  "pair-typing-with-enter-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "hello"
+      ],
+      [
+        "insertIntoField",
+        "h"
+      ],
+      [
+        "insertIntoField",
+        "e"
+      ],
+      [
+        "insertIntoField",
+        "l"
+      ],
+      [
+        "insertIntoField",
+        "l"
+      ],
+      [
+        "insertIntoField",
+        "o"
+      ],
+      [
+        "handleInputText",
+        "\r"
+      ],
+      [
+        "submit"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": 1,
+      "historyLength": 1,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [
+        "我打了hello一半的消息"
+      ],
+      "exits": []
+    }
+  },
+  "rebound-split": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0010"
+      ],
+      [
+        "handleInputText",
+        "\u0010"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 24,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "rebound-with-text": {
+    "trace": [
+      [
+        "handleInputText",
+        "ab\u0010cd"
+      ],
+      [
+        "insertIntoField",
+        "a"
+      ],
+      [
+        "insertIntoField",
+        "b"
+      ],
+      [
+        "insertIntoField",
+        "c"
+      ],
+      [
+        "insertIntoField",
+        "d"
+      ]
+    ],
+    "state": {
+      "input": "我打了abcd一半的消息",
+      "cursor": 7,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "rebound-split-with-text": {
+    "trace": [
+      [
+        "handleInputText",
+        "ab"
+      ],
+      [
+        "insertIntoField",
+        "a"
+      ],
+      [
+        "insertIntoField",
+        "b"
+      ],
+      [
+        "handleInputText",
+        "\u0010"
+      ],
+      [
+        "handleInputText",
+        "cd"
+      ],
+      [
+        "insertIntoField",
+        "c"
+      ],
+      [
+        "insertIntoField",
+        "d"
+      ]
+    ],
+    "state": {
+      "input": "我打了abcd一半的消息",
+      "cursor": 7,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "rebound-mixed-default": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~\u0010"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "rebound-mixed-default-split": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "handleInputText",
+        "\u0010"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-1-then-key-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b1\u001b[5~"
+      ],
+      [
+        "jumpToCategory",
+        "thinking"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": "已跳到最新思考。",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-1-then-key-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b1"
+      ],
+      [
+        "jumpToCategory",
+        "thinking"
+      ],
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ]
+    ],
+    "state": {
+      "input": "",
+      "cursor": 0,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 12,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": "已跳到最新思考。",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "alt-1-then-text-two-reads": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b1"
+      ],
+      [
+        "jumpToCategory",
+        "thinking"
+      ],
+      [
+        "handleInputText",
+        "x"
+      ],
+      [
+        "insertIntoField",
+        "x"
+      ]
+    ],
+    "state": {
+      "input": "x",
+      "cursor": 1,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": "已跳到最新思考。",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-keys-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A\u001b[6~q"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[A",
+        null
+      ],
+      [
+        "scrollScreen",
+        1
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[6~",
+        "pageDown"
+      ],
+      [
+        "scrollScreen",
+        -19
+      ],
+      [
+        "handleScreenInput",
+        "q",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-copy-with-page": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[6~\u001b[99;6u"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[6~",
+        "pageDown"
+      ],
+      [
+        "scrollScreen",
+        -19
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[99;6u",
+        "copy"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 39,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "屏幕上的正文",
+      "echo": "已复制 6 字到本机剪贴板（全文）",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-copy-with-page-split": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[6~"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[6~",
+        "pageDown"
+      ],
+      [
+        "scrollScreen",
+        -19
+      ],
+      [
+        "handleInputText",
+        "\u001b[99;6u"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b[99;6u",
+        "copy"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 39,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "屏幕上的正文",
+      "echo": "已复制 6 字到本机剪贴板（全文）",
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-keys-one-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B\u001b[B"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-keys-split": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-with-key-bytes": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~\u001b[5~ and yes\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "\u001b[5~ and yes"
+      ]
+    ],
+    "state": {
+      "input": "我打了\u001b[5~ and yes一半的消息",
+      "cursor": 15,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-burst-with-key-bytes": {
+    "trace": [
+      [
+        "handleInputText",
+        "one\n\u001b[5~ two\nthree\n"
+      ],
+      [
+        "handlePasteText",
+        "one\n\u001b[5~ two\nthree\n"
+      ]
+    ],
+    "state": {
+      "input": "我打了one\n\u001b[5~ two\nthree\n一半的消息",
+      "cursor": 22,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": true,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
       "rowsAdded": 0,
       "yank": "",
       "echo": null,

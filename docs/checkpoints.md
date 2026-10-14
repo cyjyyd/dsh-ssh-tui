@@ -2084,3 +2084,80 @@ Completion/Search/Doctor、版本与品牌。`scripts/bench-b2.mjs` 的 `tui.inp
 `test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`。上一轮红过的那条腿这次给出
 `tests 1442 · pass 1436 · fail 0`、`dialog window: turn settled`、
 `dialog scope: frames=1 layer=1 painted=24,25,29,30 changed=24,25 chrome=27`——与本机 20 次逐字相同。
+
+---
+
+## 0.8.4 W-3a · 一次 read 里的多个输入事件（2026-10-14）
+
+> 目标：修 **G-1**（合并的翻页/方向键被整段吞掉）、**G-2/G-8**（改绑键合并时绑定失效）、
+> **G-3**（Alt 和弦与后一字符同 read：和弦丢失、字符当文本泄漏）。不动 W-3b 的条目。
+
+**G-3 语义审查（先审查，后实施）**：两个 read `ESC 1` + `x` 与一个 read `ESC 1 x` 必须产生**相同**的
+事件消费结果。实测三个落点（修复后）：composer 里和弦执行、`x` 落在光标处（`我打了x一半的消息`，
+**不是** `1x`）；无字段 Surface 上和弦照跑、`x` 被 Surface **拒绝**（草稿原样——拒绝是 Owner 的决定，
+不是 Reader 抹掉事件）；Screen 上 `x` 归 Screen。产品里已有的同类先例是 SS3 尾巴（`\x1bOAx` 一直
+"序列 + 尾巴各自处理"），所以这条原则**不与其他契约冲突，无需裁决**；旧断言"丢弃后面的字符"确实被
+改了——这是本轮授权的语义变更，记录在此而不是静默改绿。
+
+**Reader 修改**（`src/input-reader.ts`）：新增 `read(text)`（唯一取帧入口：粘贴流量走既有标记/整段规则，
+其余走 `units`）与 `units(text)`：
+
+| 单元 | 规则 |
+|---|---|
+| 完整 CSI / SS3 | 一帧（`\x1b[5~\x1b[5~` = 两个 PgUp） |
+| "还可能长大"的转义前缀 | **整段**一帧 → 交给既有的 60ms hold（`\x1b[<0;1` 因此仍被拼回鼠标报告，轨迹抓到了这一条） |
+| Alt 和弦 | `ESC` + 一个可打印字符 = 一帧（`\x1b1`），后续字符另起 |
+| 控制字节 / CR-LF | 各自一帧，CRLF 算一个 Enter |
+| 连续可打印文本 | 一帧（`yes` 不会被拆成 `y`+`es`） |
+| 无标记的换行粘贴 | 整段一帧（`looksLikePasteBurst` 优先，否则一次粘贴会变成一串 Enter） |
+
+**Router / Owner 修改**（`src/tui.ts`）：`handleInputText` 变成"逐帧 `consumeFrame`"，每个单元刚好问一次
+Router（keymap 因此按单键查表）；**删除** `screenKeys`（Screen 专用的第二份拆键器，W-3a 后由 Reader 统一）；
+`handleScreenInput` / `ownerScreen` 的注释改成"一个单元进"。两条边界保留并测住：
+
+- **Screen 拥有它收到的那次 read**：它关闭后同一 read 余下的单元**丢弃**（0.8.3 规则）。实现用
+  `screenDismissals` 计数而不是再读一次 `this.screen`——`ownerReads.screen` 基线 25 不能涨。
+- **Surface 相反**：答案后的单元继续按 Owner 判定（`yes-typed-at-dialog` 轨迹钉住）。
+
+**G-1 / G-2+G-8 / G-3 红→绿**（W-2 构建上先证明红，`.pf/gaps-red.test.mjs` 去掉 todo 标记后跑）：
+
+| 缺口 | 红（修复前） | 绿（修复后） |
+|---|---|---|
+| G-1 `\x1b[5~\x1b[5~` | ✖ 两键全丢（scroll 0） | ✔ scroll 24；PgDn×2 / ↑×2 / ↓×2 / 混合 / 三键 / 拆成多次 read 逐一同值 |
+| G-2/G-8 `\x10\x10` | ✖ 无动作，且**掉进焦点环** `moveFocus(-1)`×2 | ✔ scroll 24、焦点不动；混文本 `ab\x10cd`、混默认键、suppressed 默认键同 read 全部同值 |
+| G-3 `\x1b1x` | ✖ 输入变 `1x`、和弦丢失 | ✔ 和弦执行 + 只输入 `x`；Surface 上 `x` 被拒；`\x1b1\x1b[5~` 与两次 read 同值 |
+
+**72 → 98 条参考轨迹**：只改 **4** 条（授权范围内，逐条 old→new 在 `GAP_FIXTURES` 与下表），新增 26 条
+成对/安全用例，其余 **68 条逐字节一致**（更新脚本对未授权差异直接抛错）。
+
+| fixture | 旧 | 新 |
+|---|---|---|
+| `arrow-left-right` (`\x1b[C\x1b[D`) | 当作未知转义**丢弃**（无调用） | `moveCursor(1)`、`moveCursor(-1)`（末态相同） |
+| `pgup-twice-one-read` | scroll 0（两键全丢） | scroll 24 |
+| `rebound-coalesced` | `moveFocus(-1)`×2、scroll 0 | scroll 24、无 `moveFocus` |
+| `alt-1-batched` | `insertIntoField('1')`、`insertIntoField('x')`、input `1x` | `jumpToCategory('thinking')`、`insertIntoField('x')`、input `x`、echo「已跳到最新思考。」 |
+
+**Input ownership matrix**：新增 8 条在机用例——合并 read 在 Screen 内**不得**碰到背后的 Composer；
+Surface 上只到 Surface；括号粘贴即使内容是键字节也是文本；无标记粘贴不拆成 Enter；向导字段与草稿隔离；
+以及"一个 read 与多次 read 同值"的成对断言（13 对）。
+
+**Freeze before → after**（`npm run freeze:input`）：`knownGaps` **3 → 0**（基线同步下调）；
+`ownerReads.screen/dialog` 25/54 **不变**（新检查用计数而非再读 owner）；`rawBranches` 8、`mouseParsers` 1、
+`routers` 1、`routerCallSites` 3 均不变；无新增白名单。移除 `screenKeys` 没有新增任何计数器。
+
+**Mutation（全部实测红后恢复，`src/` 事后无差异）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 不再切分完整 CSI/SS3（合并翻页键又被吞） | ✗ G-1 用例红 + 轨迹门红 |
+| M2 | 控制字节折回整段（keymap 恢复整段查表） | ✗ G-2/G-8 用例红 + 轨迹门红 |
+| M3 | Alt 和弦当普通文本 | ✗ G-3 三条红 + 轨迹门红 |
+| M4 | 括号粘贴被拆成键盘事件 | ✗ 粘贴四条红（含"粘贴的 yes 不作答"）+ 轨迹门红 |
+| M5 | Screen 关闭后同 read 余下单元继续投递 | ✗ "Screen 内合并 read 不穿透"红 |
+
+**门**：`npm test` **1453 项 · 1449 通过 · 0 失败 · 4 跳过 · 0 todo** · `typecheck` 0 ·
+`npm run freeze` 全绿 · `npm run freeze:input` 无超基线 · `npm run bench` 字节/行数/清屏与基线逐项相同 ·
+四条真机探针（setup / main / drop / terminal）全过。
+
+**本轮未做（W-3b 起）**：`SURFACE_COMPOSER_KEYS`、Ctrl+L 的两份实现、`composerUnit` 共用体拆分、
+Completion/Search/Doctor、picker 自带 reader、计划卡默认折叠（已单独登记 `docs/plans/plan-card-fold.md`）。

@@ -185,14 +185,14 @@ stdin / FRAME_STDIN
 
 | ID | 现象 | 触发 | 实测 | 性质 |
 |---|---|---|---|---|
-| **G-1** | composer 里一次 read 的多个键**全部丢失** | `\x1b[5~\x1b[5~`、`\x1b[B\x1b[B`、`\x1b[A\x1b[A` | `no change`（单键 PgUp 滚 12 行） | 丢失（用户按键无反应） |
-| **G-2** | rebind 的键与别的键同 read 时绑定失效 | `keys: {pageUp: 'ctrl+p'}` + `\x10\x10` | `no change`（单发滚 12 行） | 丢失 |
-| **G-3** | Alt 和弦与下一字符同 read：和弦丢失、字符当文本 | `\x1b1x` | 输入变成 `1x` | 丢失 + **泄漏**（本该跳类别） |
+| **G-1** | composer 里一次 read 的多个键**全部丢失** | `\x1b[5~\x1b[5~`、`\x1b[B\x1b[B`、`\x1b[A\x1b[A` | `no change`（单键 PgUp 滚 12 行） | 丢失（用户按键无反应）——**W-3a 已修**，见 §12 |
+| **G-2** | rebind 的键与别的键同 read 时绑定失效 | `keys: {pageUp: 'ctrl+p'}` + `\x10\x10` | `no change`（单发滚 12 行） | 丢失——**W-3a 已修**，见 §12 |
+| **G-3** | Alt 和弦与下一字符同 read：和弦丢失、字符当文本 | `\x1b1x` | 输入变成 `1x` | 丢失 + **泄漏**（本该跳类别）——**W-3a 已修**，见 §12 |
 | **G-4** | `0x16`（Ctrl+V）无任何处理 | `\x16` | `no change` | 未定义（不泄漏；终端自己粘贴） |
 | **G-5** | Screen 内不能拖拽选择 | Screen 内 button 32/0 | `no change`（有意拒绝） | 能力缺口（`/copy` 是唯一路径） |
 | **G-6** | 同一件事有两份实现 / 死代码 | `handleChar` 第二个 Screen 门（`A Screen owns the keyboard here too`）已不可达；Ctrl+L 在 composer 是 `render()`、在 Screen 是 `screenNeedsFullPaint`；`picker.ts` 自带一套 guard+escapeBuffer+escapeTimer | 代码审阅 | 结构债（下一轮最容易改错的地方） |
 | **G-7** | focus 事件靠"未知序列"兜住 | `\x1b[I` / `\x1b[O`（composer、Screen、dialog 三种 owner 下） | `no change` ✅ | **无测试的隐式契约**：将来加一条 `CSI ... I` 分支就可能误吞/误判 |
-| **G-8** | Screen 内粘贴/复制的 rebind 键同 read 失效 | 同 G-2（`moved === 'copy'` 只在整段相等时成立） | 代码审阅 + G-1 同源 | 丢失 |
+| **G-8** | Screen 内粘贴/复制的 rebind 键同 read 失效 | 同 G-2（`moved === 'copy'` 只在整段相等时成立） | 代码审阅 + G-1 同源 | 丢失——**W-3a 已修**，见 §12 |
 | **G-9** | 两个 hold 窗口做同一种事 | Guard 30ms（CPR 尾） vs TUI 60ms（ESC 前缀） | 代码审阅 | 结构债：分片规则分散在两处 |
 | **G-10** | **任何复制路径都清空 composer 草稿**（**W-0 已修**，见 §8） | `/copy`、rebind 的复制键、Screen 内的复制键、拖拽选择、链接点击（都汇到 `copyPlainText`） | 修复前：`我打了一半的消息`（caret 3）→ 三条路径全变 `""` / caret 0；修复后原样保留 | **越权写**：Workspace/Surface 的动作改了 Composer 的状态。清空本是给"`/copy` 这条命令提交后别留在输入框里"写的（`git log -L` 追到 0.5.5 时代），但复制键与鼠标手势没有命令文本要清；命令行的消费现在只由 `runCommand` 负责 |
 
@@ -494,3 +494,35 @@ the top of the frame (rows 2,1,30,29,25,24)`，而那条腿的测试套件本身
 **组合出来的帧**上判，平台无关，因此 Windows 腿也有这项证据（探针日志会打印边界说明，不假装测到了）。
 
 **过程与复核**：见 `docs/checkpoints.md` 的 P-1 节（复现、W-1/W-2 对照、M1–M4、重复稳定性）。
+
+---
+
+## 12. W-3a Status（2026-10-14）· 一次 read 里的多个事件
+
+**做了什么**：把"一个 read 里有几个单元"从消费者手里收回 **Reader**（AD-21 的位置），
+`InputReader.read(text)` 成为唯一的取帧入口：粘贴流量走既有的标记/整段规则，其余走 `units(text)` 拆成
+**完整单元**——完整 CSI/SS3、Alt 和弦（`ESC` + 一个可打印字符）、控制字节、CR/LF（CRLF 算一个 Enter）、
+一段连续可打印文本（保持整段，`yes` 不会被拆成一个字符一个字符），以及"还可能长大的转义前缀"整段交给
+60ms hold。`tui.ts` 的 `handleInputText` 只做"逐帧 → `consumeFrame`"，每个单元**恰好一次** Router 判定，
+keymap 因此按**单键**查表（AD-22 的 Router 契约不变：它仍然只对完整单元判一次，不解析字节）。
+
+**G-3 的语义**（本轮先审查后实施）：两个 read `ESC 1` + `x` 与一个 read `ESC 1 x` 必须产生**相同**的
+事件消费结果——Alt+1 作为完整和弦执行，后面的 `x` 作为**独立事件**重新判定 Owner。实测三个落点：
+composer 里 `x` 落在光标处（`我打了x一半的消息`，绝不是 `1x`）；无字段 Surface 上和弦照跑而 `x` 被
+**Surface 拒绝**（草稿原样，拒绝是 Owner 的决定）；Screen 上 `x` 归 Screen。产品里已有的同类先例是
+SS3 尾巴（`\x1bOAx` 一直是"序列 + 尾巴各自处理"），因此这条原则不与其他契约冲突，无需裁决。
+
+**保留的两条边界**：
+
+- **Screen 拥有它收到的那次 read**：Screen 关闭后，同一 read 里剩下的单元**丢弃**（0.8.3 的规则，
+  `handleScreenInput` 的 `if (this.screen === undefined) return` 原位；W-3a 用 `screenDismissals` 计数
+  在 `handleInputText` 里保持，避免新增 owner 读取点）。
+- **Surface 相反**：答案就是一个字符，read 里剩下的部分继续按 Owner 判定（`yes` 打在 confirm 上被拒、
+  草稿不动——`yes-typed-at-dialog` 轨迹钉住）。
+
+**轨迹**：98 条（72 + 26 条新增的"单 read / 多 read 成对"与安全用例）。W-3a 只改 4 条，逐条记录在
+`tests/input-reader.test.mjs` 的 `GAP_FIXTURES` 与 `docs/checkpoints.md` 的 W-3a 节；其余 68 条由
+更新脚本**拒绝非法改动**（任何未授权的差异会直接抛错），并由 `every fixture frames identically` 比对。
+
+**仍未做（W-3b / W-7）**：`SURFACE_COMPOSER_KEYS`（Surface 在时 Home/End/Delete/复制键仍到 Composer）、
+Ctrl+L 的两份重绘实现、`composerUnit` 的 Composer/Surface 共用体拆分、picker 自带 reader。

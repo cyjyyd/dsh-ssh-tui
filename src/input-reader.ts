@@ -82,6 +82,16 @@ export interface InputReaderOptions {
 /** Whether `text` is exactly one complete terminal unit (shape, not meaning). */
 const COMPLETE_CSI = /^\x1b\[[0-9;?<]*[ -/]*[@-~]$/u
 const COMPLETE_SS3 = /^\x1bO[@-~]$/u
+/** The same shapes, anchored at the start: one complete unit of a longer read. */
+const COMPLETE_CSI_AT = /^\x1b\[[0-9;?<]*[ -/]*[@-~]/u
+const COMPLETE_SS3_AT = /^\x1bO[@-~]/u
+/**
+ * `ESC` plus one printable character: the Alt chord.
+ *
+ * Not `[ -~]` alone: a terminal can send Alt with any character it can encode, and the
+ * chord has to reach the Alt branch in one piece or its character leaks as text.
+ */
+const ALT_CHORD_AT = /^\x1b(?!\[|O)[^\x00-\x1f\x7f]/u
 
 export class InputReader {
   private readonly decoder = new StringDecoder('utf8')
@@ -112,7 +122,95 @@ export class InputReader {
   }
 
   /**
-   * Whether this read is paste traffic: inside a paste, or carrying a marker.
+   * The frames of one read, whichever kind it is.
+   *
+   * A read is what the terminal happened to send, not what the reader pressed: a
+   * fast typist, a slow link or ConPTY can put several keys in one read. This is the
+   * one place that decides where one unit ends and the next begins; everything above
+   * it (Router, owners) sees complete units only, and nothing above it re-parses the
+   * bytes (AD-20 §4.4, §6).
+   */
+  read(text: string): InputFrame[] {
+    return this.isPasteTraffic(text) ? this.frames(text) : this.units(text)
+  }
+
+  /**
+   * One non-paste read, split into complete units.
+   *
+   * The rules, and why each one exists:
+   *
+   *   - **A complete CSI/SS3 sequence is one unit.** `ESC [ 5 ~ ESC [ 5 ~` is two page
+   *     keys, not one unnameable read (G-1). A sequence the read cuts short stays one
+   *     piece: `hold()` has already claimed it if it could still grow, and a trailing
+   *     `ESC [` must reach the hold again rather than be split into `ESC` + `[`.
+   *   - **An Alt chord is one unit.** `ESC` plus exactly one printable character is
+   *     Alt+that key, so `ESC 1 x` is the chord Alt+1 *and then* `x` — never the text
+   *     `1x` (G-3), and never a chord that swallows the character behind it.
+   *   - **A control byte is one unit, CR/LF pair as one Enter.** `\x10\x10` is two
+   *     presses of a rebound key (G-2/G-8), and Windows' CRLF is one key.
+   *   - **A run of ordinary characters is one unit.** Splitting typing per character
+   *     would make a pasted `yes` answer a confirm dialog character by character,
+   *     which is the boundary W-0 pinned (`yes-typed-at-dialog`). Keymap lookup on a
+   *     whole run is still exactly what a run means: text.
+   *   - **A burst the paste heuristic claims stays whole.** A console without
+   *     bracketed paste sends a paste as ordinary bytes with line breaks in them;
+   *     that read has to reach the paste path intact (`looksLikePasteBurst`).
+   */
+  units(text: string): InputFrame[] {
+    if (InputReader.looksLikePasteBurst(text)) return [{ kind: 'burst', text }]
+    const frames: InputFrame[] = []
+    let index = 0
+    while (index < text.length) {
+      const char = text[index]
+      if (char === '\x1b') {
+        const rest = text.slice(index)
+        const sequence = COMPLETE_CSI_AT.exec(rest)?.[0] ?? COMPLETE_SS3_AT.exec(rest)?.[0]
+        if (sequence !== undefined) {
+          frames.push({ kind: 'key', sequence })
+          index += sequence.length
+          continue
+        }
+        // Something that could still grow into a sequence — `ESC [ 5` with its final
+        // byte in the next read, a mouse report cut in half — goes on as one piece, so
+        // the hold below claims exactly what it claimed before: splitting it here would
+        // turn the head of a sequence into an Alt chord and type its tail as text.
+        if (isEscapePrefix(rest)) {
+          frames.push({ kind: 'key', sequence: rest })
+          index += rest.length
+          continue
+        }
+        const chord = ALT_CHORD_AT.exec(rest)?.[0]
+        if (chord !== undefined) {
+          frames.push({ kind: 'key', sequence: chord })
+          index += chord.length
+          continue
+        }
+        // A lone ESC, or something that cannot grow: its own unit, and the hold decides.
+        frames.push({ kind: 'key', sequence: '\x1b' })
+        index += 1
+        continue
+      }
+      if (char === '\r' || char === '\n') {
+        const next = text[index + 1]
+        frames.push({ kind: 'key', sequence: char === '\n' ? '\n' : '\r' })
+        index += (char === '\r' && next === '\n') || (char === '\n' && next === '\r') ? 2 : 1
+        continue
+      }
+      if (char < ' ' || char === '\x7f') {
+        frames.push({ kind: 'key', sequence: char })
+        index += 1
+        continue
+      }
+      let end = index
+      while (end < text.length && text[end] >= ' ' && text[end] !== '\x7f' && text[end] !== '\x1b') end += 1
+      frames.push({ kind: 'burst', text: text.slice(index, end) })
+      index = end
+    }
+    return frames
+  }
+
+  /**
+   * Whether a read is paste traffic: inside a paste, or carrying a marker.
    *
    * Asked before anything else, exactly as the inline check it replaces was: while
    * inside a paste, CR/LF are literal characters rather than submit.
