@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
 import { createRequire } from 'node:module'
 import { isFormsVersion } from './host-line.mjs'
+import { judgeInteractionWindow } from './paint-attribution.mjs'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
@@ -591,6 +592,22 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
         'the dialog must reach the terminal with its key hint',
       )
 
+      // The scope judgement below asks whether anything above the layer moved, and a
+      // turn that is still running moves the transcript by itself. So the window opens
+      // from a settled turn: the strip must not be reporting work. Bounded and
+      // reported — a probe that cannot settle says so instead of pretending the screen
+      // was still. (The waiting layer's own card keeps ticking; that is one row, and the
+      // judgement's tick budget covers it.) The window itself starts *after* this wait,
+      // so whatever a busy turn painted before it settled is not attributed to the key.
+      const settled = await (async () => {
+        const deadline = Date.now() + 20_000
+        for (;;) {
+          if (!/运行中|回复中|思考中|已等待|running|replying|thinking/u.test(statusRowOf(output))) return true
+          if (Date.now() >= deadline) return false
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      })()
+      console.log(`dialog window: turn ${settled ? 'settled' : 'still busy after 20s'}`)
       const beforeMove = output.length
       term.write('\x1b[B')
       await new Promise(resolve => setTimeout(resolve, 500))
@@ -602,13 +619,57 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
         `moving the selection must repaint only the layer (${movedRows.length} rows addressed)`,
       )
       check(
-        movedRows.every(row => row >= 5),
-        `the repaint must start at the layer, not at the top of the frame (rows ${movedRows.join(',')})`,
-      )
-      check(
         !/\x1b\[[HJ]|\x1b\[2J/u.test(moving),
         `moving the selection must not clear the screen: ${JSON.stringify(plain(moving).slice(0, 120))}`,
       )
+
+      // The scope half: *which* frame painted *which* row, judged from the
+      // painter's own markers rather than from pty chunks (P-1).
+      //
+      // The old rule here was "every row addressed in the window is at least row
+      // 5". It was wrong twice over. It was too weak — a repaint of the transcript
+      // (rows 5..30) satisfied it, which is exactly the regression the step exists
+      // to catch — and it was too strict at the same time, because the painter
+      // deliberately redraws the whole input box when the chrome changes
+      // (`src/paint.ts`: a frame with `chromeChanged` repaints every chrome row at
+      // or below `chromeStart`, changed or not) and an independent background
+      // update to the identity row can coalesce into the same 500 ms window. That
+      // second half is what turned `test (0.1.7-rc.1)` red on `c654153`.
+      //
+      // The judgement now reads the frames the painter delimits (`ESC[?7l … ESC[?7h`,
+      // `ESC[?2026h/l` around a multi-row batch, `ESC[<row>;1H ESC[0m ESC[2K` per
+      // row) and asks six questions, one per check, so a failure names the property
+      // instead of a row list: did the highlight move, did the layer repaint, did
+      // any frame repaint a row it did not change outside the chrome block, did
+      // anything above the layer change, was there a clear, and was the composer
+      // box on screen to locate that block at all.
+      if (PTY_IS_CONPTY) {
+        // ConPTY rewrites the painter's row addressing into newline-separated
+        // batches, so the frame markers do not survive it (the same boundary step 6b
+        // records). What is asserted here is the half that still arrives — the moved
+        // highlight and the absence of a clear — and the scope half is pinned on the
+        // composed frames by `tests/dialog-paint-scope.test.mjs`, which runs on
+        // Windows too.
+        // The marker is the evidence, not the label: `Option B` is on screen before
+        // the move too, so asserting the label alone would pass on a frame that
+        // painted nothing.
+        check(
+          /● Option B/u.test(plain(moving)),
+          'the moved highlight must reach the terminal',
+        )
+        console.log('dialog scope: frame attribution is not readable through ConPTY (batched frames); tests/dialog-paint-scope.test.mjs pins it on the composed frames')
+      } else {
+        const judgement = judgeInteractionWindow(output, {
+          since: beforeMove,
+          until: output.length,
+          height: 30,
+          labels: ['Option A', 'Option B'],
+        })
+        for (const [name, entry] of Object.entries(judgement.checks)) {
+          check(entry.ok, `moving the selection — ${name}: ${entry.detail}`)
+        }
+        console.log(`dialog scope: frames=${judgement.summary.frames} layer=${judgement.summary.layerFrames} painted=${judgement.summary.paintedRows.join(',')} changed=${judgement.summary.changedRows.join(',')} chrome=${judgement.bands.chromeTop}`)
+      }
 
       // Answering closes the layer: the status row leaves the waiting state, and
       // the card the Session keeps says what was answered.

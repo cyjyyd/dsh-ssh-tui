@@ -459,3 +459,38 @@ Router）；13 处原始序列分支与 `screenKeys()` 的按键迭代仍归消�
 **W-2 之后仍未做**（W-3/W-7）：`burst` 的逐键规范化与 G 系列修复（W-3）；`SURFACE_COMPOSER_KEYS`
 与 Ctrl+L 两份实现的收口（W-3）；`screenKeys()` 的按键迭代折进 Reader（W-3）；picker 自带 reader（W-7）；
 `composerUnit` 的 Composer/Surface 共用体拆分（W-3）。
+
+---
+
+## 11. P-1：6c 的绘制归属（2026-10-14）
+
+**问题**：W-2 的 CI 里 `test (0.1.7-rc.1)` 红了一条断言——`the repaint must start at the layer, not at
+the top of the frame (rows 2,1,30,29,25,24)`，而那条腿的测试套件本身是 `fail 0`。原因是 6c 在固定的
+500ms 窗口里统计**全部** `ESC[<row>;1H`，把三件不同的事混成了一个数字：方向键引起的层重绘、绘制器
+**故意整块重画**的 chrome（[`input-router.md`](input-router.md) 之外的 `src/paint.ts`：`chromeChanged`
+的帧会重画 `chromeStart` 及以下每一行，哪怕内容没变），以及**独立**的后台更新（第 1 行身份行的路由
+标签）恰好落进同一窗口。旧规则还**太松**：只要有问题的重绘从第 5 行开始，"每行 ≥ 5"就放行——而那
+正是这条断言要抓的回归。
+
+**判定模型**（`scripts/paint-attribution.mjs`，AD-20 的这张门从此按它执行）：
+
+| 检查 | 问题 |
+|---|---|
+| `composer` | 输入框在屏上吗（chrome 块的位置由 `╭` 行定位，定位不到就是探针自己的错） |
+| `move` | 高亮**真的**从 A 移到了 B（`●`/`○` 互换） |
+| `repaint` | 层的帧确实重画了层 |
+| `scope` | **没有任何帧重画一行它没有改变的内容**，chrome 块（输入框整块重画是记录在案的行为）除外 |
+| `transcript` | 层**上方**的行没有移动（重新开窗会把整条带挪走；独立的一次时钟 tick 允许 2 行以内） |
+| `clear` | 窗口里没有 `2J`/`3J`/`H J`/擦除到行尾的整屏清除 |
+
+**为什么不用 pty chunk**：`term.onData(chunk)` 的切分是 pty 的决定，一次 `write` 可以分成三块，ConPTY
+还会把整帧压成换行分隔的一批并改写行寻址。判定读的是**绘制器自己写在字节里**的界标——每个画行的帧
+用 `ESC[?7l … ESC[?7h` 包住它的行批（多行时外面再套 `ESC[?2026h/l`），每行是
+`ESC[<row>;1H ESC[0m ESC[2K <内容>`——所以帧就是产品说的帧。`tests/paint-attribution.test.mjs` 有一条
+用例把同一段流按 7 字节步长切开重判，结论必须不变。
+
+**ConPTY 的证据边界**：Windows 腿拿不到行寻址，6c 在那里只断言仍然可读的部分（高亮移动、无清屏），
+并把范围判定交给 `tests/dialog-paint-scope.test.mjs` —— 它用真实 `SshTui` + 显式 `paint()` 在
+**组合出来的帧**上判，平台无关，因此 Windows 腿也有这项证据（探针日志会打印边界说明，不假装测到了）。
+
+**过程与复核**：见 `docs/checkpoints.md` 的 P-1 节（复现、W-1/W-2 对照、M1–M4、重复稳定性）。

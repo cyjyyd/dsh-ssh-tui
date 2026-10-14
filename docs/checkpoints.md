@@ -1984,3 +1984,99 @@ profile 的 `link:` 改指 `.pf/w1`，并用 `require.resolve('dsh-ssh-tui')` �
 **本轮未做**：G-1/G-2/G-3 修复、`burst` 逐键规范化、Reader hold 窗口、keymap 默认值、picker 重构、
 Completion/Search/Doctor、版本与品牌。`scripts/bench-b2.mjs` 的 `tui.inputGuard.release()` →
 `tui.reader.releaseReplyTail()` 是上一个提交（`8b1d732`，W-1 收尾）做的：同一个操作，拥有者搬了家。
+
+---
+
+## 0.8.4 P-1 · 探针 6c 的绘制归属（2026-10-14）
+
+> 目标：让 6c 的绘制归属判定**稳定**（不再随机变红），同时**不削弱**它——不修 G 系列、不动 runtime、
+> 不放宽断言、不加 retry/skip/无条件 sleep。旧断言在 `c654153` 的 `test (0.1.7-rc.1)` 上随机变红，
+> 而那条腿的测试套件是 `fail 0`。
+
+**根因**：6c 在固定的 500ms 窗口里统计窗口内**全部** `ESC[<row>;1H`，于是把三件不同的事混成一个数字：
+
+1. 方向键引起的**层重绘**（应当发生）；
+2. 绘制器**故意整块重画**的 chrome —— `src/paint.ts` 的
+   `if (current === prev[index] && !(chromeChanged && index >= dirtyChromeStart)) continue`：
+   `chromeChanged` 的帧会重画 chrome 块里**没变**的行（"半个输入框比晚一帧更糟"）；
+3. **独立**的后台更新（第 1 行身份行的模式/路由标签）恰好落进同一窗口。
+
+用 `scripts/paint-attribution.mjs` 按 pty chunk 逐块归属后，红灯窗口的真实结构是
+「一块只重画第 1 行的 chrome 帧」+「一块 `sync` 的层帧（行 30,29,25,24）」——层帧本身完全正常。
+
+**旧规则还太松**：它的判据是"每一行 ≥ 5"，所以一次**从第 5 行开始**的 transcript 重绘会被放行——而那
+正是这条断言存在的理由。两条都在 `tests/paint-attribution.test.mjs` 里做成了可执行的对照：
+`the old rule rejected an identity tick…`（旧红新绿）与 `the old rule accepted a transcript repaint…`
+（旧绿新红）。
+
+**新判定**（`judgeInteractionWindow`，六项检查各自报名字，见 AD-20 §11）：
+
+| 检查 | 依据 |
+|---|---|
+| `composer` | 输入框上沿（`╭` 行）在屏上，chrome 块才定位得到 |
+| `move` | `●`/`○` 在两条选项行之间真的换了位 |
+| `repaint` | 确实有帧重画了层 |
+| `scope` | **没有帧重画它没有改变的行**（chrome 块除外）——不涉及任何行号阈值 |
+| `transcript` | 层上方没有整条带移动（独立 tick 允许 ≤2 行，写在 `transcriptTickBudget`） |
+| `clear` | 窗口内没有 `2J`/`3J`/`H J`/擦除到行尾 |
+
+**不依赖 pty chunk**：`term.onData` 的切分是 pty 的决定（ConPTY 还会把整帧压成换行批并改写行寻址）。
+判定读的是绘制器写进字节里的界标：每帧的行批被 `ESC[?7l … ESC[?7h` 包住（>2 行时外面再套
+`ESC[?2026h/l`），每行是 `ESC[<row>;1H ESC[0m ESC[2K <内容>`。`tests/paint-attribution.test.mjs`
+有一条用例把同一段流按 7 字节步长切开重判，结论必须逐项相同。
+
+**前置条件**：窗口从"回合已停"开始——探针等状态条不再报 `运行中/回复中/思考中/已等待`（有界 20s，
+把结果打进日志），并且窗口边界取在这次等待**之后**，所以忙碌回合在等待期间的绘制不算在方向键头上。
+等待层的卡片仍会 tick（一行），由 tick 预算覆盖。
+
+**变体验证**（临时改 `src/tui.ts`、重建、跑完即恢复；`git diff` 事后为空）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 方向键不再移动高亮（`ownerSurface` 的 `moveQuestionCursor` 去掉） | ✗ 真机 6c 三条红（`must repaint the layer`、`move: … ● → ●`、`repaint: did not repaint the layer`）+ 在机测试 2 红 |
+| M2 | 方向键让整屏重绘（`lastPaintRows = []`，无清屏） | ✗ `scope` 逐行点名 24 行未变却重画；旧的行数上限也同时红 |
+| M3 | 方向键触发整屏清除（`forceFullPaint = true`） | ✗ `clear: ["\u001b[H\u001b[J"]` + `scope` + 旧的无清屏断言 |
+| M4 | 独立 chrome tick 与方向键同窗 | ✓ 不误判：单测用真实 `composePaintFrame` 造出"第 1 行变了 + 层帧"的同窗，在机测试用 wait card 时钟做同样的对照，两者都绿 |
+
+**ConPTY 的证据边界**：Windows 腿拿不到行寻址，6c 在那里只断言仍可读的一半（高亮移动、无清屏），
+探针日志明确打印"frame attribution is not readable through ConPTY"，范围判定由
+`tests/dialog-paint-scope.test.mjs` 在**组合帧**上补足（真实 `SshTui` + 显式 `paint()`，平台无关）。
+
+**重复稳定性**（`.pf/stability.sh`，逐次记录；结论在每行末尾）：
+
+| 路径 | 次数 | 结果 | 窗口形态 |
+|---|---|---|---|
+| **0.1.7-rc.1 真机全量探针**（`.pf/rc1` worktree，`scripts/ci-pin-line.mjs 0.1.7-rc.1` + 独立 home） | **20** | **20 PASS**（`dialog window: turn settled`） | 每次都 `frames=1 layer=1 painted=24,25,29,30 changed=24,25 chrome=27`——层帧只画了两条**变了**的选项行，另有 chrome 块两行（`paint.ts` 允许整块重画），**没有**任何越界帧、没有清屏、没有整带移动 |
+| **W-2 当前实现**（窗口仪器，同一时间线只跑 6c） | 20 | 旧判据 0 红 / 新模型 0 红 | `unjustified=2`（就是 chrome 块那两行）、`clears=0`、非层帧 0 |
+| **W-1 基线 `b03de16`**（同一仪器，`link:` 指向 `.pf/w1`） | 20 | 旧判据 0 红 / 新模型 0 红 | 同上，逐字段相同 |
+
+这 60 次里**没有一次**出现"额外 chrome 更新落进窗口"（`other=0`），所以稳定性本身是干净的；chrome tick 的
+容忍度由 M4 的两条用例与 `c654153` 那次红灯的窗口形态（第 1 行单独一帧）钉住。旧判据在本轮的
+0.1.7-rc.1 上同样 20/20 绿——**复现率本来就低**（W-2 轮记录：全量探针 1/11、只跑 6c 1/13），因此
+"这次没红"不能当证据：**证据是判定模型本身**（规则对照做成用例、M1–M3 会红、chunk 切分不变性）。
+
+**门**：`npm test` **1442 项 · 1435 通过 · 0 失败 · 4 跳过 · 3 todo**（新增 14 条归属用例 + 3 条在机用例）·
+`typecheck` 0 · `npm run freeze` 全绿（PTY 事实新增 `dialog-scope` 一行）· `npm run freeze:input` 无超基线
+（G-1/G-2/G-8/G-3 仍是 3 条 todo）· `npm run bench` 字节/行数/清屏与基线逐项相同（501/465/2457/588/140、
+3/3/17/4/1、0 清屏）· 真机探针（setup 含 resume 阶段 + 主探针）全过。
+
+**修改的文件**（runtime 一行未动，`git diff --stat src/` 为空）：
+
+| 件 | 内容 |
+|---|---|
+| `scripts/paint-attribution.mjs` | 新增：帧解析（产品界标）+ 逐行变更归属 + `judgeInteractionWindow` 六检查 |
+| `scripts/tui-probe.mjs` | 6c：`settled` 前置条件、窗口边界、六项命名断言、ConPTY 边界说明；保留原有行数上限与无清屏断言 |
+| `tests/paint-attribution.test.mjs` | 14 条：帧解析、chunk 切分不变性、chrome 块豁免、M1/M2a/M2b/M3/M4 形状、旧规则对照 |
+| `tests/dialog-paint-scope.test.mjs` | 3 条在机用例（真实 `SshTui` + `paint()`）：方向键只画层、独立 tick 不误判、整屏重绘被抓 |
+| `scripts/b2-freeze-audit.mjs` | PTY 事实新增 `dialog-scope` |
+| `docs/decisions/input-ownership.md` §11、本文件 | 判定模型与复核过程 |
+
+**剩余风险**：
+
+1. **6d（菜单高亮）仍是同类的行号规则**（`every row >= 3`）：它同源、同弱点，本轮没红过所以没动它。
+   它的选项标签不同，需要自己的 fixture 与对照；记为下一步的小项，不藏在 P-1 里一起改。
+2. **ConPTY 无法归属帧**：Windows 腿只断言"高亮移动 + 无清屏"，范围由在机用例补足（日志明说边界）。
+3. **回合未停**（`dialog window: turn still busy after 20s`）时，`transcript` 检查可能报"移动"——日志会写明
+   原因；本轮 60 次里没有出现。
+4. 判定依赖 `╭`（输入框上沿）与选项标签文本：它们变了下标就要跟着改，但那时 `composer` 检查会直接
+   报"定位不到 chrome 块"，不会静默放过。

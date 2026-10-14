@@ -244,6 +244,7 @@ const retired = RETIRED.map(entry => ({ id: entry.id, what: entry.what, hits: en
 const PTY = [
   { id: 'screen-depth', rule: '<= 1', measured_by: 'npm test · tests/screen-contract.test.mjs (`a Screen never opens a Screen`)' },
   { id: 'stream-per-tick-clears', rule: 'addressed >= 4 × clears', measured_by: 'scripts/tui-probe.mjs (step 6b, while an answer streams)' },
+  { id: 'dialog-scope', rule: 'no frame repaints a row it did not change, outside the chrome block, and nothing above the layer moves', measured_by: 'scripts/tui-probe.mjs (step 6c, the arrow inside a question layer) + npm test · tests/dialog-paint-scope.test.mjs' },
   { id: 'screen-scroll-clears', rule: '= 0', measured_by: 'scripts/tui-probe.mjs (step 6e, PgDn on a report Screen)' },
   { id: 'setup-typing-clears', rule: '= 0', measured_by: 'npm test · tests/setup-screen.test.mjs + scripts/tui-setup-probe.mjs' },
 ]
