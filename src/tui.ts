@@ -9726,6 +9726,21 @@ export class SshTui {
     this.setField(`${current.slice(0, at)}${text}${current.slice(at)}`, at + text.length)
   }
 
+  /**
+   * Move the caret of whichever field owns the keyboard to one end (Home/End).
+   *
+   * One implementation for the two owners that carry these keys (W-3b.1): the composer
+   * edits the draft, a Surface with a borrowed field edits the answer, and a Surface
+   * without one has nothing to move — `textIsEditable` is what says which of those the
+   * keyboard is on. Ctrl+A/Ctrl+E reach the same two positions through `composerUnit`,
+   * which asks the same question.
+   */
+  private moveFieldCursor(target: 'start' | 'end'): void {
+    if (!this.textIsEditable()) return
+    this.setField(this.fieldText(), target === 'start' ? 0 : this.fieldText().length)
+    this.markDirty()
+  }
+
   /** One card's key: a call's batch can repeat a question id across calls. */
   private questionCardKey(callId: string | undefined, questionId: string): string {
     return `${callId ?? `live:${this.liveQuestionSeq}`}\u0000${questionId}`
@@ -12673,8 +12688,12 @@ export class SshTui {
    * Its arrows move a question's cursor (or nothing — an arrow a Surface does not use
    * is not the transcript's), the page keys are not its business, and its mouse reports
    * take the same path they always did so the refusal happens where it always did, down
-   * to the remembered press. Everything else goes to the shared composer/Surface body,
-   * whose `dialog` branches are the Surface's own behaviour for those keys.
+   * to the remembered press. Its own editing keys are `Home`/`End`/`Delete` (W-3b.1):
+   * they act on the field the Surface borrowed — the one row the reader can see — and a
+   * Surface that borrowed none has no field for them, so it consumes them. The kitty
+   * copy key falls out with the other sequences below: a Surface has no copy contract,
+   * and this round did not invent one. Everything else goes to the shared
+   * composer/Surface body, whose `dialog` branches are the Surface's own behaviour.
    */
   private ownerSurface(unit: string, moved: string | undefined): void {
     if (unit === '\x1b[A') { this.moveQuestionCursor(-1); return }
@@ -12684,6 +12703,14 @@ export class SshTui {
       const button = Number(sgr[1])
       if (button === 64 || button === 65) return
       this.mouseGesture(sgr)
+      return
+    }
+    if (unit === '\x1b[H' || unit === '\x1b[1~') { this.moveFieldCursor('start'); return }
+    if (unit === '\x1b[F' || unit === '\x1b[4~') { this.moveFieldCursor('end'); return }
+    if (unit === '\x1b[3~') {
+      // Only a borrowed field can be edited: the draft behind the Surface is not the
+      // field on screen, and an answer the reader cannot see is not an answer.
+      if (this.textIsEditable()) this.deleteAtCursor()
       return
     }
     if (unit.startsWith('\x1b[') || unit.startsWith('\x1bO')) return
@@ -12697,15 +12724,20 @@ export class SshTui {
    * at a time through the Router, which is what lets ownership change inside a single
    * read (a Surface answering `y` with the composer taking the `es` behind it). The
    * sequence shapes the composer owns are the arrows (the suggestion list, else
-   * history) and the caret keys.
+   * history) and the caret keys — which it now only ever gets while it owns the
+   * keyboard: with a Surface up, the Router hands those keys to the Surface (W-3b.1).
    */
   private ownerComposer(unit: string, moved: string | undefined): void {
     if (unit === '\x1b[A') { this.arrowHistory(-1); return }
     if (unit === '\x1b[B') { this.arrowHistory(1); return }
     if (unit === '\x1b[C') { if (this.textIsEditable()) this.moveCursor(1); return }
     if (unit === '\x1b[D') { if (this.textIsEditable()) this.moveCursor(-1); return }
-    if (unit === '\x1b[H' || unit === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
-    if (unit === '\x1b[F' || unit === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
+    // The caret keys go through the field the keyboard is editing, like Ctrl+A/Ctrl+E
+    // below: with no Surface up that field *is* the draft, so this is the write it
+    // always was — and it can no longer be the wrong field if a later round routes a
+    // unit here while a field is borrowed.
+    if (unit === '\x1b[H' || unit === '\x1b[1~') { this.moveFieldCursor('start'); return }
+    if (unit === '\x1b[F' || unit === '\x1b[4~') { this.moveFieldCursor('end'); return }
     if (unit === '\x1b[3~') { this.deleteAtCursor(); return }
     if (unit === '\x1b[99;6u') { this.copyKey(); return }
     this.composerUnit(unit, moved)

@@ -114,9 +114,12 @@ const STATES = [
     expect: {
       'x': 'ownerSurface', '\r': 'ownerSurface', '\x03': 'ownerSurface', '\x1b[A': 'ownerSurface',
       '\x1b[5~': 'ownerSurface', '\x1b[<65;10;5M': 'ownerSurface', '\x15': 'ownerSurface',
-      // Ctrl+L is the composer's repaint, and Home/End/Delete still reach the composer
-      // (recorded debt, AD-22 §"the two asymmetries"); the Router says so explicitly.
-      '\x0c': 'ownerComposer', '\x1b[3~': 'ownerComposer',
+      // Home/End/Delete and the copy key are the Surface's own units (W-3b.1). Ctrl+L
+      // is still the composer's repaint (recorded debt, AD-22 §"the two asymmetries",
+      // which is down to one).
+      '\x1b[H': 'ownerSurface', '\x1b[1~': 'ownerSurface', '\x1b[F': 'ownerSurface',
+      '\x1b[4~': 'ownerSurface', '\x1b[99;6u': 'ownerSurface',
+      '\x0c': 'ownerComposer', '\x1b[3~': 'ownerSurface',
     },
   },
   {
@@ -128,6 +131,7 @@ const STATES = [
     expect: {
       'x': 'ownerSurface', '\r': 'ownerSurface', '\x7f': 'ownerSurface', '\x15': 'ownerSurface',
       '\x1b[A': 'ownerSurface', '\x1b[5~': 'ownerSurface',
+      '\x1b[H': 'ownerSurface', '\x1b[F': 'ownerSurface', '\x1b[3~': 'ownerSurface',
     },
   },
 ]
@@ -163,6 +167,48 @@ test('a Screen keeps the composer behind it: keys, paste, mouse', () => {
     assert.equal(after.input, before.input, `${JSON.stringify(unit)}: the draft behind the Screen is untouched`)
     assert.equal(after.cursor, before.cursor, `${JSON.stringify(unit)}: and its caret`)
     assert.equal(after.rows, before.rows, `${JSON.stringify(unit)}: and no row was pushed behind it`)
+  }
+})
+
+test('a Surface keeps the composer behind it: its own editing keys included', async () => {
+  // The Screen case above is the same claim for a Screen. W-3b.1 adds the keys the
+  // composer's table used to answer for a Surface: Home/End moved the hidden caret and
+  // Delete edited the hidden draft. A Surface without a field has nothing to move or
+  // delete, so the draft, the caret and the reader's other state stay exactly as they
+  // were — and a Surface *with* a borrowed field edits that field, not the draft.
+  const forms = [
+    ['confirm', async tui => {
+      void new Promise(resolve => { tui.openConfirm('允许工具 "bash"？', 'y = 允许一次', resolve, 'approval') })
+      await waitForDialog(tui, 'confirm')
+    }, false],
+    ['question with options', async tui => {
+      void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1).catch(() => undefined)
+      await waitForDialog(tui, 'questions')
+    }, false],
+    ['question with a borrowed field', async tui => {
+      void tui.askQuestion({ id: 'q1', question: '回滚到哪个版本？' }, 0, 1).catch(() => undefined)
+      await waitForDialog(tui, 'questions')
+    }, true],
+  ]
+  for (const [name, open, hasField] of forms) {
+    for (const unit of ['x', '\x1b[H', '\x1b[1~', '\x1b[F', '\x1b[4~', '\x1b[3~', '\x1b[99;6u', '\x15', '\x7f']) {
+      const { tui } = fixture()
+      draft(tui)
+      await open(tui)
+      const before = snapshot(tui)
+      tui.handleData(Buffer.from(unit))
+      const after = snapshot(tui)
+      const where = `${name} + ${JSON.stringify(unit)}`
+      assert.equal(after.input, before.input, `${where}: the draft behind the Surface is untouched`)
+      assert.equal(after.cursor, before.cursor, `${where}: and its caret`)
+      assert.equal(after.historyIndex, before.historyIndex, `${where}: and the browse position`)
+      assert.equal(after.scroll, before.scroll, `${where}: and the transcript`)
+      assert.equal(after.focused, before.focused, `${where}: and the focus ring`)
+      assert.equal(after.rows, before.rows, `${where}: and no row was pushed`)
+      assert.equal(tui.dialog !== undefined, true, `${where}: the Surface is still up`)
+      if (!hasField) assert.equal(tui.borrowedText, undefined, `${where}: no field was borrowed`)
+      else if (unit === 'x') assert.equal(tui.borrowedText?.text, 'x', `${where}: the answer is the visible field's`)
+    }
   }
 })
 

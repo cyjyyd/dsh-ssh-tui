@@ -14,15 +14,17 @@
  * keystroke costs no allocation (W-2 is a hot-path migration).
  *
  * The rules are the ones `tui.ts` already applied inline, moved here verbatim —
- * including two asymmetries that are **recorded debt, not decisions**:
+ * including one asymmetry that is **recorded debt, not a decision**:
  *
  *   1. `Ctrl+L` is handled by the Screen when a Screen is up and by the Composer
  *      otherwise; the repaint has two implementations and W-2 does not merge them
  *      (AD-20 §6: only a test that proves both owners repaint identically may).
- *   2. With a Surface up, `Home`/`End`/`Delete`/kitty-`Ctrl+Shift+C` still reach the
- *      composer today (`SURFACE_COMPOSER_KEYS`). That is the same class of leak W-0
- *      found behind Screens, now written down where W-3 can see it — preserving it
- *      is what keeps this round free of behaviour changes.
+ *      W-3b.2 owns that one.
+ *
+ * W-3b.1 closed the other asymmetry this module used to record:
+ * `SURFACE_COMPOSER_KEYS` sent `Home`/`End`/`Delete`/kitty-`Ctrl+Shift+C` to the
+ * composer while a Surface was up. The Surface owns them now, like every other unit,
+ * and its adapter decides what they mean — the field it borrowed, or nothing.
  *
  * @module dsh-ssh-tui/input-router
  */
@@ -47,7 +49,13 @@ export interface OwnershipSnapshot {
   screenKind: string | undefined
   /** The Surface (dialog) that is up, if any. */
   surfaceKind: string | undefined
-  /** …and whether that Surface owns a borrowed text field. */
+  /**
+   * …and whether that Surface owns a borrowed text field.
+   *
+   * Part of the contract's vocabulary, and no rule branches on it since W-3b.1:
+   * whether a Surface borrowed a field decides what its *adapter* does with an
+   * editing key, not who owns the key.
+   */
   surfaceHasField: boolean
   /** The composer's field is empty — the focus ring's precondition. */
   composerEmpty: boolean
@@ -61,16 +69,6 @@ const ARROW_UP = '\x1b[A'
 const ARROW_DOWN = '\x1b[B'
 const SGR_MOUSE = /^\x1b\[<\d+;\d+;\d+[Mm]$/u
 
-/**
- * Units that still reach the Composer while a Surface is up (recorded debt, W-3).
- *
- * Home/End move the hidden draft's caret, `Delete` edits it, and the kitty copy
- * sequence copies from the transcript. None of them belongs to a Surface; all three
- * are what the ladder does today, and W-2 preserves them. W-3 decides whether they
- * should be dropped at the Surface boundary instead.
- */
-const SURFACE_COMPOSER_KEYS = /^(?:\x1b\[[HF]|\x1b\[1~|\x1b\[4~|\x1b\[3~|\x1b\[99;6u)$/u
-
 export class InputRouter {
   /** The one cross-owner decision. One unit in, one owner out. */
   route(kind: UnitKind, unit: string, view: OwnershipSnapshot): Owner {
@@ -83,10 +81,13 @@ export class InputRouter {
     // a Surface without a field refuses it in its own adapter — the decision is still
     // "the Surface", never the composer behind it (AD-20 §4.3, priority 1).
     if (kind === 'paste') return view.surfaceKind !== undefined ? 'surface' : 'composer'
-    // A Surface owns everything except the two recorded asymmetries above.
+    // A Surface owns everything while it is up — including the composer's own editing
+    // sequences: `Home`/`End`/`Delete` and the kitty copy key are the Surface's units
+    // since W-3b.1, and its adapter edits the field it borrowed or drops them. The
+    // composer behind it is not the field on screen, so nothing here hands a unit to it
+    // by default.
     if (view.surfaceKind !== undefined) {
       if (kind === 'control' && unit === '\x0c') return 'composer'
-      if (kind === 'sequence' && SURFACE_COMPOSER_KEYS.test(unit)) return 'composer'
       return 'surface'
     }
     return this.composerOrWorkspace(kind, unit, view)

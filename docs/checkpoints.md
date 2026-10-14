@@ -2239,3 +2239,76 @@ Screen 关闭后余下丢弃——W-3a 已修，本轮不能破坏）；标记�
 `735a2f9` 的 run `38548044940`（各含 `test-windows` 与四条 0.1.7/0.2.0 rc 腿）。
 
 **本轮未做**：W-3b 全部条目与 W-7；版本仍为 `0.8.3`，未发 npm。
+
+## 0.8.4 W-3b.1 · Surface 编辑键的输入归属收口（2026-10-14）
+
+> 目标：只做 W-3b.1——Surface 打开时 `Home`/`End`/`Delete`/复制键的归属。不动 W-3b.2（Ctrl+L）与
+> W-3b.3（`composerUnit` 拆分），不发版。
+
+**审计矩阵（先审计，后修改；真实 `handleData(Buffer)`，草稿 `我打了一半的消息` cursor 3）**：
+
+| Surface 形态 | `Home`/`End`（`ESC[H`/`ESC[1~`/`ESC[F`/`ESC[4~`） | `Delete`（`ESC[3~`） | `Ctrl+Shift+C`（`ESC[99;6u`） |
+|---|---|---|---|
+| confirm / approval（无字段） | owner=**Composer**，隐藏 `cursor` 3→0 / 3→8 | owner=**Composer**，草稿 `我打了一半的消息`→`我打了半的消息` | owner=Composer，**无操作**（`copyKey` 在 dialog 下直接拒绝） |
+| 自由文本 question（borrowedText） | owner=**Composer**，改**隐藏** `cursor`；可见字段停在 `ab\|2` | owner=Composer，`deleteAtCursor()` **field-aware** → 编辑可见字段（本身正确） | 无操作 |
+| 有选项 question（无过滤） | 隐藏 `cursor` 移动 | 草稿被删一字符 | 无操作 |
+| 过滤中的 question（`/` 进入） | 隐藏 `cursor` 移动 | 草稿被删一字符 | 无操作 |
+
+三者**不可归为一类**：Home/End 是**绕过** `fieldText/fieldCursor/setField` 的直接写（`this.cursor = 0`、
+`this.input.length`）；Delete 用的 `deleteAtCursor()` 本来就是 field-aware，只是无字段时落回草稿；
+复制键**已经**是拒绝语义。过滤形态**没有**过滤光标模型（只有 append/backspace），按合同不新增过滤编辑。
+picker 走 `src/picker.ts` 自带 decoder/reader，不经过 `handleData`（W-7 债，本轮不动）。
+
+**修复**（`src/input-router.ts` −10/+8、`src/tui.ts` +26/−4）：
+
+- Router：删除 `SURFACE_COMPOSER_KEYS` 与那条分支——Surface 拥有**全部**单元；记录在案的例外只剩
+  Ctrl+L 一条（W-3b.2）。`surfaceHasField` 保留在快照里但已无规则依赖它（注释写明）。
+- `ownerSurface`：`Home`/`End` → `moveFieldCursor('start'|'end')`；`Delete` →
+  `if (this.textIsEditable()) this.deleteAtCursor()`；复制键随其余序列被丢弃（与既有可观察行为一致）。
+- 新增 `moveFieldCursor(target)`：走 `fieldText()`/`setField()`，与 Ctrl+A/Ctrl+E 同一条路；`ownerComposer`
+  的 Home/End 也改用它（无层叠时 `fieldText()` 就是草稿，逐字节不变），于是"Composer 只在真正拥有
+  Composer 时用这些键"从约定变成结构。
+
+**红 → 绿**：先写用例并实测红（`tests/input-ownership-regression.test.mjs` 5 条红、
+`tests/input-ownership-matrix.test.mjs` 2 条红、`tests/input-router.test.mjs` 1 条红），修复后全绿。
+新增用例：无字段 Surface 五种键 × 四种形态全部丢弃（草稿/光标/历史/滚动/焦点/行数逐项不变）、
+借用字段的 Home/End/Delete **编辑可见字段**（`ab|2` → Home → `ab|0` → Delete → `b|0` → End → `b|1`）、
+`ESC[1~`/`ESC[4~` 别名、复制键在四种 Surface 形态下都无操作而 **Screen 的复制合同不变**、
+混合 read（`\x1b[3~x` 等五种）不穿透、回答/拒绝后草稿与光标原样回来、`\x1b[3~yes` 的
+"Delete 被丢弃 + `y` 作答 + `es` 进草稿"、以及矩阵与层 A 的归属断言。
+
+**参考轨迹 102 → 106**：两条**授权变更**（旧读法逐条留在 `tests/input-reader.test.mjs` 的 `W3B1_FIXTURES`
+与下表），四条**新增安全用例**，其余 **100 条逐字节不变**（更新脚本对未授权差异直接抛错）。
+
+| fixture | 旧（ed38c20） | 新 |
+|---|---|---|
+| `dialog-home-end` | 末态 `cursor` **8**（隐藏草稿光标被 Home/End 移到末尾） | `cursor` **3**（不动） |
+| `dialog-delete` | 轨迹含 **`deleteAtCursor`**，input `我打了半的消息` | 无 `deleteAtCursor`，input `我打了一半的消息` |
+| `surface-edit-keys-no-field`（新） | 旧构建：`deleteAtCursor` + `copyKey`，草稿被删、cursor 8 | 无任何消费者调用，草稿与光标原样 |
+| `surface-field-home-delete`（新，`record: ['borrowed']`） | 旧构建：`borrowed {ab,2}`（Home/Delete 对可见字段无效） | `borrowed {b,1}`（Home→0、Delete 删 `a`、End→末尾） |
+| `surface-filter-edit-keys`（新） | 旧构建：`deleteAtCursor`，草稿 `打了一半的消息` | 无 `deleteAtCursor`，草稿原样、过滤串不动 |
+| `surface-edit-then-answer`（新） | 旧构建：`我打了es半的消息`（Delete 吃掉一个字符） | `我打了es一半的消息`（Delete 被丢弃、尾部仍进草稿） |
+
+轨迹状态里的 `borrowed` 是**逐 fixture 可选**的记录项（`record: ['borrowed']`）：只有新用例打开它，
+其余 102 条状态键一字未动——否则就等于整体重录参考。
+
+**Mutation（全部实测红后恢复，`src/` 事后与提交一致）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | Home/End 又直接写隐藏 `this.cursor` | ✗ 借用字段用例 3 条 + 矩阵用例 + 轨迹门 |
+| M2 | 无字段 Surface 的 Delete 又编辑隐藏草稿 | ✗ 4 条用例（含 interaction-surface 的键表）+ 轨迹门 |
+| M3 | Router 恢复 `SURFACE_COMPOSER_KEYS`（Surface 事件又给 Composer） | ✗ 层 A + 矩阵 2 条 + 回归 4 条 + interaction-surface + 轨迹门 |
+| M4 | 借用字段的合法编辑被丢弃（整块字段键删除） | ✗ 借用字段用例 + 混合 read + 轨迹门 |
+| M5 | Screen 关闭后同 read 继续投递 | ✗ 矩阵"Screen 背后草稿"条 + W-3a/W-3a.1 三条 + 轨迹门 |
+
+**门**：`npm test` **1469 项 · 1465 通过 · 0 失败 · 4 跳过 · 0 todo**（基线 1460 · 1456，+9 = 本轮新增
+用例）· `typecheck` 0 · `npm run freeze` 全绿 · `npm run freeze:input` 无超基线且**全部不变**
+（`knownGaps` 0/0、`ownerReads.screen` 24/24、`dialog` 54/54、`rawBranches` 8、`routers` 1、
+`routerCallSites` 3；本轮没有新增计数器、也没有放宽基线）· `npm run bench` 字节 501/465/2457/588/140、
+行 3/3/17/4/1、清屏 0（与基线逐项相同）· 四条真机探针（main / setup / drop / terminal）全过。
+
+**CI**：（本轮提交推送后补记）
+
+**本轮未做**：W-3b.2（Ctrl+L 两份实现）、W-3b.3（`composerUnit` 拆分）、Surface 内左右箭头编辑借用字段
+（范围外，现状丢弃）、picker 自带 reader（W-7）。版本仍为 `0.8.3`，未发 npm。

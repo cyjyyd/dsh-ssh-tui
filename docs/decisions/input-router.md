@@ -44,6 +44,12 @@ read（0.8.3 里只有 Screen 这么做，`screenKeys` 已在 W-3a 删除）。S
 关闭必须同样终止这次投递：`ESC` 关掉 Screen 后，同一个文本单元剩下的字符既不能进它背后的 Composer，
 也不能被重新路由给别的 Owner。粘贴尾巴（`\x1b[201~` 之后的 `\x1bq`）就是这条路径唯一的现实入口。
 
+**W-3b.1 之后**：Surface 的**编辑键**也归 Surface。`Home`/`End`/`Delete` 与 kitty-`Ctrl+Shift+C`
+都是序列，曾经在 Surface 打开时被 `SURFACE_COMPOSER_KEYS` 放行给 Composer——于是 Home/End 移动**看不见的**
+草稿光标、Delete 编辑它。现在 Router 只回答"Surface 拥有"，`ownerSurface` 再决定：有借用字段就编辑**读者
+看得见**的那一行（`textIsEditable()` 判定），没有就消费掉。复制键因此也归 Surface 并被丢弃，与它原来的
+可观察行为一致（Composer 的复制在 Surface 打开时本来就拒绝）。
+
 **一次判定**：每个单元只问一次 Router；`route()` 在 Screen 归属时直接交给 Screen 适配器，
 其余情况才继续走绑定表与解析分支。绑定表不决定归属（AD-20 F-5：一个键只有一张表）。
 
@@ -73,21 +79,22 @@ route(kind: UnitKind, unit: string, view: OwnershipSnapshot): Owner
 |---|---|---|
 | 1 | `screenKind !== undefined` | **Screen**（独占键盘；它不用的单元由它自己丢弃，绝不外传） |
 | 2 | `kind === 'paste'` | Surface（若在）→ 否则 Composer；**Screen 已在第 1 步终结粘贴** |
-| 3 | `surfaceKind !== undefined` | **Surface**，除两个记录在案的例外（§4） |
+| 3 | `surfaceKind !== undefined` | **Surface**，除一个记录在案的例外（§4：Ctrl+L） |
 | 4 | 其余（无层叠） | 序列：鼠标 / 翻页 → **Workspace**；上下箭头仅在"字段为空且有可折叠卡片"时 → Workspace，否则 → Composer；其余 → **Composer** |
 
 `key`/`burst` 的逐字符语义：`burst` 永远先过一次粘贴判定（多换行即粘贴），再**逐字符**问 Router ——
 所以一次 read 里归属可以变化（Surface 用 `y` 作答后，后面的 `es` 归 Composer）。这条由
 `yes-typed-at-dialog` 轨迹钉住。
 
-## 4. 两个记录在案的例外（不是决定，是债）
+## 4. 记录在案的例外（不是决定，是债）
 
-| 例外 | 现状 | 为什么保留 |
+| 例外 | 现状 | 状态 |
 |---|---|---|
-| `Ctrl+L` | Screen 在时由 Screen 重绘（`screenNeedsFullPaint`），否则由 Composer 重绘（`repaintNow()`） | AD-20 §6：两份实现只有在测试证明"不同 Owner 下重绘行为一致"后才能合并；W-2 只给它起了名字并让 Router 显式说出来 |
-| Surface 无字段时 `Home`/`End`/`Delete`/kitty-`Ctrl+Shift+C` | 仍到达 Composer（移动/编辑**隐藏草稿**的光标） | 与 W-0 在 Screen 后面发现的泄漏同类；W-2 不改变行为，把它写进 `SURFACE_COMPOSER_KEYS` 让 W-3 能看见并决定 |
+| `Ctrl+L` | Screen 在时由 Screen 重绘（`screenNeedsFullPaint`），否则由 Composer 重绘（`repaintNow()`） | **仍在**（W-3b.2）：AD-20 §6 说两份实现只有在测试证明"不同 Owner 下重绘行为一致"后才能合并 |
+| Surface 在时的 `Home`/`End`/`Delete`/kitty-`Ctrl+Shift+C` | 曾经到达 Composer（移动/编辑**隐藏草稿**的光标），由 `SURFACE_COMPOSER_KEYS` 显式放行 | **W-3b.1 已关闭**：这四个单元现在是 Surface 的，由 Surface 适配器决定语义（编辑它借来的字段，或消费掉） |
 
-W-2 **没有**把这两条修掉：它们不是 W-2 授权范围（§"不修复 G 系列"），而且修复会改变可观察行为。
+W-2 两条都保留（不是它的授权范围，且修复会改变可观察行为）。W-3b.1 只关掉第二条，且**没有**顺手
+合并 Ctrl+L —— 那需要"两份重绘行为一致"的证明，是 W-3b.2 的事。
 
 ## 5. 四个 Owner 适配器
 
@@ -144,5 +151,6 @@ W-2 **没有**把这两条修掉：它们不是 W-2 授权范围（§"不修复 
 AD-20 的优先级表与 F-1…F-6 全部保持：F-1 现在由 Router 独家回答；F-4 的"第二套 router"仍是
 picker（W-7）；F-5 的"一个键一处处理"由 `route()` 的绑定表唯一持有。
 AD-21 的 Reader 一个字节未改（`tests/input-reader.test.mjs` 的 72 条轨迹是证据）。
-W-3 可以开始的地方：G-1/G-2/G-8/G-3 的逐键规范化（`burst` 拆分，落在 Reader 或 Router 的 `sequence`
-判定上）、Surface 侧的 `SURFACE_COMPOSER_KEYS` 债、Ctrl+L 的两份实现。
+W-3 可以开始的地方（W-3a / W-3a.1 与 W-3b.1 已走完前两条）：G-1/G-2/G-8/G-3 的逐键规范化
+（`burst` 拆分，落在 Reader 或 Router 的 `sequence` 判定上）——**已完成**；Surface 侧的
+`SURFACE_COMPOSER_KEYS` 债 —— **W-3b.1 已关闭**；Ctrl+L 的两份实现 —— 留给 W-3b.2。

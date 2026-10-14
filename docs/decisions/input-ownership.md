@@ -524,8 +524,9 @@ SS3 尾巴（`\x1bOAx` 一直是"序列 + 尾巴各自处理"），因此这条�
 `tests/input-reader.test.mjs` 的 `GAP_FIXTURES` 与 `docs/checkpoints.md` 的 W-3a 节；其余 68 条由
 更新脚本**拒绝非法改动**（任何未授权的差异会直接抛错），并由 `every fixture frames identically` 比对。
 
-**仍未做（W-3b / W-7）**：`SURFACE_COMPOSER_KEYS`（Surface 在时 Home/End/Delete/复制键仍到 Composer）、
-Ctrl+L 的两份重绘实现、`composerUnit` 的 Composer/Surface 共用体拆分、picker 自带 reader。
+**仍未做（W-3b / W-7）**：`SURFACE_COMPOSER_KEYS`（Surface 在时 Home/End/Delete/复制键仍到 Composer；
+**W-3b.1 已关闭**，见 §14）、Ctrl+L 的两份重绘实现（W-3b.2）、`composerUnit` 的 Composer/Surface 共用体
+拆分（W-3b.3）、picker 自带 reader（W-7）。
 
 ## 13. W-3a.1 Status（2026-10-14）· Screen read ownership 的收口
 
@@ -558,5 +559,48 @@ Composer）；`tests/input-trace.mjs` 新增 4 条安全轨迹（`screen-paste-t
 **轨迹**：W-3a 留下的 98 条**逐字节不变**（修复是边界收口，不是重新取帧），参考集 98 → **102** 条，
 新增的四条是上面这组安全用例。变异 M6（删掉守卫）与 M7（守卫放在循环之前）都在回归套件与轨迹门转红。
 
-**仍未做**：W-3b 全部（`SURFACE_COMPOSER_KEYS`、Ctrl+L 两份实现、`composerUnit` 拆分）与 W-7（picker
-自带 reader）。本轮不发版。
+**仍未做**：W-3b 的其余两项（Ctrl+L 两份实现、`composerUnit` 拆分）与 W-7（picker 自带 reader）。
+本轮不发版。
+
+## 14. W-3b.1 Status（2026-10-14）· Surface 编辑键的归属收口
+
+**缺陷（三条，彼此不同）**：Surface 打开时，`Home`/`End`/`Delete` 与 kitty-`Ctrl+Shift+C` 是**序列**，
+Router 在问 Surface 之前先用 `SURFACE_COMPOSER_KEYS` 把它们放行给 Composer。三个键落在三个不同的点上：
+
+| 键 | 原行为 | 性质 |
+|---|---|---|
+| `Home`/`End` | `ownerComposer` 直接写 `this.cursor` / `this.input.length`——**绕过** `fieldText/fieldCursor/setField` | 无字段 Surface：移动**隐藏草稿**的光标；有借用字段：移动的仍是隐藏草稿，读者看得见的那一行纹丝不动 |
+| `Delete` | `deleteAtCursor()` **本来就是 field-aware** | 有借用字段时它编辑的是**可见字段**（正确）；无字段 Surface 时它落回隐藏草稿（泄漏） |
+| kitty-`Ctrl+Shift+C` | `copyKey()` 在 `dialog !== undefined && screen === undefined` 时**直接返回 false** | 已经拒绝：无字段 Surface、有字段 Surface 都是无操作。本轮只收正归属，不发明 Surface 复制 UX |
+
+**审计矩阵**（真实 `handleData(Buffer)`，五种 Surface 形态 × 六个键）确认了上面的分类：confirm /
+approval / 无过滤列表 / **过滤中**列表四种形态下，Home/End 改 `cursor`（3→0 / 3→8），Delete 把草稿
+`我打了一半的消息` 改成 `我打了半的消息`；借用字段形态下 Home/End 改的是隐藏 `cursor` 而 `borrowed`
+停在 `ab|2`。**过滤形态没有过滤光标模型**（`dialog.filter` 只有 append/backspace 两个操作，
+`typeQuestionFilter`/`backspaceQuestionFilter`），所以按合同**不新增**过滤编辑：这些键在这里只能是
+"消费并丢弃"。picker 走 `src/picker.ts` 自带的 decoder/reader（W-7 债），根本不经过 `handleData`。
+
+**修复**：
+- `src/input-router.ts`：删除 `SURFACE_COMPOSER_KEYS` 及其分支——Surface 拥有**全部**单元，只剩 Ctrl+L
+  一条记录在案的例外（W-3b.2）。
+- `src/tui.ts` `ownerSurface`：`Home`/`End` → `moveFieldCursor('start'|'end')`；`Delete` →
+  `if (this.textIsEditable()) this.deleteAtCursor()`；其余序列照旧丢弃（复制键因此归 Surface 并被丢弃，
+  与既有可观察行为一致）。
+- `src/tui.ts` 新增 `moveFieldCursor(target)`（+15 行）：走 `fieldText/setField`——与 Ctrl+A/Ctrl+E 同一条
+  路；`ownerComposer` 的 Home/End 改用它，于是"Composer 只在真正拥有 Composer 时使用这些键"从**约定**
+  变成**结构**（无层叠时 `fieldText()` 就是草稿，行为逐字节不变）。
+- 没有第二套路由、没有新的 draft writer（`input`/`cursor` 的写入仍只在 `setField` 里）、没有直接清空/
+  恢复草稿来伪造隔离。
+
+**证据**：`tests/input-router.test.mjs`（层 A：六个单元对 `SURFACE`/`SURFACE_FIELD` 都答 `surface`）、
+`tests/input-ownership-matrix.test.mjs`（新用例"a Surface keeps the composer behind it: its own editing keys
+included"：三种形态 × 九个单元，草稿/光标/历史/滚动/焦点/行数全不动；借用字段那一行断言答案落在
+**可见字段**里）、`tests/input-ownership-regression.test.mjs` 新增 6 条、`tests/interaction-surface.test.mjs`
+新增 1 条（confirm 与 picker 两个 Surface 形态 × 十一个键）。参考轨迹 **102 → 106**：`dialog-home-end`
+与 `dialog-delete` **两条授权变更**（旧读法记在 `W3B1_FIXTURES` 与检查点），新增 4 条安全用例。
+
+**变异**：M1（Home/End 又直接写隐藏 `cursor`）、M2（无字段 Surface 的 Delete 又编辑隐藏草稿）、M3（Router
+又把 Surface 事件放行给 Composer）、M4（借用字段的合法编辑被丢弃）、M5（Screen 输入穿透）全部实测红。
+
+**仍未做**：Ctrl+L 的两份重绘实现（W-3b.2）、`composerUnit` 的 Composer/Surface 共用体拆分（W-3b.3）、
+Surface 内左右箭头编辑借用字段（本轮范围外，现状是被丢弃）、picker 自带 reader（W-7）。

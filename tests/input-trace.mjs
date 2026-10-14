@@ -95,6 +95,10 @@ const SETUPS = {
   question: tui => {
     void tui.askQuestion({ id: 'q1', question: '回滚到哪个版本？' }, 0, 1).catch(() => undefined)
   },
+  /** A list question: the shape that has hotkeys, and the one that can be filtered. */
+  list: tui => {
+    void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1).catch(() => undefined)
+  },
   dialog: tui => {
     // `openConfirm` is the Surface's own entry (the approval service would need a
     // mock); the route under test is the same one `handleApproval` lands on.
@@ -152,8 +156,17 @@ function oid(value) {
   return String(value)
 }
 
-function snapshot(tui, rowsAtStart) {
-  return {
+/**
+ * The recorded end state of one fixture.
+ *
+ * `record` is how a fixture asks for state only its own case can observe: W-3b.1's
+ * borrowed-field case needs the field the Surface borrowed, which the composer's own
+ * `input`/`cursor` say nothing about. It is opt-in on purpose — a key added for every
+ * fixture would rewrite the whole reference, and the reference is only worth comparing
+ * while it is the same file it always was.
+ */
+function snapshot(tui, rowsAtStart, record = []) {
+  const state = {
     input: tui.input,
     cursor: tui.cursor,
     historyIndex: tui.historyIndex,
@@ -171,6 +184,12 @@ function snapshot(tui, rowsAtStart) {
     yank: tui.copyYank ?? null,
     echo: tui.footerEcho?.text ?? null,
   }
+  if (record.includes('borrowed')) {
+    state.borrowed = tui.borrowedText === undefined
+      ? null
+      : { text: tui.borrowedText.text, cursor: tui.borrowedText.cursor }
+  }
+  return state
 }
 
 /**
@@ -198,7 +217,7 @@ export async function traceFixture(fixture) {
   // Both holds are timers (30 ms for a reply tail, 60 ms for an ESC prefix): wait
   // past them so a released key is part of the trace rather than a pending callback.
   await new Promise(resolve => setTimeout(resolve, 120))
-  const state = { ...snapshot(tui, rowsAtStart), sent: [...sent], exits: [...exits] }
+  const state = { ...snapshot(tui, rowsAtStart, fixture.record ?? []), sent: [...sent], exits: [...exits] }
   // Settle a Surface this fixture left open, so the run does not keep a pending
   // promise alive — but never wait on it: the trace is already recorded.
   if (tui.dialog !== undefined) {
@@ -346,4 +365,16 @@ export const FIXTURES = [
   { name: 'screen-escape-then-paste', reads: ['\x1bq\x1b[200~pasted\x1b[201~'], setup: ['screen', 'draft'] },
   { name: 'wizard-paste-tail-escape', reads: ['\x1b[200~pasted\x1b[201~\x1bq'], setup: ['wizard', 'draft'] },
   { name: 'surface-paste-tail-typing', reads: ['\x1b[200~pasted\x1b[201~yes'], setup: ['dialog', 'draft'] },
+  // ── W-3b.1: the Surface's own editing keys ──────────────────────────────────
+  //
+  // Home/End/Delete and the kitty copy sequence are sequences, and a sequence with a
+  // Surface up used to be looked up in the composer's table — so they moved and edited
+  // the draft behind it. These are the safety cases for the closed boundary: the
+  // no-field Surface, the borrowed field (where the same keys are the answer's own),
+  // the filter (a string with no caret, so nothing to move), and the tail behind a
+  // Surface's answer, which must still reach the composer.
+  { name: 'surface-edit-keys-no-field', reads: ['\x1b[H', '\x1b[F', '\x1b[3~', '\x1b[99;6u'], setup: ['dialog', 'draft'] },
+  { name: 'surface-field-home-delete', record: ['borrowed'], reads: ['ab', '\x1b[H', '\x1b[3~', '\x1b[F'], setup: ['question', 'draft'] },
+  { name: 'surface-filter-edit-keys', reads: ['/', 'al', '\x1b[H', '\x1b[3~', '\x1b[F'], setup: ['list', 'draft'] },
+  { name: 'surface-edit-then-answer', reads: ['\x1b[3~', 'yes'], setup: ['dialog', 'draft'] },
 ]

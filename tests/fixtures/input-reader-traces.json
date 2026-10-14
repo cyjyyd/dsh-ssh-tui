@@ -1578,7 +1578,7 @@
     ],
     "state": {
       "input": "我打了一半的消息",
-      "cursor": 8,
+      "cursor": 3,
       "historyIndex": -1,
       "historyLength": 0,
       "folded": false,
@@ -1601,9 +1601,6 @@
         "\u001b[3~"
       ],
       [
-        "deleteAtCursor"
-      ],
-      [
         "handleInputText",
         "n"
       ],
@@ -1613,7 +1610,7 @@
       ]
     ],
     "state": {
-      "input": "我打了半的消息",
+      "input": "我打了一半的消息",
       "cursor": 3,
       "historyIndex": -1,
       "historyLength": 0,
@@ -3539,6 +3536,225 @@
       [
         "handlePasteText",
         "pasted"
+      ],
+      [
+        "handleDialogChar",
+        "y"
+      ],
+      [
+        "insertIntoField",
+        "e"
+      ],
+      [
+        "insertIntoField",
+        "s"
+      ]
+    ],
+    "state": {
+      "input": "我打了es一半的消息",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-edit-keys-no-field": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[H"
+      ],
+      [
+        "handleInputText",
+        "\u001b[F"
+      ],
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[99;6u"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-field-home-delete": {
+    "trace": [
+      [
+        "handleInputText",
+        "ab"
+      ],
+      [
+        "handleDialogChar",
+        "a"
+      ],
+      [
+        "insertIntoField",
+        "a"
+      ],
+      [
+        "handleDialogChar",
+        "b"
+      ],
+      [
+        "insertIntoField",
+        "b"
+      ],
+      [
+        "handleInputText",
+        "\u001b[H"
+      ],
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ],
+      [
+        "deleteAtCursor"
+      ],
+      [
+        "handleInputText",
+        "\u001b[F"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "borrowed": {
+        "text": "b",
+        "cursor": 1
+      },
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-filter-edit-keys": {
+    "trace": [
+      [
+        "handleInputText",
+        "/"
+      ],
+      [
+        "handleDialogChar",
+        "/"
+      ],
+      [
+        "handleInputText",
+        "al"
+      ],
+      [
+        "handleDialogChar",
+        "a"
+      ],
+      [
+        "handleDialogChar",
+        "l"
+      ],
+      [
+        "handleInputText",
+        "\u001b[H"
+      ],
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[F"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-edit-then-answer": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ],
+      [
+        "handleInputText",
+        "yes"
       ],
       [
         "handleDialogChar",

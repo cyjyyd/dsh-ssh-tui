@@ -43,7 +43,7 @@ import { setLocale } from '../lib/i18n/index.js'
 import { displayWidth, stripAnsi } from '../lib/term-text.js'
 import { terminalCapabilities } from '../lib/terminal-caps.js'
 import { SshTui } from '../lib/tui.js'
-import { pushRow, waitForDialog } from './wait.mjs'
+import { pushRow, tick, waitForDialog } from './wait.mjs'
 
 setLocale('zh')
 
@@ -772,5 +772,212 @@ test('W-3a.1: a Surface still routes the rest of its read to the composer', asyn
   assert.equal(tui.input, `${before.input.slice(0, before.cursor)}es${before.input.slice(before.cursor)}`,
     'y answers the Surface and the rest of the read reaches the composer')
   tui.handleData(Buffer.from('n'))
+  await pending.catch(() => undefined)
+})
+
+// ── W-3b.1 · the Surface's own editing keys ─────────────────────────────────
+
+/**
+ * The Surfaces a key can arrive at that own the keyboard without owning a text field.
+ *
+ * Each one is a real entry point: `openConfirm` is what `handleApproval` lands on,
+ * and a question with options is answered by its hotkeys.
+ */
+const SURFACES_WITHOUT_A_FIELD = [
+  ['confirm', async tui => {
+    void new Promise(resolve => { tui.openConfirm('允许工具 "bash"？', 'y = 允许一次', resolve, 'approval') })
+    await waitForDialog(tui, 'confirm')
+  }],
+  ['approval', async tui => {
+    void tui.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } }).catch(() => undefined)
+    await waitForDialog(tui, 'confirm')
+  }],
+  ['question with options', async tui => {
+    void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1).catch(() => undefined)
+    await waitForDialog(tui, 'questions')
+  }],
+  ['question filtering', async tui => {
+    void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1).catch(() => undefined)
+    await waitForDialog(tui, 'questions')
+    // Filter mode is entered with `/`: the list's hotkeys are letters and digits, so
+    // the two cannot both be live. The filter is a string, not a field with a caret.
+    tui.handleData(Buffer.from('/'))
+    tui.handleData(Buffer.from('al'))
+  }],
+]
+
+/** The composer's own editing keys, in both the ASCII and the xterm spellings. */
+const EDIT_KEYS = {
+  'Home (ESC[H)': '\x1b[H',
+  'Home (ESC[1~)': '\x1b[1~',
+  'End (ESC[F)': '\x1b[F',
+  'End (ESC[4~)': '\x1b[4~',
+  'Delete (ESC[3~)': '\x1b[3~',
+}
+
+/** A free-text question: the Surface that borrows the composer's field. */
+const borrowedFieldQuestion = async tui => {
+  void tui.askQuestion({ id: 'q1', question: '回滚到哪个版本？' }, 0, 1).catch(() => undefined)
+  await waitForDialog(tui, 'questions')
+}
+
+test('W-3b.1: a Surface without a field takes Home/End/Delete and drops them', async () => {
+  // The leak this closes: these keys are sequences, and a sequence with a Surface up
+  // was looked up in the composer's table before the Surface saw it — so Home/End moved
+  // the caret of a draft nobody could see, and Delete edited it. A Surface that owns no
+  // field has no caret to move and no character to delete, so it consumes them.
+  for (const [name, open] of SURFACES_WITHOUT_A_FIELD) {
+    for (const [key, bytes] of Object.entries(EDIT_KEYS)) {
+      const tui = fixture()
+      draft(tui)
+      await open(tui)
+      const before = snapshot(tui)
+      const filter = tui.dialog?.filter
+      const optionCursor = tui.dialog?.cursor
+      const where = `${name} + ${key}`
+      tui.handleData(Buffer.from(bytes))
+      assertUnchanged(tui, before, where)
+      assert.equal(tui.dialog?.filter, filter, `${where}: the filter is the reader's, not the draft's`)
+      assert.equal(tui.dialog?.cursor, optionCursor, `${where}: and the highlight did not move`)
+    }
+  }
+})
+
+test('W-3b.1: a Surface with a borrowed field edits the field the reader can see', async () => {
+  // The other half: the same keys are the borrowed field's own editing keys, and the
+  // field on screen is the one they must move. The draft behind it is not.
+  const tui = fixture()
+  draft(tui)
+  await borrowedFieldQuestion(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('ab'))
+  assert.equal(tui.borrowedText?.text, 'ab', 'the answer is typed into the borrowed field')
+
+  tui.handleData(Buffer.from('\x1b[H'))
+  assert.equal(tui.borrowedText?.cursor, 0, 'Home moves the caret of the field on screen')
+  assertUnchanged(tui, before, 'Home at a borrowed field')
+
+  tui.handleData(Buffer.from('\x1b[3~'))
+  assert.equal(tui.borrowedText?.text, 'b', 'Delete edits the field on screen, not the draft behind it')
+  assert.equal(tui.borrowedText?.cursor, 0, 'and leaves the caret where the delete happened')
+  assertUnchanged(tui, before, 'Delete at a borrowed field')
+
+  tui.handleData(Buffer.from('\x1b[F'))
+  assert.equal(tui.borrowedText?.cursor, 1, 'End moves it to the end of the visible answer')
+  assertUnchanged(tui, before, 'End at a borrowed field')
+
+  // The xterm spellings are the same keys.
+  tui.handleData(Buffer.from('\x1b[1~'))
+  assert.equal(tui.borrowedText?.cursor, 0, 'ESC[1~ is Home')
+  tui.handleData(Buffer.from('\x1b[4~'))
+  assert.equal(tui.borrowedText?.cursor, 1, 'ESC[4~ is End')
+  assertUnchanged(tui, before, 'the aliases at a borrowed field')
+})
+
+test('W-3b.1: the copy key at a Surface copies nothing, at a Screen it still copies', async () => {
+  // No new Surface copy UX this round: the key is owned by the Surface and dropped
+  // there, which is what it did before (the composer's copy refuses while a Surface is
+  // up). The Screen's own copy contract is the one that must not move.
+  const copies = [...SURFACES_WITHOUT_A_FIELD, ['borrowed field', borrowedFieldQuestion]]
+  for (const [name, open] of copies) {
+    const tui = fixture()
+    transcript(tui)
+    draft(tui)
+    await open(tui)
+    const before = snapshot(tui)
+    tui.handleData(Buffer.from('\x1b[99;6u'))
+    assertUnchanged(tui, before, `${name} + Ctrl+Shift+C`)
+    assert.equal(tui.copyYank, before.yank, `${name}: nothing was copied`)
+  }
+
+  const screen = fixture()
+  screen.openScreen({
+    kind: 'report', report: 'diag', title: '诊断',
+    lines: [{ kind: 'system', text: '正文' }], offset: 0, copyText: '屏幕上的正文',
+  })
+  draft(screen)
+  const beforeScreen = snapshot(screen)
+  screen.handleData(Buffer.from('\x1b[99;6u'))
+  assert.equal(screen.copyYank, '屏幕上的正文', 'the Screen still copies its own body')
+  assert.equal(screen.input, beforeScreen.input, 'and the draft behind it is untouched')
+})
+
+test('W-3b.1: a mixed read does not let the Surface’s keys reach the draft', async () => {
+  // A read is not a key (W-3a): `ESC[3~x` is the Delete and then the `x`, and each is
+  // judged on its own. Neither belongs to the composer while a Surface is up — and the
+  // `x` is refused by a Surface without a field rather than typed behind it.
+  for (const read of ['\x1b[3~x', '\x1b[Hx', 'x\x1b[3~', '\x1b[C\x1b[3~', '\x1b[1~\x1b[4~']) {
+    const tui = fixture()
+    draft(tui)
+    void new Promise(resolve => { tui.openConfirm('允许工具 "bash"？', 'y = 允许一次', resolve, 'approval') })
+    await waitForDialog(tui, 'confirm')
+    const before = snapshot(tui)
+    tui.handleData(Buffer.from(read))
+    assertUnchanged(tui, before, `no-field Surface + ${JSON.stringify(read)}`)
+  }
+
+  // The same read at a borrowed field: Home and Delete are the visible field's own
+  // keys and the `x` is the reader's answer, which belongs there too. The draft behind
+  // it still does not move.
+  const tui = fixture()
+  draft(tui)
+  await borrowedFieldQuestion(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('ab'))
+  tui.handleData(Buffer.from('\x1b[H\x1b[3~x'))
+  assert.equal(tui.borrowedText?.text, 'xb', 'Home, then Delete, then x is the visible field’s own line')
+  assert.equal(tui.borrowedText?.cursor, 1, 'and the caret followed what landed')
+  assertUnchanged(tui, before, 'borrowed field + a mixed read')
+})
+
+test('W-3b.1: the draft a Surface was hiding comes back exactly as it was', async () => {
+  // The isolation claim, at the moment it matters: the Surface is answered and the
+  // reader is back in the composer they left.
+  const denied = fixture()
+  draft(denied)
+  denied.history.push('上一条消息')
+  denied.historyIndex = 0
+  denied.inputFolded = true
+  const pending = denied.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } })
+  await waitForDialog(denied, 'confirm')
+  const before = snapshot(denied)
+  for (const bytes of Object.values(EDIT_KEYS)) denied.handleData(Buffer.from(bytes))
+  denied.handleData(Buffer.from('n'))
+  await pending.catch(() => undefined)
+  assert.equal(denied.input, before.input, 'the draft is still the draft')
+  assert.equal(denied.cursor, before.cursor, 'and the caret is where it was')
+  assert.equal(denied.historyIndex, before.historyIndex, 'the browse position is where it was')
+  assert.equal(denied.inputFolded, before.folded, 'and the fold')
+
+  const answered = fixture()
+  draft(answered)
+  await borrowedFieldQuestion(answered)
+  const beforeAnswer = snapshot(answered)
+  for (const bytes of Object.values(EDIT_KEYS)) answered.handleData(Buffer.from(bytes))
+  answered.handleData(Buffer.from('v2'))
+  answered.handleData(Buffer.from('\r'))
+  await tick(0)
+  assert.equal(answered.dialog, undefined, 'the question was answered')
+  assert.equal(answered.borrowedText, undefined, 'and the borrowed field went back with it')
+  // Answering is a submit, and a submit resets the browse position and the fold — that
+  // is the composer's own path, not the Surface's. What the editing keys may not touch
+  // is the text and the caret.
+  assert.equal(answered.input, beforeAnswer.input, 'the draft a Surface was hiding is still the draft')
+  assert.equal(answered.cursor, beforeAnswer.cursor, 'and its caret is where the reader left it')
+})
+
+test('W-3b.1: a Surface’s own tail still reaches the composer', async () => {
+  // The asymmetry W-3a pinned: a Surface's answer is a character like any other, so the
+  // rest of the read is routed on. The editing keys must not have changed that — the
+  // Delete in front of the `y` is dropped, and the `es` behind it is still typed.
+  const tui = fixture()
+  draft(tui)
+  const pending = tui.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } })
+  await waitForDialog(tui, 'confirm')
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('\x1b[3~yes'))
+  assert.equal(tui.input, `${before.input.slice(0, before.cursor)}es${before.input.slice(before.cursor)}`,
+    'y answers and the es reaches the composer, with the Delete dropped')
+  assert.equal(tui.cursor, before.cursor + 2, 'the caret followed the two characters that landed')
   await pending.catch(() => undefined)
 })

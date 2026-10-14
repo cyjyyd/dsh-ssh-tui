@@ -473,6 +473,45 @@ test('a Screen owns the composer’s own keys, not just the printable ones', () 
   }
 })
 
+test('a Surface owns the composer’s own keys too', async () => {
+  // The Screen case above is the same claim. W-3b.1 closed the last hole of this
+  // shape: Home/End and Delete are *sequences*, and a sequence was looked up in the
+  // composer's table before the Surface saw it — so Home/End moved the caret of a draft
+  // nobody could see and Delete edited it, in the two Surface shapes that borrow no
+  // field. The control-byte keys already asked `textIsEditable` and are here as the
+  // control: they were owned all along, and they still are.
+  const keys = [
+    ['\x1b[H', 'Home'], ['\x1b[1~', 'Home (xterm)'], ['\x1b[F', 'End'], ['\x1b[4~', 'End (xterm)'],
+    ['\x1b[3~', 'Delete'], ['\x1b[99;6u', 'Ctrl+Shift+C'],
+    ['\x7f', 'Backspace'], ['\x15', 'Ctrl+U'], ['\x0b', 'Ctrl+K'],
+    ['\x01', 'Ctrl+A'], ['\x05', 'Ctrl+E'],
+  ]
+  for (const [name, open] of [['interaction/confirm', openConfirmDialog], ['picker', openPicker]]) {
+    for (const [key, label] of keys) {
+      const { tui } = fixture()
+      tui.input = 'the draft I was writing'
+      tui.cursor = 8
+      tui.history.push('an earlier prompt')
+      tui.historyIndex = 0
+      pushRow(tui, {
+        kind: 'tool', callId: 'c1', name: 'bash', title: 'bash', summary: 'ls',
+        args: '{}', output: 'ok', status: 'ok', expanded: false,
+      })
+      await open(tui)
+      const yank = tui.copyYank
+      tui.handleData(Buffer.from(key))
+      const where = `${name} + ${label}`
+      assert.equal(tui.input, 'the draft I was writing', `${where}: the draft belongs to the composer`)
+      assert.equal(tui.cursor, 8, `${where}: and so does its caret`)
+      assert.equal(tui.historyIndex, 0, `${where}: the browse position did not move`)
+      assert.equal(tui.copyYank, yank, `${where}: and nothing was copied behind the Surface`)
+      assert.notEqual(tui.dialog, undefined, `${where}: the Surface is still up`)
+      if (name === 'picker') tui.handleEscape()
+      await tick(0)
+    }
+  }
+})
+
 test('a paste at a Screen with no field goes nowhere at all', () => {
   for (const [name, open] of SCREENS.slice(1)) {
     const { tui } = fixture()

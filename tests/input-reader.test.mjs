@@ -68,6 +68,24 @@ const W3A1_FIXTURES = {
   'surface-paste-tail-typing': 'nothing (the same trace: a Surface hands the rest of the read on, and it still does)',
 }
 
+/**
+ * The two traces W-3b.1 changes, and the four safety cases it adds.
+ *
+ * The first two are the defect, written down: with a Surface up, `Home`/`End` were
+ * looked up in the composer's table and moved the *hidden* draft's caret, and `Delete`
+ * edited it. Both are replaced here with the old reading recorded, because a reference
+ * that is rewritten without one is a reference that proves nothing. The new fixtures are
+ * the boundary itself — each Surface shape, and the answer's tail behind it.
+ */
+const W3B1_FIXTURES = {
+  'dialog-home-end': 'with a confirmation up, Home/End moved the draft behind it (cursor 3 → 8); the trace itself was already the two reads, so the change is the end state',
+  'dialog-delete': 'the Delete was spent on the draft behind the confirmation (我打了一半的消息 → 我打了半的消息, with a `deleteAtCursor` call in the trace)',
+  'surface-edit-keys-no-field': 'new case: the same keys, plus the kitty copy sequence, at a confirmation — the old build deleted a character and called `copyKey`',
+  'surface-field-home-delete': 'new case: a Surface that borrowed the field edits *that* one (borrowed ab|2 → b|1 with Home, Delete and End)',
+  'surface-filter-edit-keys': 'new case: a list question in filter mode — the filter is a string with no caret, so the keys are dropped and the draft is untouched',
+  'surface-edit-then-answer': 'new case: `ESC[3~yes` at a confirmation — the Delete is dropped and `y` still answers while `es` reaches the composer',
+}
+
 test('the fixture set is the one the reference was captured from', () => {
   assert.deepEqual(
     FIXTURES.map(fixture => fixture.name).sort(),
@@ -172,6 +190,57 @@ test('W-3a.1: a Screen stops the delivery of its text unit, and a Surface still 
     ['insertIntoField', 's'],
   ], 'a Surface still hands the rest of the read on')
   assert.equal(surface.state.input, '我打了es一半的消息', 'which is what the composer takes')
+})
+
+test('W-3b.1: a Surface owns its editing keys, and the field on screen is the one they edit', () => {
+  // Where the two changed traces land, and what the four new ones pin. The trace is the
+  // evidence here because the change is a *call* that no longer happens (`deleteAtCursor`
+  // on the hidden draft) and a caret that no longer moves (the hidden `cursor`), plus the
+  // borrowed field for the one case the composer's own state cannot see.
+  assert.deepEqual(Object.keys(W3B1_FIXTURES).sort(), [
+    'dialog-delete', 'dialog-home-end', 'surface-edit-keys-no-field',
+    'surface-edit-then-answer', 'surface-field-home-delete', 'surface-filter-edit-keys',
+  ])
+
+  // The two that changed: with a confirmation up, Home/End left the draft's caret alone.
+  const homeEnd = REFERENCE['dialog-home-end']
+  assert.equal(homeEnd.state.cursor, 3, 'Home/End no longer move the caret of the draft behind the Surface')
+  assert.equal(homeEnd.state.input, '我打了一半的消息', 'and never touched its text')
+
+  const deleted = REFERENCE['dialog-delete']
+  assert.deepEqual(deleted.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]), ['handleDialogChar'],
+    'the Delete is consumed by the Surface: no `deleteAtCursor` reaches the draft')
+  assert.equal(deleted.state.input, '我打了一半的消息', 'so the draft is whole')
+
+  // A confirmation with no field: all four keys are dropped, including the copy key.
+  const noField = REFERENCE['surface-edit-keys-no-field']
+  assert.deepEqual(noField.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]), ['handleDialogChar'],
+    'none of Home/End/Delete/copy reaches a consumer behind the Surface')
+  assert.equal(noField.state.input, '我打了一半的消息', 'the draft is untouched')
+  assert.equal(noField.state.cursor, 3, 'and so is its caret')
+  assert.equal(noField.state.yank, '', 'and nothing was copied')
+
+  // The borrowed field: the keys edit the answer the reader can see. This is the one
+  // fixture that records `borrowed` — the composer's `input`/`cursor` cannot show it.
+  const borrowed = REFERENCE['surface-field-home-delete']
+  assert.deepEqual(borrowed.state.borrowed, { text: 'b', cursor: 1 },
+    'Home, Delete and End edited the borrowed field: ab|2 → b|0 → b|1')
+  assert.equal(borrowed.state.input, '我打了一半的消息', 'while the draft behind it never moved')
+  assert.equal(borrowed.state.cursor, 3, 'nor its caret')
+
+  // A filter is a string, not a field with a caret: nothing to move, nothing to delete.
+  const filter = REFERENCE['surface-filter-edit-keys']
+  assert.deepEqual(filter.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]),
+    ['handleDialogChar', 'handleDialogChar', 'handleDialogChar', 'handleDialogChar'],
+    'the filter took the `/` and the two characters, and the editing keys reached nobody')
+  assert.equal(filter.state.input, '我打了一半的消息', 'the draft behind the filtered list is whole')
+
+  // The tail behind a Surface's answer still belongs to the composer (W-3a), and the
+  // Delete in front of it no longer costs it a character.
+  const answer = REFERENCE['surface-edit-then-answer']
+  assert.deepEqual(answer.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]),
+    ['handleDialogChar', 'insertIntoField', 'insertIntoField'], 'y answers, es is typed')
+  assert.equal(answer.state.input, '我打了es一半的消息', 'with the Delete dropped rather than spent on the draft')
 })
 
 test('a read is not a key: one read and several reads reach the same owners and state', async () => {

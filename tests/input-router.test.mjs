@@ -3,14 +3,14 @@
  *
  * Layer A of the W-2 test plan: one unit in, one owner out, decided by the Router
  * alone. The rules below are the ones the ladder applied inline before this module
- * existed — including the two asymmetries the contract records as debt (Ctrl+L's two
- * implementations, and the Home/End/Delete pair that still reaches the Composer with
- * a Surface up). Pinning them here means W-3 changes them deliberately, with this
- * file in the diff, rather than by accident.
+ * existed. Two asymmetries were recorded here as debt when W-2 moved the routing;
+ * W-3b.1 closed one of them (a Surface owns its editing keys now) and the other
+ * (Ctrl+L's two repaint implementations) is still W-3b.2's. Pinning both here is what
+ * makes a change to either one show up in this file's diff.
  *
  * Layer B — the same decisions through `handleData` → Reader → Router → owner — is
- * `tests/input-reader.test.mjs` (the 72-fixture trace comparison) and the ownership
- * matrix in `tests/input-ownership-regression.test.mjs`.
+ * `tests/input-reader.test.mjs` (the trace comparison) and the ownership matrix in
+ * `tests/input-ownership-matrix.test.mjs`.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -68,14 +68,19 @@ test('a Surface owns its units, and drops what it does not use', () => {
   }
 })
 
-test('the two recorded Surface asymmetries stay where W-1 left them', () => {
-  // Ctrl+L: the repaint is the composer's implementation when no Screen is up
-  // (G-6 keeps both implementations until a test proves they are identical).
-  assert.equal(router.route('control', '\x0c', SURFACE), 'composer')
-  // Home/End/Delete and the kitty copy sequence still reach the composer today.
+test('a Surface owns the composer’s editing keys too', () => {
+  // W-3b.1: Home/End/Delete and the kitty copy sequence are the Surface's own units.
+  // They used to be looked up in the composer's table while a Surface was up, which
+  // moved and edited a draft nobody could see. The Surface decides what to do with
+  // them now (it edits a field it borrowed, or drops them) — the Router's answer is
+  // simply that the Surface owns them.
   for (const unit of ['\x1b[H', '\x1b[F', '\x1b[1~', '\x1b[4~', '\x1b[3~', '\x1b[99;6u']) {
-    assert.equal(router.route('sequence', unit, SURFACE), 'composer', `${JSON.stringify(unit)} is recorded debt (W-3)`)
+    assert.equal(router.route('sequence', unit, SURFACE), 'surface', `${JSON.stringify(unit)} is the Surface's`)
+    assert.equal(router.route('sequence', unit, SURFACE_FIELD), 'surface', 'borrowed field or not')
   }
+  // The one asymmetry left: Ctrl+L's repaint is still the composer's implementation
+  // when no Screen is up (G-6 keeps both until a test proves they are identical).
+  assert.equal(router.route('control', '\x0c', SURFACE), 'composer')
 })
 
 test('with nothing layered over it, the composer types and the workspace scrolls', () => {
