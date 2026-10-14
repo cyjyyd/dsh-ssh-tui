@@ -2161,3 +2161,7 @@ Surface 上只到 Surface；括号粘贴即使内容是键字节也是文本；�
 
 **本轮未做（W-3b 起）**：`SURFACE_COMPOSER_KEYS`、Ctrl+L 的两份实现、`composerUnit` 共用体拆分、
 Completion/Search/Doctor、picker 自带 reader、计划卡默认折叠（已单独登记 `docs/plans/plan-card-fold.md`）。
+
+**CI**：W-3a 提交 `f7e5849` 的 run `38537258218` **5/5 全绿**（`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
+`test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`）；收紧基线后的提交 `80f9a23` 的 run
+`38538601786` 同样 **5/5**。含 Windows 腿在内，`screenKeys` 删除、逐单元路由与五条变体都在真机腿上验过。
