@@ -117,7 +117,7 @@ W-2 **没有**把这两条修掉：它们不是 W-2 授权范围（§"不修复 
 | 层 | 文件 | 内容 |
 |---|---|---|
 | A · 纯决策 | `tests/input-router.test.mjs` | 每条规则一张断言；全组合扫描保证"永远是四个 Owner 之一"；快照冻结验证纯函数 |
-| B · 真实路径 | `tests/input-ownership-matrix.test.mjs` | 每个状态 × 每个单元：**恰好一个适配器**被调用；Screen 背后草稿不被任何单元改写；无字段 Surface 拒绝文本与粘贴；无人认领的事件不产生状态变化；关屏后草稿与焦点原样回来；resume → 向导；粘贴的 `yes` 不作答 |
+| B · 真实路径 | `tests/input-ownership-matrix.test.mjs` | 每个状态 × 每个单元：**恰好一个适配器**被调用；Screen 背后草稿不被任何单元改写（单元清单含"既关屏又带尾巴"的两条粘贴 read——W-3a.1）；无字段 Surface 拒绝文本与粘贴；无人认领的事件不产生状态变化；关屏后草稿与焦点原样回来；resume → 向导；粘贴的 `yes` 不作答 |
 | B · 轨迹等价 | `tests/input-reader.test.mjs` | **72 条 fixture / 246 次边界调用 + 终态**，与抽取前构建逐字节一致 |
 | 静态棘轮 | `scripts/input-freeze-audit.mjs` | 见 §8 |
 

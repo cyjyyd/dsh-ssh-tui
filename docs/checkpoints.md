@@ -2212,15 +2212,19 @@ Screen 关闭后余下丢弃——W-3a 已修，本轮不能破坏）；标记�
 | `wizard-paste-tail-escape` | `pasteIntoScreen('pasted')`、`handleSetupKey('\x1b','cancel')`、`insertIntoField('q')` | 同上但**没有** `insertIntoField`；向导字段拿到 `pasted`、Composer 草稿原样 |
 | `surface-paste-tail-typing` | `handleDialogChar('y')`、`insertIntoField('e')`、`insertIntoField('s')` | **逐字节相同**——Surface 的尾部语义没被这次修复碰到 |
 
-**新增用例**（`tests/input-ownership-regression.test.mjs` 5 条 + `tests/input-reader.test.mjs` 1 条）：
+**新增用例**（`tests/input-ownership-regression.test.mjs` 5 条 + `tests/input-reader.test.mjs` 1 条 +
+`tests/input-ownership-matrix.test.mjs` 的单元清单 2 项）：
 帧内关闭（三种尾巴 `\x1bq` / `\x1bqhello` / `\x1bq\rx`）、标记前关闭、向导字段与草稿隔离、
-普通 read 的帧间尾部仍丢弃 + 无 Screen 时尾巴照常输入、Surface 尾部仍进 Composer、以及上面那张轨迹表。
+普通 read 的帧间尾部仍丢弃 + 无 Screen 时尾巴照常输入、Surface 尾部仍进 Composer、上面那张轨迹表，
+以及矩阵里"**Screen 背后的草稿不被任何单元改写**"这一条补上的两个单元
+（`\x1b[200~pasted\x1b[201~\x1bq` 与 `\x1bq\x1b[200~pasted\x1b[201~`）——原来那份清单只有"单独的粘贴"，
+没有"既结束 Screen 又带尾巴"的单元，这正是缺陷能躲过去的地方。
 
-**Mutation（实测红后恢复，`src/` 事后只剩本轮修复本身）**：
+**Mutation（实测红后恢复，`src/` 事后与提交一致）**：
 
 | # | 变异 | 结果 |
 |---|---|---|
-| M6 | 删掉守卫（穿透路径恢复） | ✗ 三条 W-3a.1 在机用例 + 轨迹门 `every fixture frames identically` 红 |
+| M6 | 删掉守卫（穿透路径恢复） | ✗ 三条 W-3a.1 在机用例 + 矩阵"Screen 背后草稿"条 + 轨迹门 `every fixture frames identically` 红 |
 | M7 | 守卫放在循环**之前**（检查了，但只检查一次） | ✗ 同上——位置错也红，说明测的是行为不是"有没有那行" |
 
 **门**：`npm test` **1460 项 · 1456 通过 · 0 失败 · 4 跳过 · 0 todo** · `typecheck` 0 ·

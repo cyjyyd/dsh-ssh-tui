@@ -148,7 +148,12 @@ test('a unit reaches exactly one owner, in every state', () => {
 })
 
 test('a Screen keeps the composer behind it: keys, paste, mouse', () => {
-  for (const unit of ['x', '\r', '\x1b', '\x15', '\x0b', '\x7f', '\x03', '\x04', '\x12', '\x14', '\x1b[3~', '\x1b[<0;10;5M', '\x1b[200~pasted\x1b[201~']) {
+  // The last two are one read that both ends the Screen and carries a tail: a paste
+  // followed by the Escape and a key behind it, and the same in the other order. They
+  // are *units*, not frames — the delivery is character by character inside them — and
+  // they are here because this list is what says "no unit rewrites the draft behind a
+  // Screen" (W-3a.1: the tail of one of them did).
+  for (const unit of ['x', '\r', '\x1b', '\x15', '\x0b', '\x7f', '\x03', '\x04', '\x12', '\x14', '\x1b[3~', '\x1b[<0;10;5M', '\x1b[200~pasted\x1b[201~', '\x1b[200~pasted\x1b[201~\x1bq', '\x1bq\x1b[200~pasted\x1b[201~']) {
     const { tui } = fixture()
     tui.openScreen({ kind: 'report', report: 'diag', title: '诊断', lines: [{ kind: 'system', text: '正文' }], offset: 0 })
     draft(tui)
