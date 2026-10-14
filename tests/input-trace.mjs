@@ -20,13 +20,21 @@ import { pushRow } from './wait.mjs'
 
 setLocale('zh')
 
-/** The instance methods whose calls are the framing's observable output. */
+/**
+ * The instance methods whose calls are the framing's observable output.
+ *
+ * Deliberately the **owner boundary** and the effects, not the internals the
+ * refactors are allowed to rename: W-1 replaced `processPasteChunk`, W-2 replaced
+ * `handleChar`/`handlePlainText`/`scrollActiveSurface` with adapters, and neither is
+ * a behaviour change — a trace that failed on those names would be pinning the shape
+ * of the code rather than what a user sees. What stays in the list is what the four
+ * owners are called *by*, plus the operations that move state a reader can observe
+ * (history, focus, scroll, the selection, the exit).
+ */
 const TRACED = [
   'handleInputText',
   'handlePasteText',
   'pasteIntoScreen',
-  'handlePlainText',
-  'handleChar',
   'handleScreenInput',
   'handleSetupKey',
   'handleDialogChar',
@@ -34,13 +42,23 @@ const TRACED = [
   'handleEscape',
   'handleCtrlC',
   'copyKey',
-  'scrollActiveSurface',
   'scrollScreen',
+  'moveFocus',
+  'historyBack',
+  'historyForward',
+  'moveCursor',
+  'insertIntoField',
+  'backspace',
+  'deleteAtCursor',
   'beginMouseSelection',
   'extendMouseSelection',
   'endMouseSelection',
   'handleMouseClick',
   'stepSearch',
+  'jumpToCategory',
+  'toggleCollapsible',
+  'toggleAllCollapsible',
+  'requestExit',
 ]
 
 /**
@@ -73,6 +91,10 @@ const SETUPS = {
     })
   },
   wizard: tui => { void tui.runOnboarding() },
+  /** A question with no options: the Surface that owns a borrowed text field. */
+  question: tui => {
+    void tui.askQuestion({ id: 'q1', question: '回滚到哪个版本？' }, 0, 1).catch(() => undefined)
+  },
   dialog: tui => {
     // `openConfirm` is the Surface's own entry (the approval service would need a
     // mock); the route under test is the same one `handleApproval` lands on.
@@ -246,6 +268,25 @@ export const FIXTURES = [
   { name: 'paste-at-screen', reads: ['\x1b[200~pasted\x1b[201~'], setup: ['screen', 'draft'] },
   { name: 'paste-burst-no-markers', reads: ['one\ntwo\nthree\n'] },
   { name: 'yes-is-not-an-answer', reads: ['yes'] },
+  // ── the Surface's edges, and the two Ctrl+L implementations (W-2 decisions) ──
+  { name: 'dialog-arrows', reads: ['\x1b[A', '\x1b[B'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-escape', reads: ['\x1b'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-enter', reads: ['\r'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-ctrl-c', reads: ['\x03'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-ctrl-l', reads: ['\x0c'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-ctrl-u', reads: ['\x15'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-home-end', reads: ['\x1b[H', '\x1b[F'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-delete', reads: ['\x1b[3~'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-pages-wheel', reads: ['\x1b[5~', '\x1b[<65;10;5M'], setup: ['dialog', 'draft'] },
+  { name: 'dialog-unknown-csi', reads: ['\x1b[1;5u'], setup: ['dialog', 'draft'] },
+  { name: 'composer-ctrl-l', reads: ['\x0c'], setup: ['draft'] },
+  { name: 'screen-ctrl-l', reads: ['\x0c'], setup: ['screen', 'draft'] },
+  { name: 'screen-printable-hint', reads: ['x'], setup: ['screen', 'draft'] },
+  { name: 'question-typing', reads: ['v2.3'], setup: ['question', 'draft'] },
+  { name: 'question-backspace', reads: ['v2.3', '\x7f\x7f'], setup: ['question', 'draft'] },
+  { name: 'question-enter', reads: ['v2.3\r'], setup: ['question', 'draft'] },
+  { name: 'question-paste', reads: ['\x1b[200~v2.3\x1b[201~'], setup: ['question', 'draft'] },
+  { name: 'question-arrows', reads: ['\x1b[A', '\x1b[B'], setup: ['question', 'draft'] },
   { name: 'yes-typed-at-dialog', reads: ['yes'], setup: ['dialog', 'draft'] },
   { name: 'yes-pasted-at-dialog', reads: ['\x1b[200~yes\x1b[201~'], setup: ['dialog', 'draft'] },
   { name: 'screen-keys', reads: ['\x1b[B', '\x1b[6~', 'q'], setup: ['screen', 'draft'] },

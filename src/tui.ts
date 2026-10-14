@@ -54,6 +54,8 @@ import { classifyApprovalDetailed, commandForApprovalRequest, isApprovalStatusAr
 import type { FooterActivityKind } from './footer-budget.js'
 import { InputReader } from './input-reader.js'
 import type { InputFrame } from './input-reader.js'
+import { InputRouter } from './input-router.js'
+import type { Owner, OwnershipSnapshot, UnitKind } from './input-router.js'
 import {
   auditQuestionPrimaries,
   auditRepresentations,
@@ -1315,6 +1317,8 @@ const QUOTA_RETRY_MS = 15_000
  * screen's own tests have one source: the *order* is the product decision (B2.6 §3
  * keeps it unchanged), and this is where it is written down.
  */
+/** SGR mouse report: `\x1b[<button;column;row` + `M` (press/motion) or `m` (release). */
+const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u
 const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick', 'model-default', 'context', 'confirm'] as const
 
 /** The steps that show a text field (the others are pickers or the confirmation). */
@@ -2415,6 +2419,20 @@ export class SshTui {
     onRead: text => this.handleInputText(text),
     onFrame: frame => this.consumeFrame(frame),
   })
+  /**
+   * The Router (AD-22, W-2): the one place a unit's owner is decided.
+   *
+   * `ownershipView` is the read-only snapshot it answers from — one object, rewritten
+   * per decision, so a keystroke allocates nothing (W-2 is a hot-path migration).
+   */
+  private readonly router = new InputRouter()
+  private readonly ownershipView: OwnershipSnapshot = {
+    screenKind: undefined,
+    surfaceKind: undefined,
+    surfaceHasField: false,
+    composerEmpty: true,
+    workspaceCards: false,
+  }
   private thinkingStartedAt: number | undefined
   private waitStartedAt: number | undefined
   /**
@@ -12512,7 +12530,7 @@ export class SshTui {
   /** One framed unit, at the owner that takes it. */
   private consumeFrame(frame: InputFrame): void {
     switch (frame.kind) {
-      case 'paste': this.handlePasteText(frame.text); return
+      case 'paste': this.dispatchPaste(frame.text); return
       // A sequence tail, an Alt remainder or a released hold: typed as it is, with
       // no keymap lookup — which is what the inline version did at those three sites.
       case 'literal': this.handlePlainText(frame.text); return
@@ -12527,19 +12545,31 @@ export class SshTui {
     }
   }
 
-  /** Today's ladder: one read, one owner (AD-20's priority order). */
+  /**
+   * One read from the Reader, as the ladder has always taken it.
+   *
+   * Two kinds of table live here and they are not the same thing:
+   *
+   *   - **binding** — which byte means which action (the keymap's rebindable actions,
+   *     the Alt chords, the SS3 tail). Those stay; AD-20 F-5 wants one table per key.
+   *   - **ownership** — who takes the unit. That question is the Router's now, and it
+   *     is asked exactly once per unit, before any binding table is consulted: a
+   *     Screen owns the read outright, so the tables below are for the unlayered case,
+   *     which is the order the ladder always had.
+   *
+   * The parsing branches that are neither (a read that could still grow — the Reader
+   * holds it; an escape sequence nobody claimed — dropped) stay here as well.
+   */
   private route(combined: string): void {
-    // A key the user moved, and a key their move displaced. Consulted before any
-    // routing so a plain control byte reaches it as readily as a CSI sequence;
-    // everything else keeps the handling below, which is what makes the defaults
-    // unchanged by construction.
+    // A key the user moved, and a key their move displaced.
     const moved = combined === '' ? undefined : this.keymap.sequences.get(combined)
-    // A Screen replaces the workspace and owns every key outright. There is no
-    // composer behind it, no transcript to fall through to and no Surface it could
-    // share with: one gate, instead of the ten `dialog?.kind === 'inspect'` checks
-    // this replaced (B2.1).
-    if (this.screen !== undefined) {
-      this.handleScreenInput(combined, moved)
+    const kind = this.readKind(combined)
+    this.observe(kind, combined)
+    const owner = this.router.route(kind, combined, this.ownershipView)
+    // A Screen owns the read outright (AD-20 §4.3 priority 3): nothing below this
+    // line runs for it — no keymap action, no Alt chord, no bare ESC for the composer.
+    if (owner === 'screen') {
+      this.ownerScreen(combined, moved)
       return
     }
     if (this.dialog === undefined && combined !== '') {
@@ -12548,101 +12578,14 @@ export class SshTui {
       }
       if (this.dialog === undefined && this.keymap.suppressed.has(combined)) return
     }
-
-    const escape = /^\x1b\[([A-D])$/u
-    const match = combined.match(escape)
-    if (match !== null) {
-      switch (match[1]) {
-        case 'A':
-          if (this.moveQuestionCursor(-1)) {
-            return
-            return
-            return
-          } else if (this.dialog !== undefined) {
-            // A surface owns the keyboard: an arrow it does not use is not the
-            // transcript's. Falling through moved the selection behind the dialog,
-            // and with a non-empty field it rewrote the field from history.
-            return
-          } else if (this.suggestionsVisible()) {
-            this.suggestionIndex = Math.max(0, this.suggestionIndex - 1)
-            this.markDirty()
-          } else if (this.fieldText() === '' && this.collapsibleRows().length > 0) {
-            this.moveFocus(-1)
-          } else {
-            this.historyBack()
-          }
-          return
-        case 'B':
-          if (this.moveQuestionCursor(1)) {
-            return
-            return
-            return
-          } else if (this.dialog !== undefined) {
-            return
-          } else if (this.suggestionsVisible()) {
-            this.suggestionIndex = Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
-            this.markDirty()
-          } else if (this.fieldText() === '' && this.collapsibleRows().length > 0) {
-            this.moveFocus(1)
-          } else {
-            this.historyForward()
-          }
-          return
-        case 'C': if (this.textIsEditable()) this.moveCursor(1); return
-        case 'D': if (this.textIsEditable()) this.moveCursor(-1); return
-      }
-    }
-    const sgrMouse = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
-    if (sgrMouse !== null) {
-      const button = Number(sgrMouse[1])
-      const x = Number(sgrMouse[2])
-      const y = Number(sgrMouse[3])
-      if (sgrMouse[4] === 'M') {
-        if (button === 64) {
-          this.scrollActiveSurface(3)
-          return
-        }
-        if (button === 65) {
-          this.scrollActiveSurface(-3)
-          return
-        }
-        // 32 is "motion with the left button held": a drag over a reply. Shift
-        // adds 4 to every button code, and a terminal that still forwards the
-        // report while Shift is down (instead of keeping it for its own
-        // selection) must drag exactly like an unshifted one — otherwise the
-        // gesture the user was told to fall back on does nothing here.
-        if (button === 32 || button === 36) {
-          this.extendMouseSelection(y, x)
-          return
-        }
-        if (button === 0 || button === 4) {
-          this.beginMouseSelection(y, x)
-          return
-        }
-        return
-      }
-      // A release ends either a drag (copy what it covered) or a plain click.
-      if (button === 0 || button === 4) this.endMouseSelection(y, x)
-      return
-    }
-    if (combined === '\x1b[5~') {
-      this.scrollActiveSurface(Math.max(3, Math.floor(this.screenRows() / 2)))
-      return
-    }
-    if (combined === '\x1b[6~') {
-      this.scrollActiveSurface(-Math.max(3, Math.floor(this.screenRows() / 2)))
-      return
-    }
     if (this.reader.isDeviceReply(combined)) {
       this.consumeFrame({ kind: 'reply', sequence: combined })
       return
     }
-    if (combined === '\x1b[H' || combined === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
-    if (combined === '\x1b[F' || combined === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
-    if (combined === '\x1b[3~') { this.deleteAtCursor(); return }
-    // kitty / CSI-u Ctrl+Shift+C (codepoint 99, mods 6 = Ctrl+Shift)
-    if (combined === '\x1b[99;6u') {
-      this.copyKey()
+    // The sequence shapes the ladder matched before its hold window: they go to their
+    // owner as one unit, and only what is left over can still grow (the Reader holds it).
+    if (this.isSequenceShape(combined)) {
+      this.dispatchWith(owner, combined, moved)
       return
     }
     const ss3 = /^\x1bO[A-Z]/u.exec(combined)
@@ -12677,7 +12620,305 @@ export class SshTui {
       this.handlePlainText(alt)
       return
     }
-    this.handlePlainText(combined)
+    this.dispatchWith(owner, combined, moved)
+  }
+
+  /**
+   * The Router's read-only view, rewritten per decision (no allocation).
+   *
+   * The card question is the only expensive one — `collapsibleRows()` walks the
+   * visible transcript — so it is answered only for the arrow that asks it, and only
+   * when nothing is layered over the workspace.
+   */
+  private observe(kind: UnitKind, unit: string): void {
+    const view = this.ownershipView
+    const screen = this.screen
+    const surface = this.dialog
+    view.screenKind = screen?.kind
+    view.surfaceKind = surface?.kind
+    view.surfaceHasField = this.borrowedText !== undefined
+    view.composerEmpty = this.fieldText() === ''
+    view.workspaceCards = screen === undefined && surface === undefined
+      && kind === 'sequence'
+      && (unit === '\x1b[A' || unit === '\x1b[B')
+      && view.composerEmpty
+      && this.collapsibleRows().length > 0
+  }
+
+  /**
+   * Whether a read is one of the sequence shapes the ladder claims as a whole.
+   *
+   * These are matched *before* the Reader's hold window — the order the ladder always
+   * had (`ESC [ 5 ~` is a page key, not a prefix that might still grow).
+   */
+  private isSequenceShape(unit: string): boolean {
+    return /^\x1b\[[A-D]$/u.test(unit)
+      || SGR_MOUSE_RE.test(unit)
+      || unit === '\x1b[5~' || unit === '\x1b[6~'
+      || unit === '\x1b[H' || unit === '\x1b[1~' || unit === '\x1b[F' || unit === '\x1b[4~'
+      || unit === '\x1b[3~' || unit === '\x1b[99;6u'
+  }
+
+  /** The unit class of one read, by shape (the Reader's classification, allocation-free). */
+  private readKind(combined: string): UnitKind {
+    if (combined === '\x1b') return 'escape'
+    if (combined.length === 1) return combined < ' ' || combined === '\x7f' ? 'control' : 'text'
+    return combined.startsWith('\x1b') ? 'sequence' : 'text'
+  }
+
+  /** The unit class of one character — what `handleChar` routes. */
+  private charKind(char: string): UnitKind {
+    if (char === '\x1b') return 'escape'
+    return char < ' ' || char === '\x7f' ? 'control' : 'text'
+  }
+
+  /** One unit, one owner: the Router decides, the owner adapter runs it. */
+  private dispatch(kind: UnitKind, unit: string, moved?: string): void {
+    this.observe(kind, unit)
+    this.dispatchWith(this.router.route(kind, unit, this.ownershipView), unit, moved)
+  }
+
+  /** Run a unit at the owner the Router already named. */
+  private dispatchWith(owner: Owner, unit: string, moved?: string): void {
+    switch (owner) {
+      case 'screen': this.ownerScreen(unit, moved); return
+      case 'surface': this.ownerSurface(unit, moved); return
+      case 'composer': this.ownerComposer(unit, moved); return
+      case 'workspace': this.ownerWorkspace(unit, moved); return
+    }
+  }
+
+  /**
+   * A paste payload: the Router decides, the paste path executes.
+   *
+   * A paste is text, so the field that owns the keyboard takes it — and a Screen that
+   * owns the interaction terminates it (its own field or nothing), never a field
+   * behind it (AD-20 §4.3 priority 1). `handlePasteText` still re-asks that per owner;
+   * that is the compat path W-3 folds into the Router (marked there).
+   */
+  private dispatchPaste(text: string): void {
+    this.observe('paste', text)
+    if (this.router.route('paste', text, this.ownershipView) === 'workspace') return
+    this.handlePasteText(text)
+  }
+
+  /**
+   * The Screen adapter: a Screen owns the keyboard outright (AD-20 §4.3 priority 3).
+   *
+   * The whole read goes in — `handleScreenInput` is what splits it (`screenKeys`) and
+   * where the 0.8.3 paste-burst rule lives. Its own `screen === undefined` guard stays:
+   * a release raced by a teardown reaches it, and refusing there is the adapter's own
+   * business rather than a second ownership decision.
+   */
+  private ownerScreen(unit: string, moved: string | undefined): void {
+    this.handleScreenInput(unit, moved ?? this.keymap.sequences.get(unit))
+  }
+
+  /**
+   * The Surface adapter: a dialog owns the keyboard while it is up.
+   *
+   * Its arrows move a question's cursor (or nothing — an arrow a Surface does not use
+   * is not the transcript's), the page keys are not its business, and its mouse reports
+   * take the same path they always did so the refusal happens where it always did, down
+   * to the remembered press. Everything else goes to the shared composer/Surface body,
+   * whose `dialog` branches are the Surface's own behaviour for those keys.
+   */
+  private ownerSurface(unit: string, moved: string | undefined): void {
+    if (unit === '\x1b[A') { this.moveQuestionCursor(-1); return }
+    if (unit === '\x1b[B') { this.moveQuestionCursor(1); return }
+    const sgr = SGR_MOUSE_RE.exec(unit)
+    if (sgr !== null) {
+      const button = Number(sgr[1])
+      if (button === 64 || button === 65) return
+      this.mouseGesture(sgr)
+      return
+    }
+    if (unit.startsWith('\x1b[') || unit.startsWith('\x1bO')) return
+    this.composerUnit(unit, moved)
+  }
+
+  /**
+   * The Composer adapter.
+   *
+   * Text — one character or many — is typed: the burst rule first, then one character
+   * at a time through the Router, which is what lets ownership change inside a single
+   * read (a Surface answering `y` with the composer taking the `es` behind it). The
+   * sequence shapes the composer owns are the arrows (the suggestion list, else
+   * history) and the caret keys.
+   */
+  private ownerComposer(unit: string, moved: string | undefined): void {
+    if (unit === '\x1b[A') { this.arrowHistory(-1); return }
+    if (unit === '\x1b[B') { this.arrowHistory(1); return }
+    if (unit === '\x1b[C') { if (this.textIsEditable()) this.moveCursor(1); return }
+    if (unit === '\x1b[D') { if (this.textIsEditable()) this.moveCursor(-1); return }
+    if (unit === '\x1b[H' || unit === '\x1b[1~') { this.cursor = 0; this.markDirty(); return }
+    if (unit === '\x1b[F' || unit === '\x1b[4~') { this.cursor = this.input.length; this.markDirty(); return }
+    if (unit === '\x1b[3~') { this.deleteAtCursor(); return }
+    if (unit === '\x1b[99;6u') { this.copyKey(); return }
+    this.composerUnit(unit, moved)
+  }
+
+  /**
+   * The Workspace adapter: the transcript owns the mouse, the page keys and the focus
+   * ring — and the ring only when the Router said so (empty field, a card to land on).
+   */
+  private ownerWorkspace(unit: string, moved: string | undefined): void {
+    void moved
+    const sgr = SGR_MOUSE_RE.exec(unit)
+    if (sgr !== null) {
+      const button = Number(sgr[1])
+      if (button === 64) { this.scrollWorkspace(3); return }
+      if (button === 65) { this.scrollWorkspace(-3); return }
+      this.mouseGesture(sgr)
+      return
+    }
+    const page = Math.max(3, Math.floor(this.screenRows() / 2))
+    if (unit === '\x1b[5~') { this.scrollWorkspace(page); return }
+    if (unit === '\x1b[6~') { this.scrollWorkspace(-page); return }
+    if (unit === '\x1b[A') { this.moveFocus(-1); return }
+    if (unit === '\x1b[B') { this.moveFocus(1); return }
+  }
+
+  /** An arrow the composer keeps: the suggestion list while it is up, else history. */
+  private arrowHistory(direction: -1 | 1): void {
+    if (this.suggestionsVisible()) {
+      this.suggestionIndex = direction < 0
+        ? Math.max(0, this.suggestionIndex - 1)
+        : Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
+      this.markDirty()
+      return
+    }
+    if (direction < 0) this.historyBack()
+    else this.historyForward()
+  }
+
+  /** Press, motion and release: selection, links and card toggles — the transcript's. */
+  private mouseGesture(sgr: RegExpExecArray): void {
+    const button = Number(sgr[1])
+    const x = Number(sgr[2])
+    const y = Number(sgr[3])
+    if (sgr[4] === 'M') {
+      // 32 is "motion with the left button held": a drag over a reply. Shift adds 4 to
+      // every button code, and a terminal that still forwards the report while Shift is
+      // down must drag exactly like an unshifted one.
+      if (button === 32 || button === 36) { this.extendMouseSelection(y, x); return }
+      if (button === 0 || button === 4) { this.beginMouseSelection(y, x); return }
+      return
+    }
+    // A release ends either a drag (copy what it covered) or a plain click.
+    if (button === 0 || button === 4) this.endMouseSelection(y, x)
+  }
+
+  /**
+   * The composer/Surface body — the switch and the tail the ladder always had.
+   *
+   * It is shared by two adapters on purpose: its `dialog` guards *are* the Surface's
+   * behaviour for those keys (a borrowed field takes them, a field-less dialog refuses
+   * them), and splitting them is W-3's job. What the Router guarantees is that a Screen
+   * never reaches it, so every key below can only spend itself on a field the reader
+   * has in front of them — the composer's or a borrowed one. The unreachable second
+   * Screen gate the old body carried is gone with it (G-6).
+   */
+  private composerUnit(unit: string, moved: string | undefined): void {
+    void moved
+    if (unit.length > 1) { this.handlePlainText(unit); return }
+    switch (unit) {
+      case '\x1b': this.handleEscape(); return
+      case '\r':
+      case '\n': this.submit(); return
+      case '\x7f': if (this.textIsEditable()) this.backspace(); return
+      case '\x08': if (this.textIsEditable()) this.backspace(); return
+      case '\x03': this.handleCtrlC(); return
+      // Ctrl+D is the composer's exit key. A surface that owns the keyboard has no
+      // exit semantics of its own, and falling through to the process exit left a
+      // dialog on screen killing the session it was waiting for.
+      case '\x04': if (this.dialog === undefined) void this.requestExit(0); return
+      case '\x0c': this.repaintNow(); return
+      case '\x01': if (this.textIsEditable()) this.setField(this.fieldText(), 0); this.markDirty(); return
+      case '\x05': if (this.textIsEditable()) this.setField(this.fieldText(), this.fieldText().length); this.markDirty(); return
+      case '\x15':
+        if (!this.textIsEditable()) return
+        this.leaveHistoryBrowse()
+        this.setField('', 0)
+        if (this.borrowedText === undefined) this.inputFolded = false
+        this.markDirty()
+        return
+      case '\x0b':
+        if (!this.textIsEditable()) return
+        this.leaveHistoryBrowse()
+        this.setField(this.fieldText().slice(0, this.fieldCursor()), this.fieldCursor())
+        this.markDirty()
+        return
+      // A dialog owns the keyboard while it is up: moving the transcript cursor
+      // under it changed what a later copy would take while the screen showed
+      // nothing of the sort.
+      case '\x0e':
+        if (this.dialog === undefined) this.moveFocus(1)
+        return
+      case '\x10':
+        if (this.dialog === undefined) this.moveFocus(-1)
+        return
+      case '\x12':
+        if (this.dialog !== undefined) return
+        if (this.focusedRow === null) this.toggleCollapsible()
+        else this.toggleAllCollapsible()
+        return
+      case '\x14': if (this.dialog === undefined) this.inputFolded = !this.inputFolded; this.markDirty(); return
+    }
+    if (this.dialog !== undefined) {
+      this.handleDialogChar(unit)
+      return
+    }
+    if (unit === '\x07') {
+      this.stepSearch(1)
+      return
+    }
+    if (unit === '\x1f') {
+      this.input = '/find '
+      this.cursor = this.input.length
+      this.markDirty()
+      return
+    }
+    if (unit === '\t') {
+      if (this.suggestionsVisible()) {
+        const selected = this.commandSuggestions[this.suggestionIndex]
+        if (selected !== undefined) {
+          this.input = `/${selected.name} `
+          this.cursor = this.input.length
+          this.commandSuggestions = []
+          this.suggestionIndex = 0
+          this.markDirty()
+          return
+        }
+      }
+      this.input = `${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`
+      this.cursor += 2
+      this.markDirty()
+      return
+    }
+    if (unit >= ' ' && unit !== '\x7f') {
+      if (!this.textIsEditable()) return
+      this.leaveHistoryBrowse()
+      this.insertIntoField(unit)
+      this.markDirty()
+    }
+  }
+
+  /**
+   * Ctrl+L's repaint, in one place for the owners that share it (G-6).
+   *
+   * The Screen has its own implementation (`screenNeedsFullPaint`, because it repaints
+   * a Screen's frame); this one drops the cached rows so the next full frame is rebuilt
+   * from scratch. W-2 does not merge them — only a test that proves both owners repaint
+   * identically may (AD-20 §6) — but it does give the composer's copy a name.
+   */
+  private repaintNow(): void {
+    this.lastPaintRows = []
+    this.lastChromeKey = ''
+    this.lastPaintWidth = 0
+    this.lastPaintHeight = 0
+    this.dirty = true
+    this.render()
   }
 
   /**
@@ -12760,7 +13001,7 @@ export class SshTui {
     // Fallback for terminals without bracketed paste: a burst of multiple line
     // breaks in one chunk is a paste, not repeated Enter presses.
     if (InputReader.looksLikePasteBurst(text)) {
-      this.handlePasteText(text)
+      this.dispatchPaste(text)
       return
     }
 
@@ -12780,115 +13021,16 @@ export class SshTui {
     }
   }
 
+  /**
+   * One character, from a read or from the typing loop: the Router decides, again.
+   *
+   * It is asked per character rather than per read because ownership can change inside
+   * one read — a Surface that answers the first character of `yes` is gone for the rest
+   * (pinned by the `yes-typed-at-dialog` trace). A Screen never reaches the body below:
+   * the Router answered `screen` and the Screen adapter took the character.
+   */
   private handleChar(char: string): void {
-    // A Screen owns every key outright, and the gate comes first for the same reason
-    // `handleInputText` puts it first: the switch below spends its keys on the
-    // composer — Enter submits the draft, Backspace/Ctrl+U/Ctrl+K edit it, Ctrl+R
-    // folds the transcript behind the Screen. A Screen is not a dialog, so none of
-    // the `dialog === undefined` guards in that switch ever saw it, and every one of
-    // those keys used to reach a draft the reader could not see. The Screen decides
-    // what it uses (Enter and Ctrl+C close it, Esc leaves it, the wizard answers with
-    // them); anything it does not use is dropped, never forwarded (B2.6 §4).
-    if (this.screen !== undefined) {
-      this.handleScreenInput(char, this.keymap.sequences.get(char))
-      return
-    }
-    switch (char) {
-      case '\x1b': this.handleEscape(); return
-      case '\r':
-      case '\n': this.submit(); return
-      case '\x7f': if (this.textIsEditable()) this.backspace(); return
-      case '\x08': if (this.textIsEditable()) this.backspace(); return
-      case '\x03': this.handleCtrlC(); return
-      // Ctrl+D is the composer's exit key. A surface that owns the keyboard has no
-      // exit semantics of its own, and falling through to the process exit left a
-      // dialog on screen killing the session it was waiting for.
-      case '\x04': if (this.dialog === undefined && this.screen === undefined) void this.requestExit(0); return
-      case '\x0c':
-        this.lastPaintRows = []
-        this.lastChromeKey = ''
-        this.lastPaintWidth = 0
-        this.lastPaintHeight = 0
-        this.dirty = true
-        this.render()
-        return
-      case '\x01': if (this.textIsEditable()) this.setField(this.fieldText(), 0); this.markDirty(); return
-      case '\x05': if (this.textIsEditable()) this.setField(this.fieldText(), this.fieldText().length); this.markDirty(); return
-      case '\x15':
-        if (!this.textIsEditable()) return
-        this.leaveHistoryBrowse()
-        this.setField('', 0)
-        if (this.borrowedText === undefined) this.inputFolded = false
-        this.markDirty()
-        return
-      case '\x0b':
-        if (!this.textIsEditable()) return
-        this.leaveHistoryBrowse()
-        this.setField(this.fieldText().slice(0, this.fieldCursor()), this.fieldCursor())
-        this.markDirty()
-        return
-      // A dialog owns the keyboard while it is up: moving the transcript cursor
-      // under it changed what a later copy would take while the screen showed
-      // nothing of the sort.
-      case '\x0e':
-        if (this.dialog === undefined && this.screen === undefined) this.moveFocus(1)
-        return
-      case '\x10':
-        if (this.dialog === undefined && this.screen === undefined) this.moveFocus(-1)
-        return
-      case '\x12':
-        if (this.dialog !== undefined) return
-        if (this.focusedRow === null) this.toggleCollapsible()
-        else this.toggleAllCollapsible()
-        return
-      case '\x14': if (this.dialog === undefined) this.inputFolded = !this.inputFolded; this.markDirty(); return
-    }
-    // A Screen owns the keyboard here too. This is the path a plain character
-    // takes (`handleChar`), and the Screen branch must come first or a `y` typed at
-    // a Screen's confirmation would fall through to the composer behind it.
-    if (this.screen !== undefined) {
-      this.handleScreenInput(char, this.keymap.sequences.get(char))
-      return
-    }
-    if (this.dialog !== undefined) {
-      this.handleDialogChar(char)
-      return
-    }
-    if (char === '\x07') {
-      if (this.dialog === undefined) this.stepSearch(1)
-      return
-    }
-    if (char === '\x1f') {
-      if (this.dialog !== undefined) return
-      this.input = '/find '
-      this.cursor = this.input.length
-      this.markDirty()
-      return
-    }
-    if (char === '\t') {
-      if (this.dialog !== undefined) return
-      if (this.suggestionsVisible()) {
-        const selected = this.commandSuggestions[this.suggestionIndex]
-        if (selected !== undefined) {
-          this.input = `/${selected.name} `
-          this.cursor = this.input.length
-          this.commandSuggestions = []
-          this.suggestionIndex = 0
-          this.markDirty()
-          return
-        }
-      }
-      this.input = `${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`
-      this.cursor += 2
-      this.markDirty()
-      return
-    }
-    if (char >= ' ' && char !== '\x7f') {
-      if (!this.textIsEditable()) return
-      this.leaveHistoryBrowse()
-      this.insertIntoField(char)
-      this.markDirty()
-    }
+    this.dispatch(this.charKind(char), char, this.keymap.sequences.get(char))
   }
 
   /**
@@ -12898,11 +13040,14 @@ export class SshTui {
    */
   private runKeyAction(action: KeyAction): boolean {
     switch (action) {
+      // Only reachable with nothing layered over the workspace (the ladder asks this
+      // table first thing, and a Screen returns before it), so the target is the
+      // transcript — named here rather than re-derived inside a shared scroller.
       case 'pageUp':
-        this.scrollActiveSurface(Math.max(3, Math.floor(this.screenRows() / 2)))
+        this.scrollWorkspace(Math.max(3, Math.floor(this.screenRows() / 2)))
         return true
       case 'pageDown':
-        this.scrollActiveSurface(-Math.max(3, Math.floor(this.screenRows() / 2)))
+        this.scrollWorkspace(-Math.max(3, Math.floor(this.screenRows() / 2)))
         return true
       case 'toggleCard':
         this.toggleCollapsible()
@@ -14398,12 +14543,7 @@ export class SshTui {
    * inspect overlay owns the keyboard and takes no scroll at all: the transcript
    * behind a dialog must not move.
    */
-  private scrollActiveSurface(up: number): void {
-    if (this.screen !== undefined) {
-      this.scrollScreen(up)
-      return
-    }
-    if (this.dialog !== undefined) return
+  private scrollWorkspace(up: number): void {
     if (this.paintTailBudget > 0) {
       this.paintTailBudget = 0
       this.forceFullPaint = true

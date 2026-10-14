@@ -135,8 +135,8 @@ test('a paste that says yes does not answer a confirmation', async () => {
   const typed = FIXTURES.find(entry => entry.name === 'yes-typed-at-dialog')
   const { trace: typedTrace, state: typedState } = await traceFixture(typed)
   assert.deepEqual(typedTrace.map(call => call[0]), [
-    'handleInputText', 'handlePlainText', 'handleChar', 'handleDialogChar', 'handleChar', 'handleChar',
-  ])
+    'handleInputText', 'handleDialogChar', 'insertIntoField', 'insertIntoField',
+  ], 'y answers the Surface, and the rest of the read types into the composer')
   assert.equal(typedState.input, '我打了es一半的消息', 'the answered Surface lets the rest of the read type')
 })
 
@@ -159,7 +159,6 @@ test('a lone escape is held and then released as the Escape key', async () => {
   const { trace } = await traceFixture(FIXTURES.find(entry => entry.name === 'lone-escape'))
   assert.deepEqual(trace, [
     ['handleInputText', '\x1b'],
-    ['handleChar', '\x1b'],
     ['handleEscape'],
-  ], 'held on the read, released through the same two calls the inline timer made')
+  ], 'held on the read, released into the Escape the reader pressed')
 })

@@ -6,27 +6,23 @@
         "hello"
       ],
       [
-        "handlePlainText",
-        "hello"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "h"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "o"
       ]
     ],
@@ -55,15 +51,11 @@
         "ab"
       ],
       [
-        "handlePlainText",
-        "ab"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "a"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "b"
       ]
     ],
@@ -92,23 +84,19 @@
         "思考一下"
       ],
       [
-        "handlePlainText",
-        "思考一下"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "思"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "考"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "一"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "下"
       ]
     ],
@@ -137,11 +125,7 @@
         "思"
       ],
       [
-        "handlePlainText",
-        "思"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "思"
       ]
     ],
@@ -167,14 +151,6 @@
     "trace": [
       [
         "handleInputText",
-        "\u0015"
-      ],
-      [
-        "handlePlainText",
-        "\u0015"
-      ],
-      [
-        "handleChar",
         "\u0015"
       ]
     ],
@@ -203,12 +179,7 @@
         ""
       ],
       [
-        "handlePlainText",
-        ""
-      ],
-      [
-        "handleChar",
-        ""
+        "backspace"
       ]
     ],
     "state": {
@@ -236,32 +207,24 @@
         "hello\r"
       ],
       [
-        "handlePlainText",
-        "hello\r"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "h"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "o"
-      ],
-      [
-        "handleChar",
-        "\r"
       ],
       [
         "submit"
@@ -294,32 +257,24 @@
         "hello\r\n"
       ],
       [
-        "handlePlainText",
-        "hello\r\n"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "h"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "o"
-      ],
-      [
-        "handleChar",
-        "\r"
       ],
       [
         "submit"
@@ -352,14 +307,6 @@
         "\u0003"
       ],
       [
-        "handlePlainText",
-        "\u0003"
-      ],
-      [
-        "handleChar",
-        "\u0003"
-      ],
-      [
         "handleCtrlC"
       ]
     ],
@@ -388,12 +335,8 @@
         "\u0004"
       ],
       [
-        "handlePlainText",
-        "\u0004"
-      ],
-      [
-        "handleChar",
-        "\u0004"
+        "requestExit",
+        0
       ]
     ],
     "state": {
@@ -421,14 +364,6 @@
       [
         "handleInputText",
         "\f"
-      ],
-      [
-        "handlePlainText",
-        "\f"
-      ],
-      [
-        "handleChar",
-        "\f"
       ]
     ],
     "state": {
@@ -453,14 +388,6 @@
     "trace": [
       [
         "handleInputText",
-        "\u0016"
-      ],
-      [
-        "handlePlainText",
-        "\u0016"
-      ],
-      [
-        "handleChar",
         "\u0016"
       ]
     ],
@@ -487,6 +414,9 @@
       [
         "handleInputText",
         "\u001b[A"
+      ],
+      [
+        "historyBack"
       ]
     ],
     "state": {
@@ -512,6 +442,9 @@
       [
         "handleInputText",
         "\u001b[B"
+      ],
+      [
+        "historyForward"
       ]
     ],
     "state": {
@@ -562,10 +495,6 @@
       [
         "handleInputText",
         "\u001b[5~"
-      ],
-      [
-        "scrollActiveSurface",
-        12
       ]
     ],
     "state": {
@@ -593,16 +522,8 @@
         "\u001b[5~"
       ],
       [
-        "scrollActiveSurface",
-        12
-      ],
-      [
         "handleInputText",
         "\u001b[6~"
-      ],
-      [
-        "scrollActiveSurface",
-        -12
       ]
     ],
     "state": {
@@ -661,6 +582,9 @@
       [
         "handleInputText",
         "\u001b[3~"
+      ],
+      [
+        "deleteAtCursor"
       ]
     ],
     "state": {
@@ -713,11 +637,7 @@
         "\u001bOAx"
       ],
       [
-        "handlePlainText",
-        "x"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "x"
       ]
     ],
@@ -769,6 +689,9 @@
       [
         "handleInputText",
         "\u001b[A"
+      ],
+      [
+        "historyBack"
       ]
     ],
     "state": {
@@ -794,10 +717,6 @@
       [
         "handleInputText",
         "\u001b[5~"
-      ],
-      [
-        "scrollActiveSurface",
-        12
       ]
     ],
     "state": {
@@ -822,10 +741,6 @@
     "trace": [
       [
         "handleInputText",
-        "\u001b"
-      ],
-      [
-        "handleChar",
         "\u001b"
       ],
       [
@@ -857,11 +772,7 @@
         "\u001bO"
       ],
       [
-        "handlePlainText",
-        "O"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "O"
       ]
     ],
@@ -888,6 +799,10 @@
       [
         "handleInputText",
         "\u001b1"
+      ],
+      [
+        "jumpToCategory",
+        "thinking"
       ]
     ],
     "state": {
@@ -915,15 +830,11 @@
         "\u001b1x"
       ],
       [
-        "handlePlainText",
-        "1x"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "1"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "x"
       ]
     ],
@@ -1072,10 +983,6 @@
       [
         "handleInputText",
         "\u001b[<65;10;5M"
-      ],
-      [
-        "scrollActiveSurface",
-        -3
       ]
     ],
     "state": {
@@ -1217,14 +1124,6 @@
       [
         "handlePasteText",
         "pasted"
-      ],
-      [
-        "handlePlainText",
-        "\r"
-      ],
-      [
-        "handleChar",
-        "\r"
       ],
       [
         "submit"
@@ -1389,10 +1288,6 @@
         "one\ntwo\nthree\n"
       ],
       [
-        "handlePlainText",
-        "one\ntwo\nthree\n"
-      ],
-      [
         "handlePasteText",
         "one\ntwo\nthree\n"
       ]
@@ -1422,19 +1317,15 @@
         "yes"
       ],
       [
-        "handlePlainText",
-        "yes"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "y"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "s"
       ]
     ],
@@ -1456,6 +1347,730 @@
       "exits": []
     }
   },
+  "dialog-arrows": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A"
+      ],
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-escape": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b"
+      ],
+      [
+        "handleEscape"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-enter": {
+    "trace": [
+      [
+        "handleInputText",
+        "\r"
+      ],
+      [
+        "submit"
+      ],
+      [
+        "handleDialogChar",
+        "\r"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-ctrl-c": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0003"
+      ],
+      [
+        "handleCtrlC"
+      ],
+      [
+        "handleEscape"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-ctrl-l": {
+    "trace": [
+      [
+        "handleInputText",
+        "\f"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-ctrl-u": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u0015"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-home-end": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[H"
+      ],
+      [
+        "handleInputText",
+        "\u001b[F"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 8,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-delete": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[3~"
+      ],
+      [
+        "deleteAtCursor"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-pages-wheel": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[5~"
+      ],
+      [
+        "handleInputText",
+        "\u001b[<65;10;5M"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "dialog-unknown-csi": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[1;5u"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "confirm",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "composer-ctrl-l": {
+    "trace": [
+      [
+        "handleInputText",
+        "\f"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-ctrl-l": {
+    "trace": [
+      [
+        "handleInputText",
+        "\f"
+      ],
+      [
+        "handleScreenInput",
+        "\f",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 20,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-printable-hint": {
+    "trace": [
+      [
+        "handleInputText",
+        "x"
+      ],
+      [
+        "handleScreenInput",
+        "x",
+        null
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": "report",
+      "screenOffset": 20,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "question-typing": {
+    "trace": [
+      [
+        "handleInputText",
+        "v2.3"
+      ],
+      [
+        "handleDialogChar",
+        "v"
+      ],
+      [
+        "insertIntoField",
+        "v"
+      ],
+      [
+        "handleDialogChar",
+        "2"
+      ],
+      [
+        "insertIntoField",
+        "2"
+      ],
+      [
+        "handleDialogChar",
+        "."
+      ],
+      [
+        "insertIntoField",
+        "."
+      ],
+      [
+        "handleDialogChar",
+        "3"
+      ],
+      [
+        "insertIntoField",
+        "3"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "question-backspace": {
+    "trace": [
+      [
+        "handleInputText",
+        "v2.3"
+      ],
+      [
+        "handleDialogChar",
+        "v"
+      ],
+      [
+        "insertIntoField",
+        "v"
+      ],
+      [
+        "handleDialogChar",
+        "2"
+      ],
+      [
+        "insertIntoField",
+        "2"
+      ],
+      [
+        "handleDialogChar",
+        "."
+      ],
+      [
+        "insertIntoField",
+        "."
+      ],
+      [
+        "handleDialogChar",
+        "3"
+      ],
+      [
+        "insertIntoField",
+        "3"
+      ],
+      [
+        "handleInputText",
+        ""
+      ],
+      [
+        "backspace"
+      ],
+      [
+        "backspace"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "question-enter": {
+    "trace": [
+      [
+        "handleInputText",
+        "v2.3\r"
+      ],
+      [
+        "handleDialogChar",
+        "v"
+      ],
+      [
+        "insertIntoField",
+        "v"
+      ],
+      [
+        "handleDialogChar",
+        "2"
+      ],
+      [
+        "insertIntoField",
+        "2"
+      ],
+      [
+        "handleDialogChar",
+        "."
+      ],
+      [
+        "insertIntoField",
+        "."
+      ],
+      [
+        "handleDialogChar",
+        "3"
+      ],
+      [
+        "insertIntoField",
+        "3"
+      ],
+      [
+        "submit"
+      ],
+      [
+        "handleDialogChar",
+        "\r"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "question-paste": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~v2.3\u001b[201~"
+      ],
+      [
+        "handlePasteText",
+        "v2.3"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "question-arrows": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[A"
+      ],
+      [
+        "handleInputText",
+        "\u001b[B"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
   "yes-typed-at-dialog": {
     "trace": [
       [
@@ -1463,23 +2078,15 @@
         "yes"
       ],
       [
-        "handlePlainText",
-        "yes"
-      ],
-      [
-        "handleChar",
-        "y"
-      ],
-      [
         "handleDialogChar",
         "y"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "s"
       ]
     ],
@@ -1513,14 +2120,6 @@
       ],
       [
         "handleInputText",
-        "n"
-      ],
-      [
-        "handlePlainText",
-        "n"
-      ],
-      [
-        "handleChar",
         "n"
       ],
       [
@@ -1615,14 +2214,6 @@
       [
         "pasteIntoScreen",
         "text"
-      ],
-      [
-        "handlePlainText",
-        "\u0015"
-      ],
-      [
-        "handleChar",
-        "\u0015"
       ],
       [
         "handleScreenInput",
@@ -1748,14 +2339,6 @@
         "y"
       ],
       [
-        "handlePlainText",
-        "y"
-      ],
-      [
-        "handleChar",
-        "y"
-      ],
-      [
         "handleDialogChar",
         "y"
       ]
@@ -1793,14 +2376,6 @@
         "n"
       ],
       [
-        "handlePlainText",
-        "n"
-      ],
-      [
-        "handleChar",
-        "n"
-      ],
-      [
         "handleDialogChar",
         "n"
       ]
@@ -1830,32 +2405,24 @@
         "hello\r"
       ],
       [
-        "handlePlainText",
-        "hello\r"
-      ],
-      [
-        "handleChar",
+        "insertIntoField",
         "h"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "e"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "l"
       ],
       [
-        "handleChar",
+        "insertIntoField",
         "o"
-      ],
-      [
-        "handleChar",
-        "\r"
       ],
       [
         "submit"
@@ -1886,10 +2453,6 @@
       [
         "handleInputText",
         "\u0010"
-      ],
-      [
-        "scrollActiveSurface",
-        12
       ]
     ],
     "state": {
@@ -1917,16 +2480,12 @@
         "\u0010\u0010"
       ],
       [
-        "handlePlainText",
-        "\u0010\u0010"
+        "moveFocus",
+        -1
       ],
       [
-        "handleChar",
-        "\u0010"
-      ],
-      [
-        "handleChar",
-        "\u0010"
+        "moveFocus",
+        -1
       ]
     ],
     "state": {

@@ -68,15 +68,17 @@ const ALL_SOURCES = sourceFiles()
  * composer's draft shows up as a new pair.
  */
 export const BASELINE = {
-  routers: { count: 2, sites: [TUI, PICKER], what: 'a second input router (F-4: bytes → keystrokes lives in one place)' },
+  guards: { count: 2, sites: [TUI, PICKER], what: 'a `TerminalInputGuard` (bytes → keystrokes): the Reader\'s, and the picker\'s own (recorded debt, W-7)' },
   dispatchers: { count: 1, sites: [TUI], what: 'a second ownership dispatcher (F-1: one place reads screen/dialog to route)' },
-  mouseParsers: { count: 2, sites: [TUI], what: 'a second SGR mouse parser (the two sites are recorded debt: W-1) — count may shrink, not grow' },
-  rawBranches: { count: 13, sites: [TUI], what: 'an owner comparing a raw byte sequence itself (F-5: the reader splits, the owner sees keys) — 13 recorded at W-0, W-1/W-3 lower it' },
-  ownerReads: { screen: 31, dialog: 59, what: 'reads of this.screen / this.dialog — recorded per method below; may shrink, not grow' },
+  mouseParsers: { count: 1, sites: [TUI], what: 'a second SGR mouse parser (W-2 collapsed the two report sites into one matcher the adapters share)' },
+  rawBranches: { count: 8, sites: [TUI], what: 'an owner comparing a raw byte sequence itself (F-5: the reader splits, the owner sees keys) — 13 at W-0, 8 after W-2 moved the shapes into the adapters' },
+  ownerReads: { screen: 25, dialog: 54, what: 'reads of this.screen / this.dialog — 31/59 at W-0, 25/54 after W-2 moved the routing reads into the Router; may shrink, not grow' },
   pasteConsumers: { count: 2, sites: [TUI], what: 'a paste entry point (handlePasteText · pasteIntoScreen — the framing moved into the Reader in W-1, which is why this baseline could drop)' },
   mouseConsumers: { count: 3, sites: [TUI], what: 'a mouse entry point (begin · extend · endMouseSelection; `handleMouseClick` is public and counted by hand below)' },
   knownGaps: { count: 3, sites: [REGRESSION_TESTS], what: 'a `{ todo: … }` marker in the regression suite — gaps may close, not accumulate' },
-  deadScreenGate: { count: 1, sites: [TUI], what: 'the unreachable second Screen gate in `handleChar` (recorded debt: W-2)' },
+  deadScreenGate: { count: 0, sites: [TUI], what: 'the unreachable second Screen gate — removed by W-2 with the body it was buried in' },
+  routers: { count: 1, sites: ['src/input-router.ts'], what: 'a second Router module (the one place an owner is decided)' },
+  routerCallSites: { count: 3, sites: [TUI], what: 'a `this.router.route(` call site — the read in `route`, the per-unit dispatch, and the paste payload; a fourth would be a second dispatcher' },
   // Reader ownership (AD-21, W-1). `readers` + `rawRouters` is what `routers` counts:
   // the picker still runs its own guard, which is the debt W-7 names.
   readers: { count: 1, sites: [READER], what: 'a second Reader — bytes → frames happens in one place now' },
@@ -99,7 +101,12 @@ const INPUT_HANDLERS = [
   'handleDialogChar', 'submit', 'runCommand', 'handleEscape', 'handleCtrlC', 'backspace',
   'deleteAtCursor', 'moveCursor', 'insertIntoField', 'setField', 'copyPlainText', 'copyKey',
   'copyFromScreen', 'copyHighlighted', 'handleMouseClick', 'beginMouseSelection',
-  'extendMouseSelection', 'endMouseSelection', 'scrollActiveSurface', 'stepSearch', 'runKeyAction',
+  'extendMouseSelection', 'endMouseSelection', 'scrollWorkspace', 'stepSearch', 'runKeyAction',
+  // W-2: the Router's call sites and the four owner adapters. They are here so a future
+  // change that lets an adapter write state it does not own shows up as a new pair.
+  'route', 'dispatch', 'dispatchWith', 'dispatchPaste', 'observe',
+  'ownerScreen', 'ownerSurface', 'ownerComposer', 'ownerWorkspace',
+  'composerUnit', 'arrowHistory', 'mouseGesture', 'repaintNow',
 ]
 
 /**
@@ -270,7 +277,7 @@ function ownerReads() {
 
 /** The whole audit, as data. Pure: no printing, no exit. */
 export function auditInputOwnership() {
-  const routers = find(ALL_SOURCES, /new TerminalInputGuard\(/u)
+  const guards = find(ALL_SOURCES, /new TerminalInputGuard\(/u)
   const dispatchers = find(ALL_SOURCES, /private handleInputText\(/u)
   const mouseParsers = find(ALL_SOURCES, /const (?:sgr|sgrMouse) = \/\^\\x1b\\\[</u)
   const rawBranches = find(ALL_SOURCES, /combined === '\\x1b/u)
@@ -280,6 +287,8 @@ export function auditInputOwnership() {
   const knownGaps = find([REGRESSION_TESTS], /,\s*\{ todo: '/u)
   const deadScreenGate = find([TUI], /A Screen owns the keyboard here too/u, { comments: true })
   const readers = find(ALL_SOURCES, /new InputReader\(/u)
+  const routerModules = find(ALL_SOURCES, /export class InputRouter\b/u)
+  const routerCallSites = find(ALL_SOURCES, /this\.router\.route\(/u)
   const rawRouters = find(ALL_SOURCES.filter(path => posix(path) !== READER), /new TerminalInputGuard\(/u)
   const rawDecoders = find(ALL_SOURCES, /new StringDecoder\(/u)
   const pasteFraming = find(ALL_SOURCES.filter(path => posix(path) !== READER), /\\x1b\[20[01]~/u)
@@ -290,18 +299,24 @@ export function auditInputOwnership() {
   const writes = writerMap()
   const reads = ownerReads()
   return {
-    routers, dispatchers, mouseParsers, rawBranches, pasteConsumers, mouseConsumers, knownGaps, deadScreenGate,
+    guards, dispatchers, mouseParsers, rawBranches, pasteConsumers, mouseConsumers, knownGaps, deadScreenGate,
     readers, rawRouters, rawDecoders, pasteFraming, escapeAssembly,
+    routerModules, routerCallSites,
     writes, reads,
   }
 }
 
 const JSON_OUT = process.argv.slice(2).includes('--json')
 const BASELINE_WRITERS = {
-  // Recorded from the tree at W-0. `composer draft` here means the handler *is* the
-  // composer's editor (the editing keys, the paste that lands in the draft, the
-  // command line the command path consumes); the pair that must never appear is a
-  // handler that does not own the composer writing it — the shape of G-10.
+  // Recorded from the tree at W-0, re-keyed at W-2 because the refactors moved the
+  // writes between methods without changing which writes exist:
+  //   `handleInputText`/`handleChar` (W-0) → `route`/`ownerComposer`/`composerUnit` (W-2)
+  // — the Alt chord's `/find ` seed, and the composer's own editing keys. `composer
+  // draft` here means the handler *is* the composer's editor; the pair that must never
+  // appear is a handler that does not own the composer writing it — the shape of G-10.
+  route: ['composer draft'],
+  ownerComposer: ['composer draft'],
+  composerUnit: ['composer draft'],
   handleInputText: ['composer draft'],
   handlePasteText: ['composer draft'],
   handleChar: ['composer draft'],
@@ -332,7 +347,7 @@ function main() {
   const check = (id, count, baseline, what) => {
     rows.push({ id, count, baseline, what, over: count > baseline })
   }
-  check('routers', audit.routers.length, BASELINE.routers.count, BASELINE.routers.what)
+  check('guards', audit.guards.length, BASELINE.guards.count, BASELINE.guards.what)
   check('dispatchers', audit.dispatchers.length, BASELINE.dispatchers.count, BASELINE.dispatchers.what)
   check('mouseParsers', audit.mouseParsers.length, BASELINE.mouseParsers.count, BASELINE.mouseParsers.what)
   check('rawBranches', audit.rawBranches.length, BASELINE.rawBranches.count, BASELINE.rawBranches.what)
@@ -344,6 +359,9 @@ function main() {
   check('rawDecoders', audit.rawDecoders.length, BASELINE.rawDecoders.count, BASELINE.rawDecoders.what)
   check('pasteFraming', audit.pasteFraming.length, BASELINE.pasteFraming.count, BASELINE.pasteFraming.what)
   check('escapeAssembly', audit.escapeAssembly.length, BASELINE.escapeAssembly.count, BASELINE.escapeAssembly.what)
+  check('routers', audit.routerModules.length, BASELINE.routers.count, BASELINE.routers.what)
+  check('routerCallSites', audit.routerCallSites.length, BASELINE.routerCallSites.count, BASELINE.routerCallSites.what)
+  check('deadScreenGate', audit.deadScreenGate.length, BASELINE.deadScreenGate.count, BASELINE.deadScreenGate.what)
   check('ownerReads.screen', audit.reads.total.screen, BASELINE.ownerReads.screen, BASELINE.ownerReads.what)
   check('ownerReads.dialog', audit.reads.total.dialog, BASELINE.ownerReads.dialog, BASELINE.ownerReads.what)
 

@@ -437,3 +437,25 @@ M3 抓的是门自身的盲区，这正是 mutation 检查存在的意义。
 **W-1 之后仍未做**（W-2/W-3/W-7）：`route()` 里仍是 90 处 `this.screen`/`this.dialog` 读取（W-2 抽
 Router）；13 处原始序列分支与 `screenKeys()` 的按键迭代仍归消费者（W-2/W-3）；picker 仍自带 reader
 （W-7）；G-1/G-2/G-8/G-3 仍红（W-3）。
+
+---
+
+## 10. W-2 Status（2026-10-13）
+
+**W-2 把"交给谁"收敛到了唯一的 Router**（[`input-router.md`](input-router.md)，AD-22）。
+四类 Owner 各有适配器；`handleInputText` 的阶梯只剩**绑定表与解析**，跨 Owner 判定一个都不留。
+
+| 项 | 结果 |
+|---|---|
+| 新模块 | `src/input-router.ts`：`route(kind, unit, ownershipView) → Owner`，纯函数式、零分配（视图对象复用） |
+| 适配器 | `ownerScreen` / `ownerSurface` / `ownerComposer` / `ownerWorkspace`；`composerUnit` 是 Composer 与 Surface 共用的兼容执行体（旧 `handleChar` 的 switch，`dialog` 分支就是 Surface 的行为；W-3 拆） |
+| 事件 | 每个单元**恰好一个**适配器被调用（`tests/input-ownership-matrix.test.mjs` 逐格断言） |
+| 行为等价 | **72 条 fixture / 246 次边界调用 + 终态**与抽取前构建逐字节一致（W-1 的 54 条 + W-2 补齐的 18 条 Surface / Ctrl+L / 光标键） |
+| G-6 | 不可达的第二个 Screen 门删除（`deadScreenGate` 1 → 0）；`scrollActiveSurface` 的两处 owner 分支删除；两处 SGR 解析合并；Ctrl+L 的两份实现**保留**并显式路由（记录在案） |
+| 棘轮 | `ownerReads` 31/59 → **25/54**；`rawBranches` 13 → **8**；`mouseParsers` 2 → **1**；新增 `routers` 1、`routerCallSites` 3、`deadScreenGate` 0；无新增白名单 |
+| Mutation | M1 删 Screen 归属门 → ✗ 六个测试红；M2 粘贴穿透 Screen → ✗ 轨迹 + 向导粘贴用例；M3 第二个 dispatcher → ✗ `ownerReads.screen 26 > 25`；M3b workspace 适配器写草稿 → ✗ `new writer` |
+| 保住的东西 | G-1/G-2/G-8/G-3 仍红（3 条 todo 未动）；G-10 仍绿；两个 hold 窗口未动；Reader 未改 |
+
+**W-2 之后仍未做**（W-3/W-7）：`burst` 的逐键规范化与 G 系列修复（W-3）；`SURFACE_COMPOSER_KEYS`
+与 Ctrl+L 两份实现的收口（W-3）；`screenKeys()` 的按键迭代折进 Reader（W-3）；picker 自带 reader（W-7）；
+`composerUnit` 的 Composer/Surface 共用体拆分（W-3）。

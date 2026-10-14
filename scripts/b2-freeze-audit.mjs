@@ -254,7 +254,7 @@ const PTY = [
 // frozen boundary move".
 const input = auditInputOwnership()
 const inputRows = [
-  ['routers', input.routers.length, INPUT_BASELINE.routers.count],
+  ['guards', input.guards.length, INPUT_BASELINE.guards.count],
   ['dispatchers', input.dispatchers.length, INPUT_BASELINE.dispatchers.count],
   ['mouseParsers', input.mouseParsers.length, INPUT_BASELINE.mouseParsers.count],
   ['rawBranches', input.rawBranches.length, INPUT_BASELINE.rawBranches.count],
@@ -268,6 +268,9 @@ const inputRows = [
   ['rawDecoders', input.rawDecoders.length, INPUT_BASELINE.rawDecoders.count],
   ['pasteFraming', input.pasteFraming.length, INPUT_BASELINE.pasteFraming.count],
   ['escapeAssembly', input.escapeAssembly.length, INPUT_BASELINE.escapeAssembly.count],
+  ['routers', input.routerModules.length, INPUT_BASELINE.routers.count],
+  ['routerCallSites', input.routerCallSites.length, INPUT_BASELINE.routerCallSites.count],
+  ['deadScreenGate', input.deadScreenGate.length, INPUT_BASELINE.deadScreenGate.count],
 ]
 
 const problems = []

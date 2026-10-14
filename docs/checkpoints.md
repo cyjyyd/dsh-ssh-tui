@@ -1870,5 +1870,61 @@ Surface 无字段时粘贴不改草稿；Screen 内的点击数不到背后行�
 
 **本轮未做**：InputRouter、owner 优先级、Screen/Surface 行为、keymap、G-1/G-2/G-3 修复、
 ESC/paste 语义、picker 架构、Completion/Search/Doctor、UI。
+
+---
+
+## 0.8.4 W-2 · InputRouter 与四类 Owner 适配器（2026-10-13）
+
+> 目标：把"事件归谁"收敛到唯一 Router，四类 Owner 各就各位，**外部可观察行为不变**。
+
+产出：
+
+| 件 | 内容 |
+|---|---|
+| `src/input-router.ts` | **AD-22**：`route(kind, unit, ownershipView) → Owner`，纯函数式、零分配（视图对象复用、`collapsibleRows()` 只在箭头且无层叠时计算） |
+| `docs/decisions/input-router.md` | Router 契约：三层调用链、API、决策规则表、两个记录在案的例外、四个适配器职责、G-6 结果、before/after、与 AD-20/21 的关系 |
+| `src/tui.ts` | 四个适配器（`ownerScreen`/`ownerSurface`/`ownerComposer`/`ownerWorkspace`）+ `composerUnit`（Composer/Surface 共用兼容体）+ `arrowHistory`/`mouseGesture`/`repaintNow`/`scrollWorkspace`；`handleChar` 变成逐字符派发 |
+| `tests/input-router.test.mjs` | **层 A**：7 项纯决策测试（含全组合扫描"永远是四个 Owner 之一"、快照冻结验证纯函数、两条债的显式锁定） |
+| `tests/input-ownership-matrix.test.mjs` | **层 B**：7 项真实路径测试——每状态 × 每单元"恰好一个适配器"、Screen 背后草稿不被任何单元改写、无字段 Surface 拒绝文本与粘贴、无人认领的事件零状态变化、关屏后草稿与焦点原样回来、resume → 向导、粘贴的 `yes` 不作答 |
+| 轨迹门 | 参考轨迹扩到 **72 条**（新增 18 条：Surface 的箭头/Esc/Enter/Ctrl+C/Ctrl+L/Ctrl+U/Home/End/Delete/翻页滚轮/未知 CSI、两种 Ctrl+L、report Screen 可打印键、自由文本问题的输入/退格/回车/粘贴/箭头），并在**抽取前构建**上采集；追踪点改为**Owner 边界**（W-2 允许重命名内部方法，不允许改变行为） |
+
+**行为等价**：72 条 fixture / **246 次边界调用 + 终态**与抽取前构建逐字节一致（W-1 的 54 条一条未改，
+新增 18 条同样取自抽取前构建）。G-1/G-2/G-8/G-3 三条缺口的轨迹**保持为坏**（3 条 todo 未动）。
+
+**G-6**：不可达的第二个 Screen 门**删除**（`deadScreenGate` 1 → 0）；`scrollActiveSurface` 的
+screen/dialog 分支**删除**（拆成 Router 判定 + `scrollWorkspace` / `handleScreenInput`）；
+两处 SGR 解析**合并**为一个匹配器；**Ctrl+L 的两份实现保留**并显式路由（合并需要"两份重绘行为一致"
+的测试，本轮没有，按 AD-20 §6 记录为剩余债）。
+
+**Freeze Ratchet（before → after）**：
+
+| 计数 | before | after |
+|---|---|---|
+| `ownerReads.screen` / `.dialog` | 31 / 59 | **25 / 54** |
+| `rawBranches` | 13 | **8** |
+| `mouseParsers` | 2 | **1** |
+| `deadScreenGate` | 1 | **0** |
+| `routers` / `routerCallSites`（新行） | — | 1 / 3 |
+| `guards` / `readers` / `pasteFraming` / `escapeAssembly` / `rawDecoders` / `rawRouters` | 2 / 1 / 0 / 1 / 4 / 1 | 不变（picker 债仍是 W-7） |
+
+未新增白名单；`BASELINE_WRITERS` 只是把 W-0 记录的三处写入**改了方法名**
+（`handleInputText`/`handleChar` → `route`/`ownerComposer`/`composerUnit`），写入的种类与归属未变——
+顺带补上了 W-1 漏扫的 `route`（Alt 和弦的 `/find ` 种子），所以扫描面是**变严**而不是变松。
+
+**Mutation（全部实测会红并已恢复）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 删掉 Router 的 Screen 归属门 | ✗ 6 个测试红（矩阵、Screen 背后草稿、无人认领、关屏恢复、向导、层 A） |
+| M2 | 粘贴穿透 Screen 边界 | ✗ 轨迹门（`pasteIntoScreen` 消失）+ `setup-screen` 两条粘贴用例 |
+| M3 | 第二个 ownership dispatcher（`handleInputText` 里再读 `this.screen`） | ✗ `ownerReads.screen 26 > baseline 25` |
+| M3b | `ownerWorkspace` 写 composer 草稿 | ✗ `new writer: ownerWorkspace writes the composer draft` |
+
+**门**：`npm test` **1425 项 · 1418 通过 · 0 失败 · 4 跳过 · 3 todo** · `typecheck` 0 ·
+`npm run freeze` 全绿（20 条 input 计数）· `npm run bench` 三次运行字节/行数/清屏**逐项与 W-1 相同**
+（ms 单跑抖动，未出现可重复退化）· 真机探针（setup 含 resume 阶段 + 主探针）全过。
+
+**本轮未做**：G-1/G-2/G-3 修复、`burst` 逐键规范化、Reader hold 窗口、keymap 默认值、picker 重构、
+Completion/Search/Doctor、版本与品牌。
 `scripts/bench-b2.mjs` 的唯一改动是把 `tui.inputGuard.release()` 换成 `tui.reader.releaseReplyTail()`
 （同一个操作，拥有者搬了家）。
