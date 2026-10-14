@@ -608,6 +608,10 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
         }
       })()
       console.log(`dialog window: turn ${settled ? 'settled' : 'still busy after 20s'}`)
+      // An unmet precondition is reported as one: with a turn still running, the
+      // frames below cannot be attributed to the key, and a probe that measured anyway
+      // would be measuring the model's latency.
+      check(settled, 'the dialog window needs a settled turn: the status strip was still reporting work after 20s')
       const beforeMove = output.length
       term.write('\x1b[B')
       await new Promise(resolve => setTimeout(resolve, 500))
@@ -715,6 +719,11 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
         'the composer boundary must be on screen with the menu up',
       )
 
+      // Recorded debt (P-1): the menu step still judges by row number — "every row is
+      // at least row 3" — which has the same double flaw the dialog step had (it accepts
+      // a repaint that starts below the threshold, and rejects the chrome block the
+      // painter is entitled to redraw). It has not flaked in the field, and closing it
+      // needs its own labels and fixture, so W-3a leaves it exactly as it is.
       const beforeMove = output.length
       term.write('\x1b[B')
       await new Promise(resolve => setTimeout(resolve, 500))

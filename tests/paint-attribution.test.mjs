@@ -115,19 +115,51 @@ test('a frame is parsed from the painter markers, not from a chunk boundary', ()
   assert.equal(rowText(frames[0].paint[0].content).trim(), '○ Option A', 'row content is the text, not the padding')
 })
 
-test('the same stream is judged the same however the pty chopped it', () => {
+test('a chunk boundary cannot reach the judgement: it reads the collected stream', () => {
+  // The probe hands the judgement `output` — every byte the terminal received, in
+  // order — and the judgement is a pure function of that text, so where the pty
+  // happened to end a read is not an input to it at all. (An earlier version of this
+  // case sliced the text and pasted it straight back, which proved nothing about
+  // incremental parsing; the claim worth pinning is the one below: a *window* can end
+  // mid-frame, and a frame that is not complete yet must not be reported as one.)
+  const before = screen({ chosen: 0 })
+  const after = screen({ chosen: 1 })
+  const move = frame(after, { previous: before, chromeChanged: true }).output
+  assert.equal(judge(move, { before }).ok, true, 'the move frame itself passes the judgement')
+  // A settle frame first, so the stream has two frames and the second one can be cut.
+  const text = windowText([frame(before, { previous: [] }), frame(after, { previous: before, chromeChanged: true })])
+
+  const frames = parsePaintFrames(text)
+  assert.equal(frames.length, 2, 'two composed frames are two frames')
+  for (let at = 1; at < text.length; at += 7) {
+    const prefix = parsePaintFrames(text.slice(0, at))
+    assert.ok(prefix.length <= frames.length, `a prefix at ${at} cannot invent frames`)
+    for (const [index, entry] of prefix.entries()) {
+      assert.deepEqual(
+        { start: entry.start, paint: entry.paint.map(row => [row.row, row.text]) },
+        { start: frames[index].start, paint: frames[index].paint.map(row => [row.row, row.text]) },
+        `the frames a prefix at ${at} reports are the whole stream's first ${prefix.length}, unchanged`,
+      )
+    }
+    // Exactly the batches that closed are frames: a batch still open at the cut is
+    // reported by neither side, and no partial frame is ever invented.
+    const cut = text.slice(0, at)
+    const closed = (cut.match(/\x1b\[\?7h/gu) ?? []).length
+    assert.equal(prefix.length, closed, `a prefix at ${at} reports exactly its closed batches`)
+  }
+})
+
+test('a window that ends mid-frame is judged on the frames it completed', () => {
   const before = screen({ chosen: 0 })
   const after = screen({ chosen: 1 })
   const text = windowText([frame(after, { previous: before, chromeChanged: true })])
-  const whole = judge(text, { before })
-  assert.ok(whole.ok, `the plain move must pass (${whole.failures.join('; ')})`)
-  // Every split point stands for a chunk boundary the pty could have chosen.
-  for (let at = 1; at < text.length; at += 7) {
-    const chopped = judge(text.slice(0, at) + text.slice(at), { before })
-    assert.equal(chopped.ok, whole.ok, `a split at ${at} changed the verdict`)
-    assert.deepEqual(chopped.summary.paintedRows, whole.summary.paintedRows, `a split at ${at} changed the painted rows`)
-    assert.deepEqual(chopped.summary.changedRows, whole.summary.changedRows, `a split at ${at} changed the changed rows`)
-  }
+  // Cut inside the layer's batch: the judgement must see no layer frame (so the step
+  // fails loudly on the missing repaint) rather than a half-parsed one that happens to
+  // look tidy.
+  const cut = text.slice(0, text.indexOf('\x1b[?7h'))
+  const verdict = judge(cut, { before })
+  assert.equal(verdict.checks.repaint.ok, false, 'a half-arrived frame is not the layer repainting')
+  assert.equal(verdict.ok, false)
 })
 
 test('an independent identity-row update in the same window does not fail the step', () => {
