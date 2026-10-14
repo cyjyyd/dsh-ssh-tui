@@ -2141,8 +2141,8 @@ Router（keymap 因此按单键查表）；**删除** `screenKeys`（Screen 专�
 Surface 上只到 Surface；括号粘贴即使内容是键字节也是文本；无标记粘贴不拆成 Enter；向导字段与草稿隔离；
 以及"一个 read 与多次 read 同值"的成对断言（13 对）。
 
-**Freeze before → after**（`npm run freeze:input`）：`knownGaps` **3 → 0**（基线同步下调）；
-`ownerReads.screen/dialog` 25/54 **不变**（新检查用计数而非再读 owner）；`rawBranches` 8、`mouseParsers` 1、
+**Freeze before → after**（`npm run freeze:input`）：`knownGaps` **3 → 0**，`ownerReads.screen` **25 → 24**
+（删掉 Screen 专用的拆键器顺带少一处 owner 读取），两处基线都**同步下调**（只收紧、不放大）；`ownerReads.dialog` 54 不变（新检查用计数而非再读 owner）；`rawBranches` 8、`mouseParsers` 1、
 `routers` 1、`routerCallSites` 3 均不变；无新增白名单。移除 `screenKeys` 没有新增任何计数器。
 
 **Mutation（全部实测红后恢复，`src/` 事后无差异）**：

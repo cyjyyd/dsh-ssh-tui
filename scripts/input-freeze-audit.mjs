@@ -72,7 +72,7 @@ export const BASELINE = {
   dispatchers: { count: 1, sites: [TUI], what: 'a second ownership dispatcher (F-1: one place reads screen/dialog to route)' },
   mouseParsers: { count: 1, sites: [TUI], what: 'a second SGR mouse parser (W-2 collapsed the two report sites into one matcher the adapters share)' },
   rawBranches: { count: 8, sites: [TUI], what: 'an owner comparing a raw byte sequence itself (F-5: the reader splits, the owner sees keys) — 13 at W-0, 8 after W-2 moved the shapes into the adapters' },
-  ownerReads: { screen: 25, dialog: 54, what: 'reads of this.screen / this.dialog — 31/59 at W-0, 25/54 after W-2 moved the routing reads into the Router; may shrink, not grow' },
+  ownerReads: { screen: 24, dialog: 54, what: 'reads of this.screen / this.dialog — 31/59 at W-0, 25/54 after W-2 moved the routing reads into the Router, 24 after W-3a deleted the Screen-only splitter; may shrink, not grow' },
   pasteConsumers: { count: 2, sites: [TUI], what: 'a paste entry point (handlePasteText · pasteIntoScreen — the framing moved into the Reader in W-1, which is why this baseline could drop)' },
   mouseConsumers: { count: 3, sites: [TUI], what: 'a mouse entry point (begin · extend · endMouseSelection; `handleMouseClick` is public and counted by hand below)' },
   knownGaps: { count: 0, sites: [REGRESSION_TESTS], what: 'a `{ todo: … }` marker in the regression suite — W-3a closed the last three (G-1, G-2/G-8, G-3); a new marker is a regression, not a plan' },
