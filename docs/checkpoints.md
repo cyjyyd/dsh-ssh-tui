@@ -2308,7 +2308,9 @@ picker 走 `src/picker.ts` 自带 decoder/reader，不经过 `handleData`（W-7 
 `routerCallSites` 3；本轮没有新增计数器、也没有放宽基线）· `npm run bench` 字节 501/465/2457/588/140、
 行 3/3/17/4/1、清屏 0（与基线逐项相同）· 四条真机探针（main / setup / drop / terminal）全过。
 
-**CI**：（本轮提交推送后补记）
+**CI**：W-3b.1 提交 `5ad6290` 的 run `38588615683` **5/5 全绿**（`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
+`test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`）——引用字段的编辑、四个 Surface 形态的丢弃语义与
+100 条未变轨迹都在含 Windows 的真机腿上验过。
 
 **本轮未做**：W-3b.2（Ctrl+L 两份实现）、W-3b.3（`composerUnit` 拆分）、Surface 内左右箭头编辑借用字段
 （范围外，现状丢弃）、picker 自带 reader（W-7）。版本仍为 `0.8.3`，未发 npm。
