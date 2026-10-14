@@ -2080,3 +2080,7 @@ Completion/Search/Doctor、版本与品牌。`scripts/bench-b2.mjs` 的 `tui.inp
    原因；本轮 60 次里没有出现。
 4. 判定依赖 `╭`（输入框上沿）与选项标签文本：它们变了下标就要跟着改，但那时 `composer` 检查会直接
    报"定位不到 chrome 块"，不会静默放过。
+**CI**：run `38522822510`（commit `b4a1e47`）**5/5 全绿**——`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
+`test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`。上一轮红过的那条腿这次给出
+`tests 1442 · pass 1436 · fail 0`、`dialog window: turn settled`、
+`dialog scope: frames=1 layer=1 painted=24,25,29,30 changed=24,25 chrome=27`——与本机 20 次逐字相同。
