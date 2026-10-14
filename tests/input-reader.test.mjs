@@ -49,6 +49,25 @@ const GAP_FIXTURES = {
   'alt-1-batched': 'Alt+1 batched with a character typed `1x` and skipped the chord (G-3)',
 }
 
+/**
+ * The traces W-3a.1 adds, with what the build *before* the fix (46d09d9) did with
+ * them.
+ *
+ * These four are new safety cases rather than changed ones: nothing in the reference
+ * moved when the guard went in (the 98 traces W-3a left are byte-identical, which is
+ * the evidence that the fix is a boundary and not a re-framing). They are captured
+ * here because the delivery of a text unit is character by character, and a Screen
+ * that owns a read has to stop that delivery the moment it goes away — including when
+ * the same unit carries the paste payload, the Escape that closes it and the key
+ * behind the Escape.
+ */
+const W3A1_FIXTURES = {
+  'screen-paste-tail-escape': 'the Escape closed the Screen and the q behind it was typed into the draft it was hiding (draft 我打了q一半的消息, cursor 4)',
+  'screen-escape-then-paste': 'the Escape closed the Screen and the q behind it was typed as well; the paste that followed the dismissal in the same read was already dropped',
+  'wizard-paste-tail-escape': 'the paste landed in the wizard field, the Escape cancelled the wizard, and the q behind it was typed into the composer draft (draft 我打了q一半的消息)',
+  'surface-paste-tail-typing': 'nothing (the same trace: a Surface hands the rest of the read on, and it still does)',
+}
+
 test('the fixture set is the one the reference was captured from', () => {
   assert.deepEqual(
     FIXTURES.map(fixture => fixture.name).sort(),
@@ -97,6 +116,62 @@ test('the recorded gaps are closed, and the reference records the closed behavio
   const arrows = REFERENCE['arrow-left-right']
   assert.deepEqual(arrows.trace.map(entry => entry[0]), ['handleInputText', 'moveCursor', 'moveCursor'],
     'two arrows in one read both move the caret')
+})
+
+test('W-3a.1: a Screen stops the delivery of its text unit, and a Surface still does not', () => {
+  // The four safety cases for Screen read ownership, asserted on the traces the
+  // reference now records. A paste tail arrives as one `literal` unit — payload,
+  // markers and the escape behind them in a single read — and the unit is delivered
+  // character by character because that is what lets a Surface hand the rest of a read
+  // on. A Screen owns the read it was sent, so its dismissal has to end the delivery,
+  // and what follows in the same read has to be dropped: not typed into the draft the
+  // Screen was hiding, and not routed to the owner behind it.
+  assert.deepEqual(Object.keys(W3A1_FIXTURES).sort(), [
+    'screen-escape-then-paste', 'screen-paste-tail-escape',
+    'surface-paste-tail-typing', 'wizard-paste-tail-escape',
+  ])
+  const REPORT = { input: '我打了一半的消息', cursor: 3 }
+
+  const screen = REFERENCE['screen-paste-tail-escape']
+  assert.deepEqual(screen.trace, [
+    ['handleInputText', '\x1b[200~pasted\x1b[201~\x1bq'],
+    ['handlePasteText', 'pasted'],
+    ['pasteIntoScreen', 'pasted'],
+    ['handleScreenInput', '\x1b', 'cancel'],
+  ], 'the report Screen takes the paste, the Escape closes it, and the q is dropped')
+  assert.equal(screen.state.screen, null, 'the Screen is gone')
+  assert.equal(screen.state.input, REPORT.input, 'and the draft behind it is exactly what it was')
+  assert.equal(screen.state.cursor, REPORT.cursor, 'including the caret')
+
+  const before = REFERENCE['screen-escape-then-paste']
+  assert.deepEqual(before.trace, [
+    ['handleInputText', '\x1bq\x1b[200~pasted\x1b[201~'],
+    ['handleScreenInput', '\x1b', 'cancel'],
+  ], 'a dismissal before the paste drops the payload behind it too — the q with it')
+  assert.equal(before.state.input, REPORT.input, 'the draft is untouched')
+
+  const wizard = REFERENCE['wizard-paste-tail-escape']
+  assert.deepEqual(wizard.trace, [
+    ['handleInputText', '\x1b[200~pasted\x1b[201~\x1bq'],
+    ['handlePasteText', 'pasted'],
+    ['pasteIntoScreen', 'pasted'],
+    ['handleScreenInput', '\x1b', 'cancel'],
+    ['handleSetupKey', '\x1b', 'cancel'],
+  ], 'the wizard takes the paste into its own field, and the Escape ends the read there')
+  assert.equal(wizard.state.input, REPORT.input, 'the composer draft behind the wizard is untouched')
+
+  // The asymmetry is the point: a Surface's answer is a character like any other, so
+  // the rest of that read is routed on — `y` answers and `es` reaches the composer.
+  // W-3a.1 must not change it, and this fixture is byte-identical to the pre-fix build.
+  const surface = REFERENCE['surface-paste-tail-typing']
+  assert.deepEqual(surface.trace, [
+    ['handleInputText', '\x1b[200~pasted\x1b[201~yes'],
+    ['handlePasteText', 'pasted'],
+    ['handleDialogChar', 'y'],
+    ['insertIntoField', 'e'],
+    ['insertIntoField', 's'],
+  ], 'a Surface still hands the rest of the read on')
+  assert.equal(surface.state.input, '我打了es一半的消息', 'which is what the composer takes')
 })
 
 test('a read is not a key: one read and several reads reach the same owners and state', async () => {

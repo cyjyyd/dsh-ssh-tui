@@ -3418,5 +3418,157 @@
       "sent": [],
       "exits": []
     }
+  },
+  "screen-paste-tail-escape": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~\u001bq"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "pasteIntoScreen",
+        "pasted"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b",
+        "cancel"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "screen-escape-then-paste": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001bq\u001b[200~pasted\u001b[201~"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b",
+        "cancel"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "wizard-paste-tail-escape": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~\u001bq"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "pasteIntoScreen",
+        "pasted"
+      ],
+      [
+        "handleScreenInput",
+        "\u001b",
+        "cancel"
+      ],
+      [
+        "handleSetupKey",
+        "\u001b",
+        "cancel"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "surface-paste-tail-typing": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[201~yes"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handleDialogChar",
+        "y"
+      ],
+      [
+        "insertIntoField",
+        "e"
+      ],
+      [
+        "insertIntoField",
+        "s"
+      ]
+    ],
+    "state": {
+      "input": "我打了es一半的消息",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
   }
 }

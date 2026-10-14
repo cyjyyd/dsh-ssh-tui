@@ -12958,8 +12958,18 @@ export class SshTui {
       return
     }
 
+    // A text unit is delivered one character at a time and each character is routed
+    // again — that is what lets ownership change inside one unit (a Surface answers `y`
+    // and the composer takes the `es` behind it, W-2). A Screen is the one owner that
+    // does not work that way: it owns the read it was sent, and the read-level guard in
+    // `handleInputText` drops the units after it closes. This is the same rule one level
+    // down, for the units that carry several characters: without it a character that
+    // closes the Screen — the `ESC` of a paste tail, a `q`, an Enter — ended the Screen
+    // and the rest of the same unit was typed into the composer behind it (W-3a.1).
+    const dismissals = this.screenDismissals
     let previous = ''
     for (const char of text) {
+      if (this.screenDismissals !== dismissals) return
       // Windows terminals may deliver Enter as CRLF; consume only the first half.
       if (char === '\n' && previous === '\r') {
         previous = char

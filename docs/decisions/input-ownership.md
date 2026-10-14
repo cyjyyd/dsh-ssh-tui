@@ -526,3 +526,37 @@ SS3 尾巴（`\x1bOAx` 一直是"序列 + 尾巴各自处理"），因此这条�
 
 **仍未做（W-3b / W-7）**：`SURFACE_COMPOSER_KEYS`（Surface 在时 Home/End/Delete/复制键仍到 Composer）、
 Ctrl+L 的两份重绘实现、`composerUnit` 的 Composer/Surface 共用体拆分、picker 自带 reader。
+
+## 13. W-3a.1 Status（2026-10-14）· Screen read ownership 的收口
+
+**缺陷**：W-3a 把"Screen 拥有整次 read"实现为 `handleInputText` 读取循环里的
+`screenDismissals` 检查——它只发生在**帧之间**。而文本单元是**帧内**逐字符投递的
+（`handlePlainText` → `handleChar` → Router 重新判定，这正是 Surface"答一个字符、余下进 Composer"的
+机制）。于是粘贴尾巴 `\x1b[200~pasted\x1b[201~\x1bq` 里，`\x1b` 关掉 Screen、`q` 落进它背后被隐藏的
+Composer 草稿。复现（真实 `handleData(Buffer)`，Report Screen + 非空草稿）：
+`我打了一半的消息` → `我打了q一半的消息`（cursor 3 → 4）。四条路径都已实测命中：
+
+| 路径 | 旧读法 |
+|---|---|
+| Report Screen + 粘贴 + `\x1bq` | 草稿被写成 `我打了q一半的消息`（`insertIntoField('q')`） |
+| Setup Screen + 同一 read | 粘贴进向导自己的字段，Esc 取消向导，`q` 仍进 Composer 草稿 |
+| `\x1bq` **在**标记之前 | `q` 进草稿；其后的粘贴已被帧间检查正确丢弃 |
+| 更长的尾巴（`\x1bqhello`） | 五个字符全部泄漏进草稿 |
+
+**最小修复**：`handlePlainText` 在进入投递循环时记下 `screenDismissals`，每投递一个字符前重新比较，
+一旦 Screen 在这次投递中被关闭就**结束这次投递**（`src/tui.ts`，+10 行）。这是把读取循环里那条规则
+原样下沉一层，不是新增机制：没有第二个 Reader/Router、没有改 keymap、没有碰 30ms/60ms 持有窗口、
+没有改 Surface 的尾部语义（`screenDismissals` 只随 Screen 关闭递增，Surface 结算不动它）。
+`handlePasteText` 是单次编辑、不再逐字符路由，所以它是这条路径的**唯一**入口（已核对）。
+
+**证据**：`tests/input-ownership-regression.test.mjs` 新增 5 条在机用例（帧内关闭、标记前关闭、向导字段
++ 草稿隔离、普通 read 的帧间尾部仍被丢弃 / 无 Screen 时粘贴尾巴照常落入草稿、Surface 尾部仍交给
+Composer）；`tests/input-trace.mjs` 新增 4 条安全轨迹（`screen-paste-tail-escape` ·
+`screen-escape-then-paste` · `wizard-paste-tail-escape` · `surface-paste-tail-typing`），旧读法逐条记在
+`tests/input-reader.test.mjs` 的 `W3A1_FIXTURES` 与 `docs/checkpoints.md` 的 W-3a.1 节。
+
+**轨迹**：W-3a 留下的 98 条**逐字节不变**（修复是边界收口，不是重新取帧），参考集 98 → **102** 条，
+新增的四条是上面这组安全用例。变异 M6（删掉守卫）与 M7（守卫放在循环之前）都在回归套件与轨迹门转红。
+
+**仍未做**：W-3b 全部（`SURFACE_COMPOSER_KEYS`、Ctrl+L 两份实现、`composerUnit` 拆分）与 W-7（picker
+自带 reader）。本轮不发版。

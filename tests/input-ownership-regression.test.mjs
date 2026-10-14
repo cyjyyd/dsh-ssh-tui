@@ -668,3 +668,109 @@ test('W-3a: a coalesced read at the wizard stays in the wizard, not in the draft
   tui.handleData(Buffer.from('\x1b'))
   await wizard.catch(() => undefined)
 })
+
+// ── W-3a.1 · the Screen's read, inside the unit as well as between units ─────
+
+test('W-3a.1: a Screen closed inside a text unit drops the rest of that unit', () => {
+  // W-3a pinned the unit-level rule in `handleInputText`: the read loop stops as soon
+  // as the Screen it was sent to is gone. A text unit is delivered character by
+  // character *inside* one iteration of that loop — which is what lets a Surface
+  // answer `y` and the composer take the `es` behind it — so the Escape of a paste
+  // tail closed the Screen and the same delivery kept going into the draft behind it.
+  // The paste tail is where it shows: everything outside the markers is one text unit,
+  // and `ESC q` is the shortest read that closes a Screen and types behind it.
+  for (const tail of ['\x1bq', '\x1bqhello', '\x1bq\rx']) {
+    const tui = fixture()
+    tui.openScreen({
+      kind: 'report', report: 'diag', title: '诊断',
+      lines: [{ kind: 'system', text: '正文' }], offset: 0, copyText: '正文',
+    })
+    draft(tui)
+    const before = snapshot(tui)
+    tui.handleData(Buffer.from(`\x1b[200~pasted\x1b[201~${tail}`))
+    assert.equal(tui.screen, undefined, `${JSON.stringify(tail)}: the Escape closed the Screen`)
+    assert.equal(tui.input, before.input, `${JSON.stringify(tail)}: the draft behind the Screen keeps its text`)
+    assert.equal(tui.cursor, before.cursor, `${JSON.stringify(tail)}: and its caret`)
+    assert.equal(tui.rows.length, before.rows, `${JSON.stringify(tail)}: and nothing was submitted`)
+    assertUnchanged(tui, before, `W-3a.1 tail ${JSON.stringify(tail)}`, ['screen', 'screenOffset'])
+  }
+})
+
+test('W-3a.1: a dismissal before the paste drops the payload behind it too', () => {
+  // The other order in one read: the key that closes the Screen comes first, the
+  // markers after it. The paste is a unit of the same read, so it is addressed to a
+  // Screen that is gone — and a paste behind a gone Screen must not land in the draft
+  // any more than the key behind a gone Screen may.
+  const tui = fixture()
+  tui.openScreen({
+    kind: 'report', report: 'diag', title: '诊断',
+    lines: [{ kind: 'system', text: '正文' }], offset: 0, copyText: '正文',
+  })
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('\x1bq\x1b[200~pasted\x1b[201~'))
+  assert.equal(tui.screen, undefined, 'the Escape closed the Screen')
+  assert.equal(tui.input, before.input, 'neither the key behind it nor the paste reached the draft')
+  assert.equal(tui.cursor, before.cursor, 'and the caret did not move')
+})
+
+test('W-3a.1: the wizard keeps the paste in its own field and drops the tail', async () => {
+  // The setup Screen is the Screen *with* a field, so it is the case where "what the
+  // paste was for" and "what the tail must not reach" are two different places: the
+  // payload belongs to the wizard's field, the Escape cancels the wizard, and the key
+  // behind the Escape belongs to nobody.
+  const tui = fixture()
+  const wizard = tui.runOnboarding()
+  assert.equal(tui.screen?.kind, 'setup', 'the production entry opened the wizard')
+  // The wizard state is dropped when the wizard is cancelled, so the field is read
+  // through the object the wizard was running on rather than through the instance.
+  const state = tui.onboarding
+  draft(tui)
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('\x1b[200~pasted\x1b[201~\x1bq'))
+  assert.equal(tui.screen, undefined, 'the Escape cancelled the wizard')
+  assert.equal(state?.field, 'pasted', 'the paste landed in the wizard field it was sent to')
+  assert.equal(tui.input, before.input, 'and the composer draft behind it keeps its text')
+  assert.equal(tui.cursor, before.cursor, 'including its caret')
+  await wizard.catch(() => undefined)
+})
+
+test('W-3a.1: an ordinary read still drops its tail, and a read with no Screen types it', () => {
+  // The controls the fix must not disturb. A Screen that closes on a unit of an
+  // ordinary read already dropped the units behind it (W-3a), and it still does; and
+  // with nothing layered over the workspace the same paste read types its tail, because
+  // the guard is Screen ownership and not a rule about Escape.
+  for (const read of ['\rq', '\x03q', 'q\x1b[5~']) {
+    const tui = fixture()
+    tui.openScreen({
+      kind: 'report', report: 'diag', title: '诊断',
+      lines: [{ kind: 'system', text: '正文' }], offset: 0, copyText: '正文',
+    })
+    draft(tui)
+    const before = snapshot(tui)
+    tui.handleData(Buffer.from(read))
+    assert.equal(tui.screen, undefined, `${JSON.stringify(read)}: the Screen closed on its first key`)
+    assertUnchanged(tui, before, `${JSON.stringify(read)}: the read after the Screen closed`,
+      ['screen', 'screenOffset'])
+  }
+
+  const composer = fixture()
+  draft(composer)
+  const start = snapshot(composer)
+  composer.handleData(Buffer.from('\x1b[200~pasted\x1b[201~\x1bq'))
+  assert.equal(composer.input, `${start.input.slice(0, start.cursor)}pastedq${start.input.slice(start.cursor)}`,
+    'with no Screen up, the paste and the key behind it are both typed')
+})
+
+test('W-3a.1: a Surface still routes the rest of its read to the composer', async () => {
+  const tui = fixture()
+  draft(tui)
+  const pending = tui.handleApproval({ toolName: 'bash', reason: 'runs a build', agent: { id: 'main-session' } })
+  await waitForDialog(tui, 'confirm')
+  const before = snapshot(tui)
+  tui.handleData(Buffer.from('\x1b[200~pasted\x1b[201~yes'))
+  assert.equal(tui.input, `${before.input.slice(0, before.cursor)}es${before.input.slice(before.cursor)}`,
+    'y answers the Surface and the rest of the read reaches the composer')
+  tui.handleData(Buffer.from('n'))
+  await pending.catch(() => undefined)
+})

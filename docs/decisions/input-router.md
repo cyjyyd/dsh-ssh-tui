@@ -21,6 +21,7 @@ InputReader（AD-21）            decode · 回复过滤 · ESC 组装 · 粘贴
    ▼
 tui.ts
    ├─ handleInputText          assemble → read() → 逐帧 consumeFrame（Screen 关闭后余下丢弃）
+   │                           └ 文本单元内部同理：逐字符投递时 Screen 一关闭即停（W-3a.1）
    ├─ route()                  **绑定表与解析**（keymap、Alt 和弦、SS3 尾巴、hold、未知 CSI）
    │      │  每个单元问一次 Router
    │      ▼
@@ -37,6 +38,11 @@ tui.ts
 **W-3a 之后**：切分只发生在 Reader，Router 看到的**永远是完整单元**——各 Owner 的适配器不再自己拆
 read（0.8.3 里只有 Screen 这么做，`screenKeys` 已在 W-3a 删除）。Screen 把整次 read 视为自己的：
 它关闭后，同一 read 里余下的单元丢弃；Surface 相反，答案之后的单元继续按 Owner 判定。
+
+**W-3a.1 之后**：这条规则在**单元内部**同样成立。文本单元是多字符的，而多字符单元是**逐字符**投递并
+逐字符重新判定 Owner 的（这正是 Surface 能"答一个字符、余下交给 Composer"的原因），所以 Screen 的
+关闭必须同样终止这次投递：`ESC` 关掉 Screen 后，同一个文本单元剩下的字符既不能进它背后的 Composer，
+也不能被重新路由给别的 Owner。粘贴尾巴（`\x1b[201~` 之后的 `\x1bq`）就是这条路径唯一的现实入口。
 
 **一次判定**：每个单元只问一次 Router；`route()` 在 Screen 归属时直接交给 Screen 适配器，
 其余情况才继续走绑定表与解析分支。绑定表不决定归属（AD-20 F-5：一个键只有一张表）。

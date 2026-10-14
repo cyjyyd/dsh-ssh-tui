@@ -2165,3 +2165,70 @@ Completion/Search/Doctor、picker 自带 reader、计划卡默认折叠（已单
 **CI**：W-3a 提交 `f7e5849` 的 run `38537258218` **5/5 全绿**（`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
 `test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`）；收紧基线后的提交 `80f9a23` 的 run
 `38538601786` 同样 **5/5**。含 Windows 腿在内，`screenKeys` 删除、逐单元路由与五条变体都在真机腿上验过。
+
+## 0.8.4 W-3a.1 · Screen read ownership 收口（2026-10-14）
+
+> 目标：只验证并（必要时）修复一个边界——**同一个文本单元内部**关闭 Screen 之后继续投递字符的路径。
+> 不重构 Reader/Router、不改默认 keymap、不动 30ms/60ms 持有窗口、不进 W-3b、不发版。
+
+**结论：已复现**。真实 `handleData(Buffer)`，Report Screen 打开 + 非空草稿时输入
+`\x1b[200~pasted\x1b[201~\x1bq`：粘贴**没有**进被隐藏的 Composer（正确），Esc 关闭了 Screen（正确），
+但同一 read 的 `q` **进了** Composer 草稿——`我打了一半的消息`（cursor 3）→ `我打了q一半的消息`（cursor 4）。
+红灯证据来自修复前的构建（46d09d9 工作树），四条路径逐条实测：
+
+| 路径 | 修复前的读法 |
+|---|---|
+| Report Screen + 粘贴 + `\x1bq` | 轨迹 `… handleScreenInput('\x1b','cancel')`、**`insertIntoField('q')`**；草稿 `我打了q一半的消息` |
+| Setup Screen + 同一 read | `pasteIntoScreen('pasted')`（进向导自己的字段）→ Esc 取消向导 → **`insertIntoField('q')`** 进 Composer 草稿 |
+| `\x1bq` **在**粘贴标记之前 | **`insertIntoField('q')`** 进草稿；其后的粘贴已被帧间检查正确丢弃（无 `handlePasteText`） |
+| 更长的尾巴 `\x1b[201~\x1bqhello` | **五个字符**全部落进草稿（`草qhello稿`） |
+
+**事件链**：`isPasteTraffic` 为真 → `InputReader.frames()` 把标记之外的部分整段出成**一个** `literal` 帧
+（`\x1bq`）→ `consumeFrame('literal')` → `handlePlainText()` **逐字符**循环 → `handleChar('\x1b')` →
+Router 判为 Screen → `handleScreenInput` → `closeScreen()`（`screenDismissals++`）→ 同一循环的
+`handleChar('q')` → Router 这次判为 Composer（Screen 已不在）→ `insertIntoField('q')`。
+`handleInputText` 的 `screenDismissals` 检查只发生在**帧与帧之间**，而逐字符投递发生在**帧内**。
+逐字符投递本身是必需的（Surface 答 `y`、后面 `es` 进 Composer 就靠它），所以缺的不是这条机制，
+而是这条机制里的 Screen 检查。核对过 `handlePasteText` 是单次编辑、不再逐字符路由，因此这是**唯一**入口。
+
+**最小修复**（`src/tui.ts`，+10 行，无接口变更）：在 `handlePlainText()` 进入投递循环时记下
+`screenDismissals`，**每投递一个字符前**重新比较，Screen 在这次投递中被关闭就结束这次投递。
+即把读取循环里那条规则原样下沉一层：没有第二个 Reader/Router、没有改 keymap、没有改持有窗口、
+没有改 Surface 的尾部语义（`screenDismissals` 只随 **Screen** 关闭递增）。
+
+**未复现的相邻路径（已加正向用例钉住，不是缺陷）**：帧间尾部（`\rq`、`\x03q`、`q\x1b[5~` 在 read 里
+Screen 关闭后余下丢弃——W-3a 已修，本轮不能破坏）；标记内的 `\x1bq` 是**载荷**（`\x1b[200~a\x1bqb\x1b[201~`
+草稿不动）；标记前的关闭使**整段粘贴**被丢弃；无 Screen 时同一条粘贴 read 的尾巴照常落进草稿
+（`草pastedq稿`——守卫是 Screen 归属，不是"Escape 之后不输入"）；Surface 上 `y` 作答、`es` 进草稿。
+
+**98 → 102 条参考轨迹**：W-3a 留下的 **98 条逐字节不变**（修复是边界收口，不是重新取帧；用
+`git stash` 实测 46d09d9 为 **1454 项 · 1450 通过 · 4 跳过**，本轮 1460 项即 +6 条新用例）。
+参考集新增 4 条**安全用例**（旧读法逐条记录在 `tests/input-reader.test.mjs` 的 `W3A1_FIXTURES`）：
+
+| fixture | 旧（46d09d9） | 新 |
+|---|---|---|
+| `screen-paste-tail-escape` | `… handleScreenInput('\x1b','cancel')`、`insertIntoField('q')`；input `我打了q一半的消息` | `… handleScreenInput('\x1b','cancel')`**结束**；input `我打了一半的消息`、cursor 3 |
+| `screen-escape-then-paste` | `handleScreenInput('\x1b','cancel')`、`insertIntoField('q')` | `handleScreenInput('\x1b','cancel')` 一条，`q` 与粘贴都不落地 |
+| `wizard-paste-tail-escape` | `pasteIntoScreen('pasted')`、`handleSetupKey('\x1b','cancel')`、`insertIntoField('q')` | 同上但**没有** `insertIntoField`；向导字段拿到 `pasted`、Composer 草稿原样 |
+| `surface-paste-tail-typing` | `handleDialogChar('y')`、`insertIntoField('e')`、`insertIntoField('s')` | **逐字节相同**——Surface 的尾部语义没被这次修复碰到 |
+
+**新增用例**（`tests/input-ownership-regression.test.mjs` 5 条 + `tests/input-reader.test.mjs` 1 条）：
+帧内关闭（三种尾巴 `\x1bq` / `\x1bqhello` / `\x1bq\rx`）、标记前关闭、向导字段与草稿隔离、
+普通 read 的帧间尾部仍丢弃 + 无 Screen 时尾巴照常输入、Surface 尾部仍进 Composer、以及上面那张轨迹表。
+
+**Mutation（实测红后恢复，`src/` 事后只剩本轮修复本身）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M6 | 删掉守卫（穿透路径恢复） | ✗ 三条 W-3a.1 在机用例 + 轨迹门 `every fixture frames identically` 红 |
+| M7 | 守卫放在循环**之前**（检查了，但只检查一次） | ✗ 同上——位置错也红，说明测的是行为不是"有没有那行" |
+
+**门**：`npm test` **1460 项 · 1456 通过 · 0 失败 · 4 跳过 · 0 todo** · `typecheck` 0 ·
+`npm run freeze` 全绿 · `npm run freeze:input` 无超基线（`knownGaps` 0/0、`ownerReads.screen` 24/24、
+`dialog` 54/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3，**全部不变**，本轮没有新增计数器）·
+`npm run bench` 字节 501/465/2457/588/140、行 3/3/17/4/1、清屏 0（与基线逐项相同）·
+四条真机探针（setup / main / drop / terminal）全过。
+
+**CI**：（本轮提交推送后补记）
+
+**本轮未做**：W-3b 全部条目与 W-7；版本仍为 `0.8.3`，未发 npm。

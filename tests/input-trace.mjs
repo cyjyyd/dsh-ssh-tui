@@ -334,4 +334,16 @@ export const FIXTURES = [
   // when it carries something that looks like a key.
   { name: 'paste-with-key-bytes', reads: ['\x1b[200~\x1b[5~ and yes\x1b[201~'], setup: ['draft'] },
   { name: 'paste-burst-with-key-bytes', reads: ['one\n\x1b[5~ two\nthree\n'], setup: ['draft'] },
+  // ── W-3a.1: a Screen owns the whole read, including its text units ──────────
+  //
+  // The units after a dismissal are dropped, and that has to hold *inside* a unit as
+  // well as between units: a paste tail is delivered character by character, so the
+  // `ESC` that closes the Screen and the `q` behind it used to be one delivery, and
+  // the `q` was typed into the composer the Screen was hiding. These four fixtures
+  // are the safety cases for that boundary — the Screen pair, the wizard (a Screen
+  // with a field of its own) and the Surface, whose tail is still routed on.
+  { name: 'screen-paste-tail-escape', reads: ['\x1b[200~pasted\x1b[201~\x1bq'], setup: ['screen', 'draft'] },
+  { name: 'screen-escape-then-paste', reads: ['\x1bq\x1b[200~pasted\x1b[201~'], setup: ['screen', 'draft'] },
+  { name: 'wizard-paste-tail-escape', reads: ['\x1b[200~pasted\x1b[201~\x1bq'], setup: ['wizard', 'draft'] },
+  { name: 'surface-paste-tail-typing', reads: ['\x1b[200~pasted\x1b[201~yes'], setup: ['dialog', 'draft'] },
 ]
