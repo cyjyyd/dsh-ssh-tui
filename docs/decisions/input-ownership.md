@@ -604,3 +604,21 @@ included"：三种形态 × 九个单元，草稿/光标/历史/滚动/焦点/�
 
 **仍未做**：Ctrl+L 的两份重绘实现（W-3b.2）、`composerUnit` 的 Composer/Surface 共用体拆分（W-3b.3）、
 Surface 内左右箭头编辑借用字段（本轮范围外，现状是被丢弃）、picker 自带 reader（W-7）。
+输入路径上另有一处**既有**缺陷（W-3b.1a 发现、未修）：输入星光平面字符（emoji）会因 `composerUnit`
+的 `unit.length > 1` 判断而无限递归——裸 Composer 上也复现，需单独授权修。
+
+## 15. W-3b.1a Status（2026-10-14）· 借用字段的终端光标
+
+**原则**：**当前可见字段拥有文本，也必须拥有终端实际光标。** W-3b.1 保证"键编辑正确的字段"，
+W-3b.1a 保证"光标显示在该字段正确的位置"。
+
+**缺陷**：输入行绘制取 `fieldText()`/`fieldCursor()` 是正确的（那一行画的就是可见字段），但未折叠分支
+计算终端光标坐标时用的是 `this.cursor`——**隐藏 Composer 草稿**的光标。Surface 借用字段时两者不同，
+于是字段内部编辑位置正确、终端可见光标停在草稿的偏移上（终端在这里画 IME 预编辑）。折叠/masked 分支
+用的是 `inputView.cursorOffset`（来自 `fieldCursor`），本来就正确。
+
+**修复**：一处，`cursorVisualPosition(inputView.text, fieldCursor, inputTextWidth)`；不触及 Router、
+Reader、Surface 归属、宽度算法或 `paint.ts` 结构。证据是**真实终端网格**（`@xterm/headless`）里的
+`cursor()`，不是字符串断言：`tests/borrowed-field-caret.test.mjs`；Composer 路径逐帧比较**逐字节不变**
+（40 帧中 13 个 Composer 场景全同，7 帧借用字段差异经归一化后**只在光标定位**上）。106 条 Input
+Reader 参考轨迹原样保留。

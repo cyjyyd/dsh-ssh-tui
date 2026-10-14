@@ -6528,7 +6528,12 @@ export class SshTui {
       cursorRowOffset = 0
       column = Math.min(width, promptWidth + inputView.cursorOffset + 1)
     } else {
-      const pos = cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)
+      // The caret belongs to the field being drawn, like the text above it (W-3b.1a):
+      // `fieldCursor` is the borrowed answer's caret while a Surface has one, and the
+      // draft's otherwise. Reading `this.cursor` here put the terminal's caret — the
+      // cell an IME draws its pre-edit in — at the hidden draft's offset, which is a
+      // different number whenever a Surface borrowed the field.
+      const pos = cursorVisualPosition(inputView.text, fieldCursor, inputTextWidth)
       while (pos.row >= inputDisplayLines.length) inputDisplayLines.push('')
       cursorRowOffset = pos.row
       const rowPrefix = pos.row === 0 ? promptWidth : 0

@@ -2314,3 +2314,90 @@ picker 走 `src/picker.ts` 自带 decoder/reader，不经过 `handleData`（W-7 
 
 **本轮未做**：W-3b.2（Ctrl+L 两份实现）、W-3b.3（`composerUnit` 拆分）、Surface 内左右箭头编辑借用字段
 （范围外，现状丢弃）、picker 自带 reader（W-7）。版本仍为 `0.8.3`，未发 npm。
+
+## 0.8.4 W-3b.1a · 借用字段的终端光标（2026-10-14）
+
+> 目标：W-3b.1 的定向验收收口——**读者看得见的那一行拥有文本，就必须拥有终端实际光标**。
+> 不动 Ctrl+L、不拆 `composerUnit`、不加 Surface 左右箭头、不发版。
+
+**Preflight**：HEAD `e288ae989beccec74c6fe46790d0d24459e8f4c6`，工作树干净，version `0.8.3`，
+`1469 · 1465 · 0 · 4 · 0`，参考轨迹 106，CI `38589629248` 5/5——与 brief 完全一致。
+
+**红灯复现（真实终端，`@xterm/headless` 渲染器跑真实帧）**：草稿 `我打了一半的消息`@3，自由文本
+Surface 输入 `ab` 后：
+
+| 操作 | 终端光标 | 应在 | 判定 |
+|---|---|---|---|
+| 输入 `ab`（借用字段 `ab`@2） | (4,15) | 4（`> ab` 之后） | ok（巧合：行文本恰好结束在正确位置） |
+| **Home**（`ab`@0） | (4,15) | **2**（`> \|ab`） | **BAD** |
+| Home→End（`ab`@2） | (4,15) | 4 | ok（同样的巧合） |
+| **Home→Delete**（`b`@0） | (3,15) | **2**（`> \|b`） | **BAD** |
+| End→`x`（`abx`@3） | (5,15) | 5 | ok（巧合） |
+| 24 列窄屏 + 长草稿，Home | (4,15) | **2** | **BAD** |
+| 无 Surface，Home（草稿@0） | (2,15) | 2 | ok ✓ |
+
+**根因**：`src/tui.ts` 的输入行绘制里，`fieldText`/`fieldCursor`/`fieldFolded` 都取自
+`fieldText()`/`fieldCursor()`（正确），`inputView` 也用它们（正确），但**未折叠**分支算终端位置时写的是
+`cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)`——`this.cursor` 是**隐藏 Composer 草稿**
+的光标。有借用字段时两者是不同的数（例：`borrowedText.cursor = 0`、`this.cursor = 3`）。折叠分支与
+masked 分支用的是 `inputView.cursorOffset`（来自 `fieldCursor`），本来就正确；`masked` 恒为 false。
+终端在这里画 IME 预编辑，所以错的位置不只是"看着别扭"：后续输入与预编辑会出现在草稿的偏移上。
+
+**最小修复**（1 行 + 注释）：
+
+```ts
+- const pos = cursorVisualPosition(inputView.text, this.cursor, inputTextWidth)
++ const pos = cursorVisualPosition(inputView.text, fieldCursor, inputTextWidth)
+```
+
+没有触及 Router / Reader / Surface ownership / `term-text.ts` 宽度算法 / `paint.ts` 结构；没有引入
+新的字段状态模型。**纯光标移动的帧本身会被发出**（`\x1b[?25l\x1b[R;CH\x1b[?25h`），所以不需要额外
+的"仅光标变化"帧修复；核实过 `composePaintFrame` 会在每一行之后把光标送回 caret 行。
+
+**新增测试** `tests/borrowed-field-caret.test.mjs`（8 条，全部走真实 `handleData` → 真实 `paint()` →
+真实终端网格，断言 `term.cursor()`；期望值由 `displayWidth` + `cursorVisualPosition`/`foldInputView`
+契约推出，ASCII 用例另有手算值）：借用字段矩阵（输入/Home/End/Home→Delete/End→`x`）、`ESC[1~`/`ESC[4~`、
+Unicode 与宽度矩阵（ASCII / 中文 / emoji / 组合字符 / 换行 / 窄屏跨行 / 恰好占满一行 / 刚过一行）、
+"草稿光标再深也不能带动借用字段的光标"、Composer 等价矩阵（Home/End/Ctrl+A/Ctrl+E/Delete/Backspace/
+输入）、折叠与多行、Surface 生命周期（回答/取消后光标回到草稿；下一个 Surface 不继承）。
+
+**Composer 逐字节等价**（`.pf/w3b1a-frames.mjs`，同一脚本对修复前 `e288ae9` 与修复后各跑一次，
+逐帧比较）：**40 帧里 33 帧逐字节相同，其中 13 个 Composer 场景全部逐字节相同**；7 帧（全部是借用字段）
+不同，且**把光标定位 `CSI r;cH` 归一化后差异为 0**——差异只是光标位置：
+
+| 帧 | 旧 | 新 |
+|---|---|---|
+| `borrowed: Home` | `\x1b[14;5H` | `\x1b[14;3H`（`> \|ab`） |
+| `borrowed: Home then Delete`（Delete 后） | `\x1b[14;4H` | `\x1b[14;3H`（`> \|b`） |
+| `borrowed: wrapped field`（36 字符粘贴后） | `\x1b[14;6H` | `\x1b[14;39H`（字段真正末尾） |
+| `borrowed: long draft Home` | `\x1b[14;5H` | `\x1b[14;3H` |
+
+**参考轨迹：106/106 原样保留**（修复在绘制层，InputFrame/Router/Owner 调用/字段状态/粘贴/Screen
+dismissal/Surface 尾部语义都不经过这里；`fieldCursor()` 在无借用字段时恒等于 `this.cursor`）。
+
+**Mutation（实测红后恢复，`src/` 事后与提交一致）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 绘制位置恢复用 `this.cursor` | **RED** — 借用字段 5 条（`> \|ab`、`ESC[1~`、mid-field、深草稿、生命周期） |
+| M2 | 借用字段 cursor 正确，但定位固定在字段末尾 | **RED** — 8 条全红（含 Composer 等价矩阵） |
+| M3 | 修复顺手写隐藏 Composer cursor 让数字对上 | **RED** — 4 条（"草稿光标未被触碰"类断言） |
+| M4 | 光标固定放在第一显示行（窄屏跨行错误） | **RED** — 2 条（恰好占满一行 / 多行草稿） |
+
+**门**：`npm test` **1477 项 · 1473 通过 · 0 失败 · 4 跳过 · 0 todo**（+8 = 本轮新用例）· `typecheck` 0 ·
+`npm run freeze` 全绿 · `npm run freeze:input` 无超基线（全部计数与 W-3b.1 相同：`knownGaps` 0/0、
+`ownerReads` 24/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3）· `npm run bench` 字节
+501/465/2457/588/140、行 3/3/17/4/1、清屏 0（与基线逐项相同）· 四条真机探针（main / setup / drop /
+terminal）全过。
+
+**本轮发现、未修（需单独授权）**：**输入一个星光平面字符（emoji）会让进程栈溢出**——
+`composerUnit` 用 `unit.length > 1` 判断"这是多字符文本"，而一个 emoji 的 UTF-16 长度就是 2，于是
+`composerUnit('🚀')` → `handlePlainText('🚀')` → `handleChar('🚀')` → `dispatch` → `ownerSurface`/
+`ownerComposer` → `composerUnit('🚀')` 无限递归。**这是既有缺陷**：在 W-3b.1 之前的构建（`ed38c20`）上
+同样复现，且**在裸 Composer 上也复现**（不是 Surface 特有）；按码点计数的单行修复即可，但它属于输入
+路径而不是绘制光标，本轮按"不得扩大范围"只记录不修。本轮的 emoji 覆盖走**粘贴**路径（完整真实路径，
+已绿）。ConPTY 的能力边界同前：帧字节层面的断言在进程内完成，真机腿只覆盖"能渲染、不报错"。
+
+**CI**：（本轮提交推送后补记）
+
+**本轮未做**：W-3b.2、W-3b.3、Surface 左右箭头、过滤字段模型、picker Reader；版本仍 `0.8.3`，未发 npm。
