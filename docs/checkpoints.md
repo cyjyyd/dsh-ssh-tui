@@ -1891,6 +1891,13 @@ ESC/paste 语义、picker 架构、Completion/Search/Doctor、UI。
 **行为等价**：72 条 fixture / **246 次边界调用 + 终态**与抽取前构建逐字节一致（W-1 的 54 条一条未改，
 新增 18 条同样取自抽取前构建）。G-1/G-2/G-8/G-3 三条缺口的轨迹**保持为坏**（3 条 todo 未动）。
 
+**参考轨迹的独立复现**（证明 fixture 不是"改写过的期望"）：把本轮的 `tests/input-trace.mjs` 复制进
+一个检出在 `dfbfb47`（W-0 收尾，Reader/Router 都还不存在）的 worktree，`npm run build` 后重跑同一份
+比对：**72/72 逐字节相同 · 246 次边界调用**——这份答案任何人在重构前的树上都能重新推导出来。
+一次校准：先试的 `b8ec354`（B2 落地）只有 68/72，差的 4 条（`paste-at-screen`、`screen-keys`、
+`screen-paste-and-ctrl-u`、`screen-copy-key`）正是 0.8.3 紧急补丁 `a5f489f`/`f1195fe` 动过的
+Screen + 粘贴/复制语义，所以"抽取前"要取到补丁**之后**的那个提交。
+
 **G-6**：不可达的第二个 Screen 门**删除**（`deadScreenGate` 1 → 0）；`scrollActiveSurface` 的
 screen/dialog 分支**删除**（拆成 Router 判定 + `scrollWorkspace` / `handleScreenInput`）；
 两处 SGR 解析**合并**为一个匹配器；**Ctrl+L 的两份实现保留**并显式路由（合并需要"两份重绘行为一致"
@@ -1969,6 +1976,10 @@ profile 的 `link:` 改指 `.pf/w1`，并用 `require.resolve('dsh-ssh-tui')` �
 本轮**没有**为了让它变绿去动断言、探针或加 skip——那会把 W-2 的验收变成运气。修法（把行数检查限定在
 "承载层内容的那一帧 chunk"上，并用"整帧重绘"的变异证明它仍会红）单列为 **P-1 · 探针窗口归属**，
 建议在 W-3 之前单独处理。
+
+**收尾**：docs 提交 `e0c67a6` 的 run `38504428734` **5/5 全绿**——`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
+`test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`，其中就有上一条红灯的那条腿：同一棵树、
+同一条腿，这次是绿的，与"偶发、与产品无关"的结论一致。
 
 **本轮未做**：G-1/G-2/G-3 修复、`burst` 逐键规范化、Reader hold 窗口、keymap 默认值、picker 重构、
 Completion/Search/Doctor、版本与品牌。`scripts/bench-b2.mjs` 的 `tui.inputGuard.release()` →
