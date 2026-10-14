@@ -1924,7 +1924,52 @@ screen/dialog 分支**删除**（拆成 Router 判定 + `scrollWorkspace` / `han
 `npm run freeze` 全绿（20 条 input 计数）· `npm run bench` 三次运行字节/行数/清屏**逐项与 W-1 相同**
 （ms 单跑抖动，未出现可重复退化）· 真机探针（setup 含 resume 阶段 + 主探针）全过。
 
+**CI**：`c654153` 五条腿里四条绿，红的只有 `test (0.1.7-rc.1)` 的真机探针 6c 一条断言：
+
+```
+resize sweep: 60→2008B 120→4833B 60→2008B 120→4833B
+live stream: 63 row writes, 0 full clears, 10017B
+menu close: partial repaint
+screen scroll: 27 rows, 4018B, no clear
+  - the repaint must start at the layer, not at the top of the frame (rows 2,1,30,29,25,24)
+```
+
+那条腿的测试套件本身是 **1425 项 · 1419 通过 · 0 失败**（`fail 0`）——红的是断言，不是测试。
+
+**P-1（先于 W-2 存在，已定位到探针的测量窗口，不是产品）**：6c 在固定的 500ms 窗口里统计窗口内
+**全部** `ESC[<row>;1H`，而"等待回答"期间的画布本来就有**时钟驱动**的重绘：`startRenderTimer()`
+在 `row.kind === 'question' && row.status === 'waiting'`（spinner、wait card）时周期性置 `dirty`，
+`armFeedbackExpiry()` 另有 TTL 到点重绘；当第 1 行（标题规则：banner + 模式 + 路由标签）的内容恰好
+在那一瞬间变化时，它会和箭头引发的那一帧**并进同一次重绘**，窗口里就出现了 `< 5` 的行。
+
+用只跑 6c 的本地仪器（`.pf/dlg-probe.mjs`，不入库）按 **pty chunk = 帧**逐块归属，红灯窗口的真实结构是：
+
+```
+run 6: FAIL rows=1,30,29,25,24 (foreign 1)
+  [162B rows=1 | ────DeepSeek Harness — SSH TUI [标准模式] deepseek-official/deepseek-flash]
+  [551B rows=30,29,25,24 | 目录:w1 · sub:deepseek-v4-flash SSH ○○○○ 未测 │ 等待回答 ›2 ● Option B …]
+```
+
+层帧（30/29/25/24，从层的上沿往下）本身完全正常；多出来的是另一块只重绘第 1 行的 chrome 帧。
+
+**对照实验（决定性）**：同一支仪器指向 **W-2 之前的构建**——`git worktree` 检出 `b03de16`，
+profile 的 `link:` 改指 `.pf/w1`，并用 `require.resolve('dsh-ssh-tui')` 验证解析到
+`.pf/w1/lib/index.js`——同一断言以**同样的形态**变红（`rows=1,30,29,25,24`，同一块 162B 的第 1 行帧）。
+两套仪器、两棵树的统计：
+
+| 构建 | 全量探针（含 6c 的完整流程） | 只跑 6c 的仪器 |
+|---|---|---|
+| W-2 `c654153` | 1/11 | 1/13 |
+| W-1 `b03de16`（对照） | 0/13 | 1/10 |
+
+两棵树在同一断言上同形态、同量级偶发（W-2 合计 2/24，W-1 1/23）；`git diff b03de16..c654153 --stat`
+是 13 个文件（新增 `src/input-router.ts`、`src/tui.ts` 的派发改造、四个测试、轨迹 fixture、两支审计、
+四份文档），**没有一行绘制路径**。结论：这是**测量窗口的归属问题**，先于 W-2 存在，与输入归属无关。
+
+本轮**没有**为了让它变绿去动断言、探针或加 skip——那会把 W-2 的验收变成运气。修法（把行数检查限定在
+"承载层内容的那一帧 chunk"上，并用"整帧重绘"的变异证明它仍会红）单列为 **P-1 · 探针窗口归属**，
+建议在 W-3 之前单独处理。
+
 **本轮未做**：G-1/G-2/G-3 修复、`burst` 逐键规范化、Reader hold 窗口、keymap 默认值、picker 重构、
-Completion/Search/Doctor、版本与品牌。
-`scripts/bench-b2.mjs` 的唯一改动是把 `tui.inputGuard.release()` 换成 `tui.reader.releaseReplyTail()`
-（同一个操作，拥有者搬了家）。
+Completion/Search/Doctor、版本与品牌。`scripts/bench-b2.mjs` 的 `tui.inputGuard.release()` →
+`tui.reader.releaseReplyTail()` 是上一个提交（`8b1d732`，W-1 收尾）做的：同一个操作，拥有者搬了家。
