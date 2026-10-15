@@ -2715,3 +2715,8 @@ Composer；Composer 自己的路径 `borrowedText === undefined`，行为一字�
 
 **仍未做**：W-3b.3b（`composerUnit` 结构拆分）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）、
 Completion/Search Screen/Terminal Doctor、Plan Card Fold。
+
+**CI**：W-3b.3a 提交 `48efd24` 的 run `38719694935` **5/5 全绿**（`test-windows` 与四条 0.1.7/0.2.0 rc 腿）。
+`tests/surface-state-isolation.test.mjs` 是纯进程内 node 测试（不依赖 pty），**在 Windows 腿上同样执行**——
+两条风险的行为矩阵、指纹断言与 W-3a 的 Alt+1 锁都在 ConPTY 那一侧跑过；真机腿覆盖的是"能启动、能渲染、
+不报错"与交互窗口归属。
