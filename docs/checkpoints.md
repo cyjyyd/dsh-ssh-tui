@@ -2494,7 +2494,10 @@ Unicode fixture；旧构建上三条都抛 `RangeError`，读法记在 `W3B1B_FI
 （main / setup / drop / terminal）全过 · 默认 keymap、peer 范围与配置均未改动（`git diff` 只含
 `src/tui.ts` 与测试/文档）。
 
-**CI**：（本轮提交推送后补记）
+**CI**：W-3b.1b 提交 `d0db720` 的 run `38685247496` **5/5 全绿**（`test (0.1.7-rc.1)`、`test (0.1.7-rc.2)`、
+`test (0.2.0-rc.1)`、`test (0.2.0-rc.2)`、`test-windows`）。`tests/unicode-input-safety.test.mjs` 是纯进程内
+node 测试（不依赖 pty），因此**在 Windows 腿上同样执行**——非 BMP 输入、UTF-8 分片与借用字段 grapheme 编辑
+都在 ConPTY 那一侧跑过；真机腿覆盖的是"能启动、能渲染、不报错"，光标/帧字节层面的断言仍以进程内网格为准。
 
 **剩余风险**：Surface 内左右箭头仍被丢弃（与 Home/End 已支持不一致，范围外）；过滤串没有光标模型；
 picker 仍走自带 reader（W-7）；ConPTY 会重写行寻址，帧字节层面的断言只在进程内成立。
