@@ -50,6 +50,11 @@ read（0.8.3 里只有 Screen 这么做，`screenKeys` 已在 W-3a 删除）。S
 看得见**的那一行（`textIsEditable()` 判定），没有就消费掉。复制键因此也归 Surface 并被丢弃，与它原来的
 可观察行为一致（Composer 的复制在 Surface 打开时本来就拒绝）。
 
+**W-3b.2 之后**：`Ctrl+L` 的两份实现**经审核后保留**（§10，独立审核采纳 KEEP_DUAL）。审核结论是它们并不
+重复：帧合成器只有 `composePaintFrame` 一个，"下一帧整屏"通道只有 `forceFullPaint` 一条（两个 painter 各自
+消费它），真正不同的是两条**前置语句**与两个 painter 自己的光标/几何/chrome 策略。Router 的表因此一字未改：
+Screen 在时归 Screen，否则归 Composer —— 含 Surface 在时那个记录在案的例外（§4）。
+
 **一次判定**：每个单元只问一次 Router；`route()` 在 Screen 归属时直接交给 Screen 适配器，
 其余情况才继续走绑定表与解析分支。绑定表不决定归属（AD-20 F-5：一个键只有一张表）。
 
@@ -90,11 +95,11 @@ route(kind: UnitKind, unit: string, view: OwnershipSnapshot): Owner
 
 | 例外 | 现状 | 状态 |
 |---|---|---|
-| `Ctrl+L` | Screen 在时由 Screen 重绘（`screenNeedsFullPaint`），否则由 Composer 重绘（`repaintNow()`） | **仍在**（W-3b.2）：AD-20 §6 说两份实现只有在测试证明"不同 Owner 下重绘行为一致"后才能合并 |
+| `Ctrl+L` | Screen 在时由 Screen 重绘（`screenNeedsFullPaint`），否则由 Composer 重绘（`repaintNow()`） | **仍在，且已决定保留**（W-3b.2 审核采纳 KEEP_DUAL，见 §10）：这不是"两份实现只有证明一致才能合并"的悬案，而是两个 painter 按各自策略实施同一个 terminal action；Router 的归属一字未改 |
 | Surface 在时的 `Home`/`End`/`Delete`/kitty-`Ctrl+Shift+C` | 曾经到达 Composer（移动/编辑**隐藏草稿**的光标），由 `SURFACE_COMPOSER_KEYS` 显式放行 | **W-3b.1 已关闭**：这四个单元现在是 Surface 的，由 Surface 适配器决定语义（编辑它借来的字段，或消费掉） |
 
-W-2 两条都保留（不是它的授权范围，且修复会改变可观察行为）。W-3b.1 只关掉第二条，且**没有**顺手
-合并 Ctrl+L —— 那需要"两份重绘行为一致"的证明，是 W-3b.2 的事。
+W-2 两条都保留（不是它的授权范围，且修复会改变可观察行为）。W-3b.1 关掉第二条。W-3b.2 审核了第一条并按
+§10 决定**保留**——它记的是归属，不是实现；例外本身没有消失，也不得被描述成已经消失。
 
 ## 5. 四个 Owner 适配器
 
@@ -153,4 +158,59 @@ picker（W-7）；F-5 的"一个键一处处理"由 `route()` 的绑定表唯一
 AD-21 的 Reader 一个字节未改（`tests/input-reader.test.mjs` 的 72 条轨迹是证据）。
 W-3 可以开始的地方（W-3a / W-3a.1 与 W-3b.1 已走完前两条）：G-1/G-2/G-8/G-3 的逐键规范化
 （`burst` 拆分，落在 Reader 或 Router 的 `sequence` 判定上）——**已完成**；Surface 侧的
-`SURFACE_COMPOSER_KEYS` 债 —— **W-3b.1 已关闭**；Ctrl+L 的两份实现 —— 留给 W-3b.2。
+`SURFACE_COMPOSER_KEYS` 债 —— **W-3b.1 已关闭**；Ctrl+L 的两份实现 —— **W-3b.2 已审核并决定保留**（§10）。
+
+---
+
+## 10. W-3b.2 决策 · KEEP_DUAL（2026-10-14）
+
+> 独立审核的范围是只读的：**不改运行时、不改 Router、不改时序、不合并 painter、不改参考轨迹**。
+> 结论经 Independent Gate 采纳为 **KEEP_DUAL — DOCUMENT AND FREEZE**。本节是那份决策的正式记录；
+> 证据在 `tests/ctrl-l-repaint.test.mjs` 与 `docs/checkpoints.md` 的 W-3b.2a 节。
+
+### 10.1 合同（冻结）
+
+| 项 | 冻结内容 |
+|---|---|
+| `Ctrl+L` 是什么 | **terminal repaint action**，不是文本编辑：它不插入、不删除、不移动光标、不改历史、不改滚动、不改焦点、不改任何 dialog 字段 |
+| Screen 在时 | 归 **Screen**；由 **Screen painter**（`paintScreen` → `composePaintFrame`）执行完整重绘，`markDirty()` 后由**绘制节奏**取走 |
+| Composer 在时 | 归 **Composer**；由 **workspace painter**（`paintFrame` 的工作区体）执行，`repaintNow()` 同步尝试立即绘制 |
+| Surface 在时 | Router **仍返回 `composer`**（§4 的例外，保留）；**只使用它的 repaint 执行路径**。Surface 没有自己的 painter，它的行本来就是工作区帧的一部分（`windowInteractionLines` 合成进 `paintRows`） |
+| Surface 的文本所有权 | **没有**移交给 Composer：`case '\x0c'` 在 `composerUnit` 的 `dialog` 早返回**之前** `return`，`handleDialogChar` 不会被调用，字段/过滤/借用文本都不被读写 |
+| 光标 | 两个 painter 的策略**不同且都正确**：Screen 帧 `hideCursor: true`（帧尾不发 `?25h`），workspace 帧写回 field caret 并发 `?25h` |
+| 绘制时机 | 两者**不同且都冻结**：Screen 走 cadence（本地 80 ms / SSH ≤400 ms），workspace 同步尝试立即绘制（背压时 `dirty` 保留，下一拍补画） |
+| 清屏 | **允许一次**有意的完整清屏（`\x1b[H\x1b[J`）；**不允许**此后持续整屏清除 —— 两个 painter 都在帧尾恢复尺寸缓存，标志都是一次性的 |
+
+### 10.2 为什么是"保留"而不是"合并"
+
+1. **不是两份实现**：帧合成器只有 `composePaintFrame`；"下一帧整屏"通道只有 `forceFullPaint`
+   （17 个设置点，两个 painter 各消费一次）。`Ctrl+L` 的两条路径只差两句前置 + 各自 painter 的策略。
+2. **Surface 没有 painter**：把归属改判给 Surface，`ownerSurface` 的兜底仍会转发到同一行
+   `case '\x0c'` —— 行为差异为零，却把"实现重绘"的义务搬进 W-3b.3 将要拆分的 Surface 执行体。
+   即"搬债"，不是"还债"。
+3. **两个 painter 有意不等价**（光标、chrome diff 粒度、`partial`/`dirtyFrom`、分片预算、
+   `lastTranscriptStart` 毒化）：合并等于把两套策略取并集参数化，会引入额外清屏/错误光标/调度变化
+   的风险；而真正该共用的东西已经共用了。
+4. **代码重复本身不是理由**：这里重复的是两条前置语句，不是重绘实现。
+
+### 10.3 一轮清理掉的"半成品"（B2.5 → W-3b.2a）
+
+B2.5 的意图是"一条消息、一个位置"，实现却留了两个位置：`footerEcho` 先放在**状态行**（底栏第一行）
+最低优先级处，放不下才退到身份行 —— 于是同一条消息的行号由**它的长度与窗口宽度**决定（`/copy` 的短文案
+在第一行、长文案在最后一行，用户报告"copy 提示跑到第一行"）。现在 acknowledgement 恒在身份行，状态行只留
+仪表（E-1），`FooterStripInput.echo` 与 budget 的 `echo` 组一并删除。这条与 Router 无关，但它和 §10.1
+的"清屏一次、位置固定"是同一种可预测性，故一并记在这里。
+
+### 10.4 未采纳的替代方案
+
+| 方案 | 结论 |
+|---|---|
+| B1 把 Surface 时的归属改判为 `surface` | 行为等价（`ownerSurface` 兜底到同一行），但把义务搬进 W-3b.3 的拆分；**不在本轮或 RC 前做** |
+| B3 Screen 侧改用 `forceFullPaint`（一句、零行为变化） | 可选后续；本轮不做（会动运行时） |
+| C 合并为单一 repaint 实现 | **明确否决**：两个 painter 有意不等价，且 ConPTY 腿只能证明"能起能画"，合并的回归面在真机不可见 |
+
+### 10.5 与 W-3b.3 的接口
+
+W-3b.3 拆 `composerUnit` 时，`Ctrl+L` 必须继续由 Composer 执行体持有（Router 现在就这么判）；Surface 侧
+**不要**顺手加 `case '\x0c'`，也不要删 `ownerSurface` 对未认领单元的兜底转发 —— W-3b.3 的两条必测风险
+（R-HISTORY / R-ALT）与 Ctrl+L 无关，见 `docs/checkpoints.md` 的 W-3b.2a 节。

@@ -106,7 +106,7 @@ stdin / FRAME_STDIN
 | 点击 | 无 | 无 | 链接/卡片 | 链接/卡片/聚焦 |
 | 拖拽选择 | **无**（G-5） | 无 | 有（`selection.ts`） | 有（复制后清空草稿，G-10） |
 | 粘贴 | setup：进字段；其它：丢弃 | 有字段则进字段；否则丢弃 | 进草稿 | — |
-| Ctrl+L | 整屏重画 | 无 | 整屏重画（另一套实现，G-6） | 同左 |
+| Ctrl+L | 整屏重画 | 无（它的行画在工作区帧里） | 整屏重画（另一套实现，G-6 → **W-3b.2 决策：保留**，见 §17） | 同左 |
 | resize | 任何 owner 都不拥有：Renderer 处理 | | | |
 | focus 事件 | 未启用；意外收到时被"未知序列"吞掉（G-7） | | | |
 | Ctrl+V（`0x16`） | 无人处理（现代终端自己粘贴，G-4） | | | |
@@ -254,6 +254,12 @@ type InputEvent =
 
 Owner 内部的二次路由（例如 Screen 里 setup vs report vs inspect）**留在 owner 实现里**：
 Router 只回答到"四个 owner 之一"，不再往下猜。
+
+**优先级 2 的落地读法（W-3b.2 澄清，见 §17）**：`Ctrl+L` 是 terminal action，"当前最大 owner"读作
+**"能重绘当前这块屏的 painter"**——Screen 在时是 Screen painter；否则是 workspace painter（**Surface 的行
+本来就画在工作区帧里**，Surface 没有自己的 painter）。所以 Surface 在时 Router 返回的是 `composer` 而不是
+`surface`：这是 AD-22 §4 记录在案、W-3b.2 决定**保留**的例外，它只借道 repaint 执行路径，不涉及任何文本或
+字段所有权的移交。
 
 ### 4.4 owner 接口（实现阶段落地）
 
@@ -666,3 +672,65 @@ M4（Reader 逐 read 解码、分片产生替代字符）、M5（插入落到隐
 
 **仍未做**：W-3b.2（Ctrl+L 两份实现）、W-3b.3（`composerUnit` 拆分）、Surface 左右箭头、过滤字段模型、
 picker Reader（W-7）。
+
+---
+
+## 17. W-3b.2 Status（2026-10-14）· Ctrl+L 重绘归属的决策收口
+
+> 只读审核 + 决策冻结。**运行时一行未改**：`Router` 的归属、两份 painter、绘制时序、参考轨迹都不动。
+> 决策正文在 [AD-22 §10](input-router.md)；证据在 `tests/ctrl-l-repaint.test.mjs` 与
+> `docs/checkpoints.md` 的 W-3b.2a 节。
+
+### 17.1 审核看到了什么
+
+三条链（真机与源码逐行核对）：`Ctrl+L` 在 `src/` 只有三个落点——`input-router.ts:90`（Surface 时的例外）、
+`tui.ts:12344`（Screen 的 `screenNeedsFullPaint` + `markDirty`）、`tui.ts:12847`（共享执行体的
+`case '\x0c'` → `repaintNow()`）。
+
+- **不是两份重绘实现**：帧合成器只有 `composePaintFrame`；"下一帧整屏"只有 `forceFullPaint`
+  一条通道（两个 painter 各消费一次）。两条路径的差别是**两句前置**（Screen 置标志 + `markDirty`；
+  workspace 清四个缓存 + `render()`）以及两个 painter 自己的光标/几何/chrome/预算策略。
+- **Surface 没有 painter**：它的行由 `windowInteractionLines` 合成进工作区帧的 `paintRows`。
+  因此"重绘 Surface"物理上就是重绘工作区帧，"判给 Composer"是 **painter 选择**，不是输入归属移交：
+  `case '\x0c'` 在 `composerUnit` 的 `dialog` 早返回**之前** `return`，`handleDialogChar` 不会被调用，
+  写入集合只有 6 个绘制缓存。
+- **例外是标签级的**：把归属改判给 `surface`，`ownerSurface` 的兜底仍会走到同一行 —— 行为差异为零。
+- **没有持续整屏清除的结构路径**：两个 painter 都在帧尾恢复尺寸缓存，标志都是一次性
+  （`screenNeedsFullPaint` 仅 Screen 消费；`forceFullPaint` 两处消费）。
+
+### 17.2 冻结的合同（摘要，正本见 AD-22 §10.1）
+
+`Ctrl+L` = terminal repaint action（不是文本编辑）；Screen 在时由 **Screen painter** 在 cadence 上执行完整
+重绘；否则由 **workspace painter** 执行（并尝试立即绘制）；Surface 在时 Router **仍返回 `composer`**，
+**只借道 repaint 执行路径**，Surface 的文本所有权没有移交；两个 painter 的光标策略（隐藏 vs 恢复）与绘制
+时机（cadence vs 立即）**不同且都冻结**；**允许一次**有意的完整清屏，**不允许**此后持续整屏清除。
+
+### 17.3 为什么不是缺陷
+
+1. 真正的共用已经发生（`composePaintFrame` + `forceFullPaint`）；再次合并是把两套**有意不同**的策略取并集
+   参数化，直接引入"额外清屏 / 错误光标 / 调度变化"三类回归。
+2. 改判归属会把"实现重绘"的义务搬进 W-3b.3 将要拆分的 Surface 执行体（搬债而非还债）。
+3. 代码重复本身不是理由：这里重复的是两句前置语句。
+
+### 17.4 证据与变异
+
+`tests/ctrl-l-repaint.test.mjs`（4 条，全部经真实 `handleData(Buffer)` + 真实 `write()` 字节）：
+composer（草稿+caret）、confirm Surface、借用字段的 question Surface、过滤态 picker —— 每条断言
+**恰好一次 `\x1b[H\x1b[J`**、**全帧重建**（1..height 逐行寻址）、所有权指纹不变、**下一次有真实变化的帧不再清屏**
+且只重画部分行、**光标不移动**（列由 `fieldText`/`fieldCursor` 独立推出）；Screen 侧另有
+**调度边界**用例（按键本身零字节 + `dirty` 置位 + 真实 cadence 定时器取走该帧）与 report/setup/inspect
+三种 Screen 的"一次清屏 → 回到增量 → 退出后 workspace 正确恢复"。
+
+**变异**：M1（Screen 去掉 `markDirty()`）、M2（workspace 去掉强制整屏机制）、M3（workspace 帧尾不记录尺寸 →
+以后每帧都清）、M4（Screen 只置 dirty、不置整屏标志）、M5（Surface 在时 `Ctrl+L` 变无操作）**全部实测红**，
+且各自只打红对应的执行路径用例。
+
+### 17.5 W-3b.3 的接口与风险台账
+
+拆 `composerUnit` 时 `Ctrl+L` 继续由 Composer 执行体持有；**不要**给 Surface 执行体加 `case '\x0c'`，
+也不要删 `ownerSurface` 对未认领单元的兜底转发。两条待复现风险 **R-HISTORY**（借用字段编辑可能经
+`leaveHistoryBrowse()` 写隐藏 Composer 的 `historyIndex/historyDraft`）与 **R-ALT**（Surface 中
+`Alt+f`/`Alt+/` 可能覆盖隐藏 Composer 的 `input/cursor`）正式登记为 W-3b.3 的必测项，
+前提与"不得统一禁止全部 Alt 和弦（W-3a 已锁定 Alt+1）"见 `docs/checkpoints.md` W-3b.2a 节。
+
+**仍未做**：W-3b.3（`composerUnit` 拆分）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）。

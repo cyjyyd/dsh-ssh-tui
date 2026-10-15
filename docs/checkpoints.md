@@ -2503,3 +2503,102 @@ node 测试（不依赖 pty），因此**在 Windows 腿上同样执行**——�
 
 **剩余风险**：Surface 内左右箭头仍被丢弃（与 Home/End 已支持不一致，范围外）；过滤串没有光标模型；
 picker 仍走自带 reader（W-7）；ConPTY 会重写行寻址，帧字节层面的断言只在进程内成立。
+
+---
+
+## 0.8.4 W-3b.2 / W-3b.2a · Ctrl+L 重绘归属：只读审核 → KEEP_DUAL 收口（2026-10-14）
+
+> 目标：审核 `Ctrl+L` 在 Screen / Surface / Composer 三种场景下的所有权与完整重绘语义，把结论冻结成合同与
+> 证据。**运行时一行未改**（决策与测试除外）；不进入 W-3b.3，不发版。
+> 本节的"审核"部分对应 W-3b.2，"修复 + 证据"部分对应 W-3b.2a。
+
+**Preflight**：HEAD `5ee20da58d7f565ba2e0c8250d446438f23aa61c`，version `0.8.3`（42 tag），参考轨迹 **109**，
+`knownGaps` 0，InputRouter 1，CI `38685747657` **5/5**（`test-windows` + 四条 rc 腿）——与 brief 一致。
+
+**漂移一处，按维护者确认的 A 方案处理**：工作树里带着上一轮**授权暂存**的 `/copy` 提示修复（4 个文件）。
+先以独立提交落地再开始本轮收口——`915578f`「an acknowledgement is the last row, wherever it fits」，
+`npm test` 因此从 1490·1486 变 **1492·1488**（+2 条回执行号用例）；本轮自身的所有验收数字都建立在它之上。
+
+### 审核（只读）
+
+三条链在 `src/` 只有三个落点：`input-router.ts:90`（Surface 时的例外）、`tui.ts:12344`（Screen 的
+`screenNeedsFullPaint` + `markDirty()`）、`tui.ts:12847`（共享执行体的 `case '\x0c'` → `repaintNow()`）。
+
+| 结论 | 依据 |
+|---|---|
+| **不是两份重绘实现** | 帧合成器只有 `composePaintFrame`；"下一帧整屏"只有 `forceFullPaint` 一条通道（`paintScreen:5101`、`paintFrame:6904` 各消费一次，17 个设置点）。两条 `Ctrl+L` 路径的差别是**两句前置** + 两个 painter 自己的策略 |
+| **Surface 没有 painter** | 它的行由 `windowInteractionLines` 合成进工作区帧的 `paintRows`（`tui.ts:6797-6807`）——"重绘 Surface"物理上就是重绘工作区帧 |
+| **例外只借道执行路径** | `case '\x0c'` 在 `composerUnit` 的 `dialog` 早返回（`12879`）**之前** `return`，`handleDialogChar` 不会被调用；写入集合只有 6 个绘制缓存 |
+| **改判给 `surface` 行为等价** | `ownerSurface` 的兜底（`12739`）仍会走到同一行 `case '\x0c'`：标签级例外，不是行为差异 |
+| **没有持续整屏清除的结构路径** | 两个 painter 都在帧尾恢复尺寸缓存（`5137-5138` / `6960-6961`），标志一次性（`5104-5105` / `6907`） |
+| **两条真实差异** | 光标（Screen 隐藏且不发 `?25h` vs 工作区写回 field caret 并发 `?25h`）与时机（Screen 走 cadence 80–400 ms vs 工作区同步尝试立即绘制） |
+
+**决策**（Independent Gate 采纳）：**KEEP_DUAL — DOCUMENT AND FREEZE**。保留两个 painter、继续共用
+`composePaintFrame`；Router 归属一字未改，Surface 的例外**保留并明确记录**（不得描述为已消失）。
+合同正本：`docs/decisions/input-router.md` §10；AD-20 侧：§4.3 优先级 2 的落地读法 + §1.6 表行 + §17 Status。
+**未采纳**：B1（改判 Surface——行为等价但把义务搬进 W-3b.3）、B3（Screen 侧改用 `forceFullPaint`，可选后续）、
+C（合并为单一 repaint 实现——两个 painter 有意不等价，且 ConPTY 腿看不到这类回归）。
+
+### 证据：`tests/ctrl-l-repaint.test.mjs`（4 条，真实 `handleData(Buffer)` + 真实 `write()` 字节）
+
+| 用例 | 场景 | 断言 |
+|---|---|---|
+| T1a 作曲家 | 非空草稿 + 非零 cursor | 恰好 **1 次 `ESC[H ESC[J`**；**1..24 行逐行寻址**（全帧重建）；指纹不变；caret 列由 `fieldText`/`fieldCursor` 独立推出且等于帧尾 `ESC[r;cH`；下一帧（键入 `x`）**0 清屏**且只重画部分行、含 caret 行 |
+| T1b Surface（三种） | confirm（无字段）、question（借用字段）、picker（过滤态） | 归属仍是 `ownerComposer`（记录的例外）；**各 1 次清屏 + 全帧重建**；Surface 仍在画面上；草稿/光标/history/scroll/focus/borrowedText/dialog.cursor/dialog.filter/rows/yank **逐项不变**；下一帧 0 清屏且为增量 |
+| T2a 调度边界 | Report Screen | 按键本身 **0 字节** + `dirty === true` → **真实 `startRenderTimer()` 的 cadence** 取走该帧（不等额外输入）→ 1 次清屏 + 全帧重建 |
+| T2b 三种 Screen | report / setup / inspect | 各 1 次清屏 + 全帧重建 + Screen 内容回来；Screen offset / 向导字段 / 隐藏草稿不变；下一次真实局部更新 **0 清屏**且增量；退出 Screen 后 workspace 正确恢复（1 次重建 + 之后 0 清屏） |
+
+**不强制两条路径字节相同**：Screen 帧 `hideCursor` 且不发 `?25h`，工作区帧发 caret + `?25h`——这正是
+KEEP_DUAL 记录下来的有意差异。断言的是**清屏次数、寻址行集合、状态指纹、调度边界**。
+
+### Mutation（`.pf/mutations-ctrll.mjs`，逐条改源码 → build → 跑上面的用例 → 还原）
+
+| # | 变异（针对对应执行路径） | 结果 |
+|---|---|---|
+| M1 | Screen 去掉 `markDirty()`（标志仍在、调度不再知道） | **RED** — T2a + T2b（**调度边界**用例是唯一能抓住它的那条） |
+| M2 | 工作区去掉强制整屏机制（不再清尺寸缓存） | **RED** — T1a + T1b |
+| M3 | 工作区帧尾不记录尺寸 → 以后每帧都清 | **RED** — T1a + T1b（增量恢复断言） |
+| M4 | Screen 只置 dirty、不置整屏标志 | **RED** — T2a + T2b（清屏与全帧重建断言） |
+| M5 | Surface 在时 `Ctrl+L` 变无操作 | **RED** — 仅 T1b（作曲家用例保持绿：变异是定向的） |
+
+源码事后还原并重建，`git status` 确认 `src/` 无改动。
+
+### W-3b.2a 顺带修的"半成品"（B2.5 遗留）
+
+`/copy` 的短文案 `已复制 412 字…（最近回复）` 落在**底栏第一行**、长文案 `还没有可复制的回复…` 落在最后一行
+（用户报告"copy 提示跑到第一行"）。根因不是 `Ctrl+L`，而是 B2.5 只做了一半：echo 曾是**状态行**上最低优先级的
+一组，放不下才退到身份行——于是**同一条消息的行号由它的长度与窗口宽度决定**。现在 acknowledgement **恒在
+身份行**，状态行只留仪表（E-1），`FooterStripInput.echo` 与 budget 的 `echo` 组删除；notice 仍优先于 echo。
+证据：`tests/feedback-routing.test.mjs`（短/长 echo × notice × 160/100/60/40 列 + "notice 压过 echo"），
+M1–M4 全红；14 项真 PTY 提示审计（`.pf/hint-audit.mjs`）显示修复后所有回执都在最后一行、状态行保持
+`SSH ○○○○ 未测 │ 空闲`。提交：`915578f`。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `typecheck` | 干净 |
+| `npm test` | **1496 · 1492 pass · 0 fail · 4 skipped · 0 todo**（基线 1492·1488，+4 = 本轮的 Ctrl+L 专项） |
+| 参考轨迹 | **109 条不变**（`tests/fixtures/` 无 diff，0 改写） |
+| `npm run freeze` | 全绿 |
+| `npm run freeze:input` | 无基线超限（`knownGaps` 0/0、`ownerReads` 24/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3 全不变） |
+| `npm run bench` | 字节 **501/465/2457/588/140**、行 **3/3/17/4/1**、**clears 0**——与基线逐项相同。**`Ctrl+L` 的有意清屏没有、也不得加进 `bench-b2.mjs` 的常规场景**（那里的全局断言就是 `clears === 0`） |
+| 真机探针 | `tui-probe` OK（含交互层/选择器/Screen/退出交接）；`tui-setup-probe` OK（未配置 home：向导 Screen 画自己的帧、经 resize、Esc 与保存两次交回工作区）；`tui-drop-probe` OK；`tui-term-probe` OK（8/8 终端 profile） |
+| 运行时 | **未改**：`src/` 在本轮收口提交中零 diff（唯一的 src 改动属于先落的 `915578f`） |
+
+### W-3b.3 风险台账（正式登记，本轮只登记不修复）
+
+| ID | 风险 | 可达条件（源码定位） | 影响 | W-3b.3 必测 |
+|---|---|---|---|---|
+| **R-HISTORY** | 借用字段编辑时 `leaveHistoryBrowse()` 可能改隐藏 Composer 的 `historyIndex`/`historyDraft` | `leaveHistoryBrowse`（`tui.ts:15230-15235`）写 `historyIndex = this.history.length` 与 `historyDraft = this.input`；由 `backspace`(`15163`)、`deleteAtCursor`(`15174`)、`composerUnit` 的 `\x15`(`12852`)/`\x0b`(`12859`) 调用，四者都先过 `textIsEditable()`（借用字段时为真） | Surface 打开**之前**正处于历史浏览时，在**借用字段**里 Backspace/Delete/Ctrl+U/Ctrl+K 会把 `historyDraft` 覆盖成**正在浏览的历史条目文本**，用户原先的半截草稿在 Surface 关闭后经 ↑↓ 回不去；`moveFieldCursor`（`9760`）与 `handleDialogChar` 的输入路径（`13159-13164`）**不**调用它 → 同一字段上"打字不重置、退格重置"的不对称 | 用**真实历史浏览流程**（先 ↑ 进入浏览，再开 Surface，再编辑）复现，不得只构造孤立的 `historyIndex`；并断言借用字段编辑后 `historyDraft` 未被覆盖 |
+| **R-ALT** | Surface 中 `Alt+f` / `Alt+/` 可能直接覆盖隐藏 Composer 的 `input`/`cursor` | `route()` 的 Alt 分支（`12594-12611`）在 `12564` 的 `if (this.dialog === undefined …)` **之后**，且该门只挡 keymap 分支；`Alt+f`/`Alt+/` 写 `this.input = '/find '` + `this.cursor` | Surface 打开时按 `Alt+f` 会静默改写看不见的草稿（Screen 不受影响：`12560` 提前返回） | 与 W-3a 已锁定的 **Alt+1 行为**区分开（`input-ownership-regression.test.mjs:314-321` 明确断言和弦照跑、dialog 仍在、草稿不动）；**不得统一禁止全部 Alt 和弦**；`Alt+1` 另会改 `scrollOffset`（Workspace 状态），一并进入矩阵 |
+
+**建议的 W-3b.3 矩阵**：`{confirm 无字段, picker 有选项, question 借用字段, picker+filtering}` ×
+`historyIndex ∈ {-1, 0, k, history.length}` × `{Backspace, Delete, Ctrl+U, Ctrl+K, 打字, Home/End, Ctrl+A/E,
+Alt+f, Alt+1, Ctrl+L}`，逐项断言 `{input, cursor, historyIndex, historyDraft, scrollOffset, borrowedText,
+dialog.cursor, dialog.filter}` 不变（`Ctrl+L` 一行现在已是绿的，正好作对照格）。
+另注：`scripts/input-freeze-audit.mjs` 的 `OWNED_WRITES` 虽含 `historyDraft`，但 `INPUT_HANDLERS` **不含**
+`leaveHistoryBrowse`，且 `methodBody()` 只扫单方法体 → 该写入对棘轮**不可见**，建议 W-3b.3 顺手补计数。
+
+**仍未做**：W-3b.3（`composerUnit` 拆分，未授权）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）、
+Screen 侧 `Ctrl+L` 的时序对齐（可选 B3）。
