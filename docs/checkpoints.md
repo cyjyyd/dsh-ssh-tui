@@ -2404,3 +2404,97 @@ terminal）全过。
 原始字节已完整覆盖 ConPTY 的光标行为。
 
 **本轮未做**：W-3b.2、W-3b.3、Surface 左右箭头、过滤字段模型、picker Reader；版本仍 `0.8.3`，未发 npm。
+
+## 0.8.4 W-3b.1b · Unicode 标量输入安全（2026-10-14）
+
+> 目标：Release Blocker 定向修复——直接输入一个 Unicode 非 BMP 字符（`🚀`、`𠮷`）不得崩溃。
+> 不进入 W-3b.2/W-3b.3，不发版。
+
+**Preflight**：HEAD `3edf737a0576cfbcad9dfde80c9b219cb3ab6910`，工作树干净，version `0.8.3`，
+`1477 · 1473 · 0 · 4 · 0`，参考轨迹 106，`knownGaps` 0，InputRouter 1，CI `38596866193` 5/5——与 brief 一致。
+
+**历史归因（隔离 worktree，未改动任何历史版本）**：
+
+| 构建 | 裸 Composer `🚀` | 借用字段 `🚀` | confirm `🚀` | Report Screen | Setup Screen |
+|---|---|---|---|---|---|
+| `v0.8.3`（`8483538`） | ✔ `"🚀"@2` | ✔ | ✔ 不作答 | ✔ | ✔ |
+| W-1（`b03de16`） | ✔ | ✔ | ✔ | ✔ | ✔ |
+| W-2（`c654153`） | ✖ **RangeError** | ✖ **RangeError** | ✖ **RangeError** | ✔ | ✔ |
+| 当前（`3edf737`） | ✖ **RangeError** | ✖ **RangeError** | ✖ **RangeError** | ✔ | ✔ |
+
+与 brief 的假设一致：**W-2 首次引入**（`composerUnit` 的 `unit.length > 1`），`v0.8.3`/W-1 正常。
+Screen 一直安全——Router 第一步就把单元交给 Screen，永远走不到 `composerUnit`。
+
+**递归链（取自抛出的错误自身的 stack）**：
+
+```
+composerUnit('🚀') → handlePlainText('🚀') → handleChar('🚀') → dispatch → InputRouter.route
+  → ownerComposer/ownerSurface → composerUnit('🚀') → … （无限；W-2 上同一链，只是还没有独立 Router 模块）
+```
+
+`.length` 是 2（UTF-16 code unit），`for...of` 只迭代一次（code point），于是"多字符"分支把同一个码点
+无限次送回自己。`🚀` 以**两个 read** 的字节分片送入也一样命中（Reader 先正确拼回码点，然后递归）。
+
+**修复 1（本轮主修）**：`composerUnit` 改按 **code point** 判定。新增模块级
+`carriesMultipleCodePoints(unit)`：`unit.length <= 1` 直接 false；否则用 `codePointAt(0)` 判断首个码点占
+1 还是 2 个 code unit，再比较剩余长度——**零分配**（ASCII 热路径与 `length > 1` 等价）。单个 BMP/非 BMP
+码点落进原有 switch/尾部分支（插入），多码点仍走 `handlePlainText` 逐码点拆分。**多字符分支保留**：
+confirm 上 `yes` 的首个 `y` 作答、剩余 `es` 仍逐字符重新判定 Owner。
+
+**修复 2（同一根因类的第二处，本轮一并修）**：`graphemeBefore`/`graphemeAfter` 原来对 `this.input`（隐藏
+草稿）分段，而 `backspace`/`deleteAtCursor` 编辑的是 `fieldText()`（借用字段）——range 来自**另一个字符串**。
+改为切分 `this.fieldText()`。**这是既有缺陷**：`v0.8.3` 上已复现（`a🚀` + Backspace → `a\uD83D`@2，留下
+半个代理对、光标停在代理对内部），只是 emoji 递归挡住才没被发现；ASCII 场景下两个字符串的偏移常常巧合相同
+（W-3b.1 的用例因此没抓到）。修后借用字段的 Backspace/Delete 与 Composer 走同一套 grapheme 规则。
+
+**矩阵与证据**：`tests/unicode-input-safety.test.mjs`（12 条，全部真实 `handleData(Buffer)` → Reader →
+Router → Owner；递归用包装器量化为**深度**，红的时候报
+`handleChar re-entered itself 9 deep for "🚀": one code point is not a run of text` 而不是栈溢出）：
+
+- **Composer**：`🚀`/`𠮷`/`𝄞`/`a🚀b`/`🚀🚀`/`🚀a`/`a𠮷`/`你好`/`hello`——不抛异常、文本完整不重复、
+  cursor 等于 UTF-16 offset、无 U+FFFD、不提交、不推行、不动历史/滚动/焦点/echo；投递深度 ≤ 4、
+  `composerUnit` 进入次数 ≤ 1 + 码点数；混杂脚本长串（`ASCII 中文 🚀𠮷 𝄞 e\u0301 👩💻 done`）逐码点精确；
+- **借用字段**：`🚀`/`𠮷`/`a🚀b` 进 `borrowedText`，隐藏草稿与光标不动；Backspace/Delete 按**它自己的**
+  grapheme 规则删除（`a🚀` → `a`、`🚀🚀` → `🚀`、`👩💻`/`🇨🇳`/`e\u0301`/`👍🏽` 各删一个 grapheme），
+  插入中段（`a🚀b` → Home → `𠮷` → Backspace 回到原样）不留半个代理对、不留 U+FFFD；
+- **拒绝方**：confirm + `🚀`（不崩溃、不作答、草稿不动）、Report Screen + `🚀`（不穿透）、
+  **向导自己的字段** + `🚀`（字符落在向导字段里，草稿不动）——确认它没有独立路径绕过本次修复；
+- **UTF-8 分片**：`Buffer.from('🚀','utf8')` 在 1/2/3 处切开分两次送入 → 无半字符、无替代字符、终态与整读
+  **逐字段相同**；`a🚀b` 一读 vs 三读 vs 字节切片（在 emoji 中间切）三者终态相同；30ms/60ms 窗口未动；
+- **粘贴 vs 键入**：Composer 与借用字段上，三种文本的粘贴/键入终态一致；confirm 上粘贴 `yes` 不作答、
+  键入 `yes` 仍逐字符作答（`我打了es一半的消息`@5）；Screen 拒绝非 BMP 且 W-3a.1 的尾部丢弃仍生效。
+
+**参考轨迹 106 → 109**：**0 条改写**（更新脚本 `CHANGED = []`，任何非新增差异直接抛错），新增 3 条
+Unicode fixture；旧构建上三条都抛 `RangeError`，读法记在 `W3B1B_FIXTURES`：
+
+| fixture | 旧（`3edf737`） | 新 |
+|---|---|---|
+| `unicode-astral-typing`（`a🚀b`） | RangeError | `insertIntoField('a')`、`insertIntoField('🚀')`、`insertIntoField('b')`；input `我打了a🚀b一半的消息`@7 |
+| `unicode-astral-split-bytes`（`🚀` 两片字节） | RangeError | 一个 `handleInputText('🚀')` + 一次 `insertIntoField('🚀')`；input `我打了🚀一半的消息`@5 |
+| `unicode-astral-borrowed`（`a🚀b`，`record: ['borrowed']`） | RangeError | 三次 `handleDialogChar`+`insertIntoField`；`borrowed {a🚀b,4}`、草稿 `我打了一半的消息`@3 |
+
+**等价性证据**：同一脚本对修复前后（`3edf737` worktree）各跑 40 个场景的**真实帧字节**，
+**40/40 逐字节相同**——包括全部 Composer、借用字段、折叠、历史召回、粘贴场景。唯一变化的行为是原本抛
+`RangeError` 的那一个：现在正常输入并绘制（`🚀`@2，caret 落在 `\x1b[14;5H`，宽字符两格）。
+
+**Mutation（全部实测红后恢复，`src/` 事后与提交一致）**：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 恢复 `unit.length > 1` | **RED** — 10 条 Unicode 用例 + 轨迹门 |
+| M2 | 非 BMP 字符直接丢弃以规避递归 | **RED** — 9 条（文本完整性）+ 轨迹门 |
+| M3 | 多字符当块插入（不再逐码点重新判定 Owner） | **RED** — `yes` 语义 2 条 + 轨迹门 + W-3a/W-3a.1/W-3b.1 尾部 6 条 |
+| M4 | Reader 逐 read 解码（分片产生替代字符） | **RED** — 分片等价用例 + 轨迹门 |
+| M5 | 插入落到隐藏草稿而非借用字段 | **RED** — Ownership 4 条 + 轨迹门 + 借用字段光标 6 条 |
+
+**门**：`npm test` **1490 项 · 1486 通过 · 0 失败 · 4 跳过 · 0 todo**（基线 1477 · 1473，+13 = 12 条新用例
++ 1 条轨迹断言）· `typecheck` 0 · `npm run freeze` 全绿 · `npm run freeze:input` 无超基线且计数全不变
+（`knownGaps` 0/0、`ownerReads` 24/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3）· `npm run bench`
+**字节 501/465/2457/588/140、行 3/3/17/4/1、清屏 0**——与 W-3b.1a 基线逐项相同 · 四条真机探针
+（main / setup / drop / terminal）全过 · 默认 keymap、peer 范围与配置均未改动（`git diff` 只含
+`src/tui.ts` 与测试/文档）。
+
+**CI**：（本轮提交推送后补记）
+
+**剩余风险**：Surface 内左右箭头仍被丢弃（与 Home/End 已支持不一致，范围外）；过滤串没有光标模型；
+picker 仍走自带 reader（W-7）；ConPTY 会重写行寻址，帧字节层面的断言只在进程内成立。

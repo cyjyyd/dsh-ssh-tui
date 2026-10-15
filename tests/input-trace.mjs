@@ -377,4 +377,13 @@ export const FIXTURES = [
   { name: 'surface-field-home-delete', record: ['borrowed'], reads: ['ab', '\x1b[H', '\x1b[3~', '\x1b[F'], setup: ['question', 'draft'] },
   { name: 'surface-filter-edit-keys', reads: ['/', 'al', '\x1b[H', '\x1b[3~', '\x1b[F'], setup: ['list', 'draft'] },
   { name: 'surface-edit-then-answer', reads: ['\x1b[3~', 'yes'], setup: ['dialog', 'draft'] },
+  // ── W-3b.1b: one code point is one input unit ────────────────────────────────
+  //
+  // An astral character is two UTF-16 code units and one code point. These fixtures pin
+  // what that has to mean on the wire: one delivery per code point, the code point whole
+  // when its bytes arrive split, and the borrowed field owning the answer (never the
+  // draft behind it).
+  { name: 'unicode-astral-typing', reads: ['a🚀b'], setup: ['draft'] },
+  { name: 'unicode-astral-split-bytes', reads: split([0xf0, 0x9f], [0x9a, 0x80]), setup: ['draft'] },
+  { name: 'unicode-astral-borrowed', record: ['borrowed'], reads: ['a🚀b'], setup: ['question', 'draft'] },
 ]

@@ -1319,6 +1319,23 @@ const QUOTA_RETRY_MS = 15_000
  */
 /** SGR mouse report: `\x1b[<button;column;row` + `M` (press/motion) or `m` (release). */
 const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u
+
+/**
+ * Whether one unit carries more than one Unicode code point.
+ *
+ * This is the test `composerUnit` needs, and `unit.length > 1` is not it: `.length`
+ * counts UTF-16 code units, and an astral character — `🚀`, `𠮷`, an emoji with a
+ * modifier — is two of those while being a single code point. Reading the first code
+ * point and comparing the remainder costs nothing on the hot path (ASCII answers 1, so
+ * the comparison is `length > 1` as before) and never allocates, which `Array.from`
+ * would. A lone surrogate answers 1, which is the honest reading: it is one code unit
+ * and the Reader cannot produce one from the wire.
+ */
+function carriesMultipleCodePoints(unit: string): boolean {
+  if (unit.length <= 1) return false
+  return unit.length > ((unit.codePointAt(0) ?? 0) > 0xffff ? 2 : 1)
+}
+
 const SETUP_STEPS = ['provider', 'id', 'base-url', 'key', 'models', 'models-pick', 'model-default', 'context', 'confirm'] as const
 
 /** The steps that show a text field (the others are pickers or the confirmation). */
@@ -12811,7 +12828,11 @@ export class SshTui {
    */
   private composerUnit(unit: string, moved: string | undefined): void {
     void moved
-    if (unit.length > 1) { this.handlePlainText(unit); return }
+    // A run of text is split and re-judged per code point; a single one — ASCII, CJK, or
+    // an astral character the Reader framed as one unit — falls through to the switch and
+    // its owner. Counting UTF-16 code units here sent `🚀` back into this method forever
+    // (W-3b.1b), which is why the test is by code point.
+    if (carriesMultipleCodePoints(unit)) { this.handlePlainText(unit); return }
     switch (unit) {
       case '\x1b': this.handleEscape(); return
       case '\r':
@@ -15100,12 +15121,20 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** Grapheme cluster immediately before `cursor`; cursor-internal positions delete it whole. */
+  /**
+   * Grapheme cluster immediately before `cursor`; cursor-internal positions delete it whole.
+   *
+   * The cluster is measured in the field that owns the keyboard, like `backspace` and
+   * `deleteAtCursor` above, which is what makes their ranges mean the same thing as the
+   * cursor they were handed (W-3b.1b): segmenting the *draft* while editing a borrowed
+   * answer gave offsets from another string, so a borrowed `a🚀` lost one surrogate and
+   * kept the caret inside the pair.
+   */
   private graphemeBefore(cursor: number): { start: number; end: number } {
     if (cursor <= 0) return { start: 0, end: 0 }
     let previousStart = 0
     let previousEnd = 0
-    for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+    for (const segment of GRAPHEME_SEGMENTER.segment(this.fieldText())) {
       const start = segment.index
       const end = start + segment.segment.length
       if (cursor === start) return { start: previousStart, end: previousEnd }
@@ -15116,9 +15145,9 @@ export class SshTui {
     return { start: previousStart, end: previousEnd }
   }
 
-  /** Grapheme cluster containing or following `cursor`. */
+  /** Grapheme cluster containing or following `cursor`, in the field that owns the keyboard. */
   private graphemeAfter(cursor: number): { start: number; end: number } | undefined {
-    for (const segment of GRAPHEME_SEGMENTER.segment(this.input)) {
+    for (const segment of GRAPHEME_SEGMENTER.segment(this.fieldText())) {
       const start = segment.index
       const end = start + segment.segment.length
       if (cursor === start || (cursor > start && cursor < end)) return { start, end }

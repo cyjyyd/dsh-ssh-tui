@@ -604,8 +604,9 @@ included"：三种形态 × 九个单元，草稿/光标/历史/滚动/焦点/�
 
 **仍未做**：Ctrl+L 的两份重绘实现（W-3b.2）、`composerUnit` 的 Composer/Surface 共用体拆分（W-3b.3）、
 Surface 内左右箭头编辑借用字段（本轮范围外，现状是被丢弃）、picker 自带 reader（W-7）。
-输入路径上另有一处**既有**缺陷（W-3b.1a 发现、未修）：输入星光平面字符（emoji）会因 `composerUnit`
-的 `unit.length > 1` 判断而无限递归——裸 Composer 上也复现，需单独授权修。
+输入路径上那处**既有**缺陷（W-3b.1a 发现，W-3b.1b 修复）：输入星光平面字符（emoji）会因
+`composerUnit` 的 `unit.length > 1` 判断而无限递归——裸 Composer、借用字段、无字段 confirm 上都复现，
+Screen 上不复现（见 §16）。
 
 ## 15. W-3b.1a Status（2026-10-14）· 借用字段的终端光标
 
@@ -622,3 +623,46 @@ Reader、Surface 归属、宽度算法或 `paint.ts` 结构。证据是**真实�
 `cursor()`，不是字符串断言：`tests/borrowed-field-caret.test.mjs`；Composer 路径逐帧比较**逐字节不变**
 （40 帧中 13 个 Composer 场景全同，7 帧借用字段差异经归一化后**只在光标定位**上）。106 条 Input
 Reader 参考轨迹原样保留。
+
+## 16. W-3b.1b Status（2026-10-14）· Unicode 标量输入安全
+
+**原则**：**一个 Unicode 字符必须作为一个输入单元安全到达它的 Owner**——无论它占一个还是两个
+UTF-16 code unit，都不得因此递归、丢失、重复或越权。
+
+**缺陷（两个，同一类根因：UTF-16 单位被当成"字符"）**：
+
+1. **`composerUnit` 的 `unit.length > 1`**（W-2 引入，v0.8.3 与 W-1 上没有）：`.length` 数的是 UTF-16
+   code unit，而一个星光平面字符是**两个 code unit、一个 code point**。于是 `🚀` 走了"一段文本"的路径：
+   `composerUnit` → `handlePlainText` → `handleChar` → `dispatch` → Owner → `composerUnit` → … 直到
+   `RangeError: Maximum call stack size exceeded`。裸 Composer、借用字段 Surface、**无字段 confirm** 都命中
+   （confirm 在 `textIsEditable()` 之前就递归了）；Report Screen 与 Setup Screen 不命中——Screen 在
+   Router 第一步就拥有整个单元。
+2. **`graphemeBefore`/`graphemeAfter` 在切分 `this.input`**（自借用字段存在起就有，v0.8.3 上已复现）：
+   `backspace`/`deleteAtCursor` 编辑的是 `fieldText()`（借用字段），而两个 range 帮助函数却对着**隐藏草稿**
+   分段，于是拿到的是**另一个字符串**的偏移。草稿是中文、答案是 emoji 时，Backspace 只删掉半个代理对并
+   把光标留在代理对**内部**（`a🚀` → `a\uD83D`@2）。缺陷 1 修好之前这条路径根本走不到。
+
+**修复**：
+
+- `composerUnit` 改按 code point 判定（新增模块级 `carriesMultipleCodePoints`）：`codePointAt(0)` 读第一个
+  码点（> 0xFFFF 即 2 个 code unit），再比较剩余长度——**热路径零分配**（ASCII 仍是 `length > 1`），
+  单个 BMP/非 BMP 码点都不递归，多码点仍走既有 `handlePlainText` 逐码点拆分；**多字符分支不能删**：
+  confirm 上 `yes` 的首个 `y` 作答、剩下 `es` 仍需重新判定 Owner（W-3a 合同）。
+- `graphemeBefore`/`graphemeAfter` 改成切分 `this.fieldText()`：与它们服务的
+  `backspace`/`deleteAtCursor` 看同一个字段。UTF-16 cursor offset 约定不变。
+
+**证据**：`tests/unicode-input-safety.test.mjs`（12 条，全部经 `handleData(Buffer)` → Reader → Router →
+Owner，并用包装器把"递归"量化为深度而非等栈溢出）：Composer 的 `🚀`/`𠮷`/`𝄞`/`a🚀b`/`🚀🚀`/`你好`/`hello`、
+借用字段的 `🚀`/`𠮷`/`a🚀b`、拒绝方（confirm / Report Screen）与向导自己的字段、UTF-8 逐字节分片（1+3/2+2/3+1）
+与整读等价、粘贴与键入等价、`yes` 作答与 Screen dismissal 语义保持、grapheme 编辑（组合字符 / 肤色 / ZWJ /
+旗帜）与"借用字段按自己的 grapheme 编辑"。参考轨迹 **106 → 109**（**0 条改写**，新增 3 条 Unicode fixture；
+旧构建上三条都抛 `RangeError`，读法记在 `tests/input-reader.test.mjs` 的 `W3B1B_FIXTURES`）。
+
+**等价性**：与修复前构建（`3edf737`）逐帧比较，40 个场景**全部逐字节相同**；唯一变化的行为是原本抛
+`RangeError` 的那一个（现在正常输入并绘制）。
+
+**变异**：M1（恢复 `unit.length > 1`）、M2（丢弃非 BMP 以规避递归）、M3（多字符当块插入、不再逐码点重判）、
+M4（Reader 逐 read 解码、分片产生替代字符）、M5（插入落到隐藏草稿）全部实测红。
+
+**仍未做**：W-3b.2（Ctrl+L 两份实现）、W-3b.3（`composerUnit` 拆分）、Surface 左右箭头、过滤字段模型、
+picker Reader（W-7）。

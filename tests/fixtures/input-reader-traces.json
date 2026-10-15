@@ -3786,5 +3786,136 @@
       "sent": [],
       "exits": []
     }
+  },
+  "unicode-astral-typing": {
+    "trace": [
+      [
+        "handleInputText",
+        "a🚀b"
+      ],
+      [
+        "insertIntoField",
+        "a"
+      ],
+      [
+        "insertIntoField",
+        "🚀"
+      ],
+      [
+        "insertIntoField",
+        "b"
+      ]
+    ],
+    "state": {
+      "input": "我打了a🚀b一半的消息",
+      "cursor": 7,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "unicode-astral-split-bytes": {
+    "trace": [
+      [
+        "handleInputText",
+        "🚀"
+      ],
+      [
+        "insertIntoField",
+        "🚀"
+      ]
+    ],
+    "state": {
+      "input": "我打了🚀一半的消息",
+      "cursor": 5,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "unicode-astral-borrowed": {
+    "trace": [
+      [
+        "handleInputText",
+        "a🚀b"
+      ],
+      [
+        "handleDialogChar",
+        "a"
+      ],
+      [
+        "insertIntoField",
+        "a"
+      ],
+      [
+        "handleDialogChar",
+        "🚀"
+      ],
+      [
+        "insertIntoField",
+        "🚀"
+      ],
+      [
+        "handleDialogChar",
+        "b"
+      ],
+      [
+        "insertIntoField",
+        "b"
+      ],
+      [
+        "handleInputText",
+        "n"
+      ],
+      [
+        "handleDialogChar",
+        "n"
+      ],
+      [
+        "insertIntoField",
+        "n"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": "questions",
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "borrowed": {
+        "text": "a🚀b",
+        "cursor": 4
+      },
+      "sent": [],
+      "exits": []
+    }
   }
 }

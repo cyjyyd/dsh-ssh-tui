@@ -77,6 +77,20 @@ const W3A1_FIXTURES = {
  * that is rewritten without one is a reference that proves nothing. The new fixtures are
  * the boundary itself — each Surface shape, and the answer's tail behind it.
  */
+/**
+ * The three traces W-3b.1b adds, and what the build before the fix did with them.
+ *
+ * Nothing in the reference moved (106 untouched, 0 replaced): the fix is one code-point
+ * test in `composerUnit`, and the fixtures are new because no existing one could survive
+ * an astral character — the old build threw `RangeError: Maximum call stack size
+ * exceeded` on all three, which is the reading recorded here.
+ */
+const W3B1B_FIXTURES = {
+  'unicode-astral-typing': 'RangeError: typing `a🚀b` recursed until the stack ran out (the emoji is two UTF-16 units and one code point)',
+  'unicode-astral-split-bytes': 'RangeError: the same, with the four bytes of `🚀` cut in half across two reads — the Reader joined them, then the unit recursed',
+  'unicode-astral-borrowed': 'RangeError: the same at a borrowed field, before the Surface ever saw the answer',
+}
+
 const W3B1_FIXTURES = {
   'dialog-home-end': 'with a confirmation up, Home/End moved the draft behind it (cursor 3 → 8); the trace itself was already the two reads, so the change is the end state',
   'dialog-delete': 'the Delete was spent on the draft behind the confirmation (我打了一半的消息 → 我打了半的消息, with a `deleteAtCursor` call in the trace)',
@@ -241,6 +255,44 @@ test('W-3b.1: a Surface owns its editing keys, and the field on screen is the on
   assert.deepEqual(answer.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]),
     ['handleDialogChar', 'insertIntoField', 'insertIntoField'], 'y answers, es is typed')
   assert.equal(answer.state.input, '我打了es一半的消息', 'with the Delete dropped rather than spent on the draft')
+})
+
+test('W-3b.1b: a non-BMP character is delivered once per code point, to its owner', () => {
+  // The reference records it: one `handleInputText` per read, and then one delivery per
+  // code point — the emoji included, whole. The state is what a reader would see, and the
+  // borrowed-field fixture records the field itself (`record: ['borrowed']`).
+  assert.deepEqual(Object.keys(W3B1B_FIXTURES).sort(), [
+    'unicode-astral-borrowed', 'unicode-astral-split-bytes', 'unicode-astral-typing',
+  ])
+
+  const typed = REFERENCE['unicode-astral-typing']
+  assert.deepEqual(typed.trace, [
+    ['handleInputText', 'a🚀b'],
+    ['insertIntoField', 'a'],
+    ['insertIntoField', '🚀'],
+    ['insertIntoField', 'b'],
+  ], 'three code points, three deliveries, in order — no recursion and no duplication')
+  assert.equal(typed.state.input, '我打了a🚀b一半的消息', 'and the run landed at the caret behind it')
+  assert.equal(typed.state.cursor, 7, 'which moved by seven UTF-16 units')
+
+  const split = REFERENCE['unicode-astral-split-bytes']
+  assert.deepEqual(split.trace, [
+    ['handleInputText', '🚀'],
+    ['insertIntoField', '🚀'],
+  ], 'bytes cut inside the code point arrive as one unit and land once')
+  assert.equal(split.state.input, '我打了🚀一半的消息', 'with no replacement character and no duplication')
+  assert.equal(split.state.cursor, 5)
+
+  const borrowed = REFERENCE['unicode-astral-borrowed']
+  assert.deepEqual(borrowed.trace.filter(call => call[0] !== 'handleInputText').map(call => call[0]), [
+    'handleDialogChar', 'insertIntoField',
+    'handleDialogChar', 'insertIntoField',
+    'handleDialogChar', 'insertIntoField',
+    'handleDialogChar', 'insertIntoField',
+  ], 'the Surface took each code point and put it in the borrowed field')
+  assert.deepEqual(borrowed.state.borrowed, { text: 'a🚀b', cursor: 4 }, 'which is where the answer is')
+  assert.equal(borrowed.state.input, '我打了一半的消息', 'while the draft behind it never moved')
+  assert.equal(borrowed.state.cursor, 3, 'nor its caret')
 })
 
 test('a read is not a key: one read and several reads reach the same owners and state', async () => {
