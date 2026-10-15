@@ -734,3 +734,102 @@ composer（草稿+caret）、confirm Surface、借用字段的 question Surface�
 前提与"不得统一禁止全部 Alt 和弦（W-3a 已锁定 Alt+1）"见 `docs/checkpoints.md` W-3b.2a 节。
 
 **仍未做**：W-3b.3（`composerUnit` 拆分）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）。
+
+---
+
+## 18. W-3b.3a Status（2026-10-14）· 跨 Owner 状态隔离（R-HISTORY / R-ALT）
+
+> W-3b.2 审核登记的两条风险，本轮**先红后绿**复现并定向修复。不做 `composerUnit` 整体拆分（那是 W-3b.3b），
+> 不动 Ctrl+L 的 KEEP_DUAL 决策，不改版本/tag/npm。
+
+### 18.1 R-HISTORY · 借用字段的编辑结束了 Composer 的历史浏览
+
+**入口审计**（`leaveHistoryBrowse()` 的全部调用点，`leaveHistoryBrowse` 自身写 `historyIndex` + `historyDraft`）：
+
+| # | 调用点 | 借用字段时可达 | 前置条件 |
+|---|---|---|---|
+| 1 | `backspace()`（`\x7f`/`\x08`） | ✔ | 借用字段非空（`cursor === 0` 先返回） |
+| 2 | `deleteAtCursor()`（`\x1b[3~`，经 `ownerSurface`） | ✔ | 光标不在末尾（`graphemeAfter` 有值） |
+| 3 | `composerUnit` `case '\x15'`（Ctrl+U） | ✔ | `textIsEditable()` |
+| 4 | `composerUnit` `case '\x0b'`（Ctrl+K） | ✔ | `textIsEditable()` |
+| 5 | `handlePasteText()`（括号粘贴） | ✔ | `textIsEditable()`（brief 特别点出的一条，实测可达） |
+| 6 | `composerUnit` 尾部的可打印字符分支 | ✘ | 在 `dialog !== undefined` 早返回**之后**，Composer 专属 |
+
+即：**四种编辑键 + 粘贴**五条路径都会在借用字段上触发 Composer 的历史退出；普通输入不会。
+
+**红**（真实 `handleData(Buffer)`，真实 ↑ 进入浏览，历史由两次真实提交建立，不设 `historyIndex` 伪造）：
+
+- 浏览态：`historyIndex` 1 → **2**，`historyDraft` `'我打了一半的消息'` → **`'历史二'`**（正在浏览的那一条）；
+  Surface 关闭后 ↓ 被 `historyForward` 的 `historyIndex >= history.length` 直接吃掉，**用户的未发送草稿再也回不来**。
+- 非浏览态与 Composer 自身语义：**红前即绿**（对照格，说明该 bug 需要"浏览开着"这一前提）。
+
+**最小修复**（共同入口一处，`leaveHistoryBrowse()`）：
+
+```ts
+if (this.borrowedText !== undefined) return   // 历史浏览属于 Composer
+```
+
+借用字段存在时直接返回：Composer 自己的输入/召回/退出浏览路径 `borrowedText === undefined`，行为一字未变。
+
+### 18.2 R-ALT · 搜索种子写进了看不见的草稿
+
+`route()` 的 Alt 分支（`\x1b` + 其余，AD-20 §1.3 阶梯 13，owner 记为 **Workspace**）在**任何 owner 被询问之前**
+执行；其中 `Alt+f`/`Alt+F`/`Alt+/` 直接把 `this.input` 写成 `'/find '`。Surface 在时（Screen 更早返回，不受影响）
+这就是对隐藏草稿的越权写入（F-2）。实测：confirm Surface + `Alt+f` → `input` 从 `'我打了一半的消息'` 变成 `'/find '`。
+
+**最小修复**（同一分支内）：
+
+```ts
+if (this.textIsEditable() && this.borrowedText === undefined) { …种子… }
+return                                        // 和弦在 Surface 内被消费，不再穿透
+```
+
+`textIsEditable()` 单独不够——它回答的是"有字段可编辑"，而**借来的答案**也是字段；种子属于 **Composer 的**
+字段，正是 `borrowedText === undefined`。Surface 内没有既定的搜索动作，因此按 brief 消费掉该和弦。
+
+**保留不变**（合同对照）：`Alt+1…4`（跳类别）与 `Alt+n/p`（搜索步进）在 Surface 内**照旧执行**——W-3a 已锁定的
+语义（`input-ownership-regression.test.mjs` 的 surface 用例）；本轮只记录，不重新定义搜索导航。Screen 仍在
+Router 第一步吃掉全部单元（Alt 分支根本不可达）。Composer 单独拥有键盘时 `Alt+f` 仍写入 `/find ` 并把光标放到 6。
+
+### 18.3 证据与变异
+
+`tests/surface-state-isolation.test.mjs`（6 条，全部真实 `handleData(Buffer)`；浏览一律由真实 ↑ 进入）：
+
+- **R-HISTORY**：六条借用字段编辑路径（Backspace / Delete / Ctrl+U / Ctrl+K / 普通输入 / 粘贴）× 完整流程
+  （两次真实提交 → 未发送草稿 → ↑ → 打开自由文本 Question → 编辑 → Esc → ↓）——断言借用字段只影响自己、
+  Composer 指纹全程不变、Surface 关闭后仍在原浏览位置、↓ 交回原草稿、`history` 数组未被改写；
+- **R-HISTORY 对照**：非浏览态（↑ 后 ↓ 回末尾）下借用字段编辑同样零写入，且此后 ↑/↓ 的 Composer 语义仍然成立；
+  Composer 自身在浏览时打字**仍然**结束浏览（修复不得越界）；
+- **R-ALT**：四种 Surface 形态（confirm / 自由文本 Question / 有选项 Question / 过滤态 picker）× `Alt+f`・`Alt+F`・
+  `Alt+/`——隐藏草稿、光标与全部 Surface 状态零变化；Composer 形态仍写入 `/find `；
+  `Alt+1/4/n/p` 的行为被**记录**并断言仍然执行；`Ctrl+L` 的路由与"恰好一次清屏"不变（W-3b.2 冻结值）。
+
+**变异**：M1（借用字段 Backspace 重新触发历史退出）、M2（Delete/Ctrl+U/Ctrl+K 重新写历史）、M3（粘贴重新写历史）、
+M4（Surface 内 Alt+f 重新写隐藏草稿）、M5（错误地禁用 Surface 的 Alt+1）、M6（Composer 自身浏览不再保存草稿）、
+M7（把守卫做成过宽：Composer 的 `/find` 种子不再写入）**全部实测红**。
+
+### 18.4 Freeze 审计强化（能力边界）
+
+`scripts/input-freeze-audit.mjs`：
+
+- 新增写入类别 **`composer history`**（`this.(historyIndex|historyDraft) =`），从 `composer draft` 里**拆出来**：
+  此前 `historyDraft` 折在草稿里，`leaveHistoryBrowse → composer history` 这一对没有名字，审阅时看不见；
+- `INPUT_HANDLERS` 增加 `leaveHistoryBrowse`，允许列表登记 `leaveHistoryBrowse: ['composer history']` 与
+  `submit: [… 'composer history' …]`（**不是**用它消灭红灯：任何**别的**方法写历史状态会成为新的
+  `new writer: … writes the composer history`，M1–M3 实测触发）；
+- 新增结构化检查 **`historyGuards`**：该历史写入者必须**读** `this.borrowedText` 才允许写（注释被剥掉后再读，
+  所以守卫挪进注释就不算数）；缺失即 `unguarded history writer` 失败。
+- **能力边界**：静态扫描能表达"谁写了什么"与"这个写入者带不带守卫"，**不能**表达"守卫是否在正确的路径上、
+  是否覆盖全部借用字段入口"——那是路径分析，硬做会误伤合法的 Composer 历史操作。因此行为矩阵
+  （`tests/surface-state-isolation.test.mjs`）与变异 M1–M3 是主要证据，静态检查是防回归的第二道。
+- **未放大任何既有基线**：`knownGaps` 0/0、`ownerReads` 24/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3
+  全部不变；`npm run freeze:input` 与 `npm run freeze` 均绿。
+
+### 18.5 参考轨迹与门
+
+**参考轨迹 109 条不变、零改写**（`tests/fixtures/` 无 diff）：受影响的两条路径都被既有 fixture 的形态排除了——
+`alt-f` 没有 Surface（Composer 形态，行为未变），Screen 场景在 Router 第一步就被吃掉。`npm test`
+**1502 · 1498 pass · 0 fail · 4 skipped · 0 todo**（基线 1496·1492，+6 = 本轮专项）；`bench`
+501/465/2457/588/140 B、行 3/3/17/4/1、**clears 0**（与基线逐项相同，未新增完整清屏）。
+
+**仍未做**：W-3b.3b（`composerUnit` 结构拆分）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）。

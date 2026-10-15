@@ -12599,10 +12599,21 @@ export class SshTui {
       if (alt === '4') { this.jumpToCategory('reply'); return }
       if (alt === 'n' || alt === 'N') { this.stepSearch(1); return }
       if (alt === 'p' || alt === 'P') { this.stepSearch(-1); return }
+      // The `/find` seed is composer *text*, so it may only be typed into a field
+      // the composer owns (W-3b.3a). This branch runs before any owner is asked
+      // (the Alt chords are workspace-global, AD-20 §1.3 step 13), so with a
+      // Surface up it used to write the hidden draft — the one thing F-2 forbids —
+      // and the reader saw their next message replaced by `/find `. A chord is not
+      // an owner, so the key is consumed here instead of reaching behind the
+      // Surface. `textIsEditable()` alone is not this question: it answers "a field
+      // is editable", and a borrowed answer is one — the seed is the *composer's*
+      // field, which is exactly `borrowedText === undefined`.
       if (alt === 'f' || alt === 'F' || alt === '/') {
-        this.input = '/find '
-        this.cursor = this.input.length
-        this.markDirty()
+        if (this.textIsEditable() && this.borrowedText === undefined) {
+          this.input = '/find '
+          this.cursor = this.input.length
+          this.markDirty()
+        }
         return
       }
       // Other Alt+<key>: ignore ESC so it does not cancel, type the remainder.
@@ -15226,8 +15237,18 @@ export class SshTui {
     this.markDirty()
   }
 
-  /** Typing while browsing history detaches from the saved item. */
+  /**
+   * Typing while browsing history detaches from the saved item.
+   *
+   * The browse is the **composer's**, so only the composer's own field may end it
+   * (W-3b.3a). Every editing key a Surface borrowed the field for arrives here —
+   * `backspace`, `deleteAtCursor`, `handlePasteText`, and `composerUnit`'s Ctrl+U /
+   * Ctrl+K — and detaching on that path wrote the hidden composer's state from the
+   * visible answer: the recalled entry replaced `historyDraft`, so the unsent draft
+   * the browse was holding could never be reached again with `↓`.
+   */
   private leaveHistoryBrowse(): void {
+    if (this.borrowedText !== undefined) return
     if (this.historyIndex >= 0 && this.historyIndex < this.history.length) {
       this.historyIndex = this.history.length
       this.historyDraft = this.input

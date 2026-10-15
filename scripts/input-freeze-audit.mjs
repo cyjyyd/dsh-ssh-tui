@@ -90,7 +90,13 @@ export const BASELINE = {
 
 /** State an input handler must not write unless it owns it (AD-20 F-2/F-3). */
 const OWNED_WRITES = [
-  { kind: 'composer draft', pattern: /this\.(input|cursor|inputFolded|historyDraft)\s*=/u },
+  { kind: 'composer draft', pattern: /this\.(input|cursor|inputFolded)\s*=/u },
+  // The composer's *history*: which recalled entry the reader is on and the draft the
+  // browse is holding. Split out from the draft at W-3b.3a, where a borrowed field's
+  // edit reached `leaveHistoryBrowse()` and overwrote `historyDraft` with the entry
+  // being browsed — folded into `composer draft`, that write had no name of its own
+  // and the pair `leaveHistoryBrowse → composer history` could not be reviewed.
+  { kind: 'composer history', pattern: /this\.(historyIndex|historyDraft)\s*=/u },
   { kind: 'transcript', pattern: /this\.rows\.push\(|pushRow\(represent\(|this\.notice\s*=|this\.footerEcho\s*=/u },
 ]
 
@@ -107,7 +113,25 @@ const INPUT_HANDLERS = [
   'route', 'dispatch', 'dispatchWith', 'dispatchPaste', 'observe',
   'ownerScreen', 'ownerSurface', 'ownerComposer', 'ownerWorkspace',
   'composerUnit', 'arrowHistory', 'mouseGesture', 'repaintNow',
+  // W-3b.3a: the composer history's one writer. It is on the input path (four editing
+  // keys and paste reach it) and it is the method a borrowed field must not get past.
+  'leaveHistoryBrowse',
 ]
+
+/**
+ * The history writer that a borrowed field can reach, and the guard it must carry.
+ *
+ * `leaveHistoryBrowse()` is called by the composer's own keys *and* by the keys a
+ * Surface borrows the field for; only the first may end the browse. Which callers
+ * reach it at runtime is path analysis, and a scan that guessed at it would either
+ * miss the borrowed paths or forbid legitimate composer history — so the static half
+ * is deliberately structural: the method must *read* `this.borrowedText` before it
+ * writes, and the behaviour is pinned by `tests/surface-state-isolation.test.mjs`
+ * (M1–M3 in that round's mutation record remove the guard and the borrowed path's
+ * assertions go red). A guard that is present but wrong is outside what this audit
+ * can see, and that is the boundary of the check, not a claim it does not make.
+ */
+const HISTORY_GUARD_METHOD = 'leaveHistoryBrowse'
 
 /**
  * A repo-relative path with POSIX separators.
@@ -255,6 +279,21 @@ function writerMap() {
   return out
 }
 
+/**
+ * Whether the history writer still asks whose field it is looking at.
+ *
+ * See {@link HISTORY_GUARD_METHOD} for what this can and cannot see. The check is
+ * deliberately about *code*, not prose: comments are stripped before the body is
+ * read, so a guard that moves into a comment stops counting.
+ */
+function historyGuards() {
+  const found = methodBody(code(TUI), HISTORY_GUARD_METHOD)
+  return {
+    method: HISTORY_GUARD_METHOD,
+    ok: found !== undefined && /this\.borrowedText\b/u.test(found.body),
+  }
+}
+
 /** The reads of the two ownership flags, per enclosing method. */
 function ownerReads() {
   const text = code(TUI)
@@ -302,7 +341,7 @@ export function auditInputOwnership() {
     guards, dispatchers, mouseParsers, rawBranches, pasteConsumers, mouseConsumers, knownGaps, deadScreenGate,
     readers, rawRouters, rawDecoders, pasteFraming, escapeAssembly,
     routerModules, routerCallSites,
-    writes, reads,
+    writes, reads, historyGuards: historyGuards(),
   }
 }
 
@@ -321,7 +360,11 @@ const BASELINE_WRITERS = {
   handlePasteText: ['composer draft'],
   handleChar: ['composer draft'],
   setField: ['composer draft'],
-  submit: ['composer draft', 'transcript'],
+  submit: ['composer draft', 'composer history', 'transcript'],
+  // W-3b.3a: the composer history's one writer. It is *allowed* to write it — that is
+  // what the method is for — but the pair is now on the list by name, and the guard
+  // that keeps a borrowed field out of it is checked by `historyGuards`.
+  leaveHistoryBrowse: ['composer history'],
   runCommand: ['composer draft', 'transcript'],
   handleEscape: ['transcript'],
   handleCtrlC: ['transcript'],
@@ -367,6 +410,9 @@ function main() {
 
   const problems = rows.filter(row => row.over).map(row => `${row.id} ${row.count} > baseline ${row.baseline}`)
   problems.push(...writerProblems(audit.writes))
+  if (!audit.historyGuards.ok) {
+    problems.push(`unguarded history writer: ${audit.historyGuards.method} writes the composer history without reading this.borrowedText`)
+  }
 
   if (JSON_OUT) {
     console.log(JSON.stringify({ rows, writers: audit.writes, reads: audit.reads, problems }, null, 2))
@@ -383,6 +429,10 @@ function main() {
     for (const [method, kinds] of Object.entries(audit.writes)) {
       console.log(`  · ${method.padEnd(22)} ${kinds.join(', ')}`)
     }
+    console.log('')
+    console.log('composer history (the browse belongs to the composer; a borrowed field must not end it)')
+    console.log(`  · ${audit.historyGuards.method.padEnd(22)} guard ${audit.historyGuards.ok ? 'this.borrowedText ✓' : 'MISSING ✗'}`
+      + ' — behaviour: tests/surface-state-isolation.test.mjs (R-HISTORY, M1–M3)')
     console.log('')
     console.log('ownership reads, per method (recorded debt, not a target this round)')
     for (const [method, counts] of Object.entries(audit.reads.perMethod)) {
