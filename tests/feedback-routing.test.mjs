@@ -65,11 +65,66 @@ test('a control-plane confirmation leaves the transcript and appears as an echo'
     painted.some(line => line.includes('配色')),
     `the echo reaches the row the reader looks at:\n${painted.join('\n')}`,
   )
+  // Where that row is: the last one, and never the meter row above it. The echo used
+  // to be a chip *on the meter row* with the last row as its fallback, so a message
+  // changed rows with its length (`/copy` said its short `已复制 …` on the row above
+  // the last one and its long `还没有可复制的回复…` on the last one). The row a
+  // confirmation appears on may not depend on how long the confirmation is.
+  assert.ok(painted.at(-1)?.includes('配色'), `an acknowledgement is the last row: ${JSON.stringify(painted.at(-1))}`)
+  assert.equal(painted.at(-2)?.includes('配色'), false, 'and never the meter row above it')
   assert.equal(
     painted.some(line => line.includes('配色') && line.includes('目录:')),
     false,
-    'on the telemetry row, not mixed into the identity row',
+    'it replaces the identity line rather than sharing it',
   )
+})
+
+test('an acknowledgement lands on the same row whatever its length or the window', async () => {
+  // The regression behind this rule: the row depended on whether the chip *fit* the
+  // meter row, so a short confirmation and a long one — both echoes — were drawn on
+  // two different lines, and the same `/copy` moved between them as the text changed
+  // (`已复制 412 字…（最近回复）` fits, `还没有可复制的回复…` does not).
+  const cases = [
+    ['a short echo', '/theme mono', /配色/u],
+    ['a long echo', '/copy bogus', /用法：\/copy/u],
+    ['a notice', '/no-such-command', /Unknown command|未知/u],
+  ]
+  for (const [label, command, match] of cases) {
+    for (const columns of [160, 100, 60, 40]) {
+      const { tui } = fixture()
+      tui.captureFrame(columns, 24)
+      tui.runCommand(command)
+      await tick(20)
+      const painted = frame(tui, columns, 24)
+      const where = `${label} at ${columns} columns`
+      const last = painted.at(-1) ?? ''
+      const meter = painted.at(-2) ?? ''
+      assert.match(last, match, `${where}: the message is the last row (${JSON.stringify(last)})`)
+      assert.doesNotMatch(meter, match, `${where}: the meter row does not carry it (${JSON.stringify(meter)})`)
+      // The meter row is still the meter row: the echo's departure from it must not
+      // take the link/activity reading with it (E-1: the first row answers the five
+      // telemetry questions and only those).
+      assert.match(meter, /SSH|空闲|运行中|未测/u, `${where}: the meter row kept its reading (${JSON.stringify(meter)})`)
+      assert.equal(last.includes('目录:'), false, `${where}: the message replaced the identity line for now`)
+    }
+  }
+})
+
+test('a notice outranks an echo on the row they share', async () => {
+  // Both are Host-local and both are transient, and now both are on the same row —
+  // so which one a reader sees when they overlap is a rule, not a coincidence: an
+  // operational warning must not be hidden by an acknowledgement that happens to be
+  // alive at the same moment.
+  const { tui } = fixture()
+  tui.runCommand('/theme mono')
+  await tick(20)
+  assert.match(String(tui.currentFooterEcho()), /配色/u, 'the acknowledgement is up')
+  tui.runCommand('/no-such-command')
+  await tick(20)
+  assert.match(String(tui.currentNotice()), /Unknown command|未知/u, 'the warning took the row')
+  const painted = frame(tui)
+  assert.match(painted.at(-1) ?? '', /Unknown command|未知/u, 'and it is what the last row says')
+  assert.equal((painted.at(-1) ?? '').includes('配色'), false, 'the acknowledgement is not painted behind it')
 })
 
 test('the newest echo replaces the previous one, and a submit clears it', async () => {

@@ -117,15 +117,6 @@ export interface FooterStripInput {
    * its text degrades — to the glyph, and off the row only at the very end.
    */
   warning?: { long: string; short: string }
-  /**
-   * The Host-local echo: the last thing this Host confirmed to the reader
-   * (`/theme` switched, a preset saved, a copy landed).
-   *
-   * Not history (AD-13) and not telemetry: it is an acknowledgement, so it is the
-   * lowest-priority chip on the row — the first thing a narrow terminal gives up, and
-   * never at the cost of the link, the activity, the quota or the context reading.
-   */
-  echo?: string
   /** Whether the terminal must be painted with ASCII glyphs. */
   ascii?: boolean
   /** Colour depth the accents are downgraded for. */
@@ -400,13 +391,6 @@ function footerStripChips(
       render: level => contextChip(input.context, level, ascii, color, depth),
     },
     { id: 'total', priority: 5, render: level => (level >= 1 || total === undefined ? '' : total) },
-    {
-      id: 'echo',
-      // Lowest priority: level 1 is the first squeeze, and the echo is what goes —
-      // together with the session total, which is the other non-core group.
-      priority: 6,
-      render: level => (level >= 1 || input.echo === undefined ? '' : input.echo),
-    },
   )
   return chips
 }

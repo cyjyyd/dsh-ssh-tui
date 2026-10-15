@@ -6713,39 +6713,39 @@ export class SshTui {
       ...(health === undefined ? {} : { warning: { long: health.long, short: health.short } }),
       depth: this.colorDepth,
       color: this.color,
-      ...(this.footerEcho === undefined ? {} : { echo: this.footerEcho.text }),
     }
     const stripText = runtimeStrip(stripInput, Math.max(1, width), this.mutedSeparator(), this.spinnerFrame())
-    // The acknowledgement the strip could not fit.
-    //
-    // The echo chip is the lowest-priority group on the stats row, which is exactly
-    // the state a working session is in — so a command's confirmation was dropped
-    // entirely and the reader saw *no* feedback at all (B2.5, reported). The chip is
-    // still where it goes first; when it did not survive, the row that always fits
-    // says it instead. One message, one place, no extra rows.
-    const missingEcho = this.notice === undefined
-      && this.footerEcho !== undefined
-      && !stripText.includes(this.footerEcho.text)
-      ? this.footerEcho.text
-      : undefined
     // The row is one muted run with the accents spliced in at higher intensity;
     // `muteFooterLine` reopens the mute after every reset so the (already
     // coloured) pips and meters cannot bleed into the text around them.
     const statsLine = clipAnsiToWidth(this.muteFooterLine(stripText), Math.max(1, width))
     this.healthChipRow = undefined
 
-    // The identity row is composed *after* the strip, because whether it needs to
-    // carry the echo depends on what the strip managed to fit (see below).
+    // Every acknowledgement lands on the identity row, and nowhere else.
+    //
+    // The echo used to be the lowest-priority chip *on the meter row*, with the
+    // identity row as the fallback when it did not fit — so which of the two rows a
+    // message appeared on depended on its length and the window's width. The same
+    // `/copy` said `已复制 412 字…（最近回复）` on the row above the last one (it fit)
+    // and `还没有可复制的回复…` on the last one (it did not): two acknowledgements,
+    // two lines, nothing in the product saying why (reported). A confirmation is
+    // read, not measured, so it is not the meter row's business either — the first
+    // footer row answers the five telemetry questions and only those (E-1).
+    //
+    // A notice still outranks an echo: an operational warning must not be hidden by
+    // an acknowledgement that happens to be alive at the same moment. Both are
+    // Host-local, both are transient, and now both are on the row that always fits.
+    const echoText = this.notice === undefined ? this.footerEcho?.text : undefined
     const statusText = this.notice !== undefined
       ? truncateToWidth(this.notice.text, Math.max(1, width))
-      : missingEcho === undefined
-        ? fitFooterStatusLine('', identity, Math.max(1, width))
-        : truncateToWidth(missingEcho, Math.max(1, width))
+      : echoText !== undefined
+        ? truncateToWidth(echoText, Math.max(1, width))
+        : fitFooterStatusLine('', identity, Math.max(1, width))
     // Accents on an otherwise muted line: the `sub:` chip. Each reset reopens
     // mute, the same way the pre-strip footer did. `styleLine` sanitises first,
     // so the accent is spliced in after.
     let statusLine = this.styleLine('system', statusText)
-    if (this.color && this.notice === undefined) {
+    if (this.color && this.notice === undefined && echoText === undefined) {
       // The chip is only accented when it survived the fit: a `sub:` route the
       // row could not afford is not on the line, and `paintFooterSubagentChip`
       // returns the line unchanged when it cannot find its text.
