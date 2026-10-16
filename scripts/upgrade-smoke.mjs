@@ -32,6 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
 
 import { buildProbeHome, packCheckout, provisionProbeCredential } from './probe-home.mjs'
+import { inspectTarball } from './artifact-smoke.mjs'
 
 const require = createRequire(import.meta.url)
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -112,10 +113,11 @@ async function main(argv) {
 
   const to = valueOf('--to') ?? packCheckout()
   const fromSpec = from.endsWith('.tgz') ? `file:${from}` : (/^\d/u.test(from) ? `dsh-ssh-tui@${from}` : from)
-  const fromVersion = from.endsWith('.tgz')
-    ? JSON.parse(spawnSync('tar', ['-xzOf', from, 'package/package.json'], { encoding: 'utf8' }).stdout).version
-    : from
-  const toVersion = JSON.parse(spawnSync('tar', ['-xzOf', to, 'package/package.json'], { encoding: 'utf8' }).stdout).version
+  // The version comes out of the tarball itself, read in-process (no `tar` CLI: it lists
+  // and spells paths differently per platform, which is how the artifact gate's first
+  // Windows run read a listing instead of a package).
+  const fromVersion = from.endsWith('.tgz') ? inspectTarball(from).packed.version : from
+  const toVersion = inspectTarball(to).packed.version
 
   say(`==> from ${fromSpec} (${fromVersion})`)
   say(`==> to   ${to} (${toVersion})`)

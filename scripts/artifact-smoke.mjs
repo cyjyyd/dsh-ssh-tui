@@ -27,8 +27,9 @@
  *
  * @module dsh-ssh-tui/scripts/artifact-smoke
  */
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { gunzipSync } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -62,6 +63,41 @@ const FORBIDDEN = [
 ]
 
 /**
+ * The entries of a `.tgz`, read in-process.
+ *
+ * Node has no tar reader, and shelling out to `tar` was the first version of this — which
+ * is how the Windows leg found two platform differences the hard way: bsdtar lists a
+ * directory without its trailing slash (so `package/` counted as a file and the count came
+ * out 249 instead of 252), and its paths come back with backslashes. Both are the *listing*
+ * talking, not the package, and a gate about the package should not be reading a listing.
+ * Thirty lines of ustar parsing remove the dependency entirely: the header fields this
+ * needs are `name`, `prefix`, `size` and `typeflag`, with `x`/`g` (pax) skipped because
+ * npm only emits them for the entries whose metadata does not fit the fixed fields.
+ */
+export function tarEntries(tarball) {
+  const buffer = gunzipSync(readFileSync(tarball))
+  const entries = []
+  let offset = 0
+  const field = (start, length) => {
+    const slice = buffer.subarray(start, start + length)
+    const end = slice.indexOf(0)
+    return slice.subarray(0, end === -1 ? slice.length : end).toString('utf8')
+  }
+  while (offset + 512 <= buffer.length) {
+    const name = field(offset, 100)
+    if (name === '') break
+    const size = Number.parseInt(field(offset + 124, 12).trim() || '0', 8)
+    const typeflag = field(offset + 156, 1)
+    const prefix = field(offset + 345, 155)
+    const path = (prefix === '' ? name : `${prefix}/${name}`).split('\\').join('/')
+    const dataAt = offset + 512
+    if (typeflag === '0' || typeflag === '') entries.push({ path, data: buffer.subarray(dataAt, dataAt + size) })
+    offset = dataAt + Math.ceil(size / 512) * 512
+  }
+  return entries
+}
+
+/**
  * One tarball's manifest, read without installing anything.
  *
  * Exported because it is the half that can be pointed at *any* tarball (`--check`), which
@@ -69,11 +105,13 @@ const FORBIDDEN = [
  * `tests/` has to fail this function, and a fixture can prove it does.
  */
 export function inspectTarball(tarball) {
-  const list = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' })
-    .split('\n')
-    .filter(line => line !== '')
-  const files = list.filter(name => !name.endsWith('/'))
-  const packed = JSON.parse(execFileSync('tar', ['-xzOf', tarball, 'package/package.json'], { encoding: 'utf8' }))
+  const entries = tarEntries(tarball)
+  const files = entries.map(entry => entry.path)
+  const packedFile = entries.find(entry => entry.path === 'package/package.json')
+  if (packedFile === undefined) {
+    return { tarball, files, packed: {}, problems: ['the tarball has no package/package.json'], bytes: statSync(tarball).size }
+  }
+  const packed = JSON.parse(packedFile.data.toString('utf8'))
   const problems = []
   for (const name of REQUIRED) {
     if (!files.includes(`package/${name}`)) problems.push(`the tarball is missing ${name}`)
@@ -231,8 +269,12 @@ async function main(argv) {
 
   // 4. The installed package is the packed one, not the checkout.
   const spec = String(state.manifest.dependencies?.['dsh-ssh-tui'] ?? '')
+  // pnpm writes the spec with forward slashes whatever the platform's separator is, so the
+  // comparison normalises both sides — on Windows `file:C:/…` is what gets recorded for a
+  // path handed over as `C:\…`.
+  const asSpec = value => `file:${resolve(value).split('\\').join('/')}`
   check(spec.startsWith('file:'), `the profile depends on ${JSON.stringify(spec)} — a tarball install records \`file:\``)
-  check(spec === `file:${tarball}`, `the recorded spec ${JSON.stringify(spec)} is the tarball that was installed`)
+  check(spec.split('\\').join('/') === asSpec(tarball), `the recorded spec ${JSON.stringify(spec)} is the tarball that was installed`)
   check(state.present, 'the profile has a node_modules/dsh-ssh-tui')
   check(state.symlink === false, 'it is a real install, not a symlink into the checkout (`link:` installs are)')
   check(state.realPath !== realpathSync(REPO), `it resolves to ${state.realPath}, not to the repository`)

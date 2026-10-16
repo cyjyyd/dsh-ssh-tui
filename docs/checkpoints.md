@@ -3053,3 +3053,22 @@ test at tests\session-list.test.mjs:556:1
 调用加 `shell: process.platform === 'win32'`，失败信息同时带上 `status.error.code`，
 让"启动不了"不再伪装成"打包坏了"。Linux 侧不受影响（`shell:false` 路径一字未变），修后本地
 `artifact-smoke` 与 `--check` 重跑仍全绿。
+
+**第三次运行（`d9ad826`，run `38883708215`）**：Windows 的 `Fresh-home setup wizard (ConPTY, pasted key)` 仍 **PASS**；
+`Packed-artifact smoke (ConPTY)` 仍 FAIL，但这次**安装与两条探针全部成功**，失败的是**新脚本自己的跨平台读写**：
+
+```
+FAIL
+  - tarball manifest: the tarball is missing package.json; lib/index.js; lib/tui.js; cordis.patch.yml; README.md; LICENSE
+  - the recorded spec "file:C:/Users/RUNNER~1/…/dsh-ssh-tui-0.8.3.tgz" is the tarball that was installed
+```
+
+**分类：test/harness defect（同一类：把"平台差异"当成"包有问题"），不是 plugin、不是宿主**：
+- `tar -tzf` 在 Windows 上是 **bsdtar**，它的目录条目**不带结尾斜杠**（于是 `package/` 被当成文件：`249 files` 而非 252），
+  且路径用**反斜杠** → `files.includes('package/lib/tui.js')` 全miss；
+- pnpm 记录的 spec 用**正斜杠**（`file:C:/…`），而我传进去的是 `C:\…`，逐字比较失败。
+
+修法是把"读清单"这件事从 shell 工具搬进进程内：新增 `tarEntries()`（30 行 ustar 解析 + `node:zlib`，
+`name`/`prefix`/`size`/`typeflag`，跳过 pax `x`/`g`），`inspectTarball()` 与 `upgrade-smoke.mjs` 的版本读取都改用它；
+spec 比较两侧统一斜杠。**本地重跑**：`--check` 仍 252 文件、清单门绿；两个故意做坏的 tarball 仍 **RED**；
+`artifact-smoke` 全流程绿；`upgrade-smoke` 的同版本拒绝逻辑不变。
