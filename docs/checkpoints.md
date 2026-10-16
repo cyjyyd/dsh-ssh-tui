@@ -2815,3 +2815,69 @@ picker Reader（W-7）、Completion / Search Screen / Terminal Doctor、Plan Car
 G1–G4 与加宽后的 freeze 审计都是纯进程内执行（不依赖 pty），**在 Windows 腿上同样跑过**；真机腿覆盖的是
 "能启动、能渲染、不报错"与交互窗口归属。**本轮 `src/` 零改动**（`git status src/` 空），未拆 `composerUnit`、
 未动 Router / keymap / 版本 / tag / npm。
+
+---
+
+## 0.8.4 W-3b.3c · Evidence Repair — G1 的 `inputFolded` oracle 缺口（2026-10-14）
+
+> Independent Gate 的判定：**C.FAIL——W-3b 暂不能 CLOSED**。唯一 blocker 是**证据错误**，不是运行时错误：
+> G1 的 `ownerState()` 不含 Composer 状态 `inputFolded`，因此一个既有的、能改变隐藏草稿状态的 mutation
+> 仍然被 G1 判为绿。本轮只修这个 oracle 缺口。
+
+**Preflight**：HEAD `c440d60eec9ffc5f6202c51558357dcaec3859e3`，version `0.8.3`（42 tag），工作树干净、
+与远端一致，参考轨迹 109。
+
+### Gate 的 mutation（复述，未改仓库文件）
+
+移除 `composerUnit` 里 Ctrl+T 的 `dialog === undefined` guard：
+
+```ts
+case '\x14': if (this.dialog === undefined) this.inputFolded = !this.inputFolded; this.markDirty(); return
+```
+
+Gate 的观察：confirm / 借用字段 question / options question / filtering picker 下，**隐藏 Composer 的
+`inputFolded` 均 false → true**，而当时的 G1 仍 GREEN。**运行时 guard 本身没有问题**（未变异时四种 Surface 下
+`inputFolded` 都保持 false，见下），问题在于 G1 的 oracle 没有观测这个字段。
+
+### 修复（一处，`tests/input-ownership-matrix.test.mjs`）
+
+`ownerState()` 增加 `inputFolded: tui.inputFolded`（并写明它为什么在这里）。G1 的 4 Surface × 8 keys 结构、
+G2/G3/G4 的覆盖范围、测试数量都**未改变**：本轮的测试文件 diff 只有这一个字段 + 注释。
+
+### 证明（先未变异、再内存变异、再还原）
+
+**未变异（GREEN）**——四种 Surface 的 Ctrl+T 格子，直接读 `inputFolded`：
+
+```
+✔ confirm                    owner=ownerSurface   inputFolded false → false  input="我打了一半的消息"
+✔ question (borrowed field)  owner=ownerSurface   inputFolded false → false  input="我打了一半的消息"
+✔ question (options)         owner=ownerSurface   inputFolded false → false  input="我打了一半的消息"
+✔ picker (filtering)         owner=ownerSurface   inputFolded false → false  input="我打了一半的消息"
+```
+
+**内存变异（RED）**——`lib/tui.js`（git-ignored 构建产物，**未触碰任何 tracked 文件**）里删掉那两行 guard 后，
+用**既有**测试跑：`tests/input-ownership-matrix.test.mjs` → **11 pass · 1 fail**，唯一失败就是 G1，四个格子
+全部报出 `inputFolded: false → true`（诊断文本逐字记录在提交信息与本节；其余三个 G 用例保持绿，说明变异被
+精确定位到该 oracle 而不是被别处顺带抓到）。未变异时同一套用例 **12 pass · 0 fail**。
+
+**还原**：从备份恢复 `lib/tui.js` 并重建，`cmp` 确认与变异前的构建逐字节相同；`git status` 只剩本轮的测试改动，
+`git diff -- src/` 为空。
+
+### 证据
+
+| 项 | 结果 |
+|---|---|
+| 定向用例 | `node --test tests/input-ownership-matrix.test.mjs`（12 条，含 G1–G4）**全绿**；连同 `surface-state-isolation` / `ctrl-l-repaint` / `unicode-input-safety` / `borrowed-field-caret` / `interaction-surface` 共 **66 · 66 pass · 0 fail** |
+| `typecheck` | 干净（0 error） |
+| `npm run freeze` / `freeze:input` | 全绿 / 无基线超限（`composer history` 写入者与 `leaveHistoryBrowse` 守卫检查不变） |
+| `npm run bench` | 字节 **501/465/2457/588/140**、行 **3/3/17/4/1**、**clears 0** —— 与基线逐项相同（本轮无 runtime 改动，基线不应变化） |
+| 参考轨迹 | **109 条不变、零改写**（`tests/fixtures/` 无 diff） |
+| 测试数量 | 未新增任何 `test(` 声明（diff 只有字段 + 注释），总数保持 **1506**；全量回归由本轮的 CI run 提供 |
+| `git diff -- src/` | **空**（未动 runtime / Router / keymap / `composerUnit` / guard） |
+
+### 边界
+
+- 本轮**不宣称 W-3b CLOSED**：它只关闭 Gate 指出的这一个 oracle 缺口，是否 CLOSED 由 Independent Gate 判定。
+- 历史审计文字未重写：W-3b.3c 节的 G1 描述保持原样，本节作为**补充记录**说明它当时的 oracle 少了一个字段
+  （不把历史写成"原本就完整"）。
+- `KEEP_SHARED_WITH_INVARIANTS` 与 **S-1…S-6** 的含义未改变；executor split、R4、RC、npm 均未触及。

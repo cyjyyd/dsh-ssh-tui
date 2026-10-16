@@ -361,11 +361,15 @@ test('a pasted yes is not an answer, wherever it lands', async () => {
  *
  * Deliberately broader than {@link snapshot}: the composer's *history* and the borrowed
  * field are the two states W-3b.3a found being written from behind a Surface, so they
- * are asserted directly here rather than inferred from the draft.
+ * are asserted directly here rather than inferred from the draft. `inputFolded` is here
+ * for the same reason one round later — the Independent Gate removed Ctrl+T's
+ * `dialog === undefined` guard and every Surface's hidden composer folded, while this
+ * oracle was still green because the field was not in it (W-3b.3c evidence repair).
  */
 const ownerState = tui => ({
   input: tui.input,
   cursor: tui.cursor,
+  inputFolded: tui.inputFolded,
   historyIndex: tui.historyIndex,
   historyDraft: tui.historyDraft,
   borrowed: tui.borrowedText === undefined ? null : `${tui.borrowedText.text}@${tui.borrowedText.cursor}`,
