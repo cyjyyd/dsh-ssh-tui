@@ -25,7 +25,14 @@ const OWNERS = ['ownerScreen', 'ownerSurface', 'ownerComposer', 'ownerWorkspace'
 
 /** A TUI with the four owner adapters wrapped: the calls are the evidence. */
 function fixture() {
-  const ctx = { get: () => undefined, on() { return () => {} } }
+  // `appExit` is recorded rather than honoured. Ctrl+D is one of the keys a Surface
+  // must *not* let through to the process (W-3b.3c, G1), and an unrecorded exit would
+  // end the test run instead of failing an assertion.
+  const exits = []
+  const ctx = {
+    get: name => (name === 'appExit' ? code => { exits.push(code) } : undefined),
+    on() { return () => {} },
+  }
   const sent = []
   const agent = {
     id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] },
@@ -44,7 +51,7 @@ function fixture() {
   // Geometry is pinned so a page key is not the runner's terminal.
   tui.screenRows = () => 24
   tui.screenColumns = () => 80
-  return { tui, seen }
+  return { tui, seen, exits }
 }
 
 const draft = tui => { tui.input = '我打了一半的消息'; tui.cursor = 3 }
@@ -134,14 +141,56 @@ const STATES = [
       '\x1b[H': 'ownerSurface', '\x1b[F': 'ownerSurface', '\x1b[3~': 'ownerSurface',
     },
   },
+  // W-3b.3c · G2: the two Surface shapes that own the keyboard without owning the
+  // composer's text *and* without borrowing a field. A list answers with its highlight
+  // and its hotkeys; a filtering one answers with the filter box. Both are states where
+  // a printable key has a Surface meaning, which is exactly where a shared executor can
+  // be tempted to reach for the draft behind it.
+  {
+    name: 'question Surface (options)',
+    open: tui => {
+      draft(tui)
+      void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1)
+        .catch(() => undefined)
+    },
+    expect: {
+      'x': 'ownerSurface', 'y': 'ownerSurface', '\r': 'ownerSurface', '\x7f': 'ownerSurface',
+      '\x15': 'ownerSurface', '\x0c': 'ownerComposer',
+      '\x1b[A': 'ownerSurface', '\x1b[B': 'ownerSurface', '\x1b[5~': 'ownerSurface',
+      '\x1b[H': 'ownerSurface', '\x1b[1~': 'ownerSurface', '\x1b[F': 'ownerSurface',
+      '\x1b[4~': 'ownerSurface', '\x1b[3~': 'ownerSurface', '\x1b[99;6u': 'ownerSurface',
+      '\x1b[<65;10;5M': 'ownerSurface', '\x03': 'ownerSurface',
+    },
+  },
+  {
+    name: 'picker Surface (filtering)',
+    open: (tui, seen) => {
+      draft(tui)
+      void tui.askQuestion({ id: 'q3', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1)
+        .catch(() => undefined)
+      tui.handleData(Buffer.from('/'))
+      // `/` is the unit that *opens* filter mode, and it is a Surface unit like any
+      // other — recorded here so the cell under test is the only call in the trace.
+      seen.length = 0
+    },
+    expect: {
+      'x': 'ownerSurface', '\r': 'ownerSurface', '\x7f': 'ownerSurface', '\x08': 'ownerSurface',
+      '\x0c': 'ownerComposer', '\x03': 'ownerSurface',
+      '\x1b[A': 'ownerSurface', '\x1b[3~': 'ownerSurface', '\x1b[<65;10;5M': 'ownerSurface',
+    },
+  },
 ]
 
 test('a unit reaches exactly one owner, in every state', () => {
+  // A lone `ESC` is not a cell here: the Reader holds it for its own window before
+  // releasing it (AD-21), so the owner is called after this loop has moved on. Its
+  // Surface semantics are pinned where the wait is affordable — `dialog-escape` in
+  // the reference traces, and the picker's own cases in `interaction-surface`.
   const failures = []
   for (const state of STATES) {
     for (const [unit, expected] of Object.entries(state.expect)) {
       const { tui, seen } = fixture()
-      state.open(tui)
+      state.open(tui, seen)
       tui.handleData(Buffer.from(unit))
       const where = `${state.name} + ${JSON.stringify(unit)}`
       if (seen.length !== 1) failures.push(`${where}: ${seen.length} owners took it (${seen.join(', ')}) — expected ${expected}`)
@@ -298,4 +347,262 @@ test('a pasted yes is not an answer, wherever it lands', async () => {
   assert.equal(tui.input, '我打了一半的消息', 'and the draft is untouched')
   tui.handleData(Buffer.from('n'))
   await pending.catch(() => undefined)
+})
+
+// ── W-3b.3c · G1–G4: the evidence the KEEP_SHARED_WITH_INVARIANTS decision rests on ──
+//
+// The shared executor (`composerUnit`) is kept, so the keys whose value comes from a
+// `dialog` guard *inside* it — and the two paths that write the composer's own `/find `
+// seed — need cells of their own. Each case opens the Surface the way the product does
+// and reads the whole owner state, not just the final effect.
+
+/**
+ * Everything a unit may not move unless it owns it.
+ *
+ * Deliberately broader than {@link snapshot}: the composer's *history* and the borrowed
+ * field are the two states W-3b.3a found being written from behind a Surface, so they
+ * are asserted directly here rather than inferred from the draft.
+ */
+const ownerState = tui => ({
+  input: tui.input,
+  cursor: tui.cursor,
+  historyIndex: tui.historyIndex,
+  historyDraft: tui.historyDraft,
+  borrowed: tui.borrowedText === undefined ? null : `${tui.borrowedText.text}@${tui.borrowedText.cursor}`,
+  dialog: tui.dialog?.kind ?? null,
+  dialogCursor: tui.dialog?.cursor ?? null,
+  filtering: tui.dialog?.filtering ?? null,
+  filter: tui.dialog?.filter ?? null,
+  focused: tui.focusedRow?.kind ?? null,
+  rows: tui.rows.length,
+  scroll: tui.scrollOffset,
+  yank: tui.copyYank ?? null,
+  echo: tui.currentFooterEcho() ?? null,
+})
+
+/** The four Surface shapes, opened through their product entry points. */
+const SURFACE_FORMS = [
+  ['confirm', async tui => {
+    void new Promise(resolve => { tui.openConfirm('允许工具 "bash"？', 'y = 允许一次', resolve, 'approval') })
+    await waitForDialog(tui, 'confirm')
+  }],
+  ['question (borrowed field)', async tui => {
+    void tui.askQuestion({ id: 'q1', question: '回滚到哪个版本？' }, 0, 1).catch(() => undefined)
+    await waitForDialog(tui, 'questions')
+  }],
+  ['question (options)', async tui => {
+    void tui.askQuestion({ id: 'q2', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1)
+      .catch(() => undefined)
+    await waitForDialog(tui, 'questions')
+  }],
+  ['picker (filtering)', async tui => {
+    void tui.askQuestion({ id: 'q3', question: '选哪个？', options: [{ label: 'Alpha' }, { label: 'Beta' }] }, 0, 1)
+      .catch(() => undefined)
+    await waitForDialog(tui, 'questions')
+    tui.handleData(Buffer.from('/'))
+  }],
+]
+
+test('G1: the keys the shared executor guards for a Surface never reach the composer behind it', async () => {
+  // These eight are the shared body's own forks: five switch cases protected by
+  // `dialog !== undefined` (Ctrl+N/P/R/T/D), and three that fall out after the early
+  // return (`\x07`, `\x1f`, Tab). A split would move exactly these; keeping the shared
+  // body means they stay where they are, and this is what says so.
+  const keys = [
+    ['\x0e', 'Ctrl+N'], ['\x10', 'Ctrl+P'], ['\x12', 'Ctrl+R'], ['\x14', 'Ctrl+T'],
+    ['\t', 'Tab'], ['\x04', 'Ctrl+D'], ['\x07', 'Ctrl+G'], ['\x1f', 'Ctrl+_'],
+  ]
+  const failures = []
+  for (const [name, open] of SURFACE_FORMS) {
+    for (const [unit, label] of keys) {
+      const { tui, seen, exits } = fixture()
+      draft(tui)
+      await open(tui)
+      seen.length = 0
+      const before = ownerState(tui)
+      const dialog = tui.dialog?.kind
+      tui.handleData(Buffer.from(unit))
+      const where = `${name} + ${label}`
+      if (seen.length !== 1) failures.push(`${where}: ${seen.length} owners took it (${seen.join(', ')})`)
+      else if (seen[0] !== 'ownerSurface') failures.push(`${where}: ${seen[0]} took it`)
+      if (JSON.stringify(ownerState(tui)) !== JSON.stringify(before)) {
+        failures.push(`${where}: the state moved — ${JSON.stringify(before)} → ${JSON.stringify(ownerState(tui))}`)
+      }
+      if (tui.dialog?.kind !== dialog) failures.push(`${where}: the Surface left`)
+      if (name === 'picker (filtering)' && tui.dialog?.filtering !== true) failures.push(`${where}: filter mode was dropped`)
+      if (exits.length > 0) failures.push(`${where}: the process was told to exit (${exits.join(',')})`)
+    }
+    // Ctrl+L is the one recorded exception (W-3b.2 KEEP_DUAL): the Surface's keys go to
+    // the composer *adapter*, which only runs the repaint — so the Surface must not have
+    // grown a repaint case of its own, and nothing may be written either.
+    const { tui, seen } = fixture()
+    draft(tui)
+    await open(tui)
+    seen.length = 0
+    const before = ownerState(tui)
+    tui.handleData(Buffer.from('\x0c'))
+    if (seen.join(',') !== 'ownerComposer') failures.push(`${name} + Ctrl+L: ${seen.join(',') || 'nobody'} took it — KEEP_DUAL routes it to the composer adapter`)
+    if (JSON.stringify(ownerState(tui)) !== JSON.stringify(before)) failures.push(`${name} + Ctrl+L: the repaint wrote state`)
+  }
+  assert.deepEqual(failures, [], `\n  ${failures.join('\n  ')}`)
+})
+
+test('G2: the two field-less Surface shapes keep every owner state they do not own', async () => {
+  // The matrix above says *who* takes a unit in these states; this says what the unit
+  // left alone, cell by cell. `focused` is in the fingerprint on purpose: a list's
+  // highlight is `dialog.cursor`, while the transcript's ring is a different thing that
+  // must not move. Where the Surface legitimately does something, the case names it —
+  // the expectation is written per cell rather than inferred from the key's shape,
+  // because "may this move?" depends on the list's options and on the filter's contents
+  // (`y` is not a hotkey for Alpha/Beta; backspacing an empty filter is a no-op).
+  const cases = [
+    {
+      name: 'question (options)',
+      open: SURFACE_FORMS[2][1],
+      cells: [
+        // The list's hotkeys are `123456789abc…` by position (`QUESTION_OPTION_KEYS`), so
+        // with two options they are `1` and `2` — a letter is an ordinary printable here,
+        // which is exactly why "consumed" and "the Surface's own action" need separate cells.
+        ['x', {}, 'a printable that is not a hotkey is consumed'],
+        ['y', {}, 'and so is one that is not a hotkey at all'],
+        ['1', { dialogCursor: 0 }, 'a hotkey highlights its option — which was already the highlight'],
+        ['2', { dialogCursor: 1 }, 'the second hotkey moves the highlight'],
+        ['\x1b[B', { dialogCursor: 1 }, '↓ moves the highlight'],
+        ['\x1b[A', {}, '↑ at the top stays at the top'],
+        ['/', { filtering: true, filter: '' }, '`/` opens the filter box'],
+        ['\x7f', {}, 'Backspace outside the filter box types nothing'],
+        ['\x1b[3~', {}, 'Delete is a list’s nothing, not the draft’s'],
+      ],
+    },
+    {
+      name: 'picker (filtering)',
+      open: SURFACE_FORMS[3][1],
+      cells: [
+        ['x', { filter: 'x' }, 'a printable goes into the filter'],
+        ['A', { filter: 'A' }, 'and its case is kept'],
+        ['\x7f', {}, 'Backspace on an empty filter is a no-op'],
+        ['\x08', {}, 'Ctrl+H likewise'],
+        ['\x1b[A', {}, 'the arrows do not move through a filter box'],
+      ],
+    },
+  ]
+  const failures = []
+  for (const entry of cases) {
+    for (const [unit, expected, why] of entry.cells) {
+      const { tui, seen } = fixture()
+      draft(tui)
+      await entry.open(tui)
+      seen.length = 0
+      const before = ownerState(tui)
+      tui.handleData(Buffer.from(unit))
+      const where = `${entry.name} + ${JSON.stringify(unit)} (${why})`
+      if (seen.join(',') !== 'ownerSurface') failures.push(`${where}: ${seen.join(',') || 'nobody'} took it`)
+      // What the Surface owns may change, and only what it owns.
+      const after = ownerState(tui)
+      for (const field of ['input', 'cursor', 'historyIndex', 'historyDraft', 'borrowed', 'focused', 'rows', 'scroll', 'yank', 'dialog', 'echo']) {
+        if (JSON.stringify(after[field]) !== JSON.stringify(before[field])) {
+          failures.push(`${where}: ${field} moved — ${JSON.stringify(before[field])} → ${JSON.stringify(after[field])}`)
+        }
+      }
+      for (const [field, want] of Object.entries(expected)) {
+        if (JSON.stringify(after[field]) !== JSON.stringify(want)) {
+          failures.push(`${where}: ${field} is ${JSON.stringify(after[field])}, expected ${JSON.stringify(want)}`)
+        }
+      }
+      if (Object.keys(expected).length === 0 && JSON.stringify([after.dialogCursor, after.filter, after.filtering])
+        !== JSON.stringify([before.dialogCursor, before.filter, before.filtering])) {
+        failures.push(`${where}: the Surface state moved with no expectation named`)
+      }
+    }
+  }
+  assert.deepEqual(failures, [], `\n  ${failures.join('\n  ')}`)
+})
+
+test('G3: the /find seed is written by the composer, on both of its paths, and never behind a Surface', async () => {
+  // Two independent paths write the same seed, and W-3b.3a had to guard one of them:
+  // `\x1f` is the shared body's tail (already behind the `dialog` early return) and
+  // `Alt+f`/`Alt+/` are the Router's chord branch (which runs *before* any owner).
+  for (const [unit, label] of [['\x1f', 'Ctrl+_'], ['\x1bf', 'Alt+f'], ['\x1b/', 'Alt+/']]) {
+    const { tui } = fixture()
+    draft(tui)
+    tui.handleData(Buffer.from(unit))
+    assert.equal(tui.input, '/find ', `${label}: the composer seeds its own /find`)
+    assert.equal(tui.cursor, 6, `${label}: with the caret after the seed`)
+    assert.equal(tui.dialog, undefined, `${label}: and nothing was opened`)
+  }
+
+  // Ctrl+G is the search *step*, not a seed: it writes no text at all.
+  const step = fixture()
+  draft(step.tui)
+  step.tui.handleData(Buffer.from('\x07'))
+  assert.equal(step.tui.input, '我打了一半的消息', 'Ctrl+G types nothing')
+  assert.equal(step.tui.cursor, 3, 'and moves no caret')
+  assert.match(String(step.tui.currentFooterEcho() ?? ''), /还没有搜索结果/u, 'it reports the search it stepped through')
+
+  // At a Surface the seed has no field to land in — the answer is not the draft, and
+  // the draft is not the Surface's — so both paths are consumed with no write.
+  for (const [name, open] of SURFACE_FORMS) {
+    for (const [unit, label] of [['\x1f', 'Ctrl+_'], ['\x07', 'Ctrl+G'], ['\x1bf', 'Alt+f'], ['\x1b/', 'Alt+/']]) {
+      const { tui, seen } = fixture()
+      draft(tui)
+      await open(tui)
+      seen.length = 0
+      const before = ownerState(tui)
+      tui.handleData(Buffer.from(unit))
+      const where = `${name} + ${label}`
+      assert.equal(tui.input, '我打了一半的消息', `${where}: the hidden draft is not a search seed`)
+      assert.equal(tui.cursor, 3, `${where}: and its caret did not move`)
+      assert.deepEqual(ownerState(tui), before, `${where}: nothing else moved either`)
+      // Who consumed it says which fix is holding: `\x1f` and `\x07` are the shared
+      // body's tail, so the Surface adapter takes them and drops them, while the Alt
+      // chords are read by `route()` *before* any owner is asked (W-3b.3a) — no adapter
+      // sees them at all, which is what makes "consumed, not forwarded" checkable.
+      const expectedOwner = unit.startsWith('\x1b') ? '' : 'ownerSurface'
+      assert.equal(seen.join(','), expectedOwner, `${where}: ${expectedOwner === '' ? 'the chord branch consumed it' : 'the Surface took it'}`)
+    }
+  }
+})
+
+test('G4: Ctrl+N/P move the transcript’s focus ring only while the composer owns the keys', async () => {
+  // Recorded behaviour, not a defect: with nothing layered over the workspace the
+  // composer's adapter takes Ctrl+N/P and they move the *workspace's* focus ring — which
+  // is why `/copy` can copy the focused row. What matters here is the other half: the
+  // same keys at a Surface or a Screen must not move it.
+  const composer = fixture()
+  cards(composer.tui)
+  composer.tui.input = ''
+  composer.tui.cursor = 0
+  const base = ownerState(composer.tui)
+  assert.equal(base.focused, null, 'nothing is focused to begin with')
+  composer.tui.handleData(Buffer.from('\x0e'))
+  assert.notEqual(composer.tui.focusedRow, null, 'Ctrl+N focuses the newest ring entry')
+  assert.equal(composer.tui.input, '', 'and types nothing')
+  composer.tui.handleData(Buffer.from('\x10'))
+  assert.equal(ownerState(composer.tui).focused, base.focused === null ? ownerState(composer.tui).focused : base.focused,
+    'Ctrl+P moves within the ring')
+  for (const field of ['input', 'cursor', 'historyIndex', 'historyDraft', 'borrowed', 'rows', 'scroll']) {
+    assert.equal(JSON.stringify(ownerState(composer.tui)[field]), JSON.stringify(base[field]),
+      `the ring move left ${field} alone`)
+  }
+
+  // A Surface, and a Screen, own the keyboard: the ring behind them stays where it was.
+  for (const [name, open] of SURFACE_FORMS) {
+    for (const [unit, label] of [['\x0e', 'Ctrl+N'], ['\x10', 'Ctrl+P']]) {
+      const { tui } = fixture()
+      cards(tui)
+      draft(tui)
+      await open(tui)
+      const before = ownerState(tui)
+      tui.handleData(Buffer.from(unit))
+      assert.deepEqual(ownerState(tui), before, `${name} + ${label}: the focus ring behind the Surface did not move`)
+    }
+  }
+  const screen = fixture()
+  cards(screen.tui)
+  draft(screen.tui)
+  screen.tui.openScreen({ kind: 'report', report: 'diag', title: '诊断', lines: [{ kind: 'system', text: '正文' }], offset: 0 })
+  const before = ownerState(screen.tui)
+  screen.tui.handleData(Buffer.from('\x0e'))
+  screen.tui.handleData(Buffer.from('\x10'))
+  assert.deepEqual(ownerState(screen.tui), before, 'a Screen owns Ctrl+N/P: the ring behind it did not move')
 })

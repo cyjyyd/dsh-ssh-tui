@@ -2504,6 +2504,11 @@ node 测试（不依赖 pty），因此**在 Windows 腿上同样执行**——�
 **剩余风险**：Surface 内左右箭头仍被丢弃（与 Home/End 已支持不一致，范围外）；过滤串没有光标模型；
 picker 仍走自带 reader（W-7）；ConPTY 会重写行寻址，帧字节层面的断言只在进程内成立。
 
+> **补充（W-3b.3c · R4）**："过滤串没有光标模型"之外还有一条既有限制：picker 的过滤框**丢弃非 BMP 字符**
+> （`handleDialogChar` 的过滤分支以 `text.length === 1` 判单字符，而 `'🚀'.length === 2`）。不是所有权问题、
+> 不是 RC blocker，修复属"过滤字段模型"；准确记录见 AD-20 §19.4，矩阵实测格为
+> filtering picker + `🚀` → 无状态变化。
+
 ---
 
 ## 0.8.4 W-3b.2 / W-3b.2a · Ctrl+L 重绘归属：只读审核 → KEEP_DUAL 收口（2026-10-14）
@@ -2720,3 +2725,88 @@ Completion/Search Screen/Terminal Doctor、Plan Card Fold。
 `tests/surface-state-isolation.test.mjs` 是纯进程内 node 测试（不依赖 pty），**在 Windows 腿上同样执行**——
 两条风险的行为矩阵、指纹断言与 W-3a 的 Alt+1 锁都在 ConPTY 那一侧跑过；真机腿覆盖的是"能启动、能渲染、
 不报错"与交互窗口归属。
+
+---
+
+## 0.8.4 W-3b.3c · `KEEP_SHARED_WITH_INVARIANTS` 合同加固与 Gate 收口（2026-10-14）
+
+> 维护者架构裁决：**`KEEP_SHARED_WITH_INVARIANTS`** —— 保留共享执行体 `composerUnit`，0.8.4 不做
+> executor split，完整拆分仅作 W-4 之后的独立结构轮候选；`Ctrl+L` 的 `KEEP_DUAL` 继续冻结。
+> 本轮**只补证据与合同**：G1–G4 测试、freeze 审计两处盲区、AD-20/22 与 roadmap 文字。
+> **运行时零改动**（`src/` 无 diff），未拆 `composerUnit`，未动 Router / keymap / 版本 / tag / npm。
+>
+> **编号说明**：W-3b.3b 报告的 A/B/C 有过错位（§5 的 B = 拆 Surface 执行体；§6/§12 的 B =
+> `KEEP_SHARED_WITH_INVARIANTS`）。本轮起一律使用完整决策名，不再使用 A/B/C 简称。
+
+**Preflight**：HEAD `1f599eaec4084d9498f66a3359c999e4648bd109`，工作树干净、与远端一致，version `0.8.3`
+（42 tag），参考轨迹 109，`knownGaps` 0，Router 1，CI `38720419101` 5/5。
+
+### G1–G4（`tests/input-ownership-matrix.test.mjs`，全部绿灯锁定）
+
+| 组 | 格子 | 断言 |
+|---|---|---|
+| **G1** | 4 种 Surface（confirm / 借用字段 question / options question / filtering picker）× 8 键（`\x0e` `\x10` `\x12` `\x14` `\t` `\x04` `\x07` `\x1f`）= **32 格**，另加每形态 Ctrl+L | 恰好一个 owner（`ownerSurface`）；owner 状态 14 字段全不变；Surface 不离开；过滤态不丢；`appExit` 未被调用。Ctrl+L 行：仍归 `ownerComposer`（KEEP_DUAL）且零写入 |
+| **G2** | options question（9 格）与 filtering picker（5 格）进入矩阵 + 逐格具名期望 | 归属唯一；`input/cursor/historyIndex/historyDraft/borrowed/focused/rows/scroll/yank/dialog/echo` 不变；Surface 自有状态按具名期望变化（`2` 移动高亮、`/` 打开过滤、`x` 进过滤、空过滤退格 no-op…）。**热键是 `123456789abc…`（`QUESTION_OPTION_KEYS`），不是选项首字母**——实测 `x`/`y`/`A` 在该列表里都不是热键 |
+| **G3** | Composer `\x1f`/`Alt+f`/`Alt+/` 三条 `/find ` 路径 + Ctrl+G；四种 Surface × 4 键 | Composer：种子写入且光标落 6；Ctrl+G 不写文本、只报搜索。Surface：全部零写入，且**区分消费者**——`\x1f`/`\x07` 由 Surface 适配器消费（`ownerSurface`），Alt 和弦由 `route()` 分支消费（**任何适配器都看不到**） |
+| **G4** | Composer（有卡片）× `\x0e`/`\x10`；Surface / Screen × 同键 | Composer：焦点环移动（**记录既有行为**，`/copy` 依赖它），草稿/光标/历史/行数/滚动不变；Surface 与 Screen 下同一写入不出现 |
+
+**关于两处 RED 的处理（诚实记录）**：首次运行 G2/G3 各有 RED，**全部是我新写测试的期望错误**，实现侧从未存疑：
+G3 断言 Alt 和弦会到达适配器（实际由 `route()` 在分派前消费 —— 正是 W-3b.3a 的修复形状）、G2 把选项首字母当成热键、
+还把"空过滤退格"当成会变化。三处都先用 216 格矩阵探针（`.pf/executor-matrix.txt`）核对实现的实际行为，再改测试；
+未修改任何运行时。（`\x1b` 也从 G1/G2 的格子里移出：孤立的 ESC 被 Reader 持有 60 ms，同步循环里 owner 尚未被调用。）
+
+### Freeze 审计两处盲区（`scripts/input-freeze-audit.mjs`）
+
+| 盲区 | 修法 | 证明 |
+|---|---|---|
+| 赋值匹配只认 `=` | 引入 `const ASSIGN = '\\s*[-+]?='`，`composer draft` 与 `composer history` 两类都改用它 | 复现品：`this.cursor += 2`（Tab）、`this.historyIndex -= 1`（`historyBack`）、`this.historyIndex += 1`（`historyForward`）此前**全部不可见** |
+| `historyBack`/`historyForward` 不在扫描范围 | 加入 `INPUT_HANDLERS`，并在 `BASELINE_WRITERS` 登记其**真实**类别 | 二者是 Composer **自有**字段的合法写入者（与 `submit` 同类）；登记让它们进入逐对比较，任何**别的**方法写历史仍是 `new writer: … writes the composer history` |
+
+**不是"用白名单消红"**：没有任何红灯被消除——登记的是既有合法写入者；`writerProblems()` 对未登记 `(方法, 类别)`
+仍报错（W-3b.3a 的 M1–M3 重跑实测三条 `new writer` 依旧触发）。
+
+**新旧扫描对照（一次性 git-excluded 探针 `.pf/prove-scanner.mjs`，重建的旧扫描器在 `.pf/old-audit.mjs`）**：
+
+```
+=== 未变异源码 ===
+pre-round scanner    writers of composer history: submit, leaveHistoryBrowse      ← historyBack/Forward 不可见
+this round’s scanner writers of composer history: submit, leaveHistoryBrowse, historyBack, historyForward
+=== 变异：ownerSurface 里加一句 this.historyIndex += 0 ===
+pre-round scanner    exit=0  problems=[]                                          ← 盲区确实存在
+this round’s scanner exit=1  problems=["new writer: ownerSurface writes the composer history"]
+```
+
+探针自带**对照**：重建的旧扫描器必须仍能看见 `submit` 的草稿写入，否则说明测的是"重建坏了"而不是"盲区存在"。
+（第一版探针正是栽在这里——过度转义的替换式让旧扫描器什么都看不见却仍然 exit 0；这正是"看不见的匹配器也是绿的"。）
+
+**未放大任何基线**：`knownGaps` 0/0、`ownerReads` 24/54、`rawBranches` 8、`routers` 1、`routerCallSites` 3 不变；
+`freeze` 与 `freeze:input` 均绿。
+
+### 文档（`KEEP_SHARED_WITH_INVARIANTS` 的正式落点）
+
+- **AD-20 §19**（新）：决策摘要（含"共享体不是越权来源"的四条依据与"同结构的 `\x1f` 被 `dialog` 早返回挡住"
+  这条反证）、**S-1…S-6** 合同表（各自的行者与证据）、G1–G4 落点、**R4 已知限制**（过滤态非 BMP 被丢弃：
+  `text.length === 1` vs `'🚀'.length === 2`；不是所有权问题、不是 RC blocker、本轮不修）。历史审计原文未动。
+- **AD-22 §10.5**：改写为"与执行体拆分的接口（W-3b.3c 定稿）"——0.8.4 不拆、完整拆分延期至 W-4 之后的独立结构轮
+  （**不写死 0.8.5**）、`Ctrl+L` KEEP_DUAL 继续冻结、Surface 侧不加 `case '\x0c'`。
+- **0.8.4 roadmap**：0.8.4-b 行标记 W-3b.3b 由必要性 Gate 裁定 + W-3b.3c 内容；**验收判据第 2 条**由
+  "`ownerReads` 计数为 0"改为"归属判定只在 Router（`dispatchers 1`/`routers 1`/`deadScreenGate 0`）；
+  owner 自身状态读取由 `ownerReads` 记录，不设归零目标"——并说明 `ownerReads = 0` 是过时文字，
+  **未删除任何合法的 paint/lifecycle 读取**（`paintFrame` 的 10 处 dialog 读等一律保留）。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `typecheck` | 干净（0 error） |
+| `npm test` | **1506 · 1502 pass · 0 fail · 4 skipped · 0 todo**（基线 1502·1498，+4 = G1–G4） |
+| 参考轨迹 | **109 条不变、零改写**（`tests/fixtures/` 无 diff） |
+| `npm run freeze` / `freeze:input` | 全绿 / 无基线超限（含加宽后的匹配器与两个新历史写入者） |
+| `npm run bench` | 字节 **501/465/2457/588/140**、行 **3/3/17/4/1**、**clears 0**——与基线逐项相同；`Ctrl+L` 的有意清屏仍未进入 bench |
+| M1–M7 | **全部 RED**（`.pf/mutations-w3b3a.mjs`；M1–M3 同时触发加宽后的 `new writer` 检测） |
+| 真机探针 | `tui-probe` / `tui-drop-probe` / `tui-term-probe`（8/8 profile）/ `tui-setup-probe`（未配置 home）**全部 OK** |
+| 既有专项 | Input Ownership Matrix（12 条，含 G1–G4）、Ctrl+L Repaint、Unicode Input Safety、Surface State Isolation、Borrowed Field Caret、Screen ownership regression 全绿（全量套件的一部分） |
+| 默认 keymap / 上游兼容 / release 配置 / version / tag | 未改（`0.8.3`、42 tag、无 npm 动作） |
+
+**仍未做**：executor split（延期至 W-4 之后的独立结构轮）、Surface 左右箭头、过滤字段模型（含 R4）、
+picker Reader（W-7）、Completion / Search Screen / Terminal Doctor、Plan Card Fold。

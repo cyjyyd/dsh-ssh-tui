@@ -833,3 +833,59 @@ M7（把守卫做成过宽：Composer 的 `/find` 种子不再写入）**全部�
 501/465/2457/588/140 B、行 3/3/17/4/1、**clears 0**（与基线逐项相同，未新增完整清屏）。
 
 **仍未做**：W-3b.3b（`composerUnit` 结构拆分）、Surface 左右箭头、过滤字段模型、picker Reader（W-7）。
+
+---
+
+## 19. W-3b.3c Status（2026-10-14）· `KEEP_SHARED_WITH_INVARIANTS` 合同冻结
+
+> 维护者架构裁决（W-3b.3b 必要性门之后）：
+>
+> **`KEEP_SHARED_WITH_INVARIANTS`** —— 保留共享执行体 `composerUnit`；不拆 Surface executor；0.8.4 不做
+> executor split；完整拆分仅作为 **W-4 之后的独立结构轮**候选事项；`Ctrl+L` 的 `KEEP_DUAL` 继续冻结。
+>
+> 规范名称只有这一个。W-3b.3b 报告自身的 A/B/C 编号有过错位（§5 的 B 指"拆 Surface 执行体"，§6/§12 的 B 指
+> `KEEP_SHARED_WITH_INVARIANTS`）；**新文档一律以完整决策名称为准，不再使用 A/B/C 简称**。
+>
+> 本轮**未改运行时**：只补测试（G1–G4）、补静态审计的两处盲区、并把合同写下来。
+
+### 19.1 为什么保留（审核结论摘要）
+
+| 依据 | 证据 |
+|---|---|
+| 共享执行体**不是**越权来源 | W-3a.1 / W-3b.1 / W-3b.3a 三次修复，源头分别是"`route()` 里早于 owner 分派的分支"与"单点字段原语取错字段"，**没有一条**来自"两个 owner 共用一个 switch" |
+| 同结构的路径是安全的 | 与 `Alt+f` 并列写 `/find ` 种子的 `\x1f`（Ctrl+_）落在共享体**尾部**，被 `dialog` 早返回挡住 —— 实测 Surface 下零写入 |
+| 归属判定只有一处 | `dispatchers 1`、`routers 1`、`deadScreenGate 0`、`routerCallSites 3`；Surface 形态下 `Ctrl+L` 仍归 Composer（记录在案、已冻结） |
+| 实测无泄漏 | 9 状态 × 24 按键 = **216 格**矩阵（`.pf/executor-matrix.txt`）：Surface/Screen 对 Composer 草稿/光标/历史的写入为 0 |
+| 拆分的代价不对称 | 17 个 switch 项中 **9 项**对两个 owner 行为完全相同；拆开等于复制，而复制正是本系列历次缺陷的形状 |
+
+**编号提示**：本轮不重述 W-3b.3b 的 A/B/C 编号，决策名称以 `KEEP_SHARED_WITH_INVARIANTS` 为准。
+
+### 19.2 共享执行体的安全合同（S-1 … S-6）
+
+| ID | 不变量 | 执行者 | 证据 |
+|---|---|---|---|
+| **S-1** | 借用字段存在时，编辑原语**只**写 `borrowedText` | `fieldText` / `fieldCursor` / `setField` / `insertIntoField`（单点分派） | `tests/surface-state-isolation.test.mjs`（六条编辑路径）、`tests/input-ownership-matrix.test.mjs` G1/G2 |
+| **S-2** | 借用字段的编辑**不得**写 Composer 历史 | `leaveHistoryBrowse()` 的 `borrowedText` 守卫 | 同上 R-HISTORY；静态 `historyGuards`；W-3b.3a 的 M1–M3 |
+| **S-3** | **早于 owner 分派**的分支（Alt 和弦、keymap 覆盖、SS3 尾巴）不得写 Composer 草稿 | `route()` 的字段守卫 | `surface-state-isolation` R-ALT；本文件 §18.2 |
+| **S-4** | 共享执行体里每个 Composer 专属分支必须有 `dialog === undefined` / `textIsEditable()` 守卫，且**每个 Surface 可达的键都要有测试** | `composerUnit` 的 5 个 switch 守卫 + `submit` / `handleEscape` / `handleCtrlC` / `handlePasteText` 的分叉 | `input-ownership-matrix` 的 G1（8 键 × 4 种 Surface）与"exactly one owner"表；`interaction-surface` |
+| **S-5** | Surface 形态的 `Ctrl+L` 继续走 Composer 的 repaint 路径，且**恰好一次**有意清屏 | Router 的例外 + `repaintNow()` | `tests/ctrl-l-repaint.test.mjs`；G1 的 Ctrl+L 行；M5（W-3b.2） |
+| **S-6** | 任何**新增**编辑键必须同时进入共享执行体矩阵与借用字段矩阵 | 审阅 + 本文件的 §5 测试要求 | `input-ownership-matrix` 的 STATES/expect 表就是该矩阵的落点 |
+
+这六条满足 AD-20 F-1…F-6 与 AD-22 §3–§6 的安全要求：F-1（归属只由 Router 回答）不变；F-2（草稿只有 Composer
+写）由 S-1/S-3/S-4 保证并被 216 格实测；F-5（一键一表）不变；F-6（owner 之间不转交）不变 —— `ownerSurface`
+对未认领单元的兜底是**同一 owner 的执行体复用**（Router 已判定为 `composer`），不是 owner 间转交。
+
+### 19.3 G1–G4 证据（W-3b.3c 新增，全部绿灯锁定）
+
+| 组 | 内容 | 落点 |
+|---|---|---|
+| **G1** | 4 种 Surface × 8 个"共享体敏感键"（`\x0e` `\x10` `\x12` `\x14` `\t` `\x04` `\x07` `\x1f`）：恰好一个 owner（`ownerSurface`）、owner 状态全字段不变、Surface 不离开、过滤态不丢、无进程退出；外加每形态的 `Ctrl+L` 行（仍归 `ownerComposer`、零写入） | `tests/input-ownership-matrix.test.mjs` |
+| **G2** | options question 与 filtering picker 进入 ownership matrix（新增两个 STATES + 逐格"归属 + 非本 owner 状态不变"），并给出每格的**具名**期望（如 `2` 移动高亮、`/` 打开过滤、空过滤退格是 no-op） | 同上 |
+| **G3** | Composer 的 Ctrl+G / Ctrl+_：`\x1f` 与 `Alt+f`/`Alt+/` 三条写 `/find ` 的路径各自成立（光标落 6）、Ctrl+G 不写文本只报搜索；四种 Surface 下全部零写入，且**区分**是谁消费的（`\x1f`/`\x07` → Surface 适配器；Alt 和弦 → `route()` 分支，任何适配器都看不到） | 同上 |
+| **G4** | Composer 无 dialog 时 `Ctrl+N/P` 移动 **Workspace 焦点环**（记录既有行为，`/copy` 依赖它）；Surface 与 Screen 下同一写入不得出现 | 同上 |
+
+### 19.4 已知限制（R4，本轮不修）
+
+Picker 过滤态对**非 BMP 字符**存在既有限制：`handleDialogChar` 的过滤分支以 `text.length === 1` 判定单字符，
+而 `'🚀'.length === 2`，因此星平面字符在过滤框里被丢弃（其他可打印字符正常）。**不是**所有权问题、**不是**
+RC blocker，修复属"过滤字段模型"（本轮明确不做）。矩阵实测记录：`option Surface (filtering) + 🚀` → 无状态变化。

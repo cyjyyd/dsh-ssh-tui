@@ -209,8 +209,13 @@ B2.5 的意图是"一条消息、一个位置"，实现却留了两个位置：`
 | B3 Screen 侧改用 `forceFullPaint`（一句、零行为变化） | 可选后续；本轮不做（会动运行时） |
 | C 合并为单一 repaint 实现 | **明确否决**：两个 painter 有意不等价，且 ConPTY 腿只能证明"能起能画"，合并的回归面在真机不可见 |
 
-### 10.5 与 W-3b.3 的接口
+### 10.5 与执行体拆分的接口（W-3b.3c 定稿）
 
-W-3b.3 拆 `composerUnit` 时，`Ctrl+L` 必须继续由 Composer 执行体持有（Router 现在就这么判）；Surface 侧
-**不要**顺手加 `case '\x0c'`，也不要删 `ownerSurface` 对未认领单元的兜底转发 —— W-3b.3 的两条必测风险
-（R-HISTORY / R-ALT）与 Ctrl+L 无关，见 `docs/checkpoints.md` 的 W-3b.2a 节。
+W-3b.3 的其余部分由 W-3b.3a（R-HISTORY / R-ALT 修复）与 **W-3b.3c（`KEEP_SHARED_WITH_INVARIANTS`）**
+收口：
+
+- **0.8.4 不进行 executor split**，保留共享执行体 `composerUnit`（决策与 S-1…S-6 合同见
+  [AD-20 §19](input-ownership.md)）；
+- 完整拆分**延期到 W-4 之后的独立结构轮**（候选事项，不是 0.8.4 的一部分，也不绑定某个具体版本号）；
+- `Ctrl+L` 的 **KEEP_DUAL 继续冻结**：Screen 在时归 Screen，否则归 Composer（含 Surface 形态的记录在案例外），
+  Surface 侧**不要**加 `case '\x0c'`，也不要删 `ownerSurface` 对未认领单元的兜底转发。

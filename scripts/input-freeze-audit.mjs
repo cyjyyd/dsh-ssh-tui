@@ -88,15 +88,24 @@ export const BASELINE = {
   escapeAssembly: { count: 1, sites: [READER, PAINT], what: 'an `isEscapePrefix` call outside the Reader (paint.ts defines it, picker.ts assembles its own — recorded debt, W-7)' },
 }
 
-/** State an input handler must not write unless it owns it (AD-20 F-2/F-3). */
+/**
+ * State an input handler must not write unless it owns it (AD-20 F-2/F-3).
+ *
+ * The assignment is `[-+]?=`, not `=`: a compound write is the same write. It was
+ * plain `=` until W-3b.3c, which meant `this.cursor += 2` (Tab at the composer),
+ * `this.historyIndex -= 1` (`historyBack`) and `this.historyIndex += 1`
+ * (`historyForward`) were invisible to every kind below — the first hid behind the
+ * other writes in its method, the second pair behind not being scanned at all.
+ */
+const ASSIGN = '\\s*[-+]?='
 const OWNED_WRITES = [
-  { kind: 'composer draft', pattern: /this\.(input|cursor|inputFolded)\s*=/u },
+  { kind: 'composer draft', pattern: new RegExp(`this\\.(input|cursor|inputFolded)${ASSIGN}`, 'u') },
   // The composer's *history*: which recalled entry the reader is on and the draft the
   // browse is holding. Split out from the draft at W-3b.3a, where a borrowed field's
   // edit reached `leaveHistoryBrowse()` and overwrote `historyDraft` with the entry
   // being browsed — folded into `composer draft`, that write had no name of its own
   // and the pair `leaveHistoryBrowse → composer history` could not be reviewed.
-  { kind: 'composer history', pattern: /this\.(historyIndex|historyDraft)\s*=/u },
+  { kind: 'composer history', pattern: new RegExp(`this\\.(historyIndex|historyDraft)${ASSIGN}`, 'u') },
   { kind: 'transcript', pattern: /this\.rows\.push\(|pushRow\(represent\(|this\.notice\s*=|this\.footerEcho\s*=/u },
 ]
 
@@ -116,6 +125,12 @@ const INPUT_HANDLERS = [
   // W-3b.3a: the composer history's one writer. It is on the input path (four editing
   // keys and paste reach it) and it is the method a borrowed field must not get past.
   'leaveHistoryBrowse',
+  // W-3b.3c: the other two writers of the composer's history. They are reached from the
+  // input path through `arrowHistory` (the ↑/↓ the composer keeps), and before this they
+  // were outside the scan — so a third history writer could have been added next to them
+  // without the ratchet seeing it. They are *legitimate* writers of the composer's own
+  // state, which is why they are registered below rather than left invisible.
+  'historyBack', 'historyForward',
 ]
 
 /**
@@ -365,6 +380,12 @@ const BASELINE_WRITERS = {
   // what the method is for — but the pair is now on the list by name, and the guard
   // that keeps a borrowed field out of it is checked by `historyGuards`.
   leaveHistoryBrowse: ['composer history'],
+  // W-3b.3c: the ↑/↓ the composer keeps. Same reasoning as `submit`: this is the
+  // composer writing its own field and history, so the entry records what already
+  // happens rather than permitting something new — any *other* method that starts
+  // writing the history is still a `new writer: … writes the composer history`.
+  historyBack: ['composer draft', 'composer history'],
+  historyForward: ['composer draft', 'composer history'],
   runCommand: ['composer draft', 'transcript'],
   handleEscape: ['transcript'],
   handleCtrlC: ['transcript'],
