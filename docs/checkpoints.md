@@ -3025,3 +3025,22 @@ todo 0`（日志中 `✔ G1: the keys the shared executor guards…` 在场）�
 - **发布后**的"registry tarball 与上传值逐字节相同"仍是**人工步骤**（`docs/release.md` 的记录方式未变）：
   H2 覆盖的是**发布前**的产物，自动化发布后比对需要 registry 访问，本轮不并入 CI；
 - 升级冒烟**未跑真升级**（当前没有更高的候选版本），只交付脚本与"bump 后必跑"的书面要求。
+
+**CI（本轮接线后的第一次运行）**：提交 `71e049c` 的 run `38881844243` —— **Linux 默认腿
+`test (0.2.0-rc.2)` success**（两条新门都在其中），三条 compatibility 腿 success；
+**`test-windows` failure**，但失败点是**既有的单元套件第 6 步**，在两条新 Windows 门之前：
+
+```
+test at tests\session-list.test.mjs:556:1
+✖ a title is cached and painted as soon as it resolves (638.8729ms)
+  AssertionError: the fast title is painted before the slow logs finish
+  2 !== 0        (tests\session-list.test.mjs:593)
+```
+
+**分类：test defect（时间敏感断言），不是 runtime defect，与本轮 diff 无关。**
+证据：本轮提交在 `src/` 与 `tests/` 下**零文件改动**（`git diff --name-only f7d5717..71e049c -- src/ tests/`
+为空）；该用例的 mock 用 `setTimeout(150)` 模拟两个"慢日志"，却断言"快标题先于慢日志画出"（`slowResolved === 0`），
+于是它测的是**墙钟竞速**；同一用例在最近三次 Windows 运行里分别是 **227.98ms / 244.26ms / 192.16ms**（都通过），
+这次是 **638.87ms** —— 运行器慢了约 3 倍，150ms 的 mock 先醒，`slowResolved` 变成 2。
+因此：不是 plugin defect、不是 upstream host defect、不是本轮引入；**未修改该测试**（修它属于独立任务，
+本轮不扩大范围）。副作用是**两条新 Windows 门在这次运行里被 skip**，Windows 侧的 H1/H2 证据尚缺。
