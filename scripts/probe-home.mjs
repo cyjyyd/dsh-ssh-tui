@@ -26,10 +26,10 @@
  *   node scripts/probe-home.mjs --home <dir>    # build at a fixed path
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -39,13 +39,19 @@ const require = createRequire(import.meta.url)
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 
-const USAGE = `usage: node scripts/probe-home.mjs [--probe] [--keep] [--home <dir>] [--profile <name>] [-- <probe args>]
+const USAGE = `usage: node scripts/probe-home.mjs [--probe] [--keep] [--home <dir>] [--profile <name>]
+                                    [--pack | --tarball <tgz>] [-- <probe args>]
 
   --probe          run a PTY probe against the built home, then clean up
   --script <name>  which probe to run (default: tui-probe.mjs)
   --keep           keep the throwaway home (prints the path either way)
   --unconfigured   leave the home without a credential, so the boot is a first run
-                   (the setup wizard is what boots; use it with tui-setup-probe.mjs)
+                   (the setup wizard is what boots; use it with tui-setup-probe.mjs).
+                   A probe run this way is told the wizard is *required*: a home this
+                   script built unconfigured that boots straight to the workspace is the
+                   0.8.1 first-run defect, not a skip.
+  --pack           \`npm pack\` this checkout and install the tarball, not \`link:\`
+  --tarball <tgz>  install this tarball instead of linking the checkout
   --home <dir>     build at this path instead of a fresh temp directory
   --profile <name> profile to build (default: tui)
   --               everything after this reaches the probe`
@@ -112,7 +118,15 @@ export function provisionProbeCredential({ home, profile = 'tui', cli = CLI, log
  * poking at the result); otherwise a fresh temp directory is used so two runs
  * never share a session store.
  */
-export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, log = console.log, credential = true } = {}) {
+export function buildProbeHome({
+  home,
+  profile = 'tui',
+  repo = REPO,
+  cli = CLI,
+  log = console.log,
+  credential = true,
+  tarball,
+} = {}) {
   const target = home ?? mkdtempSync(join(tmpdir(), 'dsh-probe-home-'))
   const env = { ...process.env, DSH_HOME: target, DSH_TUI_NO_UPDATE_CHECK: '1' }
   log(`==> building a probe home at ${target}`)
@@ -133,8 +147,14 @@ export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, 
     writeFileSync(packageFile, `${JSON.stringify(manifest, null, 2)}\n`)
   }
 
-  log(`==> installing ${repo} into profile '${profile}'`)
-  run(process.execPath, [cli, 'plugin', '--profile', profile, 'add', `link:${repo}`], { env })
+  // Two ways in, and they are not the same evidence. `link:` runs the checkout — the
+  // source tree, with its `src/`, tests and build inputs — while a tarball runs exactly
+  // what `npm publish` would upload. A gate about "does a real user's install work" has
+  // to take the second one (`scripts/artifact-smoke.mjs`); the link stays the default
+  // for every other probe because it needs no pack step and picks up local edits.
+  const spec = tarball === undefined ? `link:${repo}` : `file:${resolve(tarball)}`
+  log(`==> installing ${spec} into profile '${profile}'`)
+  run(process.execPath, [cli, 'plugin', '--profile', profile, 'add', spec], { env })
   mountProfileRows({ profile, home: target, cli, log })
 
   // A profile that composes but cannot boot is worse than no profile: fail here.
@@ -143,6 +163,28 @@ export function buildProbeHome({ home, profile = 'tui', repo = REPO, cli = CLI, 
   else log('==> left unconfigured (--unconfigured): the boot is a first run')
   log(`==> probe home ready: ${target}`)
   return target
+}
+
+/**
+ * `npm pack` this checkout into a temp directory and return the tarball path.
+ *
+ * The cache directory is passed explicitly: a sandbox whose shared npm cache is
+ * read-only fails `npm pack` before it writes anything, and the failure reads like a
+ * packaging defect. `.npm-cache-tmp` is this repo's own writable cache (git-ignored),
+ * and on a normal machine it is simply where the pack logs go.
+ */
+export function packCheckout({ repo = REPO, log = console.log } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pack-'))
+  const status = run('npm', ['pack', '--pack-destination', dir, '--cache', join(repo, '.npm-cache-tmp'), '--silent'], {
+    cwd: repo,
+    stdio: 'pipe',
+    encoding: 'utf8',
+  })
+  if (status !== 0) throw new Error(`npm pack exited with ${status}`)
+  const tarball = readdirSync(dir).find(name => name.endsWith('.tgz'))
+  if (tarball === undefined) throw new Error(`npm pack left no tarball in ${dir}`)
+  log(`==> packed ${join(dir, tarball)}`)
+  return join(dir, tarball)
 }
 
 /** Kill whatever host the probe left behind, then drop the home. */
@@ -171,10 +213,17 @@ async function main(argv) {
     console.log(USAGE)
     return 0
   }
+  const tarballFlag = valueOf('--tarball')
+  // `--pack` is the CI-shaped shorthand: this checkout, packed the way `npm publish`
+  // would, installed into the throwaway home. The pack itself is `artifact-smoke.mjs`'s
+  // job to *verify*; here it only has to produce the artifact.
+  const tarball = tarballFlag ?? (own.includes('--pack') ? packCheckout() : undefined)
+  if (tarball !== undefined) console.log(`==> tarball: ${tarball}`)
   const home = buildProbeHome({
     home: valueOf('--home'),
     profile: valueOf('--profile') ?? 'tui',
     credential: !own.includes('--unconfigured'),
+    tarball,
   })
 
   if (!runProbe) {
@@ -188,8 +237,16 @@ async function main(argv) {
     const child = spawn(process.execPath, [join(REPO, 'scripts', script), ...probeArgs], {
       stdio: 'inherit',
       windowsHide: true,
-      // A skipped probe is not coverage: the probe fails instead of skipping.
-      env: { ...process.env, PROBE_HOME: home, PROBE_REQUIRE_PTY: '1' },
+      // A skipped probe is not coverage: the probe fails instead of skipping. The
+      // wizard is *required* on a home this script built unconfigured — "already
+      // configured" there would mean the first run was skipped, which is the 0.8.1
+      // defect this probe exists for.
+      env: {
+        ...process.env,
+        PROBE_HOME: home,
+        PROBE_REQUIRE_PTY: '1',
+        ...(own.includes('--unconfigured') ? { PROBE_REQUIRE_WIZARD: '1' } : {}),
+      },
     })
     child.on('error', () => resolve(1))
     child.on('exit', value => resolve(value ?? 1))

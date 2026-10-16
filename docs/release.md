@@ -91,6 +91,13 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
 3. **CI 全部腿全绿，才允许碰 npm。**
    当前五条腿（2026-10-03 起）：`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、`test (0.1.7-rc.2)`、
    `test (0.1.7-rc.1)`、`test-windows` —— **全部 success** 才 `npm publish`。
+   其中**默认腿（`0.2.0-rc.2`）与 `test-windows`** 另外跑两条发布前阻塞门（0.8.4 起）：
+   - **首次安装向导**（`probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs`）：真实
+     PTY / ConPTY 上的 fresh home → 向导 → **粘贴 API key** → 保存 → 自动交回工作区 → 重启不再是首启；
+   - **发布产物冒烟**（`scripts/artifact-smoke.mjs`）：`npm pack` → 检查包内清单 → 用 **tarball**（不是
+     `link:`）装进仓库之外的临时 home → 证明解析到 profile 而不是 checkout → 在该产物上跑上面两条探针。
+   **这两门红了就不是"CI 绿"**：安装失败必须按 `classifyInstallFailure` 分类后报告，不得用 workaround
+   把本插件的包改绿（宿主 / pnpm / 环境的失败尤其如此）。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
    **tag 不触发 CI**：workflow 只监听 `main` 的 push 与 PR（`.github/workflows/ci.yml` 的 `on:`），
    所以打 tag 前后要做的是**核对 tag 所指的那个 SHA 的 run 是否 success**（`main` 上的推送已经跑过
@@ -167,7 +174,11 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 当前快照（2026-10-03 · `0.8.1` = `latest` + `next`）
+### 历史快照（2026-10-03 · 当时 `0.8.1` = `latest` + `next`）
+
+> 这是**留档的当时快照**，不是当前状态。当前状态看本文件开头的发布记录：
+> **`0.8.3` = `latest` + `next`**（2026-10-13），声明窗口与 CI 腿见下表（腿列表自 2026-10-03 起未变）。
+> 表格里"我们的表态"一列今天仍然准确，通道版本号一列已经过期——保留原文是为了让当时的判断可追溯。
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
@@ -284,10 +295,33 @@ term、stdio）与单元套件：它能证明生命周期代码在 win32 上不�
 
 ### 二、fresh-home 首启（没有任何配置的 `DSH_HOME`）
 
+> **0.8.4 起这条已经自动化**：默认腿与 `test-windows` 各跑一次
+> `node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs`（跑完自动清理），
+> 也就是说下面两条命令做的事已经是 CI 里的阻塞门。人工复核仍然值得做一次，但**它不再是"只有人眼
+> 能看"的那一类**——粘贴、保存、保存后自动交回、重启不再首启、resize、Esc 都由探针断言。
+
 ```sh
 node scripts/probe-home.mjs --keep --unconfigured    # 建一份**未配置**的 home
 PROBE_HOME=<上面打印的路径> node scripts/tui-setup-probe.mjs
 ```
+
+**发布产物**（0.8.4 起，同上两腿各一次）：
+
+```sh
+node scripts/artifact-smoke.mjs            # pack → 清单 → tarball 安装 → 两条探针
+node scripts/artifact-smoke.mjs --check <tgz>   # 只查某个 tarball 的清单
+```
+
+**升级冒烟**（0.8.4 起提供脚本，**版本 bump 之后的强制步骤**）：
+
+```sh
+node scripts/upgrade-smoke.mjs --from <上一个已发布版本> --pack
+```
+
+它装上一个已发布版本、写好凭据与会话，再把候选装上去，断言 bundle 条目、凭据与会话存储都还在。
+**同版本互换不是升级**：脚本在 `from` 与候选版本相同时会明确拒绝（除非 `--allow-same-version`，
+那时它把自己标成 *reinstall smoke*）。因此它是**下一个版本 bump 之后的必跑项**，本轮不通过改版本号
+来制造条件。
 
 探针断言两件事：向导**自动**出现（不画工作区 composer）、列表步按键只重画正文、字段步打字只重画一行
 且**不清屏**、resize 后字段与按键仍在、Esc 交还工作区；随后写入一份凭据再启动，断言**第二次启动不再

@@ -9,7 +9,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the whole dsh family to 0.2.0-rc.1 (upstream `next`).
+        # package.json pins the whole dsh family to 0.2.0-rc.2 — the committed
+        # manifest, the lock and the Windows leg all install it, and it is what a
+        # fresh user resolves (upstream points both `latest` and `next` at it).
         # That line is the one 0.8.0 is declared against: it keeps the 0.1.7
         # settings seam (a form per loader entry, no `settings.get`) and the
         # process-wide agent composition, and it pins the family's roots to the
@@ -90,6 +92,23 @@ jobs:
         run: |
           npm install -g pnpm@10 --no-audit --no-fund
           node scripts/probe-home.mjs --probe
+      # The first-run wizard, as a *blocking* gate and on a home this step builds
+      # unconfigured. This is the path 0.8.3 broke for real users ("the pasted API key
+      # never reached the field") and the one probe that had never run here: the other
+      # probes drive a configured home, so the wizard was only ever walked by hand.
+      # `--unconfigured` also tells the probe the wizard is *required* — a skip there
+      # would be a green gate over the incident it exists for.
+      - name: Fresh-home setup wizard (real PTY, pasted key)
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      # …and the same path on the artifact a user actually installs. Every other probe
+      # here runs `link:<repo>` — the checkout, with its `src/` and its tests. This one
+      # packs (`npm pack`), inspects the manifest, installs the tarball into a home
+      # outside the repository, proves the plugin resolves to the profile rather than
+      # the checkout, and then runs the wizard and workspace probes against it.
+      - name: Packed-artifact smoke (npm pack → install → probes)
+        if: matrix.dsh == '0.2.0-rc.2'
+        run: node scripts/artifact-smoke.mjs
       - name: Terminal-capability probe
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
       # The desktop shape: no PTY anywhere. A parent that puts bytes on a pipe (a
@@ -180,6 +199,19 @@ jobs:
         run: |
           npm install -g pnpm@10 --no-audit --no-fund
           node scripts/probe-home.mjs --probe
+      # The first-run wizard on ConPTY: the same gate as the Linux leg, on the terminal
+      # family where a real user met the 0.8.3 incident. ConPTY rewrites the frame's row
+      # addressing, so the byte-level assertions stand down there — but "the pasted key
+      # reaches the field", "no extra keypress is needed after the save" and "the second
+      # boot does not show the wizard" are read off the grid and hold on both.
+      - name: Fresh-home setup wizard (ConPTY, pasted key)
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      # The packed artifact on ConPTY: the Windows install path is the one the community
+      # reports pnpm/manifest trouble on, so this is where the failure would show. A
+      # failure here is reported with its classification and is never worked around in
+      # this repository — see `classifyInstallFailure` in the script.
+      - name: Packed-artifact smoke (ConPTY)
+        run: node scripts/artifact-smoke.mjs
       - name: End-to-end drop/reattach probe (ConPTY)
         run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
       # "The Host keeps running when you close the window" used to be a claim

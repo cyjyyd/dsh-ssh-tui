@@ -24,7 +24,7 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
-import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 import { provisionProbeCredential } from './probe-home.mjs'
@@ -165,9 +165,17 @@ async function runProbe(argv) {
       if (/目录：|目录:|❯/u.test(plain(output))) seenWorkspaceAt ??= Date.now()
       // Three seconds of a settled workspace with no wizard is a configured home.
       if (seenWorkspaceAt !== undefined && Date.now() - seenWorkspaceAt > 3_000) {
+        // …unless the caller *built* this home with nothing configured. Then the wizard
+        // not appearing is the 0.8.1 first-run defect (`--resume` read as "configured"),
+        // and a skip here would be a green gate over exactly the incident it exists for.
+        if (process.env.PROBE_REQUIRE_WIZARD === '1') {
+          problems.push('this home was built unconfigured, so the wizard must open; the workspace settled without it'
+            + (existsSync(join(home, '.credentials.yaml')) ? ' (a credential file exists — the harness left one behind)' : ''))
+          throw new Error('the first-run wizard never opened on an unconfigured home')
+        }
         console.log('SKIP: this home is already configured, so first-run setup never opens')
         console.log('      (build an unconfigured home to walk the wizard; the in-process')
-        console.log('       suite covers the same ground as tests/setup-screen.test.mjs)')
+        console.log('       suite covers the same ground as tests/setup-screen.mjs)')
         return 0
       }
       await delay(50)
@@ -240,7 +248,12 @@ async function runProbe(argv) {
     if (secretStep) {
       check(bullets(fieldAfter) === bullets(fieldBefore) + PASTE.length,
         `the pasted key is masked in the field (${bullets(fieldBefore)} → ${bullets(fieldAfter)} bullets)`)
+      // Both halves of "the key never reaches the terminal": the painted text (what a
+      // reader sees) and the raw bytes (what a log, a scrollback or a relay would hold).
+      // A masked field writes `•`, so the raw stream is the stronger check and the same
+      // assertion covers both.
       check(!plain(output.slice(beforePaste)).includes(PASTE), 'the pasted key is never painted')
+      check(!output.slice(beforePaste).includes(PASTE), 'and never appears verbatim in the byte stream')
     } else {
       check(fieldAfter.includes(PASTE), `the paste reaches the field (${JSON.stringify(fieldAfter)})`)
     }

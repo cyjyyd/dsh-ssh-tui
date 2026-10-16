@@ -2962,3 +2962,66 @@ focused: null            → "tool"             ← 焦点环也被移动
 rc 腿）。全量回归数字取自该 run 的 `test (0.1.7-rc.1)` 腿日志：`ℹ tests 1506 · pass 1503 · fail 0 · skipped 3 ·
 todo 0`（日志中 `✔ G1: the keys the shared executor guards…` 在场）——**测试总数仍是 1506、无新增用例**。
 `git status` 干净，`git diff -- src/` 为空。
+
+---
+
+## 0.8.4 RC-HARDENING · 首次安装 / 发布产物 / setup 向导成为阻塞门（2026-10-16）
+
+> 目标：在不改任何 runtime 行为的前提下，把"真实用户首次安装 → npm 发布包 → setup 向导"变成正式的
+> 发布前阻塞测试门，特别是 0.8.3 的真实事故：**首次安装时向导无法把粘贴的 API key 放进字段**。
+> 本轮 `src/` 零改动，未改 Router / keymap / `composerUnit` / W-3b 合同 / compatibility / version / tag。
+
+**Preflight**：HEAD `f7d57171ea57c05754a5aeab88b7caafaae71f76`，version `0.8.3`（42 tag），工作树干净、
+与远端一致。
+
+### Gap Audit（从源码与 workflow 核对，不采信报告声称）
+
+| # | 项 | 结论 |
+|---|---|---|
+| A | `tests/setup-screen.test.mjs` | **24 项**，覆盖面很宽：九个步骤顺序、字段归属、粘贴（含括号粘贴与无标记 burst）、掩码不画 key、resize、Esc、保存后同帧交回、失败留存、reattach。**但它全是进程内 `handleData`**——真实 PTY 字节、真实 profile、真实安装一律没有 |
+| B | `scripts/tui-setup-probe.mjs` | **已经实现了几乎整条 H1 路径**：fresh home → 向导 → 列表步 → 字段步 → **真实括号粘贴 API key**（掩码按 `•` 计数断言 + 断言"从未被画出"）→ resize → Esc 交回 → 二次启动不再首启 → **resumed 保存**（走完 9 步 `y` 保存，工作区**无需额外按键**自动回来）。**缺口不是探针，是 CI 从不运行它** |
+| C | `scripts/probe-home.mjs` | 已有 `--unconfigured`（正是 setup 探针需要的），但安装固定为 `dsh plugin add link:<repo>`——**link 冒充不了发布包**；探针进程已带 `PROBE_REQUIRE_PTY=1` |
+| D | `scripts/tui-probe.mjs` | 跑**已配置** home 的工作区（boot / resize / diag / doctor / copy / preset / 交互层 / picker / Screen / 退出交接） |
+| E | `.github/workflows/ci.yml` | **`tui-setup-probe.mjs` 从未出现在任何腿**；Linux 腿跑 probe/term/stdio/cut/rtt/unmeasured/busy-drop/reply-copy，Windows 腿跑 probe/drop/busy-drop/term/footer-windows/stdio/unmeasured。安装一律 `link:`。注释还把默认线写成 `0.2.0-rc.1`（实际 `0.2.0-rc.2`） |
+| F | `package.json` | `files` 白名单（lib / cordis.patch.yml / README / 指定 docs / LICENSE / CHANGELOG / release notes）。`npm pack` 实测 **252 文件 / 1 523 255 B**，无 `src`/`tests`/`scripts`/`.github`/`.pf`/嵌套 tgz |
+| G | `docs/release.md` | 每次发布记录里**描述过**发布后从 registry 取回 tarball 比对 sha1（人工执行），**没有脚本**；「当前快照」标题仍是 2026-10-03 / `0.8.1`（已过期）；`docs/upstream-0.2.0.md` 的"默认线 = rc.1"同理 |
+
+### 新增 / 修改
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/probe-home.mjs` | 新增 `--pack` / `--tarball <tgz>`（安装 `file:<tgz>` 而不是 `link:<repo>`）与可复用的 `packCheckout()`；`--unconfigured` 时给探针进程加 `PROBE_REQUIRE_WIZARD=1`。默认行为一字未变 |
+| `scripts/tui-setup-probe.mjs` | `PROBE_REQUIRE_WIZARD=1` 时"这个 home 明明是未配置的，向导却没出现"从 **SKIP 变成 FAIL**（0.8.1 那类首启缺陷不再能伪装成绿）；秘密步骤增加**原始字节**断言（key 不得逐字出现在流里，而不只是"没被画出"） |
+| `scripts/artifact-smoke.mjs`（新） | **H2**：`npm pack` → 包内清单断言（必须有 `package.json`/`lib/index.js`/`lib/tui.js`/`cordis.patch.yml`/`README.md`/`LICENSE`；不得有 `src`/`tests`/`scripts`/`.github`/`.pf`/缓存/嵌套 tgz/node_modules）→ 装进**仓库之外**的临时 home → 证明 `dependencies` 记录的是 `file:<tgz>`、`node_modules/dsh-ssh-tui` **不是**指向 checkout 的符号链接、其 realpath 在 profile 内且 ≠ 仓库 → `--dump-config` 通过 → 在该产物上跑 **setup 探针（unconfigured + require-wizard）与 tui-probe**。安装失败按 `classifyInstallFailure()` 分类（environment / package-or-host-line / package-or-registry / unknown）并原样保留失败，**不绕过**。另有 `--check <tgz>` 只查任意 tarball 的清单 |
+| `scripts/upgrade-smoke.mjs`（新） | **H3 基础设施**：装上一个已发布版本 → 写凭据与会话 → 把候选装上去 → 断言 bundle 条目/凭据/会话存储存活、`--dump-config` 仍通过。**同版本互换不算升级**：`from` 与候选版本相同时明确拒绝（`--allow-same-version` 才跑机制，并把自己标成 *reinstall smoke*）。因此它是**版本 bump 之后的强制步骤**，本轮不通过改版本号制造条件 |
+| `.github/workflows/ci.yml` | 默认腿（`0.2.0-rc.2`）与 `test-windows` 各加两条阻塞门：`probe-home --probe --unconfigured --script tui-setup-probe.mjs`（H1）与 `node scripts/artifact-smoke.mjs`（H2）。四条 compatibility 腿与既有 probe 步骤保持不变；顺带修正默认线的过期注释 |
+| `docs/release.md` | 「当前快照」→「**历史快照**（当时 …）」并加当前状态指针；发布规则第 3 条列出两条新阻塞门与"安装失败必须分类、不得 workaround"；发布前人工门槛第二节记录现在已自动化 + 产物冒烟 + 升级冒烟的用法 |
+| `docs/upstream-0.2.0.md` | 顶部加"当时状态，不是当前状态"追记（默认线已换成 rc.2），正文原样保留 |
+
+### 证据（本轮实测）
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| **H1 首次安装向导（真 PTY）** | `node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs` | **PASS**：`setup Screen: painted, listed (15 rows), stepped, typed (1 rows), pasted (masked), resized and left` · `second boot on the configured home: workspace, no wizard` · `resumed first run: wizard saved on step 9, workspace back with no extra keypress` · 探针自带 `PROBE_REQUIRE_PTY=1`（无 pty 即失败，不静默跳过） |
+| **H1 的门本身有效** | 已配置 home + `PROBE_REQUIRE_WIZARD=1` | **FAIL（exit 1）**：`the first-run wizard never opened on an unconfigured home`；去掉该变量（人工路径）同一 home 仍 `SKIP` + **exit 0**，行为未变 |
+| **H2 产物冒烟** | `node scripts/artifact-smoke.mjs` | **PASS**：pack → `dsh-ssh-tui@0.8.3 · 252 files · 1523255 B` → 装进 `/tmp/dsh-artifact-home-*` → 解析证明通过 → **同一条 setup 探针（掩码粘贴）与 tui-probe 都在该产物上通过** |
+| **H2 清单门有效** | `.pf/prove-artifact-gate.mjs`（一次性，git-excluded） | 两个故意做坏的 tarball 均 **RED**：缺 `lib/tui.js` → `the tarball is missing lib/tui.js`；夹带 `tests/` → `the tarball carries package/tests/leak.test.mjs — the test suite` |
+| **H3 升级门（同版本）** | `node scripts/upgrade-smoke.mjs --from 0.8.3 --pack` | 明确 **拒绝**：*a same-version swap is a REINSTALL, not an upgrade*（exit 0，无任何升级结论） |
+| **H3 机制** | 同命令 + `--allow-same-version` | **PASS（标注 reinstall smoke）**：`0.8.3 → 0.8.3 — the manifest, the bundle entry, the credential and the session store survived a same-version swap` |
+| 既有 probe 无回归 | `node scripts/probe-home.mjs --probe` | **PASS**（默认 `link:` 路径与配置好的 home 一字未变） |
+| setup 单元用例 | `node --test tests/setup-screen.test.mjs` | **24 · 24 pass · 0 fail** |
+| 全量套件 | `npm test` | **1506 · 1502 pass · 0 fail · 4 skipped · 0 todo** |
+| `typecheck` / `freeze` / `freeze:input` / `bench` | — | 0 error / 全绿 / 无基线超限 / **501·465·2457·588·140 B、行 3·3·17·4·1、clears 0** |
+| 参考轨迹 | — | **109 条不变**；`git diff -- src/` 为 **0** |
+
+**本机沙箱说明（不是产品问题）**：本沙箱的 pnpm store（`/root/.local/share/pnpm/store/v11`）是只读文件系统，
+`dsh plugin add` 会以 `ERR_SQLITE_ERROR: unable to open database file` 失败。本地跑这些门时把
+`npm_config_store_dir` / `PNPM_HOME` 指到仓库内可写目录即可（本轮实测如此）；CI runner 的 home 可写，不需要该覆盖。
+该失败本身按 `environment` 分类——宿主/环境问题，绝不用改本插件来绕过。
+
+### 边界（未做）
+
+- **没有**修 runtime（本轮无 runtime defect 被发现）；**没有**改 version / tag / compatibility / CI 矩阵；
+- **发布后**的"registry tarball 与上传值逐字节相同"仍是**人工步骤**（`docs/release.md` 的记录方式未变）：
+  H2 覆盖的是**发布前**的产物，自动化发布后比对需要 registry 访问，本轮不并入 CI；
+- 升级冒烟**未跑真升级**（当前没有更高的候选版本），只交付脚本与"bump 后必跑"的书面要求。
