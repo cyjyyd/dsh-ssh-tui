@@ -3044,3 +3044,12 @@ test at tests\session-list.test.mjs:556:1
 这次是 **638.87ms** —— 运行器慢了约 3 倍，150ms 的 mock 先醒，`slowResolved` 变成 2。
 因此：不是 plugin defect、不是 upstream host defect、不是本轮引入；**未修改该测试**（修它属于独立任务，
 本轮不扩大范围）。副作用是**两条新 Windows 门在这次运行里被 skip**，Windows 侧的 H1/H2 证据尚缺。
+
+**第二次运行（`a559f82`，run `38882814787`）**：Windows 的单元套件这次**通过**（同一条用例正常，确认上一轮是 flake），
+`Fresh-home setup wizard (ConPTY, pasted key)` **PASS**；`Packed-artifact smoke (ConPTY)` **FAIL**，
+报告 `FAIL: npm pack exited with null` —— 这是**本轮新脚本的平台缺陷**，不是包、也不是宿主的问题：
+`spawnSync('npm', …, {shell:false})` 在 Windows 上无法启动 `npm.cmd`（`status === null`）。
+修法与仓库既有约定一致（`scripts/install.mjs`：*`npm` is a `.cmd` on Windows*）：两处 `npm pack`
+调用加 `shell: process.platform === 'win32'`，失败信息同时带上 `status.error.code`，
+让"启动不了"不再伪装成"打包坏了"。Linux 侧不受影响（`shell:false` 路径一字未变），修后本地
+`artifact-smoke` 与 `--check` 重跑仍全绿。

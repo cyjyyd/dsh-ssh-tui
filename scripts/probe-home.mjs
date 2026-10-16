@@ -179,6 +179,9 @@ export function packCheckout({ repo = REPO, log = console.log } = {}) {
     cwd: repo,
     stdio: 'pipe',
     encoding: 'utf8',
+    // `npm` is a `.cmd` shim on Windows: without a shell it cannot be spawned at all
+    // (`status === null`, which reads like a packaging failure).
+    shell: process.platform === 'win32',
   })
   if (status !== 0) throw new Error(`npm pack exited with ${status}`)
   const tarball = readdirSync(dir).find(name => name.endsWith('.tgz'))

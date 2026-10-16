@@ -169,11 +169,15 @@ async function main(argv) {
   // 1. Pack. `--cache` because a sandbox with a read-only shared cache fails `npm pack`
   //    before it writes anything, and that reads like a packaging defect.
   const packDir = mkdtempSync(join(tmpdir(), 'dsh-artifact-pack-'))
+  // `npm` is a `.cmd` shim on Windows and cannot be spawned without a shell — the same
+  // rule `scripts/install.mjs` documents. Without it the status is `null` and the failure
+  // reads like a packaging defect.
   const status = spawnSync('npm', ['pack', '--pack-destination', packDir, '--cache', join(REPO, '.npm-cache-tmp')], {
-    cwd: REPO, encoding: 'utf8', windowsHide: true,
+    cwd: REPO, encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32',
   })
   if (status.status !== 0) {
-    console.error(`FAIL: npm pack exited with ${status.status}\n${status.stdout ?? ''}${status.stderr ?? ''}`)
+    const why = status.error === undefined ? '' : ` (${status.error.code ?? status.error.message})`
+    console.error(`FAIL: npm pack exited with ${status.status}${why}\n${status.stdout ?? ''}${status.stderr ?? ''}`)
     return 1
   }
   const tarball = join(packDir, String(status.stdout).trim().split('\n').at(-1).trim())
