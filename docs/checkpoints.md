@@ -2810,3 +2810,8 @@ this round’s scanner exit=1  problems=["new writer: ownerSurface writes the co
 
 **仍未做**：executor split（延期至 W-4 之后的独立结构轮）、Surface 左右箭头、过滤字段模型（含 R4）、
 picker Reader（W-7）、Completion / Search Screen / Terminal Doctor、Plan Card Fold。
+
+**CI**：W-3b.3c 提交 `cdd85c4` 的 run `38847235769` **5/5 全绿**（`test-windows` 与四条 0.1.7/0.2.0 rc 腿）。
+G1–G4 与加宽后的 freeze 审计都是纯进程内执行（不依赖 pty），**在 Windows 腿上同样跑过**；真机腿覆盖的是
+"能启动、能渲染、不报错"与交互窗口归属。**本轮 `src/` 零改动**（`git status src/` 空），未拆 `composerUnit`、
+未动 Router / keymap / 版本 / tag / npm。
