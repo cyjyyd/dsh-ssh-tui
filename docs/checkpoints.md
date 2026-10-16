@@ -2957,3 +2957,8 @@ focused: null            → "tool"             ← 焦点环也被移动
 - 历史审计文字未重写：上一节（Evidence Repair 1）与 W-3b.3c 主体保持原样，本节作为**补充**说明 G1 当时既缺
   `inputFolded`、也缺"面背后有一张卡"这一前提。
 - `KEEP_SHARED_WITH_INVARIANTS` 与 **S-1…S-6** 语义未改；executor split、R4、RC、release 均未触及。
+
+**CI**：Evidence Repair 2 提交 `178d3b3` 的 run `38869503049` **5/5 全绿**（`test-windows` 与四条 0.1.7/0.2.0
+rc 腿）。全量回归数字取自该 run 的 `test (0.1.7-rc.1)` 腿日志：`ℹ tests 1506 · pass 1503 · fail 0 · skipped 3 ·
+todo 0`（日志中 `✔ G1: the keys the shared executor guards…` 在场）——**测试总数仍是 1506、无新增用例**。
+`git status` 干净，`git diff -- src/` 为空。
