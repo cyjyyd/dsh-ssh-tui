@@ -2881,3 +2881,8 @@ G2/G3/G4 的覆盖范围、测试数量都**未改变**：本轮的测试文件 
 - 历史审计文字未重写：W-3b.3c 节的 G1 描述保持原样，本节作为**补充记录**说明它当时的 oracle 少了一个字段
   （不把历史写成"原本就完整"）。
 - `KEEP_SHARED_WITH_INVARIANTS` 与 **S-1…S-6** 的含义未改变；executor split、R4、RC、npm 均未触及。
+
+**CI**：证据修复提交 `093dc28` 的 run `38865066776` **5/5 全绿**（`test-windows` 与四条 0.1.7/0.2.0 rc 腿）。
+本轮**未在本地强跑全量套件**（按维护者指示）；全量回归证据取自该 run 的日志：`ℹ tests 1506 · pass 1503 ·
+fail 0 · skipped 3 · todo 0`（`test (0.1.7-rc.1)` 腿，日志中 `✔ G1: the keys the shared executor guards…`、
+`✔ G2/G3/G4` 逐条在场），**测试总数仍是 1506**、无新增用例。`git status` 干净，`git diff -- src/` 为空。
