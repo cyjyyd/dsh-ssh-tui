@@ -2886,3 +2886,74 @@ G2/G3/G4 的覆盖范围、测试数量都**未改变**：本轮的测试文件 
 本轮**未在本地强跑全量套件**（按维护者指示）；全量回归证据取自该 run 的日志：`ℹ tests 1506 · pass 1503 ·
 fail 0 · skipped 3 · todo 0`（`test (0.1.7-rc.1)` 腿，日志中 `✔ G1: the keys the shared executor guards…`、
 `✔ G2/G3/G4` 逐条在场），**测试总数仍是 1506**、无新增用例。`git status` 干净，`git diff -- src/` 为空。
+
+---
+
+## 0.8.4 W-3b.3c · Evidence Repair 2 — G1 的 Ctrl+R fixture/oracle 缺口（2026-10-16）
+
+> Independent Gate 的第二次判定：上一轮的 `inputFolded` 缺口已正确修复；**当前 runtime 的 Ctrl+R guard 本身
+> 正确**；但 G1 的 `SURFACE_FORMS` 里没有任何 collapsible row，因此**移除 `case '\x12'` 的
+> `dialog !== undefined` guard 也可能是 no-op**（`collapsibleRows().length === 0` → `toggleCollapsible()`
+> 直接返回），现有 oracle 无法证明这个 guard。本轮只修这个证据缺口。
+
+**Preflight**：HEAD `aa0199dd8f2c3da3d28f3c92d06c4a1ec7a87d9`，version `0.8.3`（42 tag），工作树干净、
+与远端一致，参考轨迹 109。
+
+### 修复（只改 `tests/input-ownership-matrix.test.mjs`）
+
+| 改动 | 说明 |
+|---|---|
+| `ownerState()` 增加 **`folds`** | `"${index}:${kind}:${open\|folded}"`（按行位置列出每张带 `expanded` 的卡）。不绑定某一种卡：fixture 多一张卡也仍然有效 |
+| 新增 helper **`collapsibleCardBehind(tui)`** | 推入**一张真实可折叠的 tool 卡**（`expanded: false`），并**断言前置条件**：恰好一张卡、初始 folded、`focusedRow === null`。G1 的两个循环（8 键循环与 Ctrl+L 行）在 `open(tui)` **之前**各调用一次；四种 Surface 的打开方式未变 |
+| G1 结构 | 4 Surface × 8 keys 与 Ctrl+L 行**结构不变**；`test(` 声明数量不变（矩阵文件仍 12 条，全仓 1503 条声明 / 运行器 1506） |
+
+**为什么前置条件要断言**：这些格子只有在"卡存在、初始 folded、`focusedRow === null`"时才是证据——若有 ring
+选中项，`Ctrl+R` 折的是那一项（Composer 自己的路径），观察到的就不是这个 guard。
+
+### 证明
+
+**原实现（GREEN）**：`node --test tests/input-ownership-matrix.test.mjs` → **12 pass · 0 fail**；四种 Surface 的
+Ctrl+R 格子：`owner=ownerSurface`、`folds="3:tool:folded"` 不变、`focused=null` 不变、Composer state 不变、
+dialog 不退出、filtering 不丢。
+
+**内存变异（RED）**——只在 git-ignored 的 `lib/tui.js`（构建产物）里删掉 `case '\x12'` 的两行 guard，
+**不触碰任何 tracked 文件**，跑**既有**测试：
+
+```
+✖ G1: the keys the shared executor guards for a Surface never reach the composer behind it   ← 唯一失败
+ℹ tests 12 · pass 11 · fail 1        （未变异时 12/12；G2/G3/G4 在变异下仍全绿）
+```
+
+失败行**恰好 4 条，全部是 `+ Ctrl+R`**（四种 Surface 各一），状态变化逐字如下（confirm 一例，其余三例同形）：
+
+```
+folds:   "3:tool:folded" → "3:tool:open"      ← 隐藏转录上的卡被展开
+focused: null            → "tool"             ← 焦点环也被移动
+（input / cursor / inputFolded / historyIndex / historyDraft / borrowed / dialog /
+  dialogCursor / filtering / filter / rows / scroll / yank / echo 全部不变）
+```
+
+即：该 mutation 只被 Ctrl+R 这一个格子的 oracle 抓到，未被其它 key 或其它用例顺带抓到——这正是本轮要建立的
+定位能力。
+
+**还原**：从备份恢复 `lib/tui.js` → 重新 `npm run build` → `cmp` 与恢复前构建**逐字节相同**；guard 文本复原；
+`git status` 只剩本轮的测试改动；`git diff -- src/` 为空。
+
+### 证据
+
+| 项 | 结果 |
+|---|---|
+| 定向用例 | 矩阵 12/12；连同 `surface-state-isolation` / `ctrl-l-repaint` / `unicode-input-safety` / `borrowed-field-caret` / `interaction-surface` 共 **66 · 66 pass · 0 fail** |
+| `typecheck` | 干净（0 error） |
+| `npm run freeze` / `freeze:input` | 全绿 / 无基线超限 |
+| `npm run bench` | 字节 **501/465/2457/588/140**、行 **3/3/17/4/1**、**clears 0** —— 与基线逐项相同 |
+| 参考轨迹 | **109 条不变、零改写** |
+| 测试数量 | **未新增 `test(`**（矩阵 12 条不变）；全量回归取自本轮 CI |
+| `git diff -- src/` | **空** |
+
+### 边界
+
+- 本轮**不宣称 W-3b CLOSED**：只关闭 Gate 指出的第二个证据缺口，是否 CLOSED 由 Independent Gate 判定。
+- 历史审计文字未重写：上一节（Evidence Repair 1）与 W-3b.3c 主体保持原样，本节作为**补充**说明 G1 当时既缺
+  `inputFolded`、也缺"面背后有一张卡"这一前提。
+- `KEEP_SHARED_WITH_INVARIANTS` 与 **S-1…S-6** 语义未改；executor split、R4、RC、release 均未触及。

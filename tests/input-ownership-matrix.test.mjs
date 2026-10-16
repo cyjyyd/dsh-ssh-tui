@@ -365,11 +365,20 @@ test('a pasted yes is not an answer, wherever it lands', async () => {
  * for the same reason one round later — the Independent Gate removed Ctrl+T's
  * `dialog === undefined` guard and every Surface's hidden composer folded, while this
  * oracle was still green because the field was not in it (W-3b.3c evidence repair).
+ * `folds` is the same lesson for `Ctrl+R`: the guard protects a *card behind the
+ * Surface*, so an oracle that only watched the composer could not see it either.
  */
 const ownerState = tui => ({
   input: tui.input,
   cursor: tui.cursor,
   inputFolded: tui.inputFolded,
+  // Which cards are open, by position: `${index}:${kind}:${open|folded}`. Built from the
+  // rows rather than from one card the fixture happens to push, so the field keeps
+  // working if a fixture grows a second card.
+  folds: tui.rows
+    .map((row, index) => (typeof row.expanded === 'boolean' ? `${index}:${row.kind}:${row.expanded ? 'open' : 'folded'}` : undefined))
+    .filter(entry => entry !== undefined)
+    .join(' '),
   historyIndex: tui.historyIndex,
   historyDraft: tui.historyDraft,
   borrowed: tui.borrowedText === undefined ? null : `${tui.borrowedText.text}@${tui.borrowedText.cursor}`,
@@ -383,6 +392,30 @@ const ownerState = tui => ({
   yank: tui.copyYank ?? null,
   echo: tui.currentFooterEcho() ?? null,
 })
+
+/**
+ * One real, collapsed card on the transcript the Surface is drawn over.
+ *
+ * `Ctrl+R` folds a card — `toggleCollapsible()` takes the focused one, else the newest —
+ * so with nothing collapsible behind it the key is a no-op however its guard is spelled.
+ * The Independent Gate's second finding is exactly that: G1's surfaces had no card, so
+ * removing `case '\x12'`'s `dialog !== undefined` guard changed a state no oracle was
+ * watching and the suite stayed green. This fixture puts the reachable state there.
+ *
+ * The preconditions are asserted rather than assumed, because the cell is only evidence
+ * if they hold: a card exists, it starts folded, and nothing is focused (a focused ring
+ * entry would make `Ctrl+R` fold *that* row instead, which is the composer's own path).
+ */
+const collapsibleCardBehind = tui => {
+  pushRow(tui, {
+    kind: 'tool', callId: 'c-ctrl-r', name: 'bash', title: 'bash', summary: 'ls',
+    args: '{}', output: 'ok', status: 'ok', expanded: false,
+  })
+  const cards = tui.rows.filter(row => row.kind === 'tool')
+  assert.equal(cards.length, 1, 'the fixture put exactly one collapsible card behind the Surface')
+  assert.equal(cards[0]?.expanded, false, 'and it starts folded')
+  assert.equal(tui.focusedRow, null, 'with nothing focused')
+}
 
 /** The four Surface shapes, opened through their product entry points. */
 const SURFACE_FORMS = [
@@ -421,6 +454,7 @@ test('G1: the keys the shared executor guards for a Surface never reach the comp
     for (const [unit, label] of keys) {
       const { tui, seen, exits } = fixture()
       draft(tui)
+      collapsibleCardBehind(tui)
       await open(tui)
       seen.length = 0
       const before = ownerState(tui)
@@ -441,6 +475,7 @@ test('G1: the keys the shared executor guards for a Surface never reach the comp
     // grown a repaint case of its own, and nothing may be written either.
     const { tui, seen } = fixture()
     draft(tui)
+    collapsibleCardBehind(tui)
     await open(tui)
     seen.length = 0
     const before = ownerState(tui)
