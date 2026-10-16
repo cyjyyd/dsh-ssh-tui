@@ -3072,3 +3072,20 @@ FAIL
 `name`/`prefix`/`size`/`typeflag`，跳过 pax `x`/`g`），`inspectTarball()` 与 `upgrade-smoke.mjs` 的版本读取都改用它；
 spec 比较两侧统一斜杠。**本地重跑**：`--check` 仍 252 文件、清单门绿；两个故意做坏的 tarball 仍 **RED**；
 `artifact-smoke` 全流程绿；`upgrade-smoke` 的同版本拒绝逻辑不变。
+
+**第四次运行（`15b4bf8`，run `38884660080`）**：**5/5 全绿**，两条新门在 Linux 默认腿与 `test-windows` 上**都真的跑了**
+（不是 skip）：
+
+| 腿 | 步骤 | 结果 |
+|---|---|---|
+| `test (0.2.0-rc.2)` | `Fresh-home setup wizard (real PTY, pasted key)` | **PASS** — `setup Screen: painted, listed (15 rows), stepped, typed (1 rows), pasted (masked), resized and left` · `second boot … workspace, no wizard` · `resumed first run: wizard saved on step 9, workspace back with no extra keypress` |
+| `test (0.2.0-rc.2)` | `Packed-artifact smoke (npm pack → install → probes)` | **PASS** — `dsh-ssh-tui@0.8.3 · 249 files · 1522106 B`；tarball 安装 + 解析证明 + 两条探针全过 |
+| `test-windows` | `Fresh-home setup wizard (ConPTY, pasted key)` | **PASS** — `listed (0 rows)`（ConPTY 不重发行寻址，探针按设计降级该项）· 其余断言同 Linux |
+| `test-windows` | `Packed-artifact smoke (ConPTY)` | **PASS** — `249 files · 1522718 B`，产物安装 + 两条探针全过 |
+
+**顺带发现（记录，不在本轮修）**：本机 `npm pack` 一度给出 **252 文件 / 1 523 255 B**，CI 两条腿都是 **249 / ~1 522 1xx B**。
+差的是 `lib/footer-accents.{js,js.map}` 与 `lib/types/footer-accents.d.ts` —— 一个**已删除源文件**留下的
+**陈旧构建产物**（`tsc` 不清理旧输出，`prepack` 也不跑 `clean`）。`npm run clean && npm run build` 后本机
+也得到 **249 文件 / 1 522 117 B**，与 CI 一致。已发布的 0.8.3 是从干净树打的，因此**不是**已发布包的问题；
+但"从脏 `lib/` 打包会带上陈旧模块"值得单独处理（建议 `prepack` 走 `clean && build`，或在产物门里加"每个
+`lib/*.js` 都有对应源文件"的断言）。**本轮不实现**，因为它是新的不变量、不属于本次授权范围。
