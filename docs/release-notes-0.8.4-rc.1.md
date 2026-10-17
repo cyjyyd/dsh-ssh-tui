@@ -129,7 +129,7 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
    `LICENSE`；**不得**有 `src`/`tests`/`scripts`/`.github`/本地缓存/嵌套 tgz/node_modules）→
    把 tarball 装进**仓库之外**的临时 home（不是 `link:<repo>`）→ 证明 `dependencies` 记录的是
    `file:<tgz>`、安装实体不是指向 checkout 的符号链接、realpath 在 profile 内且不等于仓库 →
-   `--dump-config` 通过 → **在上述安装产物上**再跑一遍向导探针与工作区探针。
+   `--dump-config` 通过 → **在上述安装产物上**再跑一遍向导探针、工作区探针与粘贴探针。
 
 3. **粘贴探针**（`probe-home.mjs --probe --script tui-paste-probe.mjs`）：世界不是只靠打字——0.8.2 的事故
    是**粘贴进不了字段**，而当时的探针只会打字。向导那一半在第 1 道门里；这一道补**工作区那一半**：
@@ -144,8 +144,9 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
   断言 bundle 条目、凭据、会话存储存活、`--dump-config` 仍通过。**同版本互换不算升级**，脚本会明确
   拒绝（`--allow-same-version` 才跑机制，并把自己标成 reinstall smoke）；真正的升级验证是**版本
   bump 之后的必跑项**，本版即按此执行（见发版记录）。
-- 两道门都有**负向证明**：清单门对"缺 `lib/tui.js`"与"夹带 `tests/`"两种坏 tarball 均判红；
-  向导门在"home 明明是未配置的、向导却没出现"时从 SKIP 改为 **FAIL**（0.8.1 那类首启缺陷不再能伪装成绿）。
+- 三道门都有**负向证明**：清单门对"缺 `lib/tui.js`"与"夹带 `tests/`"两种坏 tarball 均判红；
+  向导门在"home 明明是未配置的、向导却没出现"时从 SKIP 改为 **FAIL**（0.8.1 那类首启缺陷不再能伪装成绿）；
+  粘贴门在 Reader 的 paste 分帧被关掉时判红（粘贴被当成按键执行）。
 
 ## 实测（本候选版准备时，本机 100×20）
 
