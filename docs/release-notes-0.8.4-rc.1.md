@@ -117,7 +117,7 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 
 ## 发布安全门（Release Hardening）
 
-这一版新增两道**阻塞门**，在 CI 的默认腿（`0.2.0-rc.2`）与 `test-windows` 上各跑一次：
+这一版新增三道**阻塞门**，在 CI 的默认腿（`0.2.1-rc.2`）与 `test-windows` 上各跑一次：
 
 1. **首次安装向导**（`probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs`）：
    在真实 PTY / ConPTY 上用**未配置**的 home 启动 → 向导自动出现 → 列表步 → 字段步 →
@@ -130,6 +130,13 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
    把 tarball 装进**仓库之外**的临时 home（不是 `link:<repo>`）→ 证明 `dependencies` 记录的是
    `file:<tgz>`、安装实体不是指向 checkout 的符号链接、realpath 在 profile 内且不等于仓库 →
    `--dump-config` 通过 → **在上述安装产物上**再跑一遍向导探针与工作区探针。
+
+3. **粘贴探针**（`probe-home.mjs --probe --script tui-paste-probe.mjs`）：世界不是只靠打字——0.8.2 的事故
+   是**粘贴进不了字段**，而当时的探针只会打字。向导那一半在第 1 道门里；这一道补**工作区那一半**：
+   单行粘贴落进 Composer、**多行粘贴只插入不提交**、Ctrl+U 清空、4 kB 粘贴不崩不闪、
+   **Screen / picker 打开时粘贴不漏进层、也不落到背后的 Composer**、**粘贴里的 `\x1bq` 尾巴保持字面**
+   （不当作 Esc 关掉 Screen）。负向证明：把 Reader 的 paste 分帧关掉（`isPasteRead()` 恒 false），
+   该探针立刻判红（"多行粘贴没进 Composer"——即粘贴被当成按键执行了）。
 
 另外：
 
@@ -162,10 +169,12 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - `npm test` → **1506 项 · 1502 通过 · 0 失败 · 4 跳过**
 - `npm run freeze` / `npm run freeze:input` → 全绿（八条不变量 + 七条退役路径；输入归属无基线超限）
 - 参考轨迹 **109 条**（0 改写）
-- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 531 289 B）
+- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 532 201 B；在装好的 tarball 上依次跑
+  向导探针、工作区探针与**粘贴探针**）
 - `scripts/upgrade-smoke.mjs --from 0.8.3 --pack` → **PASS**（真实 `0.8.3 → 0.8.4-rc.1`）
 - `scripts/verify-batch.mjs --home <新建的探针 home>` → **RESULT: PASS**：typecheck、1506 项套件、
-  九类真 PTY/ConPTY 探针（含 `tui-unmeasured-probe` 的两条 leg）、footer 帧检查全过，无 `SKIP:`
+  十类真 PTY/ConPTY 探针（含 `tui-unmeasured-probe` 的两条 leg 与 `tui-paste-probe`）、footer 帧检查全过，
+  无 `SKIP:`
 - `npm run bench:report -- --check` → **PASS**（README 两个语种的实测块与当前树一致）
 - **CI**（发布提交 `c49ef0e`，run [39033900944](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39033900944)）
   → **四条腿全 success**：`test (0.2.1-rc.2)` / `test (0.2.0-rc.2)` / `test (0.2.0-rc.1)` / `test-windows`。
@@ -214,6 +223,10 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
   另做了一次反向验证：把 chip 的 `probed` 强制成 false，探针**仍然判红**（两条断言）。
 - **`tui-route-probe.mjs` 不在 CI 里**：本机在同步到提交的依赖树后 13 项断言全绿；它的失败模式
   （mock 版本落后于宿主协议）已知，但它目前只有本地证据。
+- **"用户路径"能自动化到哪里，说清楚**：新机器上 `dsh plugin add <registry 版本>` 这一步**发布前无法真跑**
+  （包还不在 registry 上）。能自动化的是它的等价物——同一份 tarball 装进仓库外的临时 home，再跑向导
+  （含粘贴）、工作区、粘贴、drop/重连、以及 `0.8.3 → 0.8.4-rc.1` 的真实升级。真正的 registry 安装与
+  tarball 逐字节比对仍在发布后由人工完成。
 - **发布后的 registry tarball 比对仍是人工步骤**：本版自动化的是**发布前**的产物（pack → 清单 →
   安装 → 探针）；发布后从 registry 取回 tarball 与上传值逐字节比对、`lib/` 与构建树 `diff` 仍按
   `docs/release.md` 的记录由人工完成。

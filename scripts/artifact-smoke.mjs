@@ -305,13 +305,18 @@ async function main(argv) {
   if (json && wizard.status !== 0) say(String(wizard.stdout ?? '') + String(wizard.stderr ?? ''))
 
   // …then the workspace, on the same install, with the credential a finished wizard
-  // would have left.
+  // would have left. Paste is the other half of the same user path: 0.8.2's incident
+  // was a pasted key, and a user pastes *after* setup too — into the composer, in
+  // front of a Screen. Both run against this install rather than the checkout.
   const { provisionProbeCredential } = await import(pathToFileURL(join(REPO, 'scripts', 'probe-home.mjs')).href)
   if (wizard.status === 0) {
     provisionProbeCredential({ home, profile: 'tui', cli: CLI, log: () => {} })
     const workspace = probe('tui-probe.mjs')
     check(workspace.status === 0, `the workspace probe exited ${workspace.status}`)
     if (json && workspace.status !== 0) say(String(workspace.stdout ?? '') + String(workspace.stderr ?? ''))
+    const paste = probe('tui-paste-probe.mjs')
+    check(paste.status === 0, `the paste probe exited ${paste.status}`)
+    if (json && paste.status !== 0) say(String(paste.stdout ?? '') + String(paste.stderr ?? ''))
   }
 
   if (!keep) {
@@ -339,7 +344,8 @@ async function main(argv) {
     return 1
   }
   console.log('OK: the packed artifact installs, resolves to the profile rather than the checkout,'
-    + ' composes, walks the first-run wizard (pasted key included) and runs the workspace probes')
+    + ' composes, walks the first-run wizard (pasted key included), runs the workspace probes'
+    + ' and keeps a paste out of the layers and in the composer')
   return 0
 }
 

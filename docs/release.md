@@ -92,12 +92,16 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    当前四条腿（0.8.4-rc.1 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
    `test-windows` —— **全部 success** 才 `npm publish`。（`0.1.7-rc.2` / `0.1.7-rc.1` 两条腿在
    0.8.4-rc.1 随该线一起摘除；更早的 0.1.5 两条腿在 0.8.0 摘除。）
-   其中**默认腿（`0.2.1-rc.2`）与 `test-windows`** 另外跑两条发布前阻塞门（0.8.4 起）：
+   其中**默认腿（`0.2.1-rc.2`）与 `test-windows`** 另外跑三条发布前阻塞门（0.8.4 起）：
    - **首次安装向导**（`probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs`）：真实
      PTY / ConPTY 上的 fresh home → 向导 → **粘贴 API key** → 保存 → 自动交回工作区 → 重启不再是首启；
+   - **粘贴探针**（`probe-home.mjs --probe --script tui-paste-probe.mjs`）：工作区那一半——单行粘贴进
+     Composer、多行粘贴只插入不提交、Screen / picker 后面的粘贴不漏也不落进 Composer、粘贴里的
+     `\x1bq` 保持字面；0.8.2 的事故正是"粘贴进不了字段"，而当时的探针只会**打字**；
    - **发布产物冒烟**（`scripts/artifact-smoke.mjs`）：`npm pack` → 检查包内清单 → 用 **tarball**（不是
-     `link:`）装进仓库之外的临时 home → 证明解析到 profile 而不是 checkout → 在该产物上跑上面两条探针。
-   **这两门红了就不是"CI 绿"**：安装失败必须按 `classifyInstallFailure` 分类后报告，不得用 workaround
+     `link:`）装进仓库之外的临时 home → 证明解析到 profile 而不是 checkout → 在该产物上跑向导、工作区
+     与粘贴探针。
+   **这三门红了就不是"CI 绿"**：安装失败必须按 `classifyInstallFailure` 分类后报告，不得用 workaround
    把本插件的包改绿（宿主 / pnpm / 环境的失败尤其如此）。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
    **tag 不触发 CI**：workflow 只监听 `main` 的 push 与 PR（`.github/workflows/ci.yml` 的 `on:`），

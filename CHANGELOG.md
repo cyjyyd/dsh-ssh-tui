@@ -56,6 +56,9 @@
 - 输入参考轨迹 **72 → 109 条**（只追加、0 条改写）；归属矩阵扩到 options question / filtering picker；
   新增 `surface-state-isolation`、`unicode-input-safety`、`ctrl-l-repaint`、`borrowed-field-caret` 等专项。
 - `scripts/input-freeze-audit.mjs` 新增 `composer history` 写入类与 `historyGuards` 检查（注释剥离后判定）。
+- **`scripts/tui-paste-probe.mjs`（新，真 PTY，CI 默认腿 + Windows）**：单行粘贴进 Composer、多行粘贴
+  只插入不提交、Ctrl+U 清空、4 kB 粘贴不崩、粘贴在 Screen / picker 后面不漏也不落进 Composer、
+  粘贴里的 `\x1bq` 保持字面不关 Screen；关掉 paste 分帧即判红。
 - `tui-unmeasured-probe` 的竞态修复：应答链路上 link chip 本来就是**两帧**（引导帧 `○○○○ 未测` → 测量帧
   `●●●● 7ms`），探针此前取第一帧并断言测量值，于是在慢机器上误报。现在按本 leg 关心的状态等待并打印
   这一跳；反向验证（把 `probed` 强制 false）仍判红。

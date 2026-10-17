@@ -109,6 +109,14 @@ jobs:
       # and asserts the Host's answer follows. One leg is enough: the frames and
       # the probe round trip are host-line independent, and the probe skips
       # itself when node-pty is missing.
+      # A user's most common input is a paste, and the one incident this project
+      # shipped to users (0.8.2) was a pasted key the field never received. The
+      # wizard has its own gate above; this drives the workspace side of the same
+      # contract — a pasted newline must not submit, a paste behind a Screen or a
+      # picker must reach neither, and an ESC-looking tail inside a paste is text.
+      - name: Paste probe (composer, Screen, picker)
+        if: matrix.dsh == '0.2.1-rc.2'
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
       - name: Cut-link liveness probe
         if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-cut-probe.mjs
@@ -193,6 +201,12 @@ jobs:
       # this repository — see `classifyInstallFailure` in the script.
       - name: Packed-artifact smoke (ConPTY)
         run: node scripts/artifact-smoke.mjs
+      # The same paste contract on ConPTY, where the terminal's own bracketed-paste
+      # handling differs from a POSIX pty's. The frame-shape checks stand down
+      # there; "the composer keeps the paste", "a pasted newline does not submit"
+      # and "a paste behind a layer reaches neither" are read off the grid.
+      - name: Paste probe (ConPTY, composer + layers)
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
       - name: End-to-end drop/reattach probe (ConPTY)
         run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
       # "The Host keeps running when you close the window" used to be a claim

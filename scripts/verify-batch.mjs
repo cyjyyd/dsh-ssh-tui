@@ -65,6 +65,11 @@ const STEPS = [
   // thing a ConPTY cannot be made to do (`CSI 6n` is answered for the app there).
   // Both legs run: silent reads `未测`, answering reads a measurement.
   { id: 'unmeasured', label: 'pipe link-chip probe (unmeasured + measured)', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-unmeasured-probe.mjs'], timeoutMs: 900_000 },
+  // Paste is the input a user gives most and types least, and 0.8.2 shipped a
+  // wizard that dropped it. The wizard side is `tui-setup-probe.mjs`; this is the
+  // workspace side — composer, Screen, picker — where a pasted newline used to
+  // submit a draft and a pasted tail could close the Screen it landed in.
+  { id: 'paste', label: 'pty paste probe (composer + layers)', command: 'node', args: ['scripts/probe-home.mjs', '--probe', '--script', 'tui-paste-probe.mjs'], timeoutMs: 900_000 },
   { id: 'drop', label: 'pty drop probe', command: 'node', args: ['scripts/tui-drop-probe.mjs'], timeoutMs: 300_000, realProfile: true },
   { id: 'mock', label: 'pty mock-turn probe', command: 'node', args: ['scripts/tui-mock-probe.mjs'], timeoutMs: 300_000 },
   { id: 'route', label: 'pty session-route probe', command: 'node', args: ['scripts/tui-route-probe.mjs'], timeoutMs: 300_000 },
@@ -167,7 +172,7 @@ function parseArgs(argv) {
     else if (arg === '--only') parsed.only = argv[++index]?.split(',').filter(Boolean)
     else if (arg === '--home') parsed.home = argv[++index]
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--home <dir>] [--only typecheck,test,probe,home,term,link,unmeasured,drop,mock,route,busy,busycrash,linemode,footer]')
+      console.log('usage: node scripts/verify-batch.mjs [--batch A|B|C] [--home <dir>] [--only typecheck,test,probe,home,term,link,unmeasured,paste,drop,mock,route,busy,busycrash,linemode,footer]')
       console.log('')
       console.log('  --home <dir>  point the *real profile* steps (probe, drop, linemode) at this')
       console.log('                DSH_HOME instead of the machine\'s own. Use it when that home is')
