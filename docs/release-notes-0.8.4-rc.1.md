@@ -5,8 +5,8 @@
 > 是否转正由独立审核与后续发版决定。
 >
 > 本版同时是：**输入可靠性的修复批次**、**内部输入路由的结构整理**、以及**发布安全门的加固**。
-> 与 0.8.3 相比**有** runtime 行为变化（见「修复」），这一点如实写在最前面；本轮"发布准备"
-> 这个动作本身没有再改 runtime。
+> 与 0.8.3 相比**有** runtime 行为变化（见「修复」），这一点如实写在最前面；本轮发布准备
+> 只为跨线兼容加了一处垫片（见「跨宿主线的兼容垫片」），没有别的 runtime 改动。
 
 > `dsh-ssh-tui` is now presented as DSH Relay.
 > The npm package name and the install command have not changed.
@@ -167,6 +167,10 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - `scripts/verify-batch.mjs --home <新建的探针 home>` → **RESULT: PASS**：typecheck、1506 项套件、
   九类真 PTY/ConPTY 探针（含 `tui-unmeasured-probe` 的两条 leg）、footer 帧检查全过，无 `SKIP:`
 - `npm run bench:report -- --check` → **PASS**（README 两个语种的实测块与当前树一致）
+- **CI**（发布提交 `c49ef0e`，run [39033900944](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39033900944)）
+  → **四条腿全 success**：`test (0.2.1-rc.2)` / `test (0.2.0-rc.2)` / `test (0.2.0-rc.1)` / `test-windows`。
+  默认腿与 `test-windows` 上的两条阻塞门（首启向导、发布产物冒烟）都是**实际执行并 success**，不是 skip；
+  `unmeasured` 探针在两条腿上也已转绿。
 
 ## 兼容性
 
