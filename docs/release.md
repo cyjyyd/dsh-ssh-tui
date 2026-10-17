@@ -2,6 +2,21 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.4-rc.1 已发布（2026-10-17，只上 `next`，候选版）**：版本提交 `0e1342a` → CI 四条腿全 success
+> （run [39046019169](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39046019169)，`head_branch: main`）。
+> 默认腿（`test (0.2.1-rc.2)`）与 `test-windows` 上的**三道阻塞门全部实际执行并 success**：首启向导（含粘贴
+> API key）、**粘贴探针**（Composer / Screen / picker / 跨 read 切开的结束标记）、发布产物冒烟（tarball 上再跑
+> 向导 + 工作区 + 粘贴）。tag `v0.8.4-rc.1` 所指就是该提交；GitHub Release
+> <https://github.com/cyjyyd/dsh-ssh-tui/releases/tag/v0.8.4-rc.1>（**prerelease**）→
+> `npm publish --tag next`（回 `+ dsh-ssh-tui@0.8.4-rc.1`，约 40 秒后 packument 出现）。
+> 实收：**shasum `df4a47365b4a6280788b5ceb6b0b68ede0e8638a`**、
+> integrity `sha512-UrLdLrMTuk6j0…GRUvWcarGEalw==`、**250 个文件 / tarball 1 535 994 B / 解包 4 469 527 B**；
+> dist-tags：**`latest` = `0.8.3`、`next` = `0.8.4-rc.1`**。
+> 发布后从 registry 重新下载：sha1 与上传值逐字节相同，包内 `lib/tui.js` 与本地构建树 `diff` 无差异，
+> `docs/release-notes-0.8.4-rc.1.md` 在包内且与仓库一致；并**在这份 registry tarball 上**重建 home 跑了
+> 首启向导（含粘贴）与粘贴探针，双双通过。
+> 发版说明：[`release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)。
+
 > **0.8.3 已发布（2026-10-13，`latest` + `next`，紧急修复）**：版本提交与 tag 所指 `8483538` → CI 五条腿
 > 全 success（run [38403856392](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/38403856392)，
 > `head_branch: main`；**推 tag 不触发新的一轮，这条是核对 tag 所指 SHA 得来的**）→ GitHub Release
@@ -184,7 +199,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 ### 兼容表态（版式留自 2026-10-03 快照 · 表态列已更新到 `0.8.4-rc.1`）
 
 > 版式留自 2026-10-03 的快照（当时 `0.8.1` = `latest` + `next`）。当前发布记录看本文件开头：
-> **`0.8.3` = `latest` + `next`**（2026-10-13），`0.8.4-rc.1` 是只上 `next` 的候选。下表"我们的表态"
+> **`latest` = `0.8.3`、`next` = `0.8.4-rc.1`**（2026-10-17 起；候选版只上 `next`）。下表"我们的表态"
 > 一列是**今天**的表态（2026-10-17 随 `0.8.4-rc.1` 更新：新增 `0.2.1-rc.2`，`0.1.7` 改判
 > `incompatible` 并摘腿）；"通道版本"一列里的 `0.1.7` 行已是历史，其余仍是当前值。窗口与腿列表以
 > 本节的正文为准。
