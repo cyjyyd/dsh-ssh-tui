@@ -232,17 +232,27 @@ async function runProbe(argv) {
     //     arrived": an Escape has to still be a key afterwards.
     term.write('\x15')
     await delay(400)
-    term.write('\x1b[200~split-marker\x1b[20')
-    await delay(120)
-    term.write('1~')
-    await waitFor(async () => draftOf(await rowsOf(output), prompt) === 'split-marker', 15_000, 'a paste whose marker was split')
-    term.write('\x15')
-    await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U after the split-marker paste')
-    term.write('/diag\r')
-    await waitFor(onGrid(/判定链|verdict chain/u), 60_000, 'the /diag Screen after a split-marker paste')
-    term.write('\x1b')
-    await waitFor(onGrid(/输入 \/help/u), 20_000, 'Escape to still be a key after a split-marker paste')
-    check(draftOf(await rowsOf(output), prompt) === '', 'the split-marker paste never leaked into the draft')
+    if (PTY_IS_CONPTY) {
+      // ConPTY consumes a partial CSI instead of passing it through, so a marker cut
+      // in half is not a shape this terminal can be made to deliver. The reader's
+      // watchdog still runs there (a paste that never closes gives the keyboard
+      // back); the assertion belongs to the pty that can produce the split.
+      console.log('note: ConPTY swallows a partial CSI, so the split-marker step is skipped there')
+    } else {
+      term.write('\x1b[200~split-marker\x1b[20')
+      await delay(120)
+      term.write('1~')
+      await waitFor(async () => draftOf(await rowsOf(output), prompt) === 'split-marker', 15_000, 'a paste whose marker was split')
+    }
+    if (!PTY_IS_CONPTY) {
+      term.write('\x15')
+      await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U after the split-marker paste')
+      term.write('/diag\r')
+      await waitFor(onGrid(/判定链|verdict chain/u), 60_000, 'the /diag Screen after a split-marker paste')
+      term.write('\x1b')
+      await waitFor(onGrid(/输入 \/help/u), 20_000, 'Escape to still be a key after a split-marker paste')
+      check(draftOf(await rowsOf(output), prompt) === '', 'the split-marker paste never leaked into the draft')
+    }
 
     // 3. Ctrl+U clears the draft.
     term.write('\x15')

@@ -96,15 +96,17 @@ const ALT_CHORD_AT = /^\x1b(?!\[|O)[^\x00-\x1f\x7f]/u
 const PASTE_MARKERS = ['\x1b[200~', '\x1b[201~'] as const
 
 /**
- * How long a read may end inside a paste marker before its other half is written off.
+ * How long a paste may sit with half a marker before the reader gives up on it.
  *
- * Longer than the escape hold on purpose: this window covers a pty that delivered the
- * two halves of one write in two chunks, which is a transport delay rather than a
- * person deciding, and a marker split by a slow runner must not become text. Short
- * enough that a *stray* tail (a payload that really ends in `ESC[20`) cannot swallow
- * the keypress behind it.
+ * This is a watchdog, not a key hold: a paste is a stream, and its close marker may
+ * arrive in a second chunk after a slow terminal, a ConPTY or a loaded runner — on
+ * Windows CI the gap was over 200 ms, and expiring that early typed the marker's tail
+ * into the draft and left the session inside the paste. So the window is generous.
+ * When it does expire the reader does not just release the tail as payload, it
+ * **leaves the paste**: a paste that never closed must not keep the keyboard as its
+ * payload for the rest of the session.
  */
-const PASTE_MARKER_HOLD_MS = 200
+export const PASTE_MARKER_HOLD_MS = 2_000
 
 /**
  * The length of the longest suffix of `text` that is a *proper* prefix of a paste
@@ -175,10 +177,12 @@ export class InputReader {
     }
     if (!this.isPasteTraffic(combined)) return this.units(combined)
     const { frames, tail } = this.framePaste(combined)
-    if (tail !== '') {
-      this.pasteTail = tail
-      this.armPasteTail()
-    }
+    this.pasteTail = tail
+    // Armed for the whole paste, not just for a held tail: a terminal can swallow the
+    // close marker outright (ConPTY drops a partial CSI), and a paste that never says
+    // it ended must not keep the keyboard as its payload.
+    if (this.inPaste || tail !== '') this.armPasteTail()
+    else this.cancelPasteTail()
     return frames
   }
 
@@ -206,9 +210,11 @@ export class InputReader {
       this.pasteTailTimer = undefined
       const pending = this.pasteTail
       this.pasteTail = ''
-      if (pending === '') return
-      // Its other half never came: those bytes are what the reader pasted, not a key.
-      this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
+      // Its other half never came. Those bytes are what the reader pasted, and the
+      // paste they belonged to is over: leaving `inPaste` set here is what turned a
+      // slow (or swallowed) marker into a session that ignored every key.
+      if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
+      this.inPaste = false
     }, PASTE_MARKER_HOLD_MS)
   }
 

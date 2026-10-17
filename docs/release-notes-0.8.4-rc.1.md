@@ -108,8 +108,9 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 
 - **输入过滤器**（`TerminalInputFilter`）：粘贴流量里的尾巴不再被当成半个应答扣留——设备应答不会出现在
   括号粘贴里面；
-- **Reader**（`InputReader`）：把切开的标记留到下一读补齐；万一另一半始终不来，200ms 后当内容放行
-  （宁可晚 200ms，也不能把键盘锁死）。
+- **Reader**（`InputReader`）：把切开的标记留到下一读补齐；另有一只看门狗盯**整段粘贴**——2 秒内没有任何
+  粘贴流量就认定这次粘贴已经结束（终端的 close marker 有可能被直接吞掉，ConPTY 就会吞掉半个 CSI），
+  把状态放回"不在粘贴中"，而不是让键盘继续当粘贴内容。
 
 - 证据：`tests/input-reader.test.mjs`（跨 read 补齐 + 悬空尾巴放行）、`tests/terminal-input.test.mjs`
   （粘贴尾巴不扣留）、`scripts/tui-paste-probe.mjs` 的 "split-marker" 步骤（粘贴后 Esc 仍必须是键）
