@@ -77,6 +77,14 @@ export interface InputReaderOptions {
   onRead: (text: string) => void
   /** A frame the Reader produced on its own: paste traffic, or a released hold. */
   onFrame: (frame: InputFrame) => void
+  /**
+   * How long a stalled paste may hold the reader before it is abandoned.
+   *
+   * A seam for tests only — the default is the release value. A test that waited the
+   * real two seconds kept a whole file's process alive alongside the others and was
+   * enough to unbalance a timer-sensitive paint test on a Windows runner.
+   */
+  pasteMarkerHoldMs?: number
 }
 
 /** Whether `text` is exactly one complete terminal unit (shape, not meaning). */
@@ -215,7 +223,7 @@ export class InputReader {
       // slow (or swallowed) marker into a session that ignored every key.
       if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
       this.inPaste = false
-    }, PASTE_MARKER_HOLD_MS)
+    }, this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS)
   }
 
   private cancelPasteTail(): void {

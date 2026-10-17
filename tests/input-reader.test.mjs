@@ -40,7 +40,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { FIXTURES, traceFixture } from './input-trace.mjs'
-import { ESCAPE_HOLD_MS, InputReader, PASTE_MARKER_HOLD_MS } from '../lib/input-reader.js'
+import { ESCAPE_HOLD_MS, InputReader } from '../lib/input-reader.js'
 
 const REFERENCE = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/input-reader-traces.json', import.meta.url)), 'utf8'))
 
@@ -450,9 +450,11 @@ test('a paste close marker split across reads does not swallow the keyboard', as
 
 test('a paste tail whose other half never comes is released as payload', async () => {
   const released = []
-  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame) })
+  // The window is injected: waiting the release value here starved a timer-sensitive
+  // paint test on the Windows runner, and what is under test is the expiry, not 2 s.
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
   assert.deepEqual(reader.read('\x1b[200~pasted\x1b[20'), [{ kind: 'paste', text: 'pasted' }])
-  await new Promise(resolve => setTimeout(resolve, PASTE_MARKER_HOLD_MS + 80))
+  await new Promise(resolve => setTimeout(resolve, 140))
   assert.deepEqual(released, [{ kind: 'paste', text: '\x1b[20' }], 'a dangling tail is typed, not dropped')
   assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }],
     'and the paste it belonged to is abandoned, so the keyboard comes back')
