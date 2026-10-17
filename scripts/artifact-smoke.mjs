@@ -295,9 +295,15 @@ async function main(argv) {
 
   // 5. The probes, on the installed artifact. The wizard first: the home has no
   //    credential, which is exactly the first-run a user meets.
+  // A probe that hangs must fail this step, not hold the job open: a pty write the
+  // terminal never drains can block the child in a syscall, where its own timers
+  // cannot fire. `timeout` is enforced from here, and SIGKILL is the only signal
+  // Windows honours. Ten minutes is well past the slowest probe on either platform.
   const probe = (script, extra = {}) => spawnSync(process.execPath, [join(REPO, 'scripts', script)], {
     stdio: json ? 'pipe' : 'inherit',
     windowsHide: true,
+    timeout: 10 * 60_000,
+    killSignal: 'SIGKILL',
     env: { ...process.env, PROBE_HOME: home, PROBE_REQUIRE_PTY: '1', ...extra },
   })
   const wizard = probe('tui-setup-probe.mjs', { PROBE_REQUIRE_WIZARD: '1' })

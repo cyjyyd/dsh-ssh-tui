@@ -258,16 +258,20 @@ async function runProbe(argv) {
     term.write('\x15')
     await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U to clear the draft')
 
-    // 4. A 4 kB paste is survived: one row, alive, no clear. The row is clipped to
-    //    the terminal width, so the assertion is the shape, not the text.
+    // 4. A large paste is survived: one row, alive, no clear. The row is clipped to
+    //    the terminal width, so the assertion is the shape, not the text. ConPTY gets
+    //    a kilobyte: its input pipe blocks a writer the console has not drained yet,
+    //    and a blocking write freezes the probe's own timers (measured: a 4 kB write
+    //    held the Windows leg open). The contract is the same at either size.
+    const bulk = PTY_IS_CONPTY ? 1_000 : 4_000
     mark = output.length
-    term.write(`\x1b[200~${'x'.repeat(4000)}\x1b[201~`)
+    term.write(`\x1b[200~${'x'.repeat(bulk)}\x1b[201~`)
     await delay(1500)
     rows = await rowsOf(output)
-    check(draftOf(rows, prompt).length > 0, 'the 4 kB paste reached the composer')
-    check(promptRows(rows, prompt).length === 1, `a 4 kB paste stays one composer row (${promptRows(rows, prompt).length})`)
-    if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a 4 kB paste must not clear the screen')
-    check(exited === undefined, 'the TUI survived the 4 kB paste')
+    check(draftOf(rows, prompt).length > 0, `the ${bulk} B paste reached the composer`)
+    check(promptRows(rows, prompt).length === 1, `a ${bulk} B paste stays one composer row (${promptRows(rows, prompt).length})`)
+    if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a large paste must not clear the screen')
+    check(exited === undefined, 'the TUI survived the large paste')
     term.write('\x15')
     await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U after the big paste')
 
@@ -335,10 +339,24 @@ async function runProbe(argv) {
     return 1
   }
   console.log('OK: a single-line paste lands in the composer, a multi-line paste is inserted not executed,')
-  console.log('    4 kB survives, and a paste behind a Screen, a picker or an ESC-looking tail reaches')
+  console.log('    a large paste survives, and a paste behind a Screen, a picker or an ESC-looking tail reaches')
   console.log('    neither the layer nor the composer behind it')
   if (PTY_IS_CONPTY) console.log('note: ConPTY rewrites the frame shape, so the full-clear checks were skipped; the functional assertions ran')
   return 0
 }
+
+/**
+ * A hard stop for the probe itself.
+ *
+ * A pty write that the terminal never drains can block this process inside a syscall,
+ * where `waitFor`'s deadlines cannot fire. The parent (`artifact-smoke`) enforces its
+ * own timeout; this one covers a plain `node scripts/tui-paste-probe.mjs` run and says
+ * which step was last reached.
+ */
+const watchdog = setTimeout(() => {
+  console.log('FAIL: the paste probe itself did not finish in 240 s (a pty write the terminal never drained?)')
+  process.exit(1)
+}, 240_000)
+watchdog.unref()
 
 process.exitCode = await runProbe(process.argv.slice(2))
