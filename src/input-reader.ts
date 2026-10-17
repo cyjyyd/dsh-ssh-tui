@@ -93,6 +93,32 @@ const COMPLETE_SS3_AT = /^\x1bO[@-~]/u
  */
 const ALT_CHORD_AT = /^\x1b(?!\[|O)[^\x00-\x1f\x7f]/u
 
+const PASTE_MARKERS = ['\x1b[200~', '\x1b[201~'] as const
+
+/**
+ * How long a read may end inside a paste marker before its other half is written off.
+ *
+ * Longer than the escape hold on purpose: this window covers a pty that delivered the
+ * two halves of one write in two chunks, which is a transport delay rather than a
+ * person deciding, and a marker split by a slow runner must not become text. Short
+ * enough that a *stray* tail (a payload that really ends in `ESC[20`) cannot swallow
+ * the keypress behind it.
+ */
+const PASTE_MARKER_HOLD_MS = 200
+
+/**
+ * The length of the longest suffix of `text` that is a *proper* prefix of a paste
+ * marker (0 when there is none) — what a read cut in half leaves behind.
+ */
+function pasteMarkerSuffix(text: string): number {
+  const longest = Math.max(...PASTE_MARKERS.map(marker => marker.length)) - 1
+  for (let length = Math.min(longest, text.length); length > 0; length -= 1) {
+    const suffix = text.slice(text.length - length)
+    if (PASTE_MARKERS.some(marker => marker.startsWith(suffix))) return length
+  }
+  return 0
+}
+
 export class InputReader {
   private readonly decoder = new StringDecoder('utf8')
   private readonly guard: TerminalInputGuard
@@ -101,9 +127,20 @@ export class InputReader {
   private holdTimer: ReturnType<typeof setTimeout> | undefined
   /** Inside `ESC[200~ … ESC[201~`. */
   private inPaste = false
+  /**
+   * The tail of a read that ended *inside* a paste marker (`…ESC[20`), waiting for
+   * its other half.
+   */
+  private pasteTail = ''
+  private pasteTailTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly options: InputReaderOptions) {
-    this.guard = new TerminalInputGuard(text => this.options.onRead(text))
+    this.guard = new TerminalInputGuard(
+      text => this.options.onRead(text),
+      undefined,
+      // The filter must not mistake a paste's close marker for half a cursor reply.
+      { isPasteTraffic: text => this.isPasteTraffic(text) },
+    )
   }
 
   /** One read of bytes: decode it, drop device replies, hand the rest on. */
@@ -131,7 +168,53 @@ export class InputReader {
    * bytes (AD-20 §4.4, §6).
    */
   read(text: string): InputFrame[] {
-    return this.isPasteTraffic(text) ? this.frames(text) : this.units(text)
+    const combined = this.pasteTail === '' ? text : `${this.pasteTail}${text}`
+    if (this.pasteTail !== '') {
+      this.pasteTail = ''
+      this.cancelPasteTail()
+    }
+    if (!this.isPasteTraffic(combined)) return this.units(combined)
+    const { frames, tail } = this.framePaste(combined)
+    if (tail !== '') {
+      this.pasteTail = tail
+      this.armPasteTail()
+    }
+    return frames
+  }
+
+  /**
+   * Frame one paste read, holding back a marker it cut in half.
+   *
+   * A terminal writes bytes, not reads: `ESC[201~` can arrive as `…ESC[20` and `1~`.
+   * Framed naively, the first read swallows `ESC[20` as payload and the second one
+   * carries no marker at all — so `inPaste` never clears and **every later key is
+   * pasted text**: Esc stops closing a dialog, `/exit` stops exiting. Found by
+   * `scripts/tui-paste-probe.mjs` on CI, where the pty chunked the write exactly
+   * there. The fix is the same rule the escape ladder already uses — a read that
+   * could still grow is held, and released as payload if its other half never comes.
+   */
+  private framePaste(combined: string): { frames: InputFrame[]; tail: string } {
+    const keep = pasteMarkerSuffix(combined)
+    if (keep === 0) return { frames: this.frames(combined), tail: '' }
+    const body = combined.slice(0, combined.length - keep)
+    return { frames: this.frames(body), tail: combined.slice(combined.length - keep) }
+  }
+
+  private armPasteTail(): void {
+    this.cancelPasteTail()
+    this.pasteTailTimer = setTimeout(() => {
+      this.pasteTailTimer = undefined
+      const pending = this.pasteTail
+      this.pasteTail = ''
+      if (pending === '') return
+      // Its other half never came: those bytes are what the reader pasted, not a key.
+      this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
+    }, PASTE_MARKER_HOLD_MS)
+  }
+
+  private cancelPasteTail(): void {
+    if (this.pasteTailTimer !== undefined) clearTimeout(this.pasteTailTimer)
+    this.pasteTailTimer = undefined
   }
 
   /**
@@ -224,8 +307,9 @@ export class InputReader {
    * everything outside them as `literal` (which is what the inline version typed
    * directly, without a keymap lookup).
    *
-   * A marker split across reads stays split — the pieces are payload until both
-   * halves have arrived, which is what the trace fixture for it records.
+   * Only complete markers are handled here: `framePaste` holds back a read that ends
+   * inside one, because a marker whose two halves land in two reads would otherwise
+   * leave the reader inside the paste for the rest of the session.
    */
   frames(combined: string): InputFrame[] {
     const frames: InputFrame[] = []
@@ -325,6 +409,8 @@ export class InputReader {
   /** Drop the holds and the reply filter (display detached, teardown). */
   stop(): void {
     this.cancelHold()
+    this.cancelPasteTail()
+    this.pasteTail = ''
     this.guard.stop()
   }
 

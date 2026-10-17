@@ -23,7 +23,15 @@
  * W-3a is that change: four traces differ on purpose (`arrow-left-right`,
  * `pgup-twice-one-read`, `rebound-coalesced`, `alt-1-batched`), each with its old
  * reading recorded in `GAP_FIXTURES` below, and the rest of the reference is
- * byte-identical. The paired fixtures prove the rule the fix rests on: one read and
+ * byte-identical.
+ *
+ * 0.8.4-rc.1 changes exactly one more, and only in how the reads are spelled:
+ * `paste-split-close-marker`. The reply filter used to hold `ESC[201` as half a
+ * cursor reply and hand it over glued to `~`; it no longer holds paste traffic at
+ * all (that hold is what cut the marker in half on CI), so the Reader receives the
+ * pieces and completes the marker itself. The consumer calls and the end state are
+ * unchanged — one `handlePasteText`, `input: 'pasted'` — and the two new fixtures at
+ * the end of this file pin the completed behaviour. The paired fixtures prove the rule the fix rests on: one read and
  * several reads reach the same owners with the same state.
  */
 import test from 'node:test'
@@ -32,7 +40,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { FIXTURES, traceFixture } from './input-trace.mjs'
-import { ESCAPE_HOLD_MS } from '../lib/input-reader.js'
+import { ESCAPE_HOLD_MS, InputReader } from '../lib/input-reader.js'
 
 const REFERENCE = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/input-reader-traces.json', import.meta.url)), 'utf8'))
 
@@ -354,15 +362,19 @@ test('a bracketed paste split across three reads is still one paste', async () =
 test('the close marker split across reads is reassembled, and its payload is all that lands', async () => {
   // The interesting half of "markers may be split": a marker the terminal cut in two
   // is put back together before the paste is closed, so the pieces never become
-  // payload. The reassembly is the reply filter's 30 ms tail hold (a trailing
-  // `ESC[2…` could still grow into a cursor reply), which is why the third read
-  // carries the first two joined — the trace records that, not an assumption.
+  // payload. The reassembly is the **Reader's** now, not the reply filter's: the
+  // filter used to hold a trailing `ESC[201` as half a cursor reply, and that hold is
+  // what cut the marker in half when the second half arrived after its window (the
+  // keyboard stayed inside the paste — see `tui-paste-probe.mjs`). The filter
+  // forwards paste traffic untouched, so the trace shows the pieces arriving and the
+  // Reader completing the marker between them.
   const fixture = FIXTURES.find(entry => entry.name === 'paste-split-close-marker')
   const { trace, state } = await traceFixture(fixture)
   assert.deepEqual(trace, [
     ['handleInputText', '\x1b[200~pasted'],
     ['handlePasteText', 'pasted'],
-    ['handleInputText', '\x1b[201~'],
+    ['handleInputText', '\x1b[201'],
+    ['handleInputText', '~'],
   ])
   assert.equal(state.input, 'pasted', 'the payload is the paste, and the markers are not')
 })
@@ -415,4 +427,31 @@ test('a lone escape is held and then released as the Escape key', async () => {
     ['handleInputText', '\x1b'],
     ['handleEscape'],
   ], 'held on the read, released into the Escape the reader pressed')
+})
+
+/**
+ * The split the guard could not save: a paste whose close marker lands in two reads.
+ *
+ * The filter used to hold `ESC[20` as a half-arrived cursor reply and hand it over as
+ * typing one window later, so the other half (`1~`) arrived with no opener. Framed
+ * naively the reader never leaves the paste: every later key is payload, Esc stops
+ * closing a dialog and `/exit` stops exiting. Both halves are pinned here because the
+ * fix has two: the filter keeps paste traffic whole, the reader completes a marker it
+ * was handed in pieces.
+ */
+test('a paste close marker split across reads does not swallow the keyboard', async () => {
+  const reader = new InputReader({ onRead: () => {}, onFrame: () => {} })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[20'), [{ kind: 'paste', text: 'pasted' }],
+    'the payload is delivered; only the marker it cut in half is held')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(reader.read('1~'), [], 'the other half closes the paste instead of being typed')
+  assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }], 'and the next Escape is a key again')
+})
+
+test('a paste tail whose other half never comes is released as payload', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame) })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[20'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 260))
+  assert.deepEqual(released, [{ kind: 'paste', text: '\x1b[20' }], 'a dangling tail is typed, not dropped')
 })

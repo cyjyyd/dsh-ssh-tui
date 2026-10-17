@@ -38,7 +38,8 @@ Screen 的边界在**单元内部**同样成立：关闭 Screen 的那个字符�
 
 - 提交：`f7e5849`（W-3a）、`f44b56c`（W-3a.1）
 - 证据：`tests/input-reader.test.mjs`（成对轨迹）、`tests/input-ownership-regression.test.mjs`、
-  `tests/input-reader-traces.json`（参考轨迹 72 → 109 条，逐条追加、零改写）
+  `tests/input-reader-traces.json`（参考轨迹 72 → 111 条；两条是本次切分用例，一条只改 `handleInputText`
+  的拼接形状、消费者调用与终态不变）
 
 ### Surface 的编辑键归 Surface，编辑的是读者看得见的那一行（W-3b.1）
 
@@ -92,6 +93,27 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - Ctrl+L 的重绘归属经独立审核后**保留双 Painter**（`KEEP_DUAL`），合同与理由见 AD-22 §10；
   证据 `tests/ctrl-l-repaint.test.mjs`（一次有意的完整清屏，之后回到增量）
 
+### 粘贴的结束标记被切成两半（W-1 补）
+
+终端的粘贴用 `ESC[200~ … ESC[201~` 包起来，而**字节流不保证按 read 边界对齐**：`ESC[201~` 可能分成
+`…ESC[20` 和 `1~` 两次到达。麻烦在于 `ESC[20` 同时是"半个光标应答"的形状——输入过滤器会先把它扣住，
+30ms 后当打字放行。于是后半截到达时已经没有开头，Reader 的粘贴状态**永远关不掉**：此后每个键都被当作
+粘贴内容，Esc 关不掉对话框，`/exit` 也退不出去（只能杀进程）。
+
+这条不是本版引入的：0.8.3 的内联实现有同样的跨 read 粘贴状态与同样的朴素切分，所以同样中招；只是要
+"结束标记恰好跨两次 read 到达"才触发，之前没人撞上。本版新增的 `tui-paste-probe.mjs` 在 CI 上撞上了
+（`/view` 对话框里的 Esc 不再生效），才把它逼出来。
+
+修法两处，各管一半：
+
+- **输入过滤器**（`TerminalInputFilter`）：粘贴流量里的尾巴不再被当成半个应答扣留——设备应答不会出现在
+  括号粘贴里面；
+- **Reader**（`InputReader`）：把切开的标记留到下一读补齐；万一另一半始终不来，200ms 后当内容放行
+  （宁可晚 200ms，也不能把键盘锁死）。
+
+- 证据：`tests/input-reader.test.mjs`（跨 read 补齐 + 悬空尾巴放行）、`tests/terminal-input.test.mjs`
+  （粘贴尾巴不扣留）、`scripts/tui-paste-probe.mjs` 的 "split-marker" 步骤（粘贴后 Esc 仍必须是键）
+
 ### 跨宿主线的兼容垫片（0.2.1-rc.2）
 
 `/subagents kill <id>` 调用 subagent 服务的 `drainContinuableChildren(parent, ids)`；0.2.1-rc.2 把它
@@ -112,7 +134,8 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - **W-3b ownership / input-routing 合同已收口（CLOSED）**：G1–G4 证据（Surface × 共享体敏感键、
   options question / filtering picker 进归属矩阵、两条 `/find` 种子路径、Ctrl+N/P 的焦点环记录）
   与 M1–M7 变异全部实测为红。
-- 参考轨迹 **109 条**（0 条改写）：新增只追加，旧读法以台账形式记录在
+- 参考轨迹 **111 条**（两条新增；`paste-split-close-marker` 的拼接形状改变，消费者调用与终态不变）：
+  新增只追加，旧读法以台账形式记录在
   `tests/input-reader.test.mjs` 的 `GAP_FIXTURES` / `W3A1_FIXTURES` / `W3B1_FIXTURES` / `W3B1B_FIXTURES`。
 
 ## 发布安全门（Release Hardening）
@@ -135,7 +158,8 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
    是**粘贴进不了字段**，而当时的探针只会打字。向导那一半在第 1 道门里；这一道补**工作区那一半**：
    单行粘贴落进 Composer、**多行粘贴只插入不提交**、Ctrl+U 清空、4 kB 粘贴不崩不闪、
    **Screen / picker 打开时粘贴不漏进层、也不落到背后的 Composer**、**粘贴里的 `\x1bq` 尾巴保持字面**
-   （不当作 Esc 关掉 Screen）。负向证明：把 Reader 的 paste 分帧关掉（`isPasteRead()` 恒 false），
+   （不当作 Esc 关掉 Screen）、**结束标记被切成两半后键盘仍然可用**。负向证明：把 Reader 的
+   paste 分帧关掉（`isPasteRead()` 恒 false），
    该探针立刻判红（"多行粘贴没进 Composer"——即粘贴被当成按键执行了）。
 
 另外：
@@ -167,9 +191,9 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 同一轮的本机收据：
 
 - `npm run typecheck` → 0 error
-- `npm test` → **1506 项 · 1502 通过 · 0 失败 · 4 跳过**
+- `npm test` → **1509 项 · 1505 通过 · 0 失败 · 4 跳过**
 - `npm run freeze` / `npm run freeze:input` → 全绿（八条不变量 + 七条退役路径；输入归属无基线超限）
-- 参考轨迹 **109 条**（0 改写）
+- 参考轨迹 **111 条**（2 条新增）
 - `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 532 201 B；在装好的 tarball 上依次跑
   向导探针、工作区探针与**粘贴探针**）
 - `scripts/upgrade-smoke.mjs --from 0.8.3 --pack` → **PASS**（真实 `0.8.3 → 0.8.4-rc.1`）

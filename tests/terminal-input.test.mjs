@@ -117,6 +117,19 @@ test('the filter holds a partial reply but releases it as typing', () => {
   assert.equal(filter.pending, false)
 })
 
+test('a paste close marker is not held as a half-arrived reply', () => {
+  // `ESC[201~` ends in `ESC[20`, which is the shape of a reply still arriving. Holding
+  // it there cuts the marker in half: the filter hands the first half over as typing a
+  // window later, the second half arrives with no opener, and the Reader stays inside
+  // the paste for the rest of the session. Found on CI by `tui-paste-probe.mjs`.
+  // The filter asks its owner rather than sniffing markers itself (paste framing has
+  // one owner, the Reader), so the test hands it the same answer the Reader gives.
+  const filter = new TerminalInputFilter({ isPasteTraffic: text => text.includes('\x1b[200~') })
+  assert.deepEqual(filter.push('\x1b[200~pasted\x1b[20'), { forward: '\x1b[200~pasted\x1b[20', replies: 0 })
+  assert.equal(filter.pending, false, 'a paste tail is payload, not a reply')
+  assert.deepEqual(filter.push('1~'), { forward: '1~', replies: 0 })
+})
+
 test('stripCursorReplies reports what it removed', () => {
   assert.deepEqual(stripCursorReplies('x\x1b[1;2Ry'), { text: 'xy', replies: 1, last: '\x1b[1;2R' },
     'the reply text is kept now: a position request needs the coordinates, and the filter is what finds them')

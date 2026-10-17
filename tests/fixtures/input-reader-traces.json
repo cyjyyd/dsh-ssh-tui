@@ -1235,7 +1235,11 @@
       ],
       [
         "handleInputText",
-        "\u001b[201~"
+        "\u001b[201"
+      ],
+      [
+        "handleInputText",
+        "~"
       ]
     ],
     "state": {
@@ -3914,6 +3918,79 @@
         "text": "a🚀b",
         "cursor": 4
       },
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-split-inside-long-read": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[20"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handleInputText",
+        "1~"
+      ]
+    ],
+    "state": {
+      "input": "pasted",
+      "cursor": 6,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
+      "sent": [],
+      "exits": []
+    }
+  },
+  "paste-split-inside-long-read-then-escape": {
+    "trace": [
+      [
+        "handleInputText",
+        "\u001b[200~pasted\u001b[20"
+      ],
+      [
+        "handlePasteText",
+        "pasted"
+      ],
+      [
+        "handleInputText",
+        "1~"
+      ],
+      [
+        "handleInputText",
+        "\u001b"
+      ],
+      [
+        "handleEscape"
+      ]
+    ],
+    "state": {
+      "input": "我打了一半的消息",
+      "cursor": 3,
+      "historyIndex": -1,
+      "historyLength": 0,
+      "folded": false,
+      "scrollOffset": 0,
+      "screen": null,
+      "screenOffset": null,
+      "dialog": null,
+      "focusedKind": null,
+      "rowsAdded": 0,
+      "yank": "",
+      "echo": null,
       "sent": [],
       "exits": []
     }

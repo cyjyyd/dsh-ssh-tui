@@ -105,17 +105,37 @@ function cursorReplyTail(text: string): string {
  * typed. A read that ends in the middle of a possible reply is held back (see
  * `flush()`) so `ESC [ 1` + `7;1R` cannot become visible digits either.
  */
+export interface TerminalInputFilterOptions {
+  /**
+   * Whether a read is bracketed-paste traffic.
+   *
+   * The filter asks instead of sniffing the markers itself: paste framing has one
+   * owner (the Reader), and a marker literal here would be a second one. It matters
+   * because a paste's close marker ends in `ESC[20` — the shape of a half-arrived
+   * cursor reply — so holding that tail cuts the marker in half and the Reader stays
+   * inside the paste for the rest of the session.
+   */
+  isPasteTraffic?: (text: string) => boolean
+}
+
 export class TerminalInputFilter {
   private held = ''
 
   /** The most recent cursor reply this filter swallowed, if any. */
   lastReply: string | undefined
 
+  constructor(private readonly options: TerminalInputFilterOptions = {}) {}
+
   push(text: string): { forward: string; replies: number } {
-    const stripped = stripCursorReplies(this.held + text)
+    const combined = this.held + text
+    const stripped = stripCursorReplies(combined)
     const { text: cleaned, replies } = stripped
     if (stripped.last !== undefined) this.lastReply = stripped.last
     this.held = ''
+    // Bracketed paste is payload, never a probe answer. Holding its tail as a
+    // half-arrived reply is what cut the close marker in half on CI (the reader then
+    // never left the paste: Esc stopped closing dialogs, `/exit` stopped exiting).
+    if (this.options.isPasteTraffic?.(cleaned) === true) return { forward: cleaned, replies }
     const tail = cursorReplyTail(cleaned)
     if (tail === '') return { forward: cleaned, replies }
     this.held = tail
@@ -144,13 +164,16 @@ export class TerminalInputFilter {
  * keystrokes (the TUI and the session picker) instead of forwarding them.
  */
 export class TerminalInputGuard {
-  private readonly filter = new TerminalInputFilter()
+  private readonly filter: TerminalInputFilter
   private timer: NodeJS.Timeout | undefined
 
   constructor(
     private readonly emit: (text: string) => void,
     private readonly holdMs: number = INPUT_HOLD_MS,
-  ) {}
+    options: TerminalInputFilterOptions = {},
+  ) {
+    this.filter = new TerminalInputFilter(options)
+  }
 
   /** Feed one decoded read; anything that is not a reply reaches `emit`. */
   push(text: string): void {

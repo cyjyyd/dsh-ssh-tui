@@ -18,6 +18,11 @@
 
 ### Fixed
 
+- **粘贴的结束标记被切成两半，键盘从此"失灵"**：`ESC[201~` 的尾半截 `ESC[20` 与"半个光标应答"同形，
+  输入过滤器会先扣住它、30ms 后当打字放行；后半截 `1~` 到达时已经没有开头，Reader 于是永远停在"粘贴中"——
+  此后每个键都被当作粘贴内容：Esc 关不掉对话框，`/exit` 也退不出去。两处一起修：过滤器不再扣留粘贴流量，
+  Reader 把切开的标记留到下一读补齐（200ms 仍不齐才当内容放行）。0.8.3 及更早同样存在（同样是跨 read 的
+  粘贴状态），本版由新的粘贴探针在 CI 上撞出来。
 - **合并 read 丢键**：一次 read 里的多个键（两次方向键、`PgUp` 连按、改绑键 + 文本、`text\r`）此前只会被
   整段匹配、失败即整段丢弃。现在 Reader 分帧、每个单元各判一次归属，一次 read 与多次 read 终态相同。
 - **Screen 的 read 边界**：关闭 Screen 的那个字符之后的同一单元剩余部分不再落到它背后的 Composer。
@@ -58,7 +63,7 @@
 - `scripts/input-freeze-audit.mjs` 新增 `composer history` 写入类与 `historyGuards` 检查（注释剥离后判定）。
 - **`scripts/tui-paste-probe.mjs`（新，真 PTY，CI 默认腿 + Windows）**：单行粘贴进 Composer、多行粘贴
   只插入不提交、Ctrl+U 清空、4 kB 粘贴不崩、粘贴在 Screen / picker 后面不漏也不落进 Composer、
-  粘贴里的 `\x1bq` 保持字面不关 Screen；关掉 paste 分帧即判红。
+  粘贴里的 `\x1bq` 保持字面不关 Screen、**结束标记跨 read 切开后 Esc 仍然生效**；关掉 paste 分帧即判红。
 - `tui-unmeasured-probe` 的竞态修复：应答链路上 link chip 本来就是**两帧**（引导帧 `○○○○ 未测` → 测量帧
   `●●●● 7ms`），探针此前取第一帧并断言测量值，于是在慢机器上误报。现在按本 leg 关心的状态等待并打印
   这一跳；反向验证（把 `probed` 强制 false）仍判红。

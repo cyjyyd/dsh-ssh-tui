@@ -225,6 +225,25 @@ async function runProbe(argv) {
     check(rows.filter(row => /first-line/u.test(row)).length === 0, 'a pasted newline must not submit the draft (the text is not echoed as a turn)')
     check(rows.some(row => /空闲|idle/u.test(row)), 'the session is still idle after a multi-line paste')
 
+    // 2b. The same paste with its close marker cut in half across two reads. A pty
+    //     writes bytes, not reads, and `ESC[201~` ends in `ESC[20` — the shape of a
+    //     half-arrived cursor reply. Framed naively that leaves the reader inside the
+    //     paste for the rest of the session, so the assertion is not just "the text
+    //     arrived": an Escape has to still be a key afterwards.
+    term.write('\x15')
+    await delay(400)
+    term.write('\x1b[200~split-marker\x1b[20')
+    await delay(120)
+    term.write('1~')
+    await waitFor(async () => draftOf(await rowsOf(output), prompt) === 'split-marker', 15_000, 'a paste whose marker was split')
+    term.write('\x15')
+    await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U after the split-marker paste')
+    term.write('/diag\r')
+    await waitFor(onGrid(/判定链|verdict chain/u), 60_000, 'the /diag Screen after a split-marker paste')
+    term.write('\x1b')
+    await waitFor(onGrid(/输入 \/help/u), 20_000, 'Escape to still be a key after a split-marker paste')
+    check(draftOf(await rowsOf(output), prompt) === '', 'the split-marker paste never leaked into the draft')
+
     // 3. Ctrl+U clears the draft.
     term.write('\x15')
     await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U to clear the draft')

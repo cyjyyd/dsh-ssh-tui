@@ -284,6 +284,13 @@ export const FIXTURES = [
   { name: 'paste-split-markers', reads: split('\x1b[200~', 'pasted content', '\x1b[201~') },
   { name: 'paste-split-inside-marker', reads: split('\x1b[20', '0~pasted\x1b[201~') },
   { name: 'paste-split-close-marker', reads: split('\x1b[200~pasted', '\x1b[201', '~') },
+  // The close marker cut in half *inside a long read*: the guard above cannot hold it
+  // (the read is not an escape prefix), so the Reader is the only place that can. The
+  // naive framing leaves `inPaste` set for the rest of the session — Esc stops
+  // closing dialogs and `/exit` stops exiting, which is what `tui-paste-probe.mjs`
+  // caught on CI.
+  { name: 'paste-split-inside-long-read', reads: split('\x1b[200~pasted\x1b[20', '1~') },
+  { name: 'paste-split-inside-long-read-then-escape', reads: split('\x1b[200~pasted\x1b[20', '1~', '\x1b'), setup: ['dialog', 'draft'] },
   { name: 'paste-at-screen', reads: ['\x1b[200~pasted\x1b[201~'], setup: ['screen', 'draft'] },
   { name: 'paste-burst-no-markers', reads: ['one\ntwo\nthree\n'] },
   { name: 'yes-is-not-an-answer', reads: ['yes'] },
