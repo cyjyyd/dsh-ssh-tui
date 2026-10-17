@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { FORMS_HOST, HOST_VERSION } from './host-line.mjs'
+import { LINES } from '../scripts/ci-pin-line.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PROTECTED_ENTRY_IDS = new Set(['ui-settings-plugin-inventory', 'dsh-safe-plugin-manager'])
@@ -50,10 +51,12 @@ test('manifest declares exact dshReleases for the store window', async () => {
     const status = releases[version]
     assert.ok(status === 'compatible' || status === 'incompatible' || status === 'unknown', version)
   }
-  // Two lines have been dropped by now, and both keep an explicit verdict
-  // instead of being deleted: a user still on that line gets a definite
+  // Three lines have been dropped by now, and all of them keep an explicit
+  // verdict instead of being deleted: a user still on that line gets a definite
   // "incompatible, upgrade" from the store rather than silence, and no range
-  // comparator can admit them by accident.
+  // comparator can admit them by accident. 0.1.7 joined them in 0.8.4-rc.1 —
+  // 0.2.1-rc.2 moved the family's root pins and renamed the subagent wind-down
+  // call, and keeping the older line alive would mean carrying both seams.
   assert.equal(releases['0.1.2-rc.1'], 'incompatible')
   assert.equal(releases['0.1.3-alpha.1'], 'incompatible')
   assert.equal(releases['0.1.3-alpha.2'], 'incompatible')
@@ -62,11 +65,13 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.1.5-rc.1'], 'incompatible')
   assert.equal(releases['0.1.5-rc.2'], 'incompatible')
   assert.equal(releases['0.1.5-rc.3'], 'incompatible')
+  // The dropped 0.1.7 line states it per release, like every other retired one.
+  assert.equal(releases['0.1.7-rc.1'], 'incompatible')
+  assert.equal(releases['0.1.7-rc.2'], 'incompatible')
   // The lines that are supported state it per release, newest included.
-  assert.equal(releases['0.1.7-rc.1'], 'compatible')
-  assert.equal(releases['0.1.7-rc.2'], 'compatible')
   assert.equal(releases['0.2.0-rc.1'], 'compatible')
   assert.equal(releases['0.2.0-rc.2'], 'compatible')
+  assert.equal(releases['0.2.1-rc.2'], 'compatible')
   assert.equal(manifest.engines?.node, '>=22.19')
 })
 
@@ -88,16 +93,14 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // this checkout commits. The numbers are the ones that script's table holds,
   // pinned by `tests/ci-pin-line.test.mjs`. The schemastery spec below is
   // line-independent on purpose.
-  // One set, because 0.1.5 is no longer a supported line (0.8.0 dropped it):
-  // every leg that still runs installs a forms host, and the legacy pins that
-  // came with the 0.1.5 family are gone from the table with that line.
-  const PINS = {
-    '@deepseek-ai/cordis': '4.0.4',
-    '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
-    '@deepseek-ai/cordis-plugin-include': '1.0.9',
-    '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-    '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-  }
+  // The pins come from `scripts/ci-pin-line.mjs`'s per-line table, which is the
+  // same table CI rewrites the manifest with. 0.1.7 is no longer a supported
+  // line either (0.8.4-rc.1 dropped it), and its pins went with it.
+  // …and the numbers are read from that table, keyed by the host that landed in
+  // node_modules: the default line and the two 0.2.0 legs disagree on all five
+  // (0.2.1-rc.2 moved each one patch), so a hardcoded set would be right on one
+  // leg and wrong on the others.
+  const PINS = { ...LINES[HOST_VERSION].roots, '@deepseek-ai/cordis-plugin-hmr': '1.0.17' }
   for (const [name, pinned] of Object.entries(PINS)) {
     assert.equal(
       manifest.devDependencies?.[name] ?? manifest.dependencies?.[name],
@@ -143,15 +146,23 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.5-rc.2'), false)
   assert.equal(inRange('0.1.5-rc.3'), false)
   assert.equal(inRange('0.1.5'), false)
-  // Both verified lines are in, and the window stops at each line's end.
-  assert.equal(inRange('0.1.7-rc.1'), true)
-  assert.equal(inRange('0.1.7-rc.2'), true)
+  // The dropped 0.1.7 line is out, exactly like 0.1.5 — nobody on it is told
+  // "compatible" while its seam is no longer carried.
+  assert.equal(inRange('0.1.7-rc.1'), false)
+  assert.equal(inRange('0.1.7-rc.2'), false)
   assert.equal(inRange('0.1.8'), false)
   assert.equal(inRange('0.1.9'), false)
+  // Both declared 0.2.0 rcs and the 0.2.1 line are in, each through its own
+  // prerelease comparator, and the window stops at 0.2.2.
   assert.equal(inRange('0.2.0-rc.1'), true)
   assert.equal(inRange('0.2.0-rc.2'), true)
   assert.equal(inRange('0.2.0'), true)
-  assert.equal(inRange('0.2.1'), false)
+  assert.equal(inRange('0.2.1-rc.2'), true)
+  assert.equal(inRange('0.2.1'), true)
+  assert.equal(inRange('0.2.2'), false)
+  assert.equal(inRange('0.2.2-rc.1'), false)
+  // An alpha of the new line is still out: the promise is the rcs that were run.
+  assert.equal(inRange('0.2.1-alpha.5'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
   // admit them. A prerelease only satisfies a comparator set when a comparator
   // with the *same* [major, minor, patch] tuple carries one, so these stay out
@@ -161,7 +172,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.1.7-rc.2', '0.2.0-rc.1', '0.2.0-rc.2'], range), '0.2.0-rc.2')
+  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2'], range), '0.2.1-rc.2')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
@@ -176,7 +187,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   // satisfy a comparator set when a comparator with the *same* [major, minor,
   // patch] tuple also carries a prerelease, so `>=0.1.7-rc.1 <0.1.8` alone
   // would reject every 0.2.0-rc.
-  const SUPPORTED = '>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1'
+  const SUPPORTED = '>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2'
   const dshPeers = Object.entries(manifest.peerDependencies ?? {})
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(dshPeers.length > 0)

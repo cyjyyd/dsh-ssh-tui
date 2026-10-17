@@ -55,8 +55,8 @@ test('every line moves the whole family at once, and nothing else', () => {
     const family = familyDevDeps(pinned)
     assert.ok(family.length > 20, `${line}: the family must be pinned as one block`)
     const exceptions = LINES[line].devPins ?? {}
-    // A devDep the line never published keeps a pin of its own (the mock LLM
-    // server on 0.1.7-rc.2): everything else in the family moves together.
+    // A devDep the line never published keeps a pin of its own (`dsh-invariants`
+    // on 0.2.1-rc.2): everything else in the family moves together.
     assert.ok(Object.keys(exceptions).length <= 1, `${line}: at most one such exception, by hand`)
     for (const name of family) {
       const wanted = exceptions[name] ?? line
@@ -77,23 +77,40 @@ test('every line moves the whole family at once, and nothing else', () => {
 
 test('the family root pins follow the line, including the launcher-only one', () => {
   // These are not imported by the plugin: they are pinned so npm cannot pick a
-  // version whose peer range fights the pinned cordis. Both supported lines
-  // declare the same set — 0.2.0-rc.1 kept what 0.1.7 pinned, which is why one
-  // roots table serves the whole `LINES` entry set now that 0.1.5 is gone.
+  // version whose peer range fights the pinned cordis. The 0.2.0 rcs share one
+  // set (0.2.0-rc.1 kept what 0.1.7 pinned); 0.2.1-rc.2 moved all five one patch,
+  // and the values come from its published peers rather than from a guess.
   const roots = {
-    '@deepseek-ai/cordis': '4.0.4',
-    '@deepseek-ai/cordis-plugin-include': '1.0.9',
-    '@deepseek-ai/cordis-plugin-loader': '1.0.5',
-    '@deepseek-ai/cordis-plugin-timer': '1.1.6',
-    // dsh-app-boot peers on this one; without it the CLI cannot print its help.
-    '@deepseek-ai/cordis-plugin-group': '1.0.4',
+    '0.2.1-rc.2': {
+      '@deepseek-ai/cordis': '4.0.5',
+      '@deepseek-ai/cordis-plugin-include': '1.0.10',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      '@deepseek-ai/cordis-plugin-group': '1.0.5',
+    },
+    '0.2.0-rc.2': {
+      '@deepseek-ai/cordis': '4.0.4',
+      '@deepseek-ai/cordis-plugin-include': '1.0.9',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      '@deepseek-ai/cordis-plugin-group': '1.0.4',
+    },
+    '0.2.0-rc.1': {
+      '@deepseek-ai/cordis': '4.0.4',
+      '@deepseek-ai/cordis-plugin-include': '1.0.9',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.5',
+      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      '@deepseek-ai/cordis-plugin-group': '1.0.4',
+    },
   }
   const pinnedRoots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
     .filter(([name]) => name.startsWith('@deepseek-ai/cordis'))
     .filter(([name]) => name !== '@deepseek-ai/cordis-plugin-hmr'))
-  assert.deepEqual(pinnedRoots(defaultManifest), roots)
+  assert.deepEqual(pinnedRoots(defaultManifest), roots[DEFAULT_LINE])
+  assert.deepEqual(Object.keys(roots).sort(), Object.keys(LINES).sort(),
+    'every declared line states its roots here, so a new line cannot skip this table')
   for (const line of Object.keys(LINES)) {
-    assert.deepEqual(pinnedRoots(pinManifest(copy(), line)), roots, line)
+    assert.deepEqual(pinnedRoots(pinManifest(copy(), line)), roots[line], line)
   }
   // hmr is line-independent and not part of the per-line table.
   assert.equal(defaultManifest.devDependencies['@deepseek-ai/cordis-plugin-hmr'], '1.0.17')
@@ -105,7 +122,20 @@ test('the default line keeps the override map that holds the family together', (
   // path, not an ESM URL, and the runner answers ERR_UNSUPPORTED_ESM_URL_SCHEME.
   const manifest = tree
   const overridden = Object.keys(defaultManifest.overrides ?? {})
-  assert.deepEqual(overridden, familyDevDeps(defaultManifest).sort())
+  // Every family devDep the default line publishes is held on that line. A
+  // `devPins` exception is the opposite case — a package the line never
+  // published, pinned by hand to the newest version that exists — and an
+  // override demanding the line's version for it is an EOVERRIDE, so it is
+  // deliberately absent from the map.
+  const exceptions = LINES[DEFAULT_LINE].devPins ?? {}
+  assert.deepEqual(
+    overridden,
+    familyDevDeps(defaultManifest).filter(name => exceptions[name] === undefined).sort(),
+  )
+  for (const name of Object.keys(exceptions)) {
+    assert.equal(overridden.includes(name), false, `${name} is a hand pin, not an override`)
+    assert.equal(defaultManifest.devDependencies[name], exceptions[name])
+  }
   for (const name of overridden) assert.equal(defaultManifest.overrides[name], DEFAULT_LINE)
   // The map is built from the roots this manifest *installs* (devDeps and
   // dependencies) and from family names only. A non-family root dependency is

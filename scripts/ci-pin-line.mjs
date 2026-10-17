@@ -14,7 +14,8 @@
  *    + `dsh-agent-preset-registry` (the plural has no release on that line at
  *    all, so npm fails with ETARGET if it stays), and it moved the family's own
  *    root pins (cordis 4.0.4, include 1.0.9, loader 1.0.5, timer 1.1.6) —
- *    0.2.0-rc.1 keeps exactly those, so the two lines share one roots table;
+ *    0.2.0-rc.1 kept exactly those, so the 0.2.0 rcs share one roots table;
+ *    0.2.1-rc.2 moved all of them one patch (see `NEXT_LINE_ROOTS`);
  *  - every line needs the whole family on one version: a root spec that floats
  *    resolves above the family's exact peer and the install dies with ERESOLVE;
  *  - 0.1.7 additionally needs `overrides`, because the published ranges still
@@ -36,7 +37,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** The family's own pins: 0.1.7 and 0.2.0-rc.1 declare the same ones. */
+/** The 0.2.0 line's own pins (0.1.7 declared the same set; that line is gone). */
 const NEW_LINE_ROOTS = {
   '@deepseek-ai/cordis': '4.0.4',
   '@deepseek-ai/cordis-plugin-include': '1.0.9',
@@ -46,27 +47,41 @@ const NEW_LINE_ROOTS = {
   // the CLI cannot even print its help (ERR_MODULE_NOT_FOUND).
   '@deepseek-ai/cordis-plugin-group': '1.0.4',
 }
+/**
+ * The 0.2.1 line moved the same five siblings forward one patch. Read from the
+ * published peers (`dsh-app-boot@0.2.1-rc.2` asks `~4.0.5` / `~1.0.5` /
+ * `~1.0.6` / `~1.0.10`), not guessed: a root pinned below a family peer is an
+ * ERESOLVE at install time.
+ */
+const NEXT_LINE_ROOTS = {
+  '@deepseek-ai/cordis': '4.0.5',
+  '@deepseek-ai/cordis-plugin-include': '1.0.10',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+  '@deepseek-ai/cordis-plugin-group': '1.0.5',
+}
 /** The presets split: the plural has no release on this line at all. */
 const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
 
 export const LINES = {
-  // The line 0.8.x is developed against and declares: same roots as 0.1.7, the
-  // presets split, and the whole family on one version. rc.2 is what upstream
-  // points both `latest` and `next` at (the desktop harness's baseline), so it is
-  // the default; rc.1 keeps a light leg because it stays declared compatible.
-  '0.2.0-rc.2': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
-  '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
-  '0.1.7-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
-  '0.1.7-rc.2': {
-    roots: NEW_LINE_ROOTS,
+  // The line this checkout commits and develops against. 0.2.1-rc.2 is where
+  // upstream's `next` points; the two 0.2.0 rcs stay declared (and keep their
+  // legs) so the window's floor stays covered. The 0.1.7 line is no longer
+  // declared and no longer has a leg — its `dshReleases` entries say
+  // `incompatible` rather than disappearing, so a user still on it sees a
+  // refusal instead of silence.
+  '0.2.1-rc.2': {
+    roots: NEXT_LINE_ROOTS,
     presets: NEW_LINE_PRESETS,
     overrides: true,
-    // The rc.2 family never published the mock LLM server, and the suite's
-    // host-contract case and the busy-drop probe need it. It is a standalone
-    // HTTP mock with no family peer, so it stays on the last version that
-    // exists instead of taking the whole leg down with ETARGET.
-    devPins: { '@deepseek-ai/dsh-llm-mock-server': '0.1.7-rc.1' },
+    // `dsh-invariants` has no 0.2.1-rc.2 release (the line stopped publishing it
+    // after 0.2.0-rc.2) and this plugin installs it directly. It is pinned to
+    // the newest version that exists instead of taking the leg down with ETARGET
+    // — the same exception shape the 0.1.7 line needed for the mock LLM server.
+    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
   },
+  '0.2.0-rc.2': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
+  '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */
@@ -82,7 +97,7 @@ const ALL_PRESETS = [...new Set(Object.values(LINES).flatMap(line => line.preset
  * manifest on one line installed by a leg that rewrites to another is how a
  * green run stops meaning anything.
  */
-export const DEFAULT_LINE = '0.2.0-rc.2'
+export const DEFAULT_LINE = '0.2.1-rc.2'
 
 /** `@deepseek-ai/dsh` itself, or a package of the family. */
 export function isFamilyPackage(name) {

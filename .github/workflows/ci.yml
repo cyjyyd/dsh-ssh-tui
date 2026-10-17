@@ -9,46 +9,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the whole dsh family to 0.2.0-rc.2 — the committed
-        # manifest, the lock and the Windows leg all install it, and it is what a
-        # fresh user resolves (upstream points both `latest` and `next` at it).
-        # That line is the one 0.8.0 is declared against: it keeps the 0.1.7
-        # settings seam (a form per loader entry, no `settings.get`) and the
-        # process-wide agent composition, and it pins the family's roots to the
-        # same cordis 4.0.4 / include 1.0.9 / loader 1.0.5 / timer 1.1.6 set, so
-        # one roots table serves both lines. The default leg and the Windows leg
-        # install the committed manifest unchanged; every other leg rewrites it
-        # with `scripts/ci-pin-line.mjs` and deletes the lock, because the
-        # committed lock belongs to the default line.
+        # package.json pins the whole dsh family to 0.2.1-rc.2 — the committed
+        # manifest, the lock and the Windows leg all install it, and it is where
+        # upstream's `next` points. It is the line this checkout develops against.
+        #
+        # The window it declares is `>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2`
+        # (two comparators: node-semver only admits a prerelease through one on the
+        # same tuple), so both 0.2.0 rcs keep a leg: rc.2 at full depth, rc.1 with
+        # typecheck plus the suite. The 0.1.7 line is no longer declared — its
+        # `dshReleases` entries say `incompatible` and its legs are gone with it,
+        # so a user still on that line gets a refusal from the launcher instead of
+        # a half-working plugin.
         #
         # Every version we declare stays covered, at the depth its risk deserves:
-        # the default (0.2.0-rc.2) and 0.1.7-rc.2 run the full probe set, while
-        # 0.2.0-rc.1 and 0.1.7-rc.1 — same generation as their newer sibling, and
-        # the rc.1s are only declared because they were run — keep typecheck plus
-        # the suite. rc.2 became the default when upstream pointed *both*
-        # `latest` and `next` at it: it is the baseline the desktop harness
-        # ships, so it is what a fresh user resolves.
-        #
-        # 0.1.7-rc.2 keeps a full leg because the line is still declared:
-        # still declared compatible, and 59 of its 272 packages changed their type
-        # surface against rc.1, so both rcs stay covered. Its one wrinkle is that
-        # the family never published dsh-llm-mock-server on that line, so the pin
-        # script keeps that devDep at rc.1 (a standalone HTTP mock with no family
-        # peer); without it the host-contract case and the busy-drop probe cannot
-        # run at all.
-        #
-        # The 0.1.5 line is *dropped* in 0.8.0 (see dshReleases: its releases are
-        # `incompatible` now, and the range no longer admits them). Its two legs
-        # are gone with it, the plural `dsh-agent-presets` package is no longer
-        # declared anywhere, and the `--legacy-peer-deps` install step that only
-        # that line needed is gone too — 0.1.5 resolved its peers through caret
-        # ranges that a fresh install no longer satisfies.
+        # the default (0.2.1-rc.2) and 0.2.0-rc.2 run the full probe set, while
+        # 0.2.0-rc.1 — same generation as rc.2 — keeps typecheck plus the suite.
         #
         # Pinning a leg to an older rc *within* a line does not resolve when that
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
-        # the newest rc of that generation it can install cleanly, plus the rs
+        # the newest rc of that generation it can install cleanly, plus the rcs
         # upstream still points a dist-tag at.
-        dsh: ["0.2.0-rc.2", "0.2.0-rc.1", "0.1.7-rc.2", "0.1.7-rc.1"]
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -59,9 +40,9 @@ jobs:
       # family's root pins and the override map were not, and a typo in one of them
       # only showed up as a red leg twenty minutes later. The script is a pure
       # function with a test, and it is runnable locally:
-      #   node scripts/ci-pin-line.mjs 0.1.7-rc.2
+      #   node scripts/ci-pin-line.mjs 0.2.0-rc.2
       - name: Pin the tree to the dsh ${{ matrix.dsh }} line
-        if: matrix.dsh != '0.2.0-rc.2'
+        if: matrix.dsh != '0.2.1-rc.2'
         run: |
           node scripts/ci-pin-line.mjs ${{ matrix.dsh }}
           rm -f package-lock.json
@@ -99,7 +80,7 @@ jobs:
       # `--unconfigured` also tells the probe the wizard is *required* — a skip there
       # would be a green gate over the incident it exists for.
       - name: Fresh-home setup wizard (real PTY, pasted key)
-        if: matrix.dsh == '0.2.0-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
       # …and the same path on the artifact a user actually installs. Every other probe
       # here runs `link:<repo>` — the checkout, with its `src/` and its tests. This one
@@ -107,7 +88,7 @@ jobs:
       # outside the repository, proves the plugin resolves to the profile rather than
       # the checkout, and then runs the wizard and workspace probes against it.
       - name: Packed-artifact smoke (npm pack → install → probes)
-        if: matrix.dsh == '0.2.0-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/artifact-smoke.mjs
       - name: Terminal-capability probe
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
@@ -129,7 +110,7 @@ jobs:
       # the probe round trip are host-line independent, and the probe skips
       # itself when node-pty is missing.
       - name: Cut-link liveness probe
-        if: matrix.dsh == '0.2.0-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-cut-probe.mjs
       # The link is measured at attach *and* re-measured afterwards, because one
       # measurement taken while the session was booting used to decide the footer
@@ -137,7 +118,7 @@ jobs:
       # that never recovered. This plays a terminal that is slow for the first
       # seconds and fast afterwards and reads the chip out of the real PTY.
       - name: Link-quality probe
-        if: matrix.dsh == '0.2.0-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/probe-home.mjs --probe --script tui-rtt-probe.mjs
       # The link chip with nothing measured — the shape the field reported twice
       # (`SSH ○○○○ 160ms`, where 160ms was the paint cadence, not a latency). A
@@ -169,7 +150,7 @@ jobs:
       # where the marker's cell accounting is pinned. One leg: it needs the mock
       # model, and the frames it asserts are host-line independent.
       - name: Reply copy probe (scripted turn)
-        if: matrix.dsh == '0.2.0-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/tui-mock-probe.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup

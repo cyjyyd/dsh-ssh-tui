@@ -13,8 +13,8 @@
 ## 0.8.4-rc.1 — 2026-10-17（候选版，只上 `next`）
 
 发版说明：[`docs/release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)。
-**输入归属 + 发布安全门的候选版。** 与 0.8.3 相比**有 runtime 行为变化**（下列 Fixed）；
-本文件的"发布准备"提交本身没有再改 runtime。`latest` 仍为 `0.8.3`。
+**输入归属 + 发布安全门的候选版。** 与 0.8.3 相比**有 runtime 行为变化**（下列 Fixed / Changed）；
+发布准备这一轮只为兼容加了一处垫片（见 Changed 的第三条），没有别的 runtime 改动。`latest` 仍为 `0.8.3`。
 
 ### Fixed
 
@@ -29,6 +29,20 @@
   不再覆盖它的 `historyDraft`；Surface 内 `Alt+f`/`Alt+F`/`Alt+/` 不再把 `/find ` 写进隐藏草稿。
 - **反馈行位置**：回执不再随消息长度/窗口宽度在底栏两行之间漂移，恒在身份行；状态行只留仪表。
 
+### Changed
+
+- **兼容窗口**：新增 `0.2.1-rc.2`，整族 devDeps 与族 root pins 随之前移（cordis 4.0.5、include 1.0.10、
+  loader 1.0.6、group 1.0.5），默认线改为它。窗口因此变成
+  `>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2`（两个 comparator 是 node-semver 的 prerelease 规则，
+  不是笔误）。
+- **摘除 `0.1.7` 线**：`dshReleases` 的 `0.1.7-rc.1` / `0.1.7-rc.2` 改为 `incompatible`，对应的两条 CI 腿
+  删除。原因是范围判断：0.2.1-rc.2 移动了族的 root pins，并把 subagent 的 `drainContinuableChildren`
+  改名为 `drainChildren`（签名不变、旧名在新宿主上消失），同时面向两代 seam 要在类型面上各写一份分支；
+  0.2.0 的两个 rc 仍在窗口内、仍各有一条腿。
+- **跨线兼容垫片**：`/subagents kill` 改走 `src/dsh-compat.ts` 的 `drainChildSubagents()`，按宿主实际拥有
+  的方法名调用；这是本版唯一为兼容而改的 runtime 代码。
+- `dsh-invariants` 没有 0.2.1-rc.2 发布，作为该线的**唯一 per-line 例外**钉在 `0.2.0-rc.2`。
+
 ### Internal
 
 - `src/input-reader.ts`（新）与 `src/input-router.ts`（新）：`handleInputText` = Reader → Router → owner；
@@ -42,6 +56,9 @@
 - 输入参考轨迹 **72 → 109 条**（只追加、0 条改写）；归属矩阵扩到 options question / filtering picker；
   新增 `surface-state-isolation`、`unicode-input-safety`、`ctrl-l-repaint`、`borrowed-field-caret` 等专项。
 - `scripts/input-freeze-audit.mjs` 新增 `composer history` 写入类与 `historyGuards` 检查（注释剥离后判定）。
+- `tui-unmeasured-probe` 的竞态修复：应答链路上 link chip 本来就是**两帧**（引导帧 `○○○○ 未测` → 测量帧
+  `●●●● 7ms`），探针此前取第一帧并断言测量值，于是在慢机器上误报。现在按本 leg 关心的状态等待并打印
+  这一跳；反向验证（把 `probed` 强制 false）仍判红。
 
 ### Release Hardening
 

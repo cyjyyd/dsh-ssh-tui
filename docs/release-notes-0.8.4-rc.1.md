@@ -92,6 +92,15 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - Ctrl+L 的重绘归属经独立审核后**保留双 Painter**（`KEEP_DUAL`），合同与理由见 AD-22 §10；
   证据 `tests/ctrl-l-repaint.test.mjs`（一次有意的完整清屏，之后回到增量）
 
+### 跨宿主线的兼容垫片（0.2.1-rc.2）
+
+`/subagents kill <id>` 调用 subagent 服务的 `drainContinuableChildren(parent, ids)`；0.2.1-rc.2 把它
+改名为 `drainChildren(parent, ids)`（同义、签名一致），旧名不再存在。窗口里同时有两条线，所以调用点
+改走 `src/dsh-compat.ts` 的 `drainChildSubagents()`：它按宿主实际拥有的名字调用，两者都没有时解析为
+`Promise.resolve()`。这是本版唯一一处**为兼容而改的 runtime 代码**。
+
+- 证据：`npm run typecheck` 在 0.2.1-rc.2 上 0 error；0.2.0 两条腿在 CI 上同样编译（它们只认旧名）。
+
 ## 内部结构
 
 - **Reader**（`src/input-reader.ts`，新文件，W-1）：解码、探测回复过滤、ESC 组装、粘贴边界、单元切分。
@@ -135,10 +144,10 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 
 ```
 场景                          毫秒    字节   寻址行  整屏清屏
-流式输出时的一次重绘          1.81     501      3       0
-等待卡片时钟走一格            1.32     465      3       0
-报告屏翻一页（PgDn / PgUp）   1.16    2457     17       0
-菜单里移动一次光标            0.87     588      4       0
+流式输出时的一次重绘          1.68     501      3       0
+等待卡片时钟走一格            1.13     465      3       0
+报告屏翻一页（PgDn / PgUp）   1.40    2457     17       0
+菜单里移动一次光标            0.91     588      4       0
 向导字段里打一个字符          0.19     140      1       0
 ```
 
@@ -153,23 +162,30 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - `npm test` → **1506 项 · 1502 通过 · 0 失败 · 4 跳过**
 - `npm run freeze` / `npm run freeze:input` → 全绿（八条不变量 + 七条退役路径；输入归属无基线超限）
 - 参考轨迹 **109 条**（0 改写）
-- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 528 907 B）
+- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 531 289 B）
 - `scripts/upgrade-smoke.mjs --from 0.8.3 --pack` → **PASS**（真实 `0.8.3 → 0.8.4-rc.1`）
-- `scripts/verify-batch.mjs --home <新建的探针 home>` → 除 `tui-unmeasured-probe` 一项外全部 PASS；
-  该项见「已知限制」
+- `scripts/verify-batch.mjs --home <新建的探针 home>` → **RESULT: PASS**：typecheck、1506 项套件、
+  九类真 PTY/ConPTY 探针（含 `tui-unmeasured-probe` 的两条 leg）、footer 帧检查全过，无 `SKIP:`
+- `npm run bench:report -- --check` → **PASS**（README 两个语种的实测块与当前树一致）
 
 ## 兼容性
 
-声明窗口**未变**：
+声明窗口本版**变了**，两条线一进一出：
 
 ```
->=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1
+>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2
 ```
 
+- **新增 `0.2.1-rc.2`**（上游 `next`）：整族随之移动到这条线，族的 root pins 各前进一个 patch
+  （cordis 4.0.5、include 1.0.10、loader 1.0.6、group 1.0.5），默认线（提交的 manifest / 锁 /
+  `test-windows`）改为它。
+- **摘除 `0.1.7` 线**（`0.1.7-rc.1` / `0.1.7-rc.2`）：`dshReleases` 改为 `incompatible`、两条 CI 腿删除。
+  原因是实打实的范围判断而不是喜新：0.2.1-rc.2 移动了族的 root pins，并把 subagent 的 wind-down 调用
+  改名（`drainContinuableChildren` → `drainChildren`——**签名一致，但旧名在新宿主上不存在**）；
+  一个构建同时面向两代 seam，就得在类型面上各写一份分支。0.2.0 的两个 rc 仍在窗口内，仍各有一条腿。
 - `0.1.5` 及更早仍**不支持**（`dshReleases` 保留 `incompatible` 表态）。
-- `0.2.1-alpha.x` **不在**声明承诺内，本版不宣布支持。
-- 默认线（提交的 manifest / 锁 / `test-windows`）仍是 `0.2.0-rc.2`；`0.1.7-rc.2` 与两条 rc.1 腿
-  继续跑既有的兼容性回归。
+- `0.2.1-alpha.x` **不在**声明承诺内：承诺的是**跑过并表态**的 rc。
+- 默认线现在是 `0.2.1-rc.2`；`0.2.0-rc.2` 与 `0.2.0-rc.1` 继续跑既有的兼容性回归。
 
 ## 已知限制
 
@@ -186,9 +202,12 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
   高亮那一行"这类**帧字节**检查在 Windows 上标记为 `NOT_MEASURED`（探针会打印出来，`verify-batch`
   见到 `SKIP:` 收尾为 `INCOMPLETE`，不算通过）；**功能断言**（粘贴、字段、掩码、进度、保存、返回、
   二次启动）在 ConPTY 上照常执行并通过。
-- **`tui-unmeasured-probe.mjs` 在本机（管道父进程）稳定失败**：`/diag` 报"已测量 RTT 7ms"，而
-  footer 仍显示 `SSH ○○○○ 未测`。该失败**在已发布的 v0.8.3 上同样复现**，CI 两条腿上是绿的——因此
-  归为**环境相关、尚未定位**，本版不把它算作通过，也不据此改代码。
+- **（已定位并修复，不再是限制）`tui-unmeasured-probe` 的竞态**：该探针此前取"屏幕上第一个 link chip"
+  并断言它已经是测量值。应答链路上 chip 本来就是**两帧**——引导帧先画延迟槽（`○○○○ 未测`），
+  测量落地后的下一帧才画 `●●●● 7ms`；快的机器上第一次轮询就已经是第二帧，慢的机器上读到的是第一帧，
+  于是同一个探针在 CI 绿、在本机红（实测 `+4018ms 未测` → `+4119ms 7ms`，产品行为正确）。
+  现在按"本 leg 关心的状态"等待（未应答 leg 等 `未测`、应答 leg 等 `\d+ms`），并把这一跳打印出来；
+  另做了一次反向验证：把 chip 的 `probed` 强制成 false，探针**仍然判红**（两条断言）。
 - **`tui-route-probe.mjs` 不在 CI 里**：本机在同步到提交的依赖树后 13 项断言全绿；它的失败模式
   （mock 版本落后于宿主协议）已知，但它目前只有本地证据。
 - **发布后的 registry tarball 比对仍是人工步骤**：本版自动化的是**发布前**的产物（pack → 清单 →

@@ -37,6 +37,7 @@ import {
   hostSettingsGeneration,
   isTokenDeltaChunk,
   listenHostEvent,
+  drainChildSubagents,
   readSettingsSection,
   REPLAY_YIELD_EVERY,
   sessionEvents,
@@ -14954,7 +14955,7 @@ export class SshTui {
               break
             }
             const targets = ids.map(id => SessionId(id))
-            void subagents.drainContinuableChildren(this.agent, targets).then(() => {
+            void drainChildSubagents(subagents, this.agent, targets).then(() => {
               this.pushRow(represent('subagent-notice', { kind: 'system', text: t('sub.killRequested', { ids: ids.join(', ') }) }))
               this.markDirty()
             }).catch((error: unknown) => {

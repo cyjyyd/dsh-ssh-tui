@@ -156,11 +156,36 @@ async function runWindow({ answers }) {
   const painted = await waitFor(() => /─{20,}/u.test(output), BOOT_TIMEOUT_MS)
   // 2. The chip, and the cursor probes the relay sent to get there. The attach
   //    waits out its sampling budget when nothing answers, so this is the slow leg.
-  let chip
-  const chipDeadline = Date.now() + STEP_TIMEOUT_MS
-  while (Date.now() < chipDeadline && chip === undefined) {
-    await delay(100)
-    chip = (await visible()).find(row => /SSH [●○*o]{4}/u.test(row))
+  //
+  //    The chip is *two* frames on an answering terminal: the boot frame paints the
+  //    delay slot before the round trip has been measured (`○○○○ 未测`), and the frame
+  //    after the answer paints the measurement (`●●●● 7ms`). Waiting for "the first
+  //    chip" therefore raced the measurement — it passed on a fast runner, where the
+  //    answer had already landed by the first poll, and failed on a slow one, where the
+  //    boot frame was read and the product's own repaint came 100 ms later (measured:
+  //    `未测` at +4018 ms, `7ms` at +4119 ms). Each leg now waits for the state it is
+  //    about, so the assertion is about what the product settles on rather than about
+  //    which frame happened to be read first.
+  const CHIP = /SSH [●○*o]{4}/u
+  const waitForChip = async (pattern) => {
+    const deadline = Date.now() + STEP_TIMEOUT_MS
+    let first
+    let last
+    while (Date.now() < deadline) {
+      const row = (await visible()).find(line => CHIP.test(line))
+      if (row !== undefined) {
+        first ??= row
+        last = row
+        if (pattern === undefined || pattern.test(row)) return { chip: row, first, last }
+      }
+      await delay(100)
+    }
+    return { chip: last, first, last }
+  }
+  const wanted = answers ? /SSH [●*]{4}\s+\d+ms/u : /SSH [○o*]{4}\s+(未测|n\/a)/u
+  const { chip, first: firstChip } = await waitForChip(wanted)
+  if (firstChip !== undefined && firstChip !== chip) {
+    console.log(`      chip: ${firstChip} → ${chip} (the boot frame paints the delay slot first)`)
   }
   // 3. `/diag` says what the probe knows, on its own rows.
   let diagRows = []
@@ -189,7 +214,7 @@ async function runWindow({ answers }) {
     console.log('--- host/launcher stderr ---')
     for (const line of errors.trim().split('\n').slice(-8)) console.log(`  ${line}`)
   }
-  return { painted, chip, diagRows, frame, requests, answersWritten, exitCode, output, errors, sessionId }
+  return { painted, chip, firstChip, diagRows, frame, requests, answersWritten, exitCode, output, errors, sessionId }
 }
 
 console.log(`probe home: ${home}`)

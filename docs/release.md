@@ -89,9 +89,10 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    `npm dist-tag add dsh-ssh-tui@X.Y.Z next`。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   当前五条腿（2026-10-03 起）：`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、`test (0.1.7-rc.2)`、
-   `test (0.1.7-rc.1)`、`test-windows` —— **全部 success** 才 `npm publish`。
-   其中**默认腿（`0.2.0-rc.2`）与 `test-windows`** 另外跑两条发布前阻塞门（0.8.4 起）：
+   当前四条腿（0.8.4-rc.1 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
+   `test-windows` —— **全部 success** 才 `npm publish`。（`0.1.7-rc.2` / `0.1.7-rc.1` 两条腿在
+   0.8.4-rc.1 随该线一起摘除；更早的 0.1.5 两条腿在 0.8.0 摘除。）
+   其中**默认腿（`0.2.1-rc.2`）与 `test-windows`** 另外跑两条发布前阻塞门（0.8.4 起）：
    - **首次安装向导**（`probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs`）：真实
      PTY / ConPTY 上的 fresh home → 向导 → **粘贴 API key** → 保存 → 自动交回工作区 → 重启不再是首启；
    - **发布产物冒烟**（`scripts/artifact-smoke.mjs`）：`npm pack` → 检查包内清单 → 用 **tarball**（不是
@@ -147,10 +148,12 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   3.18.4，几分钟后四条 CI 腿全部倒在 `npm install` 上**（在那之前 25 分钟还是绿的）。第一轮修完
   cordis/loader/schemastery 之后，当时最老的 0.1.2-rc.1 腿又因为 **cordis-plugin-include 被 npm 拿到 1.0.9**
   而挂——1.0.9 的 peer 是 `cordis ~4.0.4`，与钉住的 4.0.2 天然冲突（rc.3 族里它是被精确钉成 1.0.7 的，
-  老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：默认线（2026-09-26 起是
-  `0.1.7-rc.1`，2026-10-03 起是 **`0.2.0-rc.2`**）写死 `cordis 4.0.4`、
-  `cordis-plugin-{include 1.0.9, loader 1.0.5, hmr 1.0.17, timer 1.1.6}`、
-  `cordis-plugin-group 1.0.4`（launcher 组装用，不是我们 import 的）、`schemastery 3.18.2 || ~3.18.4`。
+  老族里没人钉）。那条腿已随 0.1.2 支持一起摘除，教训留在根部的钉版上：默认线跟着当前要验的那一代
+  走（`0.1.7-rc.1` → 2026-10-03 `0.2.0-rc.2` → 2026-10-17 **`0.2.1-rc.2`**），族的 root pins 因此也
+  随线移动：今天这条线是 `cordis 4.0.5`、
+  `cordis-plugin-{include 1.0.10, loader 1.0.6, hmr 1.0.17, timer 1.1.6}`、
+  `cordis-plugin-group 1.0.5`（launcher 组装用，不是我们 import 的）、`schemastery 3.18.2 || ~3.18.4`；
+  0.2.0 的两条腿仍是 `4.0.4` / `1.0.9` / `1.0.5` / `1.0.4`。逐线的表在 `scripts/ci-pin-line.mjs` 的 `LINES`。
   （0.1.5 的两条腿曾由 `scripts/ci-pin-line.mjs` 改写成那一族的 `4.0.2` / `1.0.7` / `1.0.3` / `1.1.4`；
   该线已摘除，改写表里不再有它们的条目。）
   `peerDependencies` 里保持区间（消费者那边由宿主提供）。`tests/bundle-patch.test.mjs` 钉住树上实际装到
@@ -163,8 +166,8 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   才放行 prerelease。所以 `>=0.1.5-alpha.1 <0.1.6` 既排除 `0.1.6-alpha.x`，也排除 `0.1.7-alpha.x`；
   这条已被 `tests/bundle-patch.test.mjs` 钉住，别靠感觉改。
 - **CI 腿的取舍**：`matrix.dsh` 里每个"能启动宿主"的版本都跑全套单元测试 + 真 PTY 探针。当前四条
-  （`0.2.0-rc.2` / `0.2.0-rc.1` / `0.1.7-rc.2` / `0.1.7-rc.1`）+ `test-windows`：默认腿跟着
-  `package.json` 的 pin 走（= 当前要重点验的那一版，现在是 **`0.2.0-rc.2`**；这条腿原样安装提交的
+  （`0.2.1-rc.2` / `0.2.0-rc.2` / `0.2.0-rc.1`）+ `test-windows`：默认腿跟着
+  `package.json` 的 pin 走（= 当前要重点验的那一版，现在是 **`0.2.1-rc.2`**；这条腿原样安装提交的
   manifest，`test-windows` 也是），其余线由 `scripts/ci-pin-line.mjs` 改写 manifest 后从零安装
   （顺带删锁），改写的正确性由 `tests/ci-pin-line.test.mjs` + `tests/workflow.test.mjs` 的守卫断言守住。
   **0.1.5 的两条腿已随该线摘除**（`--legacy-peer-deps` 安装步骤、复数 `dsh-agent-presets` 的 peer 一并
@@ -174,24 +177,27 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
   被摘版本在 `dshReleases` 里留 **`incompatible`** 而不是删条目：还在那条线的用户看到的是
   "不兼容，请升级"这种明确结论，比"没有表态"更有用；范围里则不能留任何能匹配它的 comparator。
 
-### 历史快照（2026-10-03 · 当时 `0.8.1` = `latest` + `next`）
+### 兼容表态（版式留自 2026-10-03 快照 · 表态列已更新到 `0.8.4-rc.1`）
 
-> 这是**留档的当时快照**，不是当前状态。当前状态看本文件开头的发布记录：
-> **`0.8.3` = `latest` + `next`**（2026-10-13），声明窗口与 CI 腿见下表（腿列表自 2026-10-03 起未变）。
-> 表格里"我们的表态"一列今天仍然准确，通道版本号一列已经过期——保留原文是为了让当时的判断可追溯。
+> 版式留自 2026-10-03 的快照（当时 `0.8.1` = `latest` + `next`）。当前发布记录看本文件开头：
+> **`0.8.3` = `latest` + `next`**（2026-10-13），`0.8.4-rc.1` 是只上 `next` 的候选。下表"我们的表态"
+> 一列是**今天**的表态（2026-10-17 随 `0.8.4-rc.1` 更新：新增 `0.2.1-rc.2`，`0.1.7` 改判
+> `incompatible` 并摘腿）；"通道版本"一列里的 `0.1.7` 行已是历史，其余仍是当前值。窗口与腿列表以
+> 本节的正文为准。
 
 | 通道 | 版本 | 我们的表态 |
 |---|---|---|
-| `latest` | **`0.2.0-rc.2`** | `compatible`：**默认线**（提交的 manifest、锁与 `test-windows` 腿都装它），跑完整探针 |
-| `next` | **`0.2.0-rc.2`** | 同上（上游把 `latest` 与 `next` 都指向它） |
+| `latest` | **`0.2.0-rc.2`** | `compatible`：桌面版基线，仍声明、仍有腿（完整探针） |
+| `next` | **`0.2.1-rc.2`** | `compatible`：**默认线**（提交的 manifest、锁与 `test-windows` 腿都装它），跑完整探针 |
 | `0.2.0` 线 | `0.2.0-rc.1` | `compatible`：见 [upstream-0.2.0.md](upstream-0.2.0.md)（干净树安装、`tsc` 0 错、真 PTY 探针全过）；CI 里由 `ci-pin-line.mjs` 改写 manifest 后从零安装 |
-| `0.1.7` 线 | `0.1.7-rc.1` / **`0.1.7-rc.2`** | `compatible`：两条都在 CI 里（rc.2 完整探针，rc.1 typecheck + 套件；同一代际） |
+| `0.1.7` 线 | `0.1.7-rc.1` / `0.1.7-rc.2` | **`incompatible`**（0.8.4-rc.1 摘除）：0.2.1-rc.2 移动了族的 root pins 并改名了 subagent 的 wind-down 调用（签名不变、旧名消失），同时养两条 seam 不划算；`dshReleases` 保留明确表态，两条 CI 腿删除 |
 | 旧线 | `0.1.5-alpha.1` … `0.1.5-rc.3` | **`incompatible`**：0.8.0 随用户决定摘除（范围不再有 comparator、CI 两条腿与 legacy-peers 安装步骤删除、复数 `dsh-agent-presets` 的 peer 删除；`dshReleases` 保留明确表态） |
 | 已摘 | `0.1.2-rc.1`、`0.1.3-alpha.1`/`alpha.2` | `incompatible`：**支持已取消**（范围不再有 comparator，`dshReleases` 保留明确表态，让还在该线的用户看到"不兼容，请升级"而不是沉默） |
 | `alpha` | `0.1.7-alpha.2` | 范围外，不声明 |
 | — | `0.1.6-alpha.1`/`alpha.2` | 范围外，不声明（**0.1.6 从未有 rc**；复数 `dsh-agent-presets` 正是停在 0.1.6-alpha.2） |
 
-当前声明窗口：`>=0.1.7-rc.1 <0.1.8 || >=0.2.0-rc.1 <0.2.1`（**不含 0.1.5 与更早**）。上游再发 `0.2.0`
+当前声明窗口：`>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2`（**不含 0.1.7 与更早**；两个 comparator
+是因为 node-semver 只让 prerelease 被**同一 tuple** 的 comparator 接纳）。上游再发 `0.2.0`
 正式版时，按同样流程跑一遍（干净树安装 → `tsc` → 全套 → 探针）再决定是否加 comparator。
 
 > **2026-09-28**：上游 `next` 的 **`0.1.7-rc.2`** 已按完整流程验过并声明 `compatible`：干净树安装（族全部 rc.2）、

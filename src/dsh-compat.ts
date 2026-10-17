@@ -9,9 +9,10 @@
  * here picks the API that is actually present so one build runs on either
  * host line.
  */
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
 
@@ -667,4 +668,34 @@ export function listenHostEvent(
   handler: (...args: unknown[]) => unknown,
 ): () => void {
   return (ctx.on as (name: string, listener: (...args: unknown[]) => unknown) => () => void)(event, handler)
+}
+
+/**
+ * Wind down the selected direct children of one parent, under both names the
+ * subagent service has shipped.
+ *
+ * 0.2.1-rc.2 renamed `drainContinuableChildren(parent, childIds)` to
+ * `drainChildren(parent, childIds)` — same contract (release the selected
+ * resident direct children of one exact live parent, leaving its other children
+ * admitted). Both 0.2.0 rcs and 0.2.1-rc.2 are declared, so the call site asks
+ * for whichever spelling the host has instead of pinning one and failing to
+ * compile on the other. A composition without the service at all resolves: the
+ * caller has already handled "no service", and this keeps the helper total.
+ *
+ * @param subagents - the host's subagent service.
+ * @param parent - the exact live parent whose children are being released.
+ * @param childIds - durable direct-child ids to release when resident.
+ * @returns once every selected activation released its execution handle.
+ */
+export function drainChildSubagents(
+  subagents: Context['subagents'],
+  parent: Agent,
+  childIds: readonly SessionId[],
+): Promise<void> {
+  const runtime = subagents as unknown as {
+    drainChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
+    drainContinuableChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
+  }
+  const drain = runtime.drainChildren ?? runtime.drainContinuableChildren
+  return drain === undefined ? Promise.resolve() : drain.call(subagents, parent, childIds)
 }
