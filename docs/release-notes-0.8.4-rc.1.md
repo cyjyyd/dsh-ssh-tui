@@ -159,7 +159,9 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
    是**粘贴进不了字段**，而当时的探针只会打字。向导那一半在第 1 道门里；这一道补**工作区那一半**：
    单行粘贴落进 Composer、**多行粘贴只插入不提交**、Ctrl+U 清空、4 kB 粘贴不崩不闪、
    **Screen / picker 打开时粘贴不漏进层、也不落到背后的 Composer**、**粘贴里的 `\x1bq` 尾巴保持字面**
-   （不当作 Esc 关掉 Screen）、**结束标记被切成两半后键盘仍然可用**。负向证明：把 Reader 的
+   （不当作 Esc 关掉 Screen）、**结束标记被切成两半后键盘仍然可用**（这一步在 ConPTY 上跳过并说明原因：
+   它会把半个 CSI 直接吞掉，切不出这个形状；那里的"粘贴后 Esc 仍然生效"由别的步骤覆盖）。
+   负向证明：把 Reader 的
    paste 分帧关掉（`isPasteRead()` 恒 false），
    该探针立刻判红（"多行粘贴没进 Composer"——即粘贴被当成按键执行了）。
 
@@ -195,17 +197,17 @@ Surface 打开时，`Home`/`End`/`Delete` 与 kitty 的复制序列此前被放�
 - `npm test` → **1509 项 · 1505 通过 · 0 失败 · 4 跳过**
 - `npm run freeze` / `npm run freeze:input` → 全绿（八条不变量 + 七条退役路径；输入归属无基线超限）
 - 参考轨迹 **111 条**（2 条新增）
-- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 1 532 201 B；在装好的 tarball 上依次跑
+- `scripts/artifact-smoke.mjs` → **PASS**（`0.8.4-rc.1` · 250 文件 · 约 1.53 MB；在装好的 tarball 上依次跑
   向导探针、工作区探针与**粘贴探针**）
 - `scripts/upgrade-smoke.mjs --from 0.8.3 --pack` → **PASS**（真实 `0.8.3 → 0.8.4-rc.1`）
-- `scripts/verify-batch.mjs --home <新建的探针 home>` → **RESULT: PASS**：typecheck、1506 项套件、
+- `scripts/verify-batch.mjs --home <新建的探针 home>` → **RESULT: PASS**：typecheck、1509 项套件、
   十类真 PTY/ConPTY 探针（含 `tui-unmeasured-probe` 的两条 leg 与 `tui-paste-probe`）、footer 帧检查全过，
   无 `SKIP:`
 - `npm run bench:report -- --check` → **PASS**（README 两个语种的实测块与当前树一致）
-- **CI**（发布提交 `c49ef0e`，run [39033900944](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39033900944)）
-  → **四条腿全 success**：`test (0.2.1-rc.2)` / `test (0.2.0-rc.2)` / `test (0.2.0-rc.1)` / `test-windows`。
-  默认腿与 `test-windows` 上的两条阻塞门（首启向导、发布产物冒烟）都是**实际执行并 success**，不是 skip；
-  `unmeasured` 探针在两条腿上也已转绿。
+- **CI** → **四条腿全 success**：`test (0.2.1-rc.2)` / `test (0.2.0-rc.2)` / `test (0.2.0-rc.1)` / `test-windows`。
+  默认腿与 `test-windows` 上的三道阻塞门（首启向导、粘贴、发布产物冒烟）都是**实际执行并 success**，不是
+  skip；`unmeasured` 探针在两条腿上也已转绿。具体的 run 号与提交写在 `docs/release.md` 的发版记录里——
+  这份说明随包发布，把 run 号钉进来只会在下一次改动里立刻过期。
 
 ## 兼容性
 
