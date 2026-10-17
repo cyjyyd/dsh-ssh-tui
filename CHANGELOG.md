@@ -10,6 +10,49 @@
 
 ---
 
+## 0.8.4-rc.1 — 2026-10-17（候选版，只上 `next`）
+
+发版说明：[`docs/release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)。
+**输入归属 + 发布安全门的候选版。** 与 0.8.3 相比**有 runtime 行为变化**（下列 Fixed）；
+本文件的"发布准备"提交本身没有再改 runtime。`latest` 仍为 `0.8.3`。
+
+### Fixed
+
+- **合并 read 丢键**：一次 read 里的多个键（两次方向键、`PgUp` 连按、改绑键 + 文本、`text\r`）此前只会被
+  整段匹配、失败即整段丢弃。现在 Reader 分帧、每个单元各判一次归属，一次 read 与多次 read 终态相同。
+- **Screen 的 read 边界**：关闭 Screen 的那个字符之后的同一单元剩余部分不再落到它背后的 Composer。
+- **Surface 编辑键归属**：`Home`/`End`/`Delete` 归 Surface，编辑**借来的字段**；无字段时消费掉。
+- **借用字段的终端光标**：绘制取正在绘制的字段的列号，而不是隐藏草稿的。
+- **非 BMP 字符输入崩溃**：输入 `🚀` / `𠮷` 曾抛 `RangeError`（按 UTF-16 长度判定"一段文本"导致自我递归）；
+  改为按**码点**判定，多字符单元仍逐码点重新判定。同一根因的借用字段 grapheme 编辑一并修复。
+- **跨 Owner 状态写入**：借用字段的退格/Delete/Ctrl+U/Ctrl+K/**粘贴**不再结束 Composer 的历史浏览、
+  不再覆盖它的 `historyDraft`；Surface 内 `Alt+f`/`Alt+F`/`Alt+/` 不再把 `/find ` 写进隐藏草稿。
+- **反馈行位置**：回执不再随消息长度/窗口宽度在底栏两行之间漂移，恒在身份行；状态行只留仪表。
+
+### Internal
+
+- `src/input-reader.ts`（新）与 `src/input-router.ts`（新）：`handleInputText` = Reader → Router → owner；
+  归属判定集中在 Router（`dispatchers 1` / `routers 1` / `deadScreenGate 0`）。
+- 共享执行体 `composerUnit` 经必要性审核后**保留**（`KEEP_SHARED_WITH_INVARIANTS`，S-1…S-6，AD-20 §19）；
+  **未做 executor split**。
+- Ctrl+L 的重绘归属经审核后保留双 Painter（`KEEP_DUAL`，AD-22 §10），证据 `tests/ctrl-l-repaint.test.mjs`。
+
+### Tests
+
+- 输入参考轨迹 **72 → 109 条**（只追加、0 条改写）；归属矩阵扩到 options question / filtering picker；
+  新增 `surface-state-isolation`、`unicode-input-safety`、`ctrl-l-repaint`、`borrowed-field-caret` 等专项。
+- `scripts/input-freeze-audit.mjs` 新增 `composer history` 写入类与 `historyGuards` 检查（注释剥离后判定）。
+
+### Release Hardening
+
+- **首次安装向导**成为 CI 阻塞门（默认腿 + `test-windows`）：真实 PTY/ConPTY、未配置 home、**括号粘贴
+  API Key**（掩码、原始字节不含密钥）、保存后无需按键返回工作区、二次启动不再进向导、resumed 首启保存。
+- **发布产物冒烟**（`scripts/artifact-smoke.mjs`）：`npm pack` → 包内清单 → 用 **tarball**（不是 `link:`）
+  装进仓库外的临时 home → 解析路径证明 → 在安装产物上跑向导与工作区探针。
+- **升级冒烟基础设施**（`scripts/upgrade-smoke.mjs`）：同版本互换会明确拒绝，真正的升级是 bump 后的必跑项。
+
+---
+
 ## 0.8.3 — 2026-10-13（`latest` + `next`）
 
 发版说明：[`docs/release-notes-0.8.3.md`](release-notes-0.8.3.md)。
