@@ -59,34 +59,62 @@ async function rowsOf(output) {
 }
 
 /**
+ * The composer's rule, and the glyph it puts in front of the draft.
+ *
+ * Both are read off the frame rather than hardcoded, because the prompt is not one
+ * character: the composer paints `❯ ` when it has colour and `> ` when it does not
+ * (`src/tui.ts`), and the first CI run of this probe failed on exactly that — the
+ * grid had `❯ pasted-single-line` and the parser was looking for `>`. The rule is
+ * the last row of the frame that is a box corner plus a horizontal line.
+ */
+function composerRule(rows) {
+  return rows.map((row, index) => [row, index])
+    .filter(([row]) => /^[╭┌+,]─{10,}/u.test(row.trimStart()))
+    .at(-1)?.[1]
+}
+
+/** The prompt glyph the composer is currently using (`❯`, `>`, or its ASCII fallback). */
+function promptOf(rows) {
+  const rule = composerRule(rows)
+  if (rule === undefined) return undefined
+  const first = rows[rule + 1]?.trimStart() ?? ''
+  const glyph = Array.from(first)[0]
+  if (glyph === undefined || glyph === '─') return undefined
+  return glyph
+}
+
+/**
  * The composer's own rows: below its rule, and only the prompt rows.
  *
  * Not "everything until the footer", because the footer is not one shape: a home
  * with a `/doctor` warning paints `⚠︎ … │ SSH … │ 空闲` where a clean one paints
- * `SSH …`, so a row-based boundary silently swallowed the status row into the
- * draft. The composer body is contiguous and every row of it starts with `>`.
+ * `SSH …`, so a row-based boundary silently swallowed the status row into the draft.
+ * The composer body is contiguous and every row of it starts with the prompt glyph.
  */
-function composerRows(rows) {
-  const rule = rows.map((row, index) => [row, index]).filter(([row]) => row.trimStart().startsWith('╭')).at(-1)?.[1]
-  if (rule === undefined) return []
+function composerRows(rows, prompt) {
+  const rule = composerRule(rows)
+  if (rule === undefined || prompt === undefined) return []
   const body = []
   for (let index = rule + 1; index < rows.length; index++) {
     const row = rows[index]
-    if (row.trimStart().startsWith('>')) { body.push(row); continue }
+    if (row.trimStart().startsWith(prompt)) { body.push(row); continue }
     if (row.trim() === '') continue
     break
   }
   return body
 }
 
-/** The draft, as text: the field's rows without the `>` prompt or the `│` rule. */
-function draftOf(rows) {
-  return composerRows(rows).map(row => row.replace(/^\s*[>│] ?/u, '')).join('\n').trim()
+/** The draft, as text: the field's rows without the prompt glyph. */
+function draftOf(rows, prompt) {
+  return composerRows(rows, prompt)
+    .map(row => row.trimStart().slice(prompt.length))
+    .join('\n')
+    .trim()
 }
 
 /** Only the field's prompt rows — a folded draft is exactly one of them. */
-function promptRows(rows) {
-  return composerRows(rows).filter(row => row.trimStart().startsWith('>'))
+function promptRows(rows, prompt) {
+  return composerRows(rows, prompt)
 }
 
 function fullClearIn(chunk) {
@@ -136,6 +164,8 @@ async function runProbe(argv) {
 
   const problems = []
   const check = (condition, message) => { if (!condition) problems.push(message) }
+  /** Set at boot from the frame itself: `❯` with colour, `>` without. */
+  let prompt
   const waitFor = async (predicate, timeoutMs, label) => {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
@@ -155,7 +185,7 @@ async function runProbe(argv) {
     //    has its own (which pastes into its field); say so instead of timing out on
     //    a frame this run was never going to paint.
     const wizardUp = onGrid(/安装向导|Setup \d\/9|选择提供商/u)
-    const composerUp = onGrid(/╭/u)
+    const composerUp = async () => promptOf(await rowsOf(output)) !== undefined
     await waitFor(async () => (await wizardUp()) || (await composerUp()), 90_000, 'the workspace composer or the first-run wizard')
     if (await wizardUp()) {
       console.log('SKIP: this home is unconfigured, so the wizard owns the keyboard')
@@ -166,14 +196,17 @@ async function runProbe(argv) {
     // the row that says a turn is idle so the paste is not racing the boot.
     await waitFor(onGrid(/空闲|idle/u), 60_000, 'the idle status row')
     let rows = await rowsOf(output)
-    check(draftOf(rows) === '', 'the probe needs an empty draft to start from')
+    // Calibrate the prompt glyph off the frame, then require an empty draft.
+    prompt = promptOf(rows)
+    check(prompt !== undefined, 'the composer paints a prompt glyph to calibrate against')
+    check(draftOf(rows, prompt) === '', 'the probe needs an empty draft to start from')
 
     // 1. A single-line paste lands in the composer.
     let mark = output.length
     term.write('\x1b[200~pasted-single-line\x1b[201~')
-    await waitFor(async () => draftOf(await rowsOf(output)).includes('pasted-single-line'), 15_000, 'the pasted line in the composer')
+    await waitFor(async () => draftOf(await rowsOf(output), prompt).includes('pasted-single-line'), 15_000, 'the pasted line in the composer')
     rows = await rowsOf(output)
-    check(draftOf(rows) === 'pasted-single-line', `the paste is the whole draft (${JSON.stringify(draftOf(rows))})`)
+    check(draftOf(rows, prompt) === 'pasted-single-line', `the paste is the whole draft (${JSON.stringify(draftOf(rows, prompt))})`)
     if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a paste must not clear the screen')
     check(rows.some(row => /空闲|idle/u.test(row)), 'a paste does not submit a turn')
 
@@ -186,15 +219,15 @@ async function runProbe(argv) {
     term.write('\x1b[200~first-line\nsecond-line\nthird-line\x1b[201~')
     await delay(1200)
     rows = await rowsOf(output)
-    check(draftOf(rows) !== '', 'the multi-line paste did not vanish')
-    check(promptRows(rows).length === 1, `a multi-line paste stays one composer row (${promptRows(rows).length})`)
+    check(draftOf(rows, prompt) !== '', 'the multi-line paste did not vanish')
+    check(promptRows(rows, prompt).length === 1, `a multi-line paste stays one composer row (${promptRows(rows, prompt).length})`)
     if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a multi-line paste must not clear the screen')
     check(rows.filter(row => /first-line/u.test(row)).length === 0, 'a pasted newline must not submit the draft (the text is not echoed as a turn)')
     check(rows.some(row => /空闲|idle/u.test(row)), 'the session is still idle after a multi-line paste')
 
     // 3. Ctrl+U clears the draft.
     term.write('\x15')
-    await waitFor(async () => draftOf(await rowsOf(output)) === '', 10_000, 'Ctrl+U to clear the draft')
+    await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U to clear the draft')
 
     // 4. A 4 kB paste is survived: one row, alive, no clear. The row is clipped to
     //    the terminal width, so the assertion is the shape, not the text.
@@ -202,12 +235,12 @@ async function runProbe(argv) {
     term.write(`\x1b[200~${'x'.repeat(4000)}\x1b[201~`)
     await delay(1500)
     rows = await rowsOf(output)
-    check(draftOf(rows).length > 0, 'the 4 kB paste reached the composer')
-    check(promptRows(rows).length === 1, `a 4 kB paste stays one composer row (${promptRows(rows).length})`)
+    check(draftOf(rows, prompt).length > 0, 'the 4 kB paste reached the composer')
+    check(promptRows(rows, prompt).length === 1, `a 4 kB paste stays one composer row (${promptRows(rows, prompt).length})`)
     if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a 4 kB paste must not clear the screen')
     check(exited === undefined, 'the TUI survived the 4 kB paste')
     term.write('\x15')
-    await waitFor(async () => draftOf(await rowsOf(output)) === '', 10_000, 'Ctrl+U after the big paste')
+    await waitFor(async () => draftOf(await rowsOf(output), prompt) === '', 10_000, 'Ctrl+U after the big paste')
 
     // 5. A paste behind a Screen: the Screen owns the keyboard, so nothing may
     //    reach the composer it is drawn over — and the Screen must stay open.
@@ -222,7 +255,7 @@ async function runProbe(argv) {
     if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a paste behind a Screen must not clear the screen')
     term.write('\x1b')
     await waitFor(onGrid(/输入 \/help/u), 20_000, 'the workspace back after Esc')
-    check(draftOf(await rowsOf(output)) === '', 'the paste behind the Screen never reached the composer')
+    check(draftOf(await rowsOf(output), prompt) === '', 'the paste behind the Screen never reached the composer')
 
     // 6. An escape-looking tail **inside** a paste is text, not an Esc: bracketed
     //    paste is one unit, and the unit boundary is what keeps `\x1bq` from closing
@@ -251,7 +284,7 @@ async function runProbe(argv) {
     if (!PTY_IS_CONPTY) check(!fullClearIn(since(mark)), 'a paste into the picker must not clear the screen')
     term.write('\x1b')
     await waitFor(onGrid(/输入 \/help/u), 20_000, 'the workspace back after the picker')
-    check(draftOf(await rowsOf(output)) === '', 'the picker paste never reached the composer')
+    check(draftOf(await rowsOf(output), prompt) === '', 'the picker paste never reached the composer')
 
     // 8. `/exit` hands the terminal back instead of leaving a shell with no prompt.
     term.write('/exit\r')
