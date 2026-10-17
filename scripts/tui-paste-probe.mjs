@@ -326,7 +326,17 @@ async function runProbe(argv) {
   } catch (error) {
     problems.push(String(error?.message ?? error))
   } finally {
-    if (exited === undefined && !keep) term.kill()
+    // Always close the pty, even after a clean `/exit`: on Windows the ConPTY handle
+    // can stay referenced after the child is gone, and a probe that printed OK but
+    // never returned held the CI job open for ten minutes (the spawn timeout caught
+    // it). Killing a pty whose child has exited is a no-op.
+    if (!keep) {
+      try {
+        term.kill()
+      } catch {
+        // already gone
+      }
+    }
   }
 
   if (problems.length > 0) {
@@ -359,4 +369,8 @@ const watchdog = setTimeout(() => {
 }, 240_000)
 watchdog.unref()
 
-process.exitCode = await runProbe(process.argv.slice(2))
+const code = await runProbe(process.argv.slice(2))
+process.exitCode = code
+// The belt to `term.kill()`'s braces: if any pty bookkeeping stays referenced, the
+// loop would never drain and the process would sit there after printing its verdict.
+setTimeout(() => process.exit(code), 100).unref()
