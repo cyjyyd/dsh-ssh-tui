@@ -2382,8 +2382,23 @@ export class SshTui {
    */
   private readonly reader = new InputReader({
     onRead: text => this.handleInputText(text),
-    onFrame: frame => this.consumeFrame(frame),
+    // A frame the Reader emits on its own (a released Escape, a paste tail) is
+    // *late*: the reader who was reading may have dismissed the layer that held it.
+    onFrame: frame => this.consumeReleasedFrame(frame),
   })
+  /**
+   * The owner that was reading when a sequence went on hold.
+   *
+   * `hold()` waits 60 ms for the rest of a sequence. The wizard can close inside that
+   * window, and the released frame then used to be delivered to whoever owns the
+   * screen *now* — the composer behind it. A held `ESC O` released as the literal `O`
+   * and typed into the draft the reader had been writing (F2). The release is
+   * delivered to the owner that held it; an adapter whose layer is gone refuses it
+   * itself (`handleScreenInput` returns when `screen === undefined`), so a dismissed
+   * Screen consumes instead of leaking. Capturing the owner — not a layer comparison —
+   * is also what keeps this out of the input-freeze audit's `ownerReads` count.
+   */
+  private heldOwner: Owner | undefined
   /**
    * The Router (AD-22, W-2): the one place a unit's owner is decided.
    *
@@ -12564,7 +12579,7 @@ export class SshTui {
       // to arrives whole: a split `ESC[<2;20` + `;10M` used to reach the wizard as
       // text (`[<2;20`) and edit the field. Complete shapes dispatch unchanged, and
       // a lone Esc is an `escape` unit, not a sequence, so it is never delayed.
-      if (kind === 'sequence' && !this.isSequenceShape(combined) && this.reader.hold(combined)) return
+      if (kind === 'sequence' && !this.isSequenceShape(combined) && this.holdInput(combined, 'screen')) return
       this.ownerScreen(combined, moved)
       return
     }
@@ -12592,7 +12607,7 @@ export class SshTui {
     }
     // A read that could still grow into a sequence is the Reader's to hold, and the
     // window is the same 60 ms it always was (AD-21: moved, not changed).
-    if (this.reader.hold(combined)) return
+    if (this.holdInput(combined, owner)) return
     if (combined.startsWith('\x1b[') || combined.startsWith('\x1bO')) {
       // Unknown escape sequence (including SS3 function keys) — consume
       // without side effects.
@@ -12650,6 +12665,37 @@ export class SshTui {
       && (unit === '\x1b[A' || unit === '\x1b[B')
       && view.composerEmpty
       && this.collapsibleRows().length > 0
+  }
+
+  /**
+   * Hold a sequence that could still grow, remembering which owner was reading.
+   * @param unit - the read being held.
+   * @param owner - the owner the Router named for it.
+   * @returns true when it was held (the caller stops there).
+   */
+  private holdInput(unit: string, owner: Owner): boolean {
+    if (!this.reader.hold(unit)) return false
+    this.heldOwner = owner
+    return true
+  }
+
+  /**
+   * A frame the Reader produced on its own, delivered back to the owner that held it.
+   *
+   * The Reader's holds release a `literal` or an `escape`; a paste tail releases a
+   * `paste` and never passes through `hold()`, so it keeps the ordinary path. The
+   * owner is the one from the read that started the hold: if its layer is gone, its
+   * adapter refuses the unit (a Screen's `handleScreenInput` returns on no Screen),
+   * which is "consume, do not reinterpret as whoever is on screen now".
+   */
+  private consumeReleasedFrame(frame: InputFrame): void {
+    const owner = this.heldOwner
+    this.heldOwner = undefined
+    if (owner === undefined || (frame.kind !== 'literal' && frame.kind !== 'escape')) {
+      this.consumeFrame(frame)
+      return
+    }
+    this.dispatchWith(owner, frame.kind === 'escape' ? '\x1b' : frame.text)
   }
 
   /**
@@ -13450,6 +13496,13 @@ export class SshTui {
       }
       return
     }
+    // Anything left that starts with Esc is protocol, not text: `ESC[Z` (Shift+Tab),
+    // a modified arrow (`ESC[1;5A`), a function key, an Alt chord. The wizard has no
+    // meaning for them, and falling through typed their payload into the field
+    // (`[Z`, `[1;5A`). A paste never takes this path — the Reader frames it as a
+    // paste and `pasteIntoScreen` handles it — so consuming here cannot swallow
+    // pasted data.
+    if (combined.startsWith('\x1b')) return
     this.handleOnboardingChar(combined)
   }
 

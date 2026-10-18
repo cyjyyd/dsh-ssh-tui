@@ -517,15 +517,30 @@ test('a left click and its release are consumed too', () => {
   assert.equal(tui.onboarding.fieldCursor, 0)
 })
 
-test('a mouse report split across two reads is still one report', async () => {
+test('a mouse report split across two reads is still one report', () => {
   const { tui } = setup('id')
-  // The Reader holds a read that could still grow (60 ms), so the halves the pty
-  // delivered are put back together before the wizard sees anything.
+  // Two independent `handleData` calls, no sleep: the Reader holds a read that could
+  // still grow, and the next read completes it before the timer can fire. Deterministic
+  // — a `tick(20)` here only made the case depend on the machine being faster than 60 ms.
   tui.handleData(Buffer.from('\u001b[<2;20'))
-  await tick(30)
   tui.handleData(Buffer.from(';10M'))
   assert.equal(tui.onboarding.field, '')
   assert.equal(tui.onboarding.fieldCursor, 0)
+})
+
+test('a half report that never completes is dropped, not typed', async () => {
+  // The other side of the hold: when the rest never comes, the 60 ms window expires.
+  // `releaseHold` consumes an unfinished CSI instead of typing it, and nothing reaches
+  // the field or the composer behind the wizard.
+  const { tui } = setup('id')
+  tui.input = 'draft'
+  tui.cursor = 5
+  tui.handleData(Buffer.from('\u001b[<2;20'))
+  assert.equal(tui.onboarding.field, '', 'nothing is typed while the hold is open')
+  await tick(140)
+  assert.equal(tui.onboarding.field, '')
+  assert.equal(tui.input, 'draft')
+  assert.equal(tui.cursor, 5)
 })
 
 test('a bracketed paste still lands after a mouse report', () => {
@@ -537,14 +552,66 @@ test('a bracketed paste still lands after a mouse report', () => {
   assert.equal(tui.onboarding.field, 'sk-pasted-value')
 })
 
-test('a sequence split across reads is held at a Screen too, never typed', async () => {
+test('a sequence split across reads is held at a Screen too, never typed', () => {
   // Same rule as the mouse report, for every sequence: the Screen branch used to
   // deliver a half-arrived `ESC[` as a key, and the wizard typed the `[`. The ladder
-  // holds it now, so the arrow arrives whole.
+  // holds it now, so the arrow arrives whole. No sleep: two calls, two reads.
   const { tui } = setup('provider', { providerCursor: 0 })
   tui.handleData(Buffer.from('\u001b['))
-  await tick(20)
   tui.handleData(Buffer.from('B'))
   assert.equal(tui.onboarding.providerCursor, 1, 'the arrow moved the highlight')
   assert.equal(tui.onboarding.field, '', 'and no partial sequence reached the field')
+})
+
+// ── F1: a control sequence is not text ──────────────────────────────────────
+
+test('a complete sequence the wizard does not use is consumed, not typed', () => {
+  // Shift+Tab, a modified arrow, the kitty copy key: each is a complete CSI with no
+  // meaning at any wizard step. They used to fall through to the field and type their
+  // payload (`[Z`, `[1;5A`) — a field edited by a keypress the reader could not see.
+  for (const input of ['\u001b[Z', '\u001b[1;5A', '\u001b[99;6u']) {
+    const { tui } = setup('id')
+    tui.input = 'draft'
+    tui.cursor = 5
+    tui.handleData(Buffer.from(input))
+    assert.equal(tui.onboarding.field, '', `${JSON.stringify(input)} must not be typed`)
+    assert.equal(tui.onboarding.fieldCursor, 0)
+    assert.equal(tui.input, 'draft', 'and it is not the composer’s either')
+    assert.equal(tui.onboarding.step, 'id')
+  }
+})
+
+test('an unfinished sequence is consumed when its window expires', async () => {
+  const { tui } = setup('id')
+  tui.handleData(Buffer.from('\u001b[9~'))
+  await tick(140)
+  assert.equal(tui.onboarding.field, '', 'a sequence nobody defines is dropped, not typed')
+})
+
+test('text and emoji still reach the field', () => {
+  const { tui } = setup('id')
+  tui.handleData(Buffer.from('héllo 🚀'))
+  assert.equal(tui.onboarding.field, 'héllo 🚀')
+})
+
+// ── F2: a held sequence does not follow the reader out of the Screen ────────
+
+test('a held sequence is dropped when the wizard closes before it completes', async () => {
+  // `ESC O` is held for 60 ms and released as the literal `O`. If the wizard is gone by
+  // then, that `O` belongs to a screen that no longer exists: it used to be typed into
+  // the composer draft the reader had been writing behind the wizard.
+  for (const held of ['\u001bO', '\u001b[', '\u001b[1;5']) {
+    const { tui } = setup('id')
+    tui.input = 'draft'
+    tui.cursor = 5
+    const rows = tui.rows.length
+    tui.handleData(Buffer.from(held))
+    tui.cancelOnboarding()
+    await tick(140)
+    assert.equal(tui.input, 'draft', `${JSON.stringify(held)} must not reach the composer`)
+    assert.equal(tui.cursor, 5)
+    assert.equal(tui.screen, undefined, 'the wizard is gone')
+    assert.equal(tui.rows.length, rows, 'and no row was written by the release')
+    assert.equal(tui.history.length, 0)
+  }
 })
