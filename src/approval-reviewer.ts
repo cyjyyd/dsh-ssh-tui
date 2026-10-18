@@ -379,7 +379,10 @@ export async function consumeReviewStream(
   try {
     iterator = stream[Symbol.asyncIterator]()
   } catch (error) {
-    return { attempt: collector.attempt(), failure: 'threw', errorCategory: describeReviewError(error) }
+    const stopped = reviewStopReason(options.signal, options.deadlineAt, now)
+    return stopped === undefined
+      ? { attempt: collector.attempt(), failure: 'threw', errorCategory: describeReviewError(error) }
+      : { attempt: collector.attempt(), failure: stopped }
   }
   let completed = false
   try {

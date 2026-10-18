@@ -9513,7 +9513,7 @@ export class SshTui {
         ? rawFinish
         : 'other'
     const output = attempt?.usage?.outputTokens
-    const outputText = typeof output === 'number' && Number.isFinite(output) ? String(output) : 'unknown'
+    const outputText = typeof output === 'number' && Number.isFinite(output) && output >= 0 ? String(output) : 'unknown'
     const common = {
       provider,
       model,
