@@ -11,6 +11,8 @@
  * than `yes` is never approved, whatever the model claims.
  */
 
+import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+
 export interface ReviewInput {
   userText: string
   segments: string[]
@@ -120,6 +122,129 @@ export function buildReviewUserMessage(input: ReviewInput): string {
     '[输出要求] 必须给出最终可见回复；该回复只能是一行 JSON，思考过程不算结论。',
   )
   return lines.join('\n')
+}
+
+/**
+ * The output budget of one review attempt, and the ceiling on the whole review.
+ *
+ * `400` was chosen when the reviewer was assumed to answer with one short line. A
+ * reasoning model spends that line's budget on thinking: the provider reports
+ * `max-tokens`, no final text arrives, and auto-approval silently falls back to a
+ * human (or denies when nobody is attached). These numbers are the contract:
+ *
+ *   - the first attempt is generous enough for a paragraph of reasoning plus the
+ *     JSON line, small enough that a stuck reviewer costs little;
+ *   - one escalation, capped, is allowed when the provider says it truncated;
+ *   - never more than two model calls, never an unbounded retry;
+ *   - the whole review (both attempts) shares one deadline. The old 15 s per call
+ *     would have been 30 s of a stalled turn with two attempts, so the total is
+ *     20 s: still a hard stop, still close to what a single slow call used to cost.
+ *
+ * The budget is a *request*, not a model limit: `maxTokens` is not the model's
+ * absolute output ceiling, and a provider may stop earlier on its own.
+ */
+export const REVIEW_FIRST_MAX_TOKENS = 2_048
+/** The one escalation, used only after an explicit `max-tokens` truncation. */
+export const REVIEW_RETRY_MAX_TOKENS = 8_192
+/** The whole review's hard deadline, shared by every attempt. */
+export const REVIEW_DEADLINE_MS = 20_000
+/** At most two model calls per approval request. */
+export const REVIEW_BUDGETS: readonly number[] = [REVIEW_FIRST_MAX_TOKENS, REVIEW_RETRY_MAX_TOKENS]
+
+/** Why one attempt produced no verdict. Each maps to a different diagnostic. */
+export type ReviewFailure =
+  | 'aborted'      // the request signal or the deadline ended the stream
+  | 'provider'     // the stream finished with `error`
+  | 'threw'        // the adapter threw (bad key, quota, unsupported option)
+  | 'truncated'    // `max-tokens`: the budget ran out
+  | 'incomplete'   // a finish reason that is not a plain `stop`
+  | 'empty'        // `stop` with no final text
+  | 'unparsed'     // final text that is not a usable verdict
+
+/** What one model call produced, with what the stream said about it. */
+export interface ReviewAttempt {
+  readonly text: string
+  readonly sawReasoning: boolean
+  readonly finish: FinishReason | undefined
+  readonly usage: TokenUsage | undefined
+}
+
+/**
+ * Fold one `llm.stream()` into an {@link ReviewAttempt}.
+ *
+ * Reasoning deltas are counted, never collected: the classifier reads the final
+ * visible reply, and keeping thinking around would only invite a later round to
+ * read a JSON object out of it. `finish` is what decides whether the reply is
+ * trustworthy — a reply cut off by `max-tokens` is not a verdict even when it
+ * happens to end in `}`.
+ */
+export class ReviewCollector {
+  private readonly parts: string[] = []
+  private reasoning = false
+  private finishReason: FinishReason | undefined
+  private lastUsage: TokenUsage | undefined
+
+  push(chunk: StreamChunk): void {
+    switch (chunk.type) {
+      case 'text-delta':
+        if (chunk.text !== '') this.parts.push(chunk.text)
+        return
+      case 'reasoning-delta':
+        if (chunk.text !== '') this.reasoning = true
+        return
+      case 'usage':
+        this.lastUsage = chunk.usage
+        return
+      case 'finish':
+        this.finishReason = chunk.reason
+        return
+      default:
+        return
+    }
+  }
+
+  attempt(): ReviewAttempt {
+    return {
+      text: this.parts.join(''),
+      sawReasoning: this.reasoning,
+      finish: this.finishReason,
+      usage: this.lastUsage,
+    }
+  }
+}
+
+/**
+ * The one place a review attempt becomes a verdict (or a classified failure).
+ *
+ * Only a `stop` finish with parseable final text can approve. `max-tokens`,
+ * `error`, `aborted`, `tool-calls`, a provider-specific kind, an empty reply and
+ * unparseable text all fail closed — the caller then either escalates the budget
+ * (`truncated`) or asks a human / denies.
+ */
+export function reviewOutcome(attempt: ReviewAttempt): { verdict?: ReviewVerdict; failure?: ReviewFailure } {
+  const kind = attempt.finish?.kind
+  if (kind === undefined) return { failure: 'incomplete' }
+  if (kind === 'aborted') return { failure: 'aborted' }
+  if (kind === 'error') return { failure: 'provider' }
+  if (kind === 'max-tokens') return { failure: 'truncated' }
+  if (kind !== 'stop') return { failure: 'incomplete' }
+  if (attempt.text.trim() === '') return { failure: 'empty' }
+  const verdict = parseReviewOutput(attempt.text)
+  return verdict === undefined ? { failure: 'unparsed' } : { verdict }
+}
+
+/**
+ * Whether one explicit truncation earns the single escalation.
+ *
+ * Deliberately narrow: only `max-tokens`, only while the whole review's deadline
+ * has not passed, only with budget headroom left in {@link REVIEW_BUDGETS}. A
+ * verdict of `rejected`, a provider error, an aborted request or an empty reply
+ * never retries — a larger budget is not a second opinion.
+ */
+export function shouldRetryReview(attempt: ReviewAttempt, attempts: number, deadlineAt: number): boolean {
+  if (attempt.finish?.kind !== 'max-tokens') return false
+  if (attempts >= REVIEW_BUDGETS.length) return false
+  return Date.now() < deadlineAt
 }
 
 /**

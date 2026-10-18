@@ -80,7 +80,19 @@ import {
   type ScreenState,
 } from './screen.js'
 import { screenRuntimeStrip } from './footer-budget.js'
-import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
+import {
+  buildReviewUserMessage,
+  ReviewCollector,
+  reviewOutcome,
+  reviewSystemPrompt,
+  REVIEW_BUDGETS,
+  REVIEW_DEADLINE_MS,
+  REVIEW_FIRST_MAX_TOKENS,
+  shouldRetryReview,
+  type ReviewAttempt,
+  type ReviewFailure,
+  type ReviewVerdict,
+} from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import {
   catalogContextWindow,
@@ -1700,7 +1712,10 @@ export class SshTui {
   private autoApprovalMode: AutoApprovalMode = 'off'
   private autoAllowedCount = 0
   private autoDeniedCount = 0
+  /** Approval requests routed to the model reviewer (one row in /approval status). */
   private aiReviewCount = 0
+  /** Model calls the reviewer made: a truncated first attempt costs a second one. */
+  private aiReviewCallCount = 0
   private cacheHitCount = 0
   /** Verdicts this TUI already reviewed, reusable for a bounded time. */
   private readonly approvalCache = new ApprovalVerdictCache()
@@ -9319,9 +9334,7 @@ export class SshTui {
       }
     }
     const userText = this.latestUserAuthorizationText(request.agent)
-    const signals = [request.signal, AbortSignal.timeout(15_000)].filter(s => s !== undefined)
-    const signal = signals.length > 0 ? AbortSignal.any(signals) : undefined
-    const options: GenerateOptions = {
+    const base: GenerateOptions = {
       provider,
       model,
       messages: [createUserMessage({
@@ -9337,47 +9350,116 @@ export class SshTui {
         source: { kind: TUI_SOURCE_KIND },
       })],
       system: reviewSystemPrompt(getLocale()),
-      maxTokens: 400,
+      // `off` is the cheapest request, but it is a *request*: an adapter may ignore it
+      // or a model may reason anyway. The budget and the finish reason are what make
+      // that case safe, not this field.
       reasoningEffort: ReasoningEffortId('off'),
-      signal,
     }
+    // One review, one deadline: the attempts share it, and a retry never gets a fresh
+    // clock. Nothing polls — each attempt's signal is a timeout, and there are at most
+    // two of them.
+    const deadlineAt = Date.now() + REVIEW_DEADLINE_MS
     this.aiReviewCount += 1
-    let text = ''
-    try {
-      for await (const chunk of llm.stream(options)) {
-        // Classifier reads the final assistant reply only. Reasoning/thinking
-        // is ignored even when it happens to contain JSON.
-        if (chunk.type === 'text-delta') text += chunk.text
+    let attempts = 0
+    let last: ReviewAttempt | undefined
+    let lastFailure: ReviewFailure | undefined
+    let lastError: string | undefined
+    let lastBudget = REVIEW_FIRST_MAX_TOKENS
+    for (const [index, budget] of REVIEW_BUDGETS.entries()) {
+      const remaining = deadlineAt - Date.now()
+      if (remaining <= 0 || request.signal?.aborted === true) {
+        lastFailure ??= 'aborted'
+        break
       }
-    } catch (error: unknown) {
-      this.pushRow(represent('approval-warning', {
-        kind: 'system',
-        text: t('approval.reviewFailed', { error: errorChain(error) }),
-      }))
-      this.markDirty()
-      return undefined
+      if (index > 0) {
+        // Only announce the escalation once it is actually going to happen: a
+        // deadline that expired mid-stream must not promise a second call.
+        this.pushRow(represent('approval-warning', {
+          kind: 'system',
+          text: t('approval.reviewRetry', {
+            from: String(REVIEW_BUDGETS[index - 1] ?? REVIEW_FIRST_MAX_TOKENS),
+            to: String(budget),
+          }),
+        }))
+        this.markDirty()
+      }
+      lastBudget = budget
+      const deadline = AbortSignal.timeout(remaining)
+      const signal = request.signal === undefined ? deadline : AbortSignal.any([request.signal, deadline])
+      const collector = new ReviewCollector()
+      attempts += 1
+      this.aiReviewCallCount += 1
+      try {
+        for await (const chunk of llm.stream({ ...base, maxTokens: budget, signal })) collector.push(chunk)
+      } catch (error: unknown) {
+        // An adapter error is not a budget problem: a bad key, an exhausted quota or an
+        // option the route does not support will not improve with a second attempt.
+        // A signal-driven abort is not a provider failure either — it means the
+        // deadline (or the user) ended the review, which is also never retried.
+        lastError = errorChain(error)
+        const name = error instanceof Error ? error.name : ''
+        lastFailure = name === 'AbortError' || name === 'TimeoutError' ? 'aborted' : 'threw'
+        break
+      }
+      const attempt = collector.attempt()
+      last = attempt
+      const outcome = reviewOutcome(attempt)
+      if (outcome.verdict !== undefined) {
+        this.pushRow(represent('approval-warning', {
+          kind: 'system',
+          text: t('approval.reviewRow', {
+            verdict: outcome.verdict.approved ? t('approval.reviewApproved') : t('approval.reviewRejected'),
+            risk: outcome.verdict.risk,
+            authorization: outcome.verdict.authorization,
+            reason: outcome.verdict.reason,
+          }),
+        }))
+        this.markDirty()
+        return outcome.verdict
+      }
+      lastFailure = outcome.failure
+      // A cancelled request and a broken stream both land in `aborted`, which the
+      // policy never retries; only an explicit truncation is worth a second call.
+      if (!shouldRetryReview(attempt, attempts, deadlineAt)) break
     }
-    const verdict = parseReviewOutput(text)
-    if (verdict === undefined) {
-      const preview = text.trim() === '' ? t('approval.reviewNoReply') : text.trim()
-      this.pushRow(represent('approval-warning', {
-        kind: 'system',
-        text: t('approval.reviewUnparsed', { output: preview.slice(0, 160) }),
-      }))
-      this.markDirty()
-      return undefined
-    }
-    this.pushRow(represent('approval-warning', {
-      kind: 'system',
-      text: t('approval.reviewRow', {
-        verdict: verdict.approved ? t('approval.reviewApproved') : t('approval.reviewRejected'),
-        risk: verdict.risk,
-        authorization: verdict.authorization,
-        reason: verdict.reason,
-      }),
-    }))
+    this.reportReviewFailure(lastFailure, last, attempts, lastBudget, lastError)
+    return undefined
+  }
+
+  /**
+   * Say why a review produced no verdict, without the reasoning or the material.
+   *
+   * The reader has to be able to tell "the model said no" from "the model never got
+   * to answer", because the two need different actions: a bigger budget is worth
+   * trying, a provider error is not, and an empty reply means the route cannot do
+   * this job at all.
+   */
+  private reportReviewFailure(
+    failure: ReviewFailure | undefined,
+    attempt: ReviewAttempt | undefined,
+    attempts: number,
+    budget: number,
+    error: string | undefined,
+  ): void {
+    const finish = attempt?.finish?.kind ?? 'none'
+    const text = (() => {
+      if (failure === 'unparsed') {
+        return t('approval.reviewUnparsed', { output: (attempt?.text ?? '').trim().slice(0, 160) })
+      }
+      if (failure === 'threw') return t('approval.reviewFailed', { error: error ?? 'unknown' })
+      if (failure === 'aborted') return t('approval.reviewAborted', { attempts: String(attempts) })
+      if (failure === 'truncated') {
+        return t('approval.reviewBudget', { budget: String(budget), finish, attempts: String(attempts) })
+      }
+      if (failure === 'empty') {
+        return attempt?.sawReasoning === true
+          ? t('approval.reviewReasoningOnly', { attempts: String(attempts) })
+          : t('approval.reviewNoReply')
+      }
+      return t('approval.reviewFinished', { finish, attempts: String(attempts) })
+    })()
+    this.pushRow(represent('approval-warning', { kind: 'system', text }))
     this.markDirty()
-    return verdict
   }
 
   private recordAutoApproval(
@@ -15004,6 +15086,7 @@ export class SshTui {
                 allowed: this.autoAllowedCount,
                 denied: this.autoDeniedCount,
                 reviewed: this.aiReviewCount,
+                calls: this.aiReviewCallCount,
                 cacheHits: this.cacheHitCount,
                 cached: this.approvalCache.size,
               })

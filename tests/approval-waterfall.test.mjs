@@ -121,6 +121,8 @@ test('auto mode asks the reviewer for unrecognized shapes and can deny', async (
         return {
           stream: async function* () {
             for (const chunk of chunks) yield chunk
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -145,6 +147,8 @@ test('auto mode can allow an unrecognized shape after a low-risk review', async 
         return {
           stream: async function* () {
             yield { type: 'text-delta', text: '{"risk":"low","authorization":"yes","decision":"approved","reason":"项目内构建"}' }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -164,6 +168,8 @@ test('auto mode can allow npm publish after the reviewer sees user authorization
         return {
           stream: async function* () {
             yield { type: 'text-delta', text: '{"risk":"medium","authorization":"yes","decision":"approved","reason":"用户要求发版"}' }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -202,6 +208,8 @@ test('reviewer JSON in reasoning-delta is ignored; only the final reply counts',
           stream: async function* () {
             yield { type: 'reasoning-delta', text: '{"risk":"low","authorization":"yes","decision":"approved","reason":"思考通道里的JSON不算"}' }
             yield { type: 'text-delta', text: '{"risk":"medium","authorization":"yes","decision":"rejected","reason":"最终回复拒绝"}' }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -224,6 +232,8 @@ test('reasoning-only reviewer output is treated as no final reply', async () => 
         return {
           stream: async function* () {
             yield { type: 'reasoning-delta', text: '{"risk":"low","authorization":"yes","decision":"approved","reason":"只在思考里"}' }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -234,8 +244,9 @@ test('reasoning-only reviewer output is treated as no final reply', async () => 
   const { tui, agent } = approvalTui(ctx)
   const pending = decide(tui, bashCall(tui, agent, 'c-reason-only', 'python deploy.py'))
   await new Promise(resolve => setTimeout(resolve, 20))
-  const card = String(tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('无可用结论'))?.text ?? '')
-  assert.match(card, /未给出最终回复/)
+  const card = String(tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('自动审批复核'))?.text ?? '')
+  assert.match(card, /只产生了思考/)
+  assert.match(card, /没有最终回复/)
   assert.doesNotMatch(card, /只在思考里/)
   assert.equal(tui.dialog?.kind, 'confirm')
   tui.handleChar('n')
@@ -249,6 +260,8 @@ test('unparsed reviewer output leaves a card then asks', async () => {
         return {
           stream: async function* () {
             yield { type: 'text-delta', text: 'not-json' }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
@@ -362,6 +375,8 @@ function reviewerTui(verdictJson, counters = { reviews: 0 }) {
           stream: async function* () {
             counters.reviews += 1
             yield { type: 'text-delta', text: verdictJson }
+            yield { type: 'usage', usage: { inputTokens: 32, outputTokens: 16 } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
           },
         }
       }
