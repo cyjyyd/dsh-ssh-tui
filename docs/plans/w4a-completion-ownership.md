@@ -68,6 +68,34 @@ different notion of "empty" than the Router does.
 screenKind, surfaceKind, surfaceHasField, composerEmpty, workspaceCards
 ```
 
+### 1.3b A Router owner is not always an executor (measured)
+
+`route()` computes an owner for every unit, but not every unit reaches that
+owner's adapter. The ladder is: Screen first (`ownerScreen`, before anything
+else), then the keymap/Alt branches, then `isSequenceShape(unit)` →
+`dispatchWith(owner)`, then `reader.hold(unit)`, then the unknown-CSI return
+(`tui.ts:12553-12595`). A complete CSI that is not one of the known shapes is
+therefore **consumed inside `route()`** — the computed owner is never asked.
+
+`ESC[Z` (Shift+Tab) is exactly that case, measured:
+
+| Layer up | Router says | Who actually sees it | Where it is consumed |
+|---|---|---|---|
+| Screen | `screen` | `ownerScreen` → `handleScreenInput` | the Screen's own handler; no branch matches, nothing happens |
+| Surface | `surface` | **nobody** — `isSequenceShape('\x1b[Z')` is false, `hold()` is false | `route()`'s `startsWith('\x1b[')` return (`tui.ts:12590-12595`) |
+| none, draft non-empty | `composer` | **nobody** | the same return |
+| none, empty draft + cards | `workspace` | **nobody** | the same return |
+
+Consequences the matrix and the tests must respect:
+
+- the key meaning is "nothing happens" in every context, and it stays that way;
+- the *path* is not "the adapter ignores it" — for Surface/Composer/Workspace no
+  adapter runs at all;
+- any future **sequence-shaped** completion key would be swallowed by that same
+  return unless it is added to `isSequenceShape` **and** given a matrix row. W-4B
+  adds none: Tab (a control byte) and the arrows (known shapes) are the only
+  completion keys.
+
 ### 1.4 What the tests cover
 
 | Area | Covered? | Where |
@@ -105,7 +133,7 @@ the gap W-4A exists to close.
 | B14 | Multi-line paste | folded into one row + `输入已折叠`; the list is computed from the raw `input` (newlines included) → no matches | `tui.ts:12976` |
 | B15 | `/clear`, session switch, `/model` | `input` changes → the list is rebuilt on the next paint; index clamped then | `tui.ts:6482` |
 | B16 | Surface or Screen opens | list is not painted (`dialog === undefined` gate) but `commandSuggestions` keeps its old value until the next paint | `tui.ts:6482` |
-| B17 | Shift+Tab | **no handler anywhere**: not in `KeyAction` (`keymap.ts:14`), not in `isSequenceShape` (`tui.ts:12655`), not in `composerUnit`. `ESC[Z` frames as a complete CSI key and is then ignored | `input-reader.read('\x1b[Z')` measured; `tui.ts:12841` has no case |
+| B17 | Shift+Tab | **no handler anywhere**: not in `KeyAction` (`keymap.ts:14`), not in `isSequenceShape` (`tui.ts:12655`), not in `composerUnit`. `ESC[Z` frames as a complete CSI and is consumed by `route()`'s unknown-CSI return before any owner adapter runs — except with a Screen up, where it is delivered and ignored (§1.3b) | `input-reader.read('\x1b[Z')` measured; `tui.ts:12590-12595` |
 | B18 | line mode | `paint()` does not run, so the list never exists; Tab inserts spaces | inferred (`lineMode` path) |
 
 ### 2.1 What this design has to account for
@@ -171,7 +199,7 @@ round.
 draft (`tui.ts:6482`). Measured in-process with `captureFrame`: 12 painted rows
 before Esc → array cleared to 0 → **12 painted rows again on the next frame, array
 back to 27**. So for the reader Esc is a no-op on the list. W-4B's persistent
-`dismissed` flag is therefore an **intentional observable behaviour change** (the
+dismissal (`dismissedFor`) is therefore an **intentional observable behaviour change** (the
 key starts doing what it looks like it does), not a refactor with identical
 behaviour; it gets before/after tests (§8.2 P6, §8.3 N6) and a line in the W-4B
 round's notes.
@@ -193,10 +221,10 @@ Composer adapter owns and the painter reads:
 ```ts
 // src/completion.ts (new, pure, no I/O)
 export interface CompletionState {
-  readonly query: string        // the draft the items were built for
+  readonly query: string              // the draft the items were built for
   readonly items: readonly CommandSuggestion[]
   readonly index: number
-  readonly dismissed: boolean   // Esc, until the draft changes again
+  readonly dismissedFor?: string      // the exact draft an Esc/Tab dismissed
 }
 export function completionFor(query, hostCommands, locale, dialogOpen): CompletionState
 export function moveCompletion(state, delta): CompletionState
@@ -267,7 +295,10 @@ should keep answering *which layer*, not *which widget inside the layer*.
 
 ## 4. Completion state machine
 
-States: `hidden`, `listed`, `dismissed`.
+States: `hidden`, `listed`, `dismissed`. `dismissed` carries the draft it applies
+to (`dismissedFor: string | undefined`), because a dismissal must survive the
+draft change that *caused* it — Tab rewrites the draft and dismisses in the same
+unit — and must not survive the next one the reader makes.
 
 ```
                  draft starts with '/' and items > 0
@@ -290,17 +321,20 @@ Rules:
   line mode never paints (`writeLineMode` appends to the log) — a completion state
   there would have no renderer and no dismissal path, so it must not exist at all
   (§6, the line-mode row, and P13).
-- **R2 (leave)** any draft mutation recomputes `query`; if it differs, `dismissed`
-  resets to `false` and the list is `listed` again (a new `/` line is a new
-  question).
+- **R2 (leave)** the state is `dismissed` exactly while `dismissedFor === draft`.
+  A draft mutation therefore re-lists the new draft (`/` again is a new question),
+  except the mutation an accept performs, which sets `dismissedFor` to the text it
+  just wrote (R5) — so Tab's own rewrite does not resurrect the list it accepted.
 - **R3 (index)** `index` is clamped into `[0, items.length - 1]` **at derivation**,
   not at paint. A move that would leave the range is a no-op (no wrap: the
   existing list does not wrap, and changing that is not this round's business).
-- **R4 (Esc)** `dismissed = true` for the current `query`; Esc does not reach the
-  agent-cancel branch while the list is listed (same precedence as today, but the
-  scroll/focus branches stay *above* it — B11 is preserved).
+- **R4 (Esc)** `dismissedFor = draft`; Esc does not reach the agent-cancel branch
+  while the list is listed (same precedence as today, but the scroll/focus
+  branches stay *above* it — B11 is preserved).
 - **R5 (accept, Tab)** replace the draft with `/name ` (trailing space), put the
-  caret at the end, `dismissed = true`. No submit.
+  caret at the end, and set `dismissedFor` to **that new text**. No submit. (Today
+  the list happens to stay away because the trailing space matches nothing; the
+  marker makes it a rule rather than a coincidence.)
 - **R6 (accept, Enter)** Enter **submits** the draft. When the list is `listed`
   and the highlighted name is a byte-for-byte extension of the typed prefix (after
   the `/`), Enter replaces the draft with `/name` first — the existing guard,
@@ -354,47 +388,92 @@ Invariants W-4B must keep and test:
 
 ### 5.3 With paint
 
-- Paint reads `completion` and `pickerWindowStart`; it writes **nothing**.
+- Paint reads **`this.completion.state`** — a materialized field — and
+  `pickerWindowStart`. It does not derive, does not query the host service, and
+  does not initialize the state: a frame is never the first thing that asks for
+  commands. Materialization happens at the two boundaries in §5.4, neither of
+  which is paint.
 - The 12-row window and the `↑ 还有`/`↓ 还有` markers stay exactly as painted
   today (`tui.ts:6487-6505`); the only change is where the array comes from.
 - `captureFrame()` stays the test seam for the window shape.
 
-### 5.4 Derivation and invalidation contract (what W-4B implements)
+### 5.4 Who materializes the state, and when (what W-4B implements)
 
-The state is not a cache with a timeout; it is a **keyed derivation**. One small
-holder in the TUI:
+The state is a **keyed derivation**, and this section answers the question the
+previous revision left open: *who is allowed to run it*. Exactly two places, and
+paint is not one of them.
 
 ```ts
 interface CompletionCache {
   key: { draft: string; locale: Locale; agentId: string; revision: number; host: boolean }
-  state: CompletionState
+  state: CompletionState          // what paint and the adapters read
 }
 ```
 
-`completion()` reads `getLocale()` (O(1), `i18n/index.ts:74`), the current draft,
-the session id, `revision`, and whether `ctx.get('commands')` exists; it compares
-those five and recomputes only when one differs. Paint calls `completion()` and
-renders it; it never assigns.
+**1. The read boundary.** `handleInputText` materializes before each unit and once
+after the read:
 
-A host call that throws must not take the frame down: the derivation catches it,
-falls back to the local catalog for that key, and leaves `revision` unchanged (the
-next `commands/change` retries). That is one `try`/`catch` and one test (`list()`
+```ts
+for (const frame of this.reader.read(combined)) {
+  if (this.screenDismissals !== dismissals) return
+  this.refreshCompletion()
+  this.consumeFrame(frame)
+}
+this.refreshCompletion()
+```
+
+That is what makes the **same raw read** work without a paint: `/`, ↓, Tab, Enter
+sent as one pipe write are four units, and each one sees the state the previous
+one produced. The refresh is a five-field key comparison (strings; the draft
+compare is O(len), the rest O(1)); `commands.list()` runs only when the key
+changed — not per unit, and never per frame.
+
+**2. `commands/change`.** The listener bumps the revision, refreshes, and requests
+a repaint, so a command registered while the list is open appears **with no
+keystroke at all** (C3.5).
+
+**Everyone else reads the field.** The composer adapter (arrows, Tab, Enter, Esc),
+the painter, and the tests read `this.completion.state`; there is no getter that
+writes on first access, and `paint()` never calls `refreshCompletion()`.
+
+**The existing semantics are preserved by the key, not by a second update path.**
+`refreshCompletion()` with an unchanged `(draft, locale, agent, revision)` returns
+the same state, `dismissedFor` included; `dismissed` holds only while
+`dismissedFor === draft` (R2), so the draft an accept writes stays dismissed while
+the next edit re-lists; and `listed` still requires no dialog and no screen (R1),
+so a Surface or Screen that opens while the list is up leaves the state untouched
+and unread until it closes.
+
+A host call that throws must not take the frame down: the refresh catches it, falls
+back to the local catalog for that key, and leaves `revision` unchanged (the next
+`commands/change` or draft change retries). One `try`/`catch`, one test (`list()`
 throws → the list still paints the local commands, no exception reaches `paint`).
+
+**Residual risk, stated rather than hidden.** A draft write *outside* a read — a
+future resume/restore path — would bypass the read loop. Today every draft write
+already funnels through `setField()` (`tui.ts:9735`) apart from nine direct
+`this.input =` writes, and all nine sit inside unit handlers (typing, Tab, submit,
+`runCommand`'s clear, history recall), i.e. inside a read. W-4B adds a source-level
+guard in the style of `scripts/input-freeze-audit.mjs` — "no `this.input =` outside
+`setField`" — so a later programmatic writer must call `refreshCompletion()`
+explicitly. **If the gate rejects that guard, this becomes OPEN C3-a** (programmatic
+draft writes may leave the state one change stale until the next read); it does not
+become a getter with hidden writes.
 
 **Triggers and what they invalidate**
 
-| Trigger | Key part | What is recomputed | What must not change |
+| Trigger | Key part | What `refreshCompletion()` recomputes | What must not change |
 |---|---|---|---|
 | typing / backspace / Ctrl+U / Ctrl+K | `draft` | items + index clamp | history, focus ring, transcript |
 | paste | `draft` | items + index clamp | borrowed field (pastes go to the owner the Router named) |
 | history browse (↑/↓ with no list) | `draft` | items (a recalled `/…` line lists) | `historyIndex` (it is the browse's own state) |
-| Tab accept | `draft`, then `dismissed` | items stay; `dismissed` set | history |
-| Esc | `dismissed` only | nothing (the list is not destroyed) | draft |
+| Tab accept | `draft` | items stay; `dismissedFor = <the new draft>` | history |
+| Esc | `draft` (records `dismissedFor`) | nothing — the same key returns the same state with `dismissedFor === draft` | draft |
 | `commands/change` (host) | `revision` | localized items | draft, index (clamped), history |
 | locale change (`/language`) | `locale` | descriptions | everything else |
 | agent / session switch | `agentId` | items (`list(agent)` is per agent) | the new session's own state |
 | Screen / Surface opens | none — `listed` is gated | nothing is destroyed | the layer's state |
-| Screen / Surface closes | none | the next `completion()` re-reads the same key | draft |
+| Screen / Surface closes | none | nothing — the closing unit's trailing refresh returns the same state, so the same list reappears | draft |
 | `/clear`, submit of a command | `draft` | items | rows are the command's business |
 
 **Invalidation source (a real event, not a "generation")**
@@ -423,17 +502,20 @@ replaced, never mutated, and never copied per paint.
 
 **Conservative fallback when the event is unavailable.** A host that does not
 dispatch it, or a test double without `on`, must not leave the list stale forever
-and must not fall back to a per-paint query. The
-fallback is: bump `revision` on **every draft change**. Bound: a command
-registered while a draft is open appears at the next keystroke, never later and
-never earlier. That bound is the test boundary (§8.2 P12): with the event, a
-registration while the draft is open repaints the list; without it, it appears on
-the next draft change and not before.
+and must not fall back to a per-paint query. The draft is already part of the key,
+so the fallback needs no extra machinery: leave `revision` at zero and let the
+read-boundary refresh re-query the host list **on every draft change**. Bound: a
+command registered while a draft is open appears at the next keystroke, never
+later and never earlier. That bound is the test boundary (§8.2 P12): with the
+event, a registration while the draft is open repaints the list; without it, it
+appears on the next draft change and not before.
 
 **Explicitly rejected in W-4B**
 
 - a timer that refreshes the list "just in case" (battery/idle cost for nothing);
 - querying `commands.list()` during paint (the current shape);
+- a `completion()` getter that materializes on first access — the same hidden write
+  one layer down, and the one C3 forbids by name;
 - a `host generation` field that nothing increments — the revision is only ever
   derived from the event above or from the documented fallback;
 - caching the *rendered* rows (the window depends on width and index; `paint.ts`
@@ -459,10 +541,10 @@ Legend: **CURRENT** = read out of this commit; **PROPOSED** = W-4B target;
 | Input | Completion visible | Completion not visible | Question / Confirm (Surface) | Screen |
 |---|---|---|---|---|
 | ↑ / ↓ | **CURRENT** moves the highlight (`tui.ts:12803`); history untouched. **PROPOSED** same, via `moveCompletion`. **UNVERIFIED** as a contract (no test) | **CURRENT** empty draft + cards ⇒ workspace focus ring (`input-router.ts:107`); else history (`tui.ts:12807`). **PROPOSED** unchanged | **CURRENT** cursor move / no-op (`ownerSurface`, `dialogs.ts:274`). **PROPOSED** unchanged; completion unreachable (I2) | **CURRENT** Screen's own (`handleScreenInput`). **PROPOSED** unchanged |
-| Tab | **CURRENT** accepts: `/name `, list cleared, no submit (`tui.ts:12906`). **PROPOSED** `acceptCompletion`, same text, `dismissed = true` | **CURRENT** inserts two spaces (`tui.ts:12916`). **PROPOSED** unchanged | **CURRENT** `handleDialogChar('\t')` — ignored. **PROPOSED** unchanged | **CURRENT** Screen's own. **PROPOSED** unchanged |
-| Shift+Tab | **CURRENT** `ESC[Z` frames as a complete CSI (`read()` → `{kind:'key'}`, `isEscapePrefix('\x1b[Z')` is false), routes as `kind: 'sequence'`: no Screen/Surface ⇒ `composerOrWorkspace` — **composer** for a non-empty draft, **workspace** for an empty draft with cards. Either adapter ignores it (`ownerComposer` has no case → `composerUnit` has no case; `ownerWorkspace` handles only mouse/page/arrows), so nothing happens and the list keeps its highlight. It is **consumed by the owner it was routed to, not dropped by the Reader**. **PROPOSED** no change of default; W-4B adds trace tests for both routes so a later round cannot claim it | **CURRENT** same (ignored by the composer; empty draft + cards ⇒ ignored by the workspace). **PROPOSED** unchanged | **CURRENT** consumed by the Surface: `ownerSurface`'s `unit.startsWith('\x1b[')` branch returns before `composerUnit`, so it never reaches a dialog char. **PROPOSED** unchanged | **CURRENT** consumed by the Screen's own handler (`ownerScreen`). **PROPOSED** unchanged |
+| Tab | **CURRENT** accepts: `/name `, list cleared, no submit (`tui.ts:12906`). **PROPOSED** `acceptCompletion`, same text, `dismissedFor = '/name '` | **CURRENT** inserts two spaces (`tui.ts:12916`). **PROPOSED** unchanged | **CURRENT** `handleDialogChar('\t')` — ignored. **PROPOSED** unchanged | **CURRENT** Screen's own. **PROPOSED** unchanged |
+| Shift+Tab | **CURRENT** `ESC[Z` is framed as a complete CSI (`read()` → `{kind:'key'}`, `isEscapePrefix` is false) and **consumed inside `route()`'s unknown-CSI return** — no adapter runs, nothing happens, the list keeps its highlight (§1.3b has the measured per-context table). **PROPOSED** no change of default; W-4B adds a trace per context so a later round cannot claim it | **CURRENT** same: consumed in `route()`, not by the composer. **PROPOSED** unchanged | **CURRENT** same return — the Surface adapter is never called (`isSequenceShape` is false). **PROPOSED** unchanged | **CURRENT** the one exception: `owner === 'screen'` is dispatched *before* the ladder, so `handleScreenInput` receives it and ignores it there. **PROPOSED** unchanged |
 | Enter | **CURRENT** completes **and submits** (`tui.ts:14647`); the completion is skipped when the highlighted name is not a prefix extension. **PROPOSED** one call (`acceptCompletion` then `submit`), same observable text, and the non-extension case is asserted. **UNVERIFIED** which the product wants (O1) | **CURRENT** submit; empty draft + answerable question ⇒ answer (`tui.ts:14632`); empty draft + focused card ⇒ toggle (`tui.ts:14639`). **PROPOSED** unchanged | **CURRENT** answers/cancels the Surface (`handleDialogChar('\r')`). **PROPOSED** unchanged | **CURRENT** Screen's own (confirm, dismiss). **PROPOSED** unchanged |
-| Esc | **CURRENT** clears the array, but the next frame rebuilds it from the unchanged draft — measured: 12 painted rows before, 12 after, 27 items again — so the list stays visible; and it only runs after scroll (B11) and the focus ring. **PROPOSED** `dismissed = true` persists until the draft changes: **an intentional observable fix** (§2.1 D2b), precedence unchanged | **CURRENT** scroll → focus ring → agent cancel (`tui.ts:14220-14245`). **PROPOSED** unchanged | **CURRENT** filter-clear first, then reject (`tui.ts:14214`). **PROPOSED** unchanged | **CURRENT** closes the Screen. **PROPOSED** unchanged |
+| Esc | **CURRENT** clears the array, but the next frame rebuilds it from the unchanged draft — measured: 12 painted rows before, 12 after, 27 items again — so the list stays visible; and it only runs after scroll (B11) and the focus ring. **PROPOSED** `dismissedFor = draft` holds until the draft changes: **an intentional observable fix** (§2.1 D2b), precedence unchanged | **CURRENT** scroll → focus ring → agent cancel (`tui.ts:14220-14245`). **PROPOSED** unchanged | **CURRENT** filter-clear first, then reject (`tui.ts:14214`). **PROPOSED** unchanged | **CURRENT** closes the Screen. **PROPOSED** unchanged |
 | Ctrl+L | **CURRENT** repaint reaches `repaintNow()` (`composerUnit` `\x0c`); KEEP_DUAL stands. **PROPOSED** unchanged, and asserted while the list is up | **CURRENT** same | **CURRENT** routed to `composer` even with a Surface up — the recorded exception (`input-router.ts:90`). **PROPOSED** unchanged (KEEP_DUAL) | **CURRENT** `screenNeedsFullPaint`. **PROPOSED** unchanged |
 | Ctrl+N / Ctrl+P | **CURRENT** moves the transcript focus ring; the list is untouched (`tui.ts:12878`). **PROPOSED** unchanged (documented, not "fixed") | **CURRENT** focus ring | **CURRENT** no-op (`dialog === undefined` gate). **PROPOSED** unchanged | **CURRENT** Screen's own |
 | Paste | **CURRENT** inserts into the draft; the list updates on the **next paint** (B13). **PROPOSED** the same visible result, but the state is recomputed at the paste (`R2`), so the next key sees the post-paste list — no one-frame window | **CURRENT** composer takes it (Router: paste → composer). **PROPOSED** unchanged | **CURRENT** only a borrowed field (`dispatchPaste` → `surface` → `handlePasteText` → `textIsEditable`). **PROPOSED** unchanged | **CURRENT** `pasteIntoScreen` (setup field only). **PROPOSED** unchanged |
@@ -554,8 +636,8 @@ existing traces.
 | P1 | `/` lists the catalog, 12-row window, aliases withheld | painted frame contains `/disconnect`, not `/exit` |
 | P2 | `/se` ranks starts-with first | item order |
 | P3 | ↓ × 3 moves the highlight and paints the row | `completion.index`, painted `›` row |
-| P4 | Tab accepts: draft `/help `, caret at end, list dismissed | state fingerprint |
-| P5 | Enter on `/hel` with `help` highlighted (a prefix extension) | `/help` runs, the draft is cleared, `completion` dismissed |
+| P4 | Tab accepts: draft `/help `, caret at end, list dismissed **and still dismissed on the next frame** (`dismissedFor === '/help '`) | state fingerprint + painted rows |
+| P5 | Enter on `/hel` with `help` highlighted (a prefix extension) | `/help` runs, the draft is cleared, `completion` hidden |
 | P6 | Esc dismisses **and it stays dismissed**: painted rows go 12 → 0 and stay 0 on the next frame (today they come back — §2.1 D2b) | painted rows + `completion.visible` before/after **two** frames |
 | P7 | More than 12 results: window slides, markers appear | painted rows (existing test stays green) |
 | P8 | Paste of `/mod` lists after the paste, without a paint in between | state fingerprint right after `handleData` |
@@ -564,6 +646,7 @@ existing traces.
 | P11 | Tab accepts `/hel` → draft `/help `, caret at the end, list dismissed; the next Enter runs `/help` — the accepted text and the executed command agree | draft, caret, command output row |
 | P12 | A command registered while the draft is open: with `commands/change` the list repaints on the event; without it, it appears on the next draft change and not before | item list before/after the event, and after one keystroke |
 | P13 | line mode: `/` then Tab inserts two spaces, no completion state is created, nothing is painted. Asserted through `handleData` only — the test must not call `captureFrame`, so it cannot accidentally depend on paint | `completion` absent/hidden, draft, `rowsAdded` |
+| P14 | stdio (`DSH_TUI_DISPLAY=stdio`): `/`, `\x1b[B`, `\t`, `\r` written into the display pipe, as one write and as four | relayed frames show the list, the moved highlight, the accepted `/help ` and the `/help` output; `historyIndex` unchanged; no paint-before-key dependency |
 
 ### 8.3 Negative (owner isolation) cases — the ones that matter
 
@@ -598,14 +681,33 @@ when every one of them turns a named test red.
 
 ### 8.5 Platform boundary
 
+Five shapes, and they are not the same claim (the last two decide whether the TUI
+runs at all):
+
 - **Linux PTY**: arrow/Tab/Enter/Esc with the list up, plus a real paste that
   opens it. `scripts/tui-probe.mjs` already drives `/` + typing; W-4B adds one
   step, not a new probe.
 - **Windows ConPTY**: the same keys, with the frame-shape assertions standing
   down (the existing `PTY_IS_CONPTY` convention). Completion is host-line
   independent; the risk there is input framing, which the paste probe covers.
-- **No PTY at all** (stdio/desktop): completion must not exist, and must not
-  crash — `tui-stdio-probe.mjs` stays green.
+- **stdio (`DSH_TUI_DISPLAY=stdio`)** — a **supported full TUI**, not a degraded
+  mode: the parent relays stdin/stdout and reports the panel size
+  (`docs/display-mode.md`), and the plugin's no-terminal guard is designed to let
+  it through (`src/index.ts:245-250`). Completion must work there exactly as on
+  a PTY, byte for byte. **Acceptance (P14)**: write `/`, `\x1b[B`, `\t`, `\r`
+  into the pipe — once as a single write and once as four — and assert on the
+  relayed frames that the list appears, the highlight moves, Tab accepts `/name `
+  and Enter runs it, with `historyIndex` untouched. The list may not depend on a
+  frame having been painted before the next key arrives (that is C3's same-read
+  rule, and stdio is where it is easiest to get wrong because the parent controls
+  the chunking).
+- **`DSH_TUI_LINE_MODE=1`** — no completion at all: line mode never paints
+  (`writeLineMode` appends plain lines), R1 excludes it, and P13 asserts it
+  through `handleData` without ever calling `captureFrame`.
+- **No terminal and no stdio declaration** (the desktop launcher) — the plugin is
+  **inert**: `apply()` returns before mounting anything
+  (`src/index.ts:258-268`), so there is no TUI and no completion to test. The
+  desktop path is covered by the launch guard's own tests, not by this suite.
 
 ---
 
