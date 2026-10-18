@@ -24,7 +24,7 @@ footprint* — and to say honestly where the current evidence stops.
 Two things this document will not do:
 
 - it will not turn "1 GB is enough" into "the TUI uses N MB" (the number depends on
-  the host runtime, the profile and the node build — §4.1);
+  the dsh runtime, the profile and the node build — §4.1);
 - it will not treat a high RTT as evidence of CPU or rendering waste (§3.4).
 
 ---
@@ -59,7 +59,7 @@ setup-typing   0.19 ms   140 B    1 row    0 clears
 ### 2.2 What it does **not** cover
 
 - cold boot (time, peak RSS);
-- **idle** CPU and wakeups;
+- **idle** CPU, context switches (and, with a proper instrument, timer wakeups);
 - composer typing at scale, and **completion** (the list is painted, never
   measured);
 - long session / resume (replay cost, peak RSS);
@@ -76,9 +76,9 @@ kept in `.pf/perf-*.mjs` (not committed; they are scratch).
 
 | What | How | Result |
 |---|---|---|
-| Idle CPU, 20 s window | `utime+stime` delta from `/proc/<pid>/stat` | frontend **0.05 %**, host **0.10 %** of one core |
-| Idle wakeups | `voluntary+nonvoluntary_ctxt_switches` delta | frontend **1.3/s**, host **6.6/s** |
-| Idle memory | `VmRSS`, `VmHWM`, `smaps_rollup` Pss | frontend **RSS 319 MiB / PSS 272 / private 261**; host **RSS 333 / PSS 285 / private 273** |
+| Idle CPU, 20 s window | `utime+stime` delta from `/proc/<pid>/stat` | frontend **0.05 %**, Host **0.10 %** of one core |
+| Idle **context switches**, 20 s | `voluntary+nonvoluntary_ctxt_switches` delta | frontend **1.3/s**, Host **6.6/s** (not a timer-wakeup count — see §2.4) |
+| Idle memory | `VmRSS`, `VmHWM`, `smaps_rollup` Pss | frontend **RSS 319 MiB / PSS 272 / private 261**; Host **RSS 333 / PSS 285 / private 273** |
 | Bare node floor (same sandbox) | `node -e` reading its own status | RSS 59 MiB / PSS 24 MiB |
 | dsh composition without the TUI | peak RSS polling of `--dump-config` and `--help` | **73.7 MiB / 176 ms** and **258.4 MiB / 7.5 s** (§4.1) |
 | One paint, 100×20, transcript 200→8000 normal rows | in-process `captureFrame()` | **0.52 – 0.68 ms**, flat |
@@ -93,6 +93,28 @@ kept in `.pf/perf-*.mjs` (not committed; they are scratch).
 **These are not the server's numbers.** A 1 vCPU shared box is slower per
 millisecond and the node build differs; treat them as ratios and as a searchlight,
 not as a benchmark of the field machine.
+
+### 2.4 Two caveats about the instrument itself
+
+**Context switches are not wakeups.** `voluntary_ctxt_switches` counts every
+blocking transition (a `write` to the display socket, a `read` that waits, a timer
+that fires), and `nonvoluntary_ctxt_switches` counts preemptions. Neither says how
+often a timer woke the process, which is what "idle wakeups" usually means and what
+a battery/idle-cost argument needs. A real wakeup count would need
+`/proc/<pid>/schedstat`, `perf sched`, or a `timerfd`/`epoll` trace — none was used
+here, so this document says **context switches** and draws no conclusion about
+wakeup frequency. The CPU number (0.05 %/0.10 %) is the one that matters for idle
+cost, and it is a direct measurement.
+
+**The sampling scripts are not in the repository.** Every number in §2.3 came from
+scratch scripts under `.pf/` (`perf-idle.mjs`, `perf-completion.mjs`,
+`perf-scale.mjs`, `perf-focus.mjs`, `perf-mix.mjs`, `perf-mem.mjs`, `perf-peak.cjs`,
+`esc-suggest*.mjs`), which are git-ignored and were not committed. They are the
+author's sampling receipt — command, environment and process scope are recorded
+above — but **a third party cannot re-run them from this repository**. The
+reproducible artifacts are `scripts/bench-b2.mjs` (committed) and the measurement
+plan in §5; anything that needs to be cited in a later round has to be promoted to
+a committed script first.
 
 ---
 
@@ -178,36 +200,50 @@ effect and is already budgeted.
 
 ### 4.1 Process boundary, and why "the TUI's memory" is the wrong question
 
-Two node processes are involved: the **frontend** (the one a reader's terminal is
-attached to) and the **host** (the dsh runtime that owns the session). Both run the
-dsh CLI; the plugin lives in the frontend. Measured PSS at idle in the sandbox:
+`src/index.ts` splits the two processes by `isTuiHostProcess()`
+(`display-sock.ts:221`, the `DSH_TUI_HOST` environment variable):
+
+- the **frontend** is the process a reader's terminal is attached to. It runs the
+  dsh CLI and this plugin, but it does **not** mount the TUI: `start()` takes the
+  `if (!hostProcess)` branch, writes the splash and calls
+  `spawnHostAndRelay()` (`src/index.ts:417`). It draws the boot splash and, later,
+  the session picker, and it carries the display relay;
+- the **Host** is spawned with `DSH_TUI_HOST=1` (`display-sock.ts:1347`); it mounts
+  `SshTui` (`src/index.ts:656`, `mountTui` with `headlessDisplay: true`) and owns
+  the agent, the session and the painting.
+
+So **the TUI lives in the Host**, and the frontend is the launcher plus the relay.
+Measured at idle in the sandbox (PSS is the honest per-process number; RSS sums are
+not):
 
 ```
-frontend  PSS 271.9 MiB  (private 261.1)   idle CPU 0.05 %   1.3 wakeups/s
-host      PSS 284.6 MiB  (private 272.8)   idle CPU 0.10 %   6.6 wakeups/s
+frontend (launcher + relay, no Tui)   PSS 271.9 MiB  (private 261.1)   CPU 0.05 %   1.3 ctxt switches/s
+Host     (runtime + SshTui + session) PSS 284.6 MiB  (private 272.8)   CPU 0.10 %   6.6 ctxt switches/s
 ```
 
-Summing PSS is defensible (it de-duplicates shared pages); summing **RSS** is not,
-and neither number may be attributed to the plugin without a breakdown. The
-breakdown this audit can offer:
+Neither number may be attributed to this plugin as a whole, and this audit does not
+try: the breakdown below bounds only the *plugin-held* state, and the process
+totals belong to their compositions.
 
 | Component | Evidence | Approximate cost |
 |---|---|---|
 | Bare node | `node -e` self-report | PSS 24 MiB |
 | dsh composing the profile, no TUI loop | peak RSS of `--dump-config` | **73.7 MiB / 176 ms** |
 | dsh CLI loading a heavier entry point | peak RSS of `--help` | **258.4 MiB / 7.5 s** |
-| **This plugin's transcript data** | in-process: 500 → 5000 rows | **+7 MiB total**, heapUsed ~22 MiB |
+| **This plugin's transcript state** | in-process fixture: 500 → 5000 rows | **+7 MiB**, heapUsed ~22 MiB |
 | Frames | `lastPaintRows` ≤ terminal height | a few KiB |
 | Suggestions | 67 items × name+description | a few KiB |
 
-So the ~270 MiB per process is **the dsh runtime and its CLI surface**, not rows,
-frames or the suggestion list. That is also why this audit does not propose a
-memory optimization in this repository: the lever is composition (which plugins a
-profile loads), and that is the host's, not ours.
+What that supports: the plugin's own row/frame/suggestion state is small and
+bounded, so it is not where a memory hunt should start. What it does **not**
+support: a claim about how the Host's or the frontend's ~270 MiB splits between the
+dsh runtime, the CLI surface, node itself and this plugin's code — that needs a
+heap-level measurement inside each process (§5, and `MEASUREMENT PENDING`).
 
-`MEASUREMENT PENDING`: the same breakdown on the 1 vCPU / 1 GB machine, with
-OpenClaw running, is the number that would actually matter. It must be taken with
-`Pss` (not RSS sums) and with the two processes labelled.
+`MEASUREMENT PENDING`: the same numbers on the 1 vCPU / 1 GB machine, with OpenClaw
+running, are the ones that would matter. They must be taken as `Pss` (not RSS
+sums), with the two roles labelled as above, and with the Host's heap broken down
+before any conclusion about attribution.
 
 ### 4.2 Growth paths inside the plugin
 
@@ -218,12 +254,12 @@ OpenClaw running, is the number that would actually matter. It must be taken wit
 | `lastPaintRows` / `paintResume` | terminal height | `tui.ts:2418` |
 | `commandSuggestions` | catalog size | rebuilt per paint (`tui.ts:6482`) |
 | `lineModePending` | until a display attaches | `writeLineMode` |
-| `session` events | **not** in the frontend; the host owns them | — |
+| `session` events | **not** in the frontend; the Host owns the session and its log | — |
 | decoders / buffers | one `StringDecoder` per input path | `input-reader.ts`, `terminal-input.ts` |
 
 `/clear` sets `clearedRows` and does not free the array; after it, every paint calls
 `this.rows.slice(clearedRows)` (`tui.ts:4913`) — an O(rows) copy per frame until the
-rows are re-bounded. That is a small, real, easily measured cost (P2-5).
+rows are re-bounded. That is a small, real, easily measured cost (P2-3).
 
 ### 4.3 Detach / reattach
 
@@ -244,7 +280,7 @@ low-load window on the server.
 | Scenario | Method | Observe |
 |---|---|---|
 | Cold boot | `probe-home` throwaway home, wall clock from spawn to first idle frame; peak RSS by 20 ms polling | time-to-first-frame, peak RSS of both processes |
-| Idle | 60 s window, `/proc` deltas as in §2.3 | CPU %, wakeups/s, PSS, **detached vs attached** |
+| Idle | 60 s window, `/proc` deltas as in §2.3 | CPU %, **context switches/s** (a wakeup count needs `schedstat` or `perf sched`, §2.4), PSS, **detached vs attached** |
 | Composer typing | in-process fixture (bench-b2 shape): 1 char, 10 chars, paste 1 kB | per-keystroke ms, painted rows, bytes |
 | Completion visible | input `/` and `/se` with a **real** host command service, 200 paints | paint ms, `list()` calls per paint, `list()` duration (instrumented once, then reverted) |
 | Streaming | `bench-b2` + a real mock turn | ms, bytes, rows, clears per tick |
@@ -268,11 +304,11 @@ justify touching runtime code in this line.
 
 | # | Candidate | Evidence today | Hypothesis | How to verify | Payoff | Risk | W-4A? | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| P2-1 | **Host `commands.list()` + localization per paint** (`tui.ts:6981`) | 1 call/paint, +0.079 ms/frame with a stub | a real `list()` is more expensive than the stub; 4 frames/s × N commands | instrument one boot to time `list()`; then a keyed cache (`draft`, locale, host generation) | CPU (small), latency (none) | stale suggestions if a generation is missed — the exact D1 shape | yes: W-4A moves the *derivation*, not a cache | measure first; **do not** add a cache in W-4B |
+| P2-1 | **Host `commands.list()` + localization per paint** (`tui.ts:6981`) | 1 call/paint, +0.079 ms/frame with a stub | a real `list()` is more expensive than the stub; 4 frames/s × N commands | instrument one boot to time `list()`; then a keyed cache (`draft`, locale, `commands/change` revision — see W-4A §5.4) | CPU (small), latency (none) | stale suggestions if a generation is missed — the exact D1 shape | yes: W-4A moves the *derivation*, not a cache | measure first; **do not** add a cache in W-4B |
 | P2-2 | **`collapsibleRows()` per arrow** (`tui.ts:4225`) | 0.002 ms (mix) → 0.13 ms (all-plan) at 5000 rows | O(n) per arrow, only when cards exist | memoize by `(rows.length, revision)` | CPU (negligible) | invalidation bugs for zero gain | no | not worth it |
 | P2-3 | **`visibleRows()` slice per paint after `/clear`** (`tui.ts:4913`) | O(rows) copy per frame while `clearedRows > 0` | a long session that used `/clear` pays a copy per frame | return an iterator/subarray, or compact on clear | CPU/RAM (small) | touching a hot path for a rare state | no | leave; note it |
 | P2-4 | **Plan dock scaling with plan rows** | pathological fixture: 12.2 ms paint / 5.5 ms focus at 5000 plan rows; 0.78 ms with a realistic 1-in-50 mix | the dock scans plan rows | cap the dock to the newest N plans | CPU (only in a pathological session) | hides history if N is too small | no | guard with a test, not an optimization |
-| P2-5 | **Two-process memory** (frontend + host, ~270 MiB PSS each in the sandbox) | `--dump-config` alone is 73.7 MiB, `--help` 258 MiB | the cost is the dsh CLI/composition, not this plugin | the §5 server sample | RAM (potentially the only big lever) | outside this repo | no | report to the host, do not "optimize" here |
+| P2-5 | **Two-process memory** (frontend 272 MiB + Host 285 MiB PSS in the sandbox; the Host is the one running `SshTui`, §4.1) | `--dump-config` alone is 73.7 MiB, `--help` 258 MiB; the plugin's own rows measured at ~7 MiB | the split between dsh runtime, CLI surface and this plugin is unmeasured on either process | the §5 server sample, with a heap breakdown per role | RAM (potentially the only big lever) | outside this repo, and not attributable yet | no | report to the host, do not "optimize" here |
 
 Deliberately **not** listed: a transcript page cache, compression of rows, lazy i18n,
 or a smaller frame budget on weak links. None has evidence, and the last one would
@@ -285,8 +321,10 @@ trade the maintainer's satisfactory interaction for bytes.
 1. **The server's CPU/RSS.** Everything here is a sandbox with a different node
    build and no OpenClaw co-tenant. The 1 vCPU / 1 GB numbers are
    `MEASUREMENT PENDING`.
-2. **That the TUI "uses" ~270 MiB.** That is a process total dominated by the dsh
-   runtime; the plugin's own data measured at the 5000-row cap is ~7 MiB.
+2. **That the TUI "uses" ~270 MiB.** The Host's 285 MiB PSS is the runtime, the
+   session and the TUI together; the frontend's 272 MiB does not run the TUI at
+   all. The plugin's own row state measured at the 5000-row cap is ~7 MiB, which
+   bounds that state and nothing else.
 3. **That the real host `commands.list()` is cheap.** The stub says the plugin-side
    work is 0.08 ms/frame; the host call is unmeasured.
 4. **That a cache would help.** Not measured, and the invalidation risk is the same

@@ -108,23 +108,73 @@ the gap W-4A exists to close.
 | B17 | Shift+Tab | **no handler anywhere**: not in `KeyAction` (`keymap.ts:14`), not in `isSequenceShape` (`tui.ts:12655`), not in `composerUnit`. `ESC[Z` frames as a complete CSI key and is then ignored | `input-reader.read('\x1b[Z')` measured; `tui.ts:12841` has no case |
 | B18 | line mode | `paint()` does not run, so the list never exists; Tab inserts spaces | inferred (`lineMode` path) |
 
-### 2.1 The three defects this design has to remove
+### 2.1 What this design has to account for
+
+W-4B **removes D1** (the list stops being written during paint) and **contains
+D3** rather than removing it: the Router keeps deciding *which layer*, and the
+composer — the one owner it named — stays the only place that interprets the unit
+inside that layer. **D2 is not removed**: it is recorded, bounded and deferred (D2
+below), and no part of this document may call it fixed.
 
 **D1 — paint writes state that input reads.** `commandSuggestions` is assigned in
 the frame composer. Between two paints, `suggestionsVisible()` answers from the
-*previous* frame. A read that submits and then delivers another unit
-(`/help\r` + `↑` in one read is legal — the Reader splits it) sees the list that
-the submit just made obsolete, so the ↑ is swallowed as a list move instead of
-browsing history. It is a one-frame window, and it is exactly the kind of
-same-read hazard W-3a spent a release eliminating.
+*previous* frame, so any read that arrives in that window sees the list the last
+frame drew.
 
-**D2 — Enter is two actions.** `submit()` silently completes first
-(`tui.ts:14647`) and then runs the command. The completion is conditional on
-`selected.name.startsWith(input.slice(1))`, so a list ranked by *contains*
-(`/se` → `usage`? no — `filter` uses startsWith **or** includes) can highlight an
-entry that the Enter guard then refuses: the user sees a highlighted command,
-presses Enter, and gets the raw text submitted instead. Tab has no such
-asymmetry; Enter does.
+The cheapest real path that shows it, measured in-process, with no Screen and no
+Surface involved:
+
+1. send a plain message (`hello\r`) — the composer is empty again and `history`
+   holds one entry (`['hello']`), which is the precondition for ↑ to browse history;
+2. type `/clear` and let the frame land, as it does while a reader types: the list
+   is open and `commandSuggestions` holds the `/clear` entry (measured: 1 item);
+3. press Enter — `submit()` runs the command and empties the draft, and **nothing
+   clears the list**: it is only cleared by Tab, Esc, or the next paint (measured:
+   `input` is `''`, `commandSuggestions` still has 1 item);
+4. press ↑ before the next frame — `suggestionsVisible()` still answers `true`, so
+   `arrowHistory` takes the list branch: `input` stays `''` (measured) where the
+   reader asked for `hello` from history. The frame that follows empties the list —
+   after the arrow has already been spent.
+
+That is a one-frame window, and it is exactly the kind of same-read hazard W-3a
+spent a release eliminating. The same window is what makes §5.4's keyed
+derivation necessary: a state that is only correct *after* a paint cannot be read
+by the code that runs *before* one.
+
+**D2 — the highlight and Enter's action can disagree (visibility vs execution).**
+`submit()` completes first (`tui.ts:14648`) and then runs the command, but only
+when `selected.name.startsWith(this.input.slice(1))`. The list, however, also
+matches by *contains* (`commands.ts:89`), and that guard compares **case-sensitive
+bytes** while the filter lowercases the prefix (`commands.ts:81`). Measured
+consequences today:
+
+- `/ag` → `diag` is highlighted (contains-only) → the guard refuses → the literal
+  `/ag` is submitted as a command line and fails as unknown;
+- `/HELP` → `help` is highlighted (the filter is case-insensitive) → the guard
+  compares `HELP` with `help` → refuses → `/HELP` is submitted and fails.
+
+Tab has no such asymmetry: it accepts whatever is highlighted.
+
+**W-4B does not fix this**, and this document must not claim it does. It keeps the
+prefix guard — a contains-only or case-mismatched highlight must never execute a
+command the reader did not type — moves the decision into `acceptCompletion` so it
+is testable without `submit()`, and records the inconsistency as **DEFERRED**.
+Fixing it means choosing between "highlight only what Enter will run" (a ranking
+change: `/ag` would have to show nothing, or rank by prefix only) and "Enter runs
+whatever is highlighted" (a new execution path for a near-miss name); both are
+product decisions with their own matrix rows, and neither belongs to an ownership
+round.
+
+**D2b — Esc does not dismiss the list today (measured).** `handleEscape` clears
+`commandSuggestions` and `suggestionIndex` and calls `markDirty()`
+(`tui.ts:14237-14241`); the next frame then rebuilds the list from the unchanged
+draft (`tui.ts:6482`). Measured in-process with `captureFrame`: 12 painted rows
+before Esc → array cleared to 0 → **12 painted rows again on the next frame, array
+back to 27**. So for the reader Esc is a no-op on the list. W-4B's persistent
+`dismissed` flag is therefore an **intentional observable behaviour change** (the
+key starts doing what it looks like it does), not a refactor with identical
+behaviour; it gets before/after tests (§8.2 P6, §8.3 N6) and a line in the W-4B
+round's notes.
 
 **D3 — one key, two owners, no single place to read.** The arrow's meaning is
 split between `InputRouter.route` and `arrowHistory`. Neither is wrong today, but
@@ -234,9 +284,12 @@ States: `hidden`, `listed`, `dismissed`.
 Rules:
 
 - **R1 (enter)** `listed` requires `draft.startsWith('/') && items.length > 0 &&
-  dialog === undefined && screen === undefined`. A Screen already swallows the
-  whole read, so the Screen clause is an assertion of the existing invariant, not
-  a new rule.
+  dialog === undefined && screen === undefined && lineMode === false`. A Screen
+  already swallows the whole read, so the Screen clause is an assertion of the
+  existing invariant, not a new rule. `lineMode` is an explicit clause because
+  line mode never paints (`writeLineMode` appends to the log) — a completion state
+  there would have no renderer and no dismissal path, so it must not exist at all
+  (§6, the line-mode row, and P13).
 - **R2 (leave)** any draft mutation recomputes `query`; if it differs, `dismissed`
   resets to `false` and the list is `listed` again (a new `/` line is a new
   question).
@@ -248,12 +301,15 @@ Rules:
   scroll/focus branches stay *above* it — B11 is preserved).
 - **R5 (accept, Tab)** replace the draft with `/name ` (trailing space), put the
   caret at the end, `dismissed = true`. No submit.
-- **R6 (accept, Enter)** Enter **submits** the draft as it stands; it must not
-  silently rewrite it. The current complete-then-run becomes: if `listed`, the
-  highlighted name is what the user is looking at, so Enter applies it **only if
-  it is an extension of the typed prefix** (the existing guard) — otherwise Enter
-  submits the literal draft. W-4B keeps that, but moves the decision into
-  `acceptCompletion` so it is testable without `submit()`.
+- **R6 (accept, Enter)** Enter **submits** the draft. When the list is `listed`
+  and the highlighted name is a byte-for-byte extension of the typed prefix (after
+  the `/`), Enter replaces the draft with `/name` first — the existing guard,
+  `selected.name.startsWith(this.input.slice(1))`, kept exactly as it is and moved
+  into `acceptCompletion`. In every other case Enter submits the literal draft:
+  contains-only highlights (`/ag` → `diag`) and case-mismatched ones (`/HELP` →
+  `help`) do **not** execute. That visible inconsistency is **DEFERRED** (§2.1 D2),
+  not repaired here; the tests in §8.2 P9/P10 pin today's behaviour so a later
+  round has to change it deliberately.
   *(Open question O1: should Enter ever complete-but-not-run? See §9.)*
 - **R7 (paste)** a paste is a draft mutation like typing (R2). A paste that makes
   the draft folded (`inputFolded`) still lists from the raw draft, and a draft
@@ -303,7 +359,87 @@ Invariants W-4B must keep and test:
   today (`tui.ts:6487-6505`); the only change is where the array comes from.
 - `captureFrame()` stays the test seam for the window shape.
 
-### 5.4 With the picker
+### 5.4 Derivation and invalidation contract (what W-4B implements)
+
+The state is not a cache with a timeout; it is a **keyed derivation**. One small
+holder in the TUI:
+
+```ts
+interface CompletionCache {
+  key: { draft: string; locale: Locale; agentId: string; revision: number; host: boolean }
+  state: CompletionState
+}
+```
+
+`completion()` reads `getLocale()` (O(1), `i18n/index.ts:74`), the current draft,
+the session id, `revision`, and whether `ctx.get('commands')` exists; it compares
+those five and recomputes only when one differs. Paint calls `completion()` and
+renders it; it never assigns.
+
+A host call that throws must not take the frame down: the derivation catches it,
+falls back to the local catalog for that key, and leaves `revision` unchanged (the
+next `commands/change` retries). That is one `try`/`catch` and one test (`list()`
+throws → the list still paints the local commands, no exception reaches `paint`).
+
+**Triggers and what they invalidate**
+
+| Trigger | Key part | What is recomputed | What must not change |
+|---|---|---|---|
+| typing / backspace / Ctrl+U / Ctrl+K | `draft` | items + index clamp | history, focus ring, transcript |
+| paste | `draft` | items + index clamp | borrowed field (pastes go to the owner the Router named) |
+| history browse (↑/↓ with no list) | `draft` | items (a recalled `/…` line lists) | `historyIndex` (it is the browse's own state) |
+| Tab accept | `draft`, then `dismissed` | items stay; `dismissed` set | history |
+| Esc | `dismissed` only | nothing (the list is not destroyed) | draft |
+| `commands/change` (host) | `revision` | localized items | draft, index (clamped), history |
+| locale change (`/language`) | `locale` | descriptions | everything else |
+| agent / session switch | `agentId` | items (`list(agent)` is per agent) | the new session's own state |
+| Screen / Surface opens | none — `listed` is gated | nothing is destroyed | the layer's state |
+| Screen / Surface closes | none | the next `completion()` re-reads the same key | draft |
+| `/clear`, submit of a command | `draft` | items | rows are the command's business |
+
+**Invalidation source (a real event, not a "generation")**
+
+`@deepseek-ai/dsh-commands` declares the observer event and documents its purpose
+(`lib/types/types.d.ts:86` — `'commands/change'(): void`, "A command was
+registered or unregistered … so live adapters can refresh discovery"; README:92).
+W-4B registers one listener for the TUI's lifetime and bumps `revision`:
+
+```ts
+// registered once, disposed with the TUI (same shape as listenHostEvent in dsh-compat)
+ctx.on('commands/change', () => {
+  this.completionRevision += 1
+  if (this.input.startsWith('/')) this.markDirty()   // repaint only if a list could be on screen
+})
+```
+
+Both supported host lines declare it — checked in the published typings, not
+assumed: `@deepseek-ai/dsh-commands@0.2.0-rc.2` and `@0.2.1-rc.2` carry the same
+`'commands/change'(): void` in `lib/types/types.d.ts:86`, and both READMEs describe
+it as the refresh signal for "live adapters".
+
+`list(agent)` returns *"the effective immutable command descriptors"* (same
+typings), so the holder may keep that array until the revision changes; it is
+replaced, never mutated, and never copied per paint.
+
+**Conservative fallback when the event is unavailable.** A host that does not
+dispatch it, or a test double without `on`, must not leave the list stale forever
+and must not fall back to a per-paint query. The
+fallback is: bump `revision` on **every draft change**. Bound: a command
+registered while a draft is open appears at the next keystroke, never later and
+never earlier. That bound is the test boundary (§8.2 P12): with the event, a
+registration while the draft is open repaints the list; without it, it appears on
+the next draft change and not before.
+
+**Explicitly rejected in W-4B**
+
+- a timer that refreshes the list "just in case" (battery/idle cost for nothing);
+- querying `commands.list()` during paint (the current shape);
+- a `host generation` field that nothing increments — the revision is only ever
+  derived from the event above or from the documented fallback;
+- caching the *rendered* rows (the window depends on width and index; `paint.ts`
+  already handles that).
+
+### 5.5 With the picker
 
 `pickerWindowStart` is already shared (`paint.ts:564`). The *interaction* model is
 not: the session picker has its own guard and its own stepper
@@ -324,12 +460,13 @@ Legend: **CURRENT** = read out of this commit; **PROPOSED** = W-4B target;
 |---|---|---|---|---|
 | ↑ / ↓ | **CURRENT** moves the highlight (`tui.ts:12803`); history untouched. **PROPOSED** same, via `moveCompletion`. **UNVERIFIED** as a contract (no test) | **CURRENT** empty draft + cards ⇒ workspace focus ring (`input-router.ts:107`); else history (`tui.ts:12807`). **PROPOSED** unchanged | **CURRENT** cursor move / no-op (`ownerSurface`, `dialogs.ts:274`). **PROPOSED** unchanged; completion unreachable (I2) | **CURRENT** Screen's own (`handleScreenInput`). **PROPOSED** unchanged |
 | Tab | **CURRENT** accepts: `/name `, list cleared, no submit (`tui.ts:12906`). **PROPOSED** `acceptCompletion`, same text, `dismissed = true` | **CURRENT** inserts two spaces (`tui.ts:12916`). **PROPOSED** unchanged | **CURRENT** `handleDialogChar('\t')` — ignored. **PROPOSED** unchanged | **CURRENT** Screen's own. **PROPOSED** unchanged |
-| Shift+Tab | **CURRENT** `ESC[Z` is a *complete* CSI unit (`input-reader.read('\x1b[Z')` → `key`), but no handler claims it: it reaches the Composer adapter and falls through `composerUnit` — no insert, no move, no submit; the list keeps its highlight. **PROPOSED** no change of default (not a keymap action); W-4B adds a trace test that it does nothing, so a later round cannot claim it | **CURRENT** same (ignored). **PROPOSED** unchanged | **CURRENT** ignored (`ownerSurface` → `composerUnit` → no case). **PROPOSED** unchanged | **CURRENT** ignored (Screen has no SS3/CSI case for it). **PROPOSED** unchanged |
+| Shift+Tab | **CURRENT** `ESC[Z` frames as a complete CSI (`read()` → `{kind:'key'}`, `isEscapePrefix('\x1b[Z')` is false), routes as `kind: 'sequence'`: no Screen/Surface ⇒ `composerOrWorkspace` — **composer** for a non-empty draft, **workspace** for an empty draft with cards. Either adapter ignores it (`ownerComposer` has no case → `composerUnit` has no case; `ownerWorkspace` handles only mouse/page/arrows), so nothing happens and the list keeps its highlight. It is **consumed by the owner it was routed to, not dropped by the Reader**. **PROPOSED** no change of default; W-4B adds trace tests for both routes so a later round cannot claim it | **CURRENT** same (ignored by the composer; empty draft + cards ⇒ ignored by the workspace). **PROPOSED** unchanged | **CURRENT** consumed by the Surface: `ownerSurface`'s `unit.startsWith('\x1b[')` branch returns before `composerUnit`, so it never reaches a dialog char. **PROPOSED** unchanged | **CURRENT** consumed by the Screen's own handler (`ownerScreen`). **PROPOSED** unchanged |
 | Enter | **CURRENT** completes **and submits** (`tui.ts:14647`); the completion is skipped when the highlighted name is not a prefix extension. **PROPOSED** one call (`acceptCompletion` then `submit`), same observable text, and the non-extension case is asserted. **UNVERIFIED** which the product wants (O1) | **CURRENT** submit; empty draft + answerable question ⇒ answer (`tui.ts:14632`); empty draft + focused card ⇒ toggle (`tui.ts:14639`). **PROPOSED** unchanged | **CURRENT** answers/cancels the Surface (`handleDialogChar('\r')`). **PROPOSED** unchanged | **CURRENT** Screen's own (confirm, dismiss). **PROPOSED** unchanged |
-| Esc | **CURRENT** clears the list, but only after scroll (B11) and focus ring. **PROPOSED** `dismissed = true`; precedence unchanged | **CURRENT** scroll → focus ring → agent cancel (`tui.ts:14220-14245`). **PROPOSED** unchanged | **CURRENT** filter-clear first, then reject (`tui.ts:14214`). **PROPOSED** unchanged | **CURRENT** closes the Screen. **PROPOSED** unchanged |
+| Esc | **CURRENT** clears the array, but the next frame rebuilds it from the unchanged draft — measured: 12 painted rows before, 12 after, 27 items again — so the list stays visible; and it only runs after scroll (B11) and the focus ring. **PROPOSED** `dismissed = true` persists until the draft changes: **an intentional observable fix** (§2.1 D2b), precedence unchanged | **CURRENT** scroll → focus ring → agent cancel (`tui.ts:14220-14245`). **PROPOSED** unchanged | **CURRENT** filter-clear first, then reject (`tui.ts:14214`). **PROPOSED** unchanged | **CURRENT** closes the Screen. **PROPOSED** unchanged |
 | Ctrl+L | **CURRENT** repaint reaches `repaintNow()` (`composerUnit` `\x0c`); KEEP_DUAL stands. **PROPOSED** unchanged, and asserted while the list is up | **CURRENT** same | **CURRENT** routed to `composer` even with a Surface up — the recorded exception (`input-router.ts:90`). **PROPOSED** unchanged (KEEP_DUAL) | **CURRENT** `screenNeedsFullPaint`. **PROPOSED** unchanged |
 | Ctrl+N / Ctrl+P | **CURRENT** moves the transcript focus ring; the list is untouched (`tui.ts:12878`). **PROPOSED** unchanged (documented, not "fixed") | **CURRENT** focus ring | **CURRENT** no-op (`dialog === undefined` gate). **PROPOSED** unchanged | **CURRENT** Screen's own |
 | Paste | **CURRENT** inserts into the draft; the list updates on the **next paint** (B13). **PROPOSED** the same visible result, but the state is recomputed at the paste (`R2`), so the next key sees the post-paste list — no one-frame window | **CURRENT** composer takes it (Router: paste → composer). **PROPOSED** unchanged | **CURRENT** only a borrowed field (`dispatchPaste` → `surface` → `handlePasteText` → `textIsEditable`). **PROPOSED** unchanged | **CURRENT** `pasteIntoScreen` (setup field only). **PROPOSED** unchanged |
+| **line mode** (any of the above) | **CURRENT** no paint runs, so the list never exists; Tab inserts two spaces; ↑/↓ browse history. **PROPOSED** unchanged, and stated as a rule: `listed` requires `lineMode === false` (R1). A completion state in line mode would have no renderer and no dismissal path | **CURRENT** same (no state to show) | **CURRENT** the Surface's own; line mode has no Surface | **CURRENT** the Screen's own |
 
 ### 6.1 Edge cases the matrix must be completed with
 
@@ -344,7 +481,7 @@ Legend: **CURRENT** = read out of this commit; **PROPOSED** = W-4B target;
 | Multi-line paste (B14) | draft has `\n` ⇒ no match ⇒ hidden, but `inputFolded` is set | UNVERIFIED |
 | Split CSI / released Esc | Reader reassembles; a lone Esc becomes `escape` (`input-reader.ts:releaseHold`) and reaches Esc handling | CURRENT for keys, UNVERIFIED for the list |
 | Custom keymap (`pageUp: ctrl+p`) | `KeyAction` has no completion action; a rebound key cannot collide with Tab/arrows | CURRENT by absence |
-| line mode (B18) | no paint ⇒ no list; Tab = spaces | UNVERIFIED |
+| line mode (B18) | no paint ⇒ no list; Tab = spaces; ↑ = history. R1 makes it a rule, P13 tests it without ever painting | UNVERIFIED → R1 + P13 |
 | Narrow terminal (e.g. 40 cols) | list rows truncated by `fitLine`, window still 12 | UNVERIFIED |
 | Resize while listed | paint recomputes the window; index clamped at paint today | UNVERIFIED |
 | History browse entering/leaving | `leaveHistoryBrowse()` on typing/paste; the list is rebuilt from the recalled draft | UNVERIFIED |
@@ -360,21 +497,26 @@ of what exists plus the smallest set of assertions W-4B has to add.
 1. `src/completion.ts`: the state and the pure transitions above (no i18n, no
    paint, no host access — the caller passes items).
 2. `tui.ts`:
-   - a single `completion()` accessor with the derivation key,
+   - a single `completion()` accessor with the derivation key (§5.4), including the
+     `commands/change` listener and the fallback revision;
    - `arrowHistory`, the Tab branch, `submit`, `handleEscape` call it,
    - paint renders it and no longer assigns `commandSuggestions`,
    - removes `commandSuggestions` / `suggestionIndex` as free-floating fields (or
      keeps them as the state's storage with no writer outside the module).
 3. Tests: the contract in §8. No keymap change, no Router change, no new owner.
-4. No cache of the host command list in W-4B (see the perf audit, P2): first make
-   the call sites correct, then measure.
+4. No host-list cache beyond the derivation key in §5.4. The list is still queried
+   on every draft change (today it is every paint); a cache that survives draft
+   changes needs the perf round's invalidation design, and the perf audit (P2-1)
+   says to measure the host call first.
 
 ### 7.1 Explicitly **not** in W-4B
 
 - No fifth Router owner, no `completionVisible` in `OwnershipSnapshot`.
 - No change to Tab's two-space fallback or to Enter's submit semantics.
 - No fuzzy matching, no ranking change, no new commands.
-- No completion in line mode, at a Surface, or in the picker.
+- No completion in line mode (R1 excludes it), at a Surface, or in the picker.
+- No repair of D2's visibility/execution mismatch: the prefix guard stays, `/ag`
+  and `/HELP` keep failing loudly, and the decision is DEFERRED to a product round.
 - No rebindable completion keys.
 - No `composerUnit` split (KEEP_SHARED_WITH_INVARIANTS stands).
 - No new dependency, no version bump in this round.
@@ -413,10 +555,15 @@ existing traces.
 | P2 | `/se` ranks starts-with first | item order |
 | P3 | ↓ × 3 moves the highlight and paints the row | `completion.index`, painted `›` row |
 | P4 | Tab accepts: draft `/help `, caret at end, list dismissed | state fingerprint |
-| P5 | Enter on `/hel` with `help` highlighted | command ran (`/help` output row), draft cleared |
-| P6 | Esc dismisses; typing again lists again | `dismissed` then `visible` |
+| P5 | Enter on `/hel` with `help` highlighted (a prefix extension) | `/help` runs, the draft is cleared, `completion` dismissed |
+| P6 | Esc dismisses **and it stays dismissed**: painted rows go 12 → 0 and stay 0 on the next frame (today they come back — §2.1 D2b) | painted rows + `completion.visible` before/after **two** frames |
 | P7 | More than 12 results: window slides, markers appear | painted rows (existing test stays green) |
 | P8 | Paste of `/mod` lists after the paste, without a paint in between | state fingerprint right after `handleData` |
+| P9 | `/ag` highlights `diag` (contains-only) and Enter **refuses** it: the literal `/ag` reaches the unknown-command path (`Unknown command: /ag (try /help)`), `diag` never runs, the draft is cleared. Pins the DEFERRED inconsistency (§2.1 D2) so a later round changes it deliberately | the unknown-command row, no `diag` output, `completion` unchanged |
+| P10 | `/HELP` highlights `help` (case-insensitive filter) and Enter **refuses** it: `/HELP` takes the same unknown-command path. Same DEFERRED pin | same |
+| P11 | Tab accepts `/hel` → draft `/help `, caret at the end, list dismissed; the next Enter runs `/help` — the accepted text and the executed command agree | draft, caret, command output row |
+| P12 | A command registered while the draft is open: with `commands/change` the list repaints on the event; without it, it appears on the next draft change and not before | item list before/after the event, and after one keystroke |
+| P13 | line mode: `/` then Tab inserts two spaces, no completion state is created, nothing is painted. Asserted through `handleData` only — the test must not call `captureFrame`, so it cannot accidentally depend on paint | `completion` absent/hidden, draft, `rowsAdded` |
 
 ### 8.3 Negative (owner isolation) cases — the ones that matter
 
@@ -425,9 +572,10 @@ existing traces.
 | **N1** | Make `arrowHistory` browse history while the list is up | `historyIndex` changes / `completion.index` does not |
 | **N2** | Let completion write `borrowedText` (Surface field) | `borrowedText` changes while a dialog is up — must stay byte-identical |
 | **N3** | Route an arrow to completion while a Surface is up | `dialog.cursor` does not move, `completion.index` does |
-| **N4** | Keep the list alive across a Screen dismissal | the unit after the dismissal reaches the composer/workspace, not the list |
+| **N4a** | Keep completion alive across a Screen dismissal **inside one raw read** | the units after the dismissal are discarded by the Screen-owns-its-read contract (`tui.ts:12514` returns when `screenDismissals` changed), so neither the composer nor the list may receive them; `rowsAdded` and `completion.index` unchanged |
+| **N4b** | Keep completion alive into **a new read** after the Screen closed | that read is routed again from scratch: the Router sees `screenKind === undefined`, so a `/` draft may legitimately list and an arrow may legitimately move it — assert the *new* state, not a discarded one |
 | **N5** | Make Tab also submit | `rowsAdded` increases / `sent` gets a message |
-| **N6** | Skip the state reset on submit | after `/help\r` the list is still `listed` |
+| **N6** | Skip the state reset on submit, and drop `dismissed` so Esc only clears the array (today's behaviour) | after `/help\r` the list is still `listed`; and after Esc the next frame paints the list again (P6 fails) |
 | **N7** | Make Ctrl+L take the completion branch | the frame is not a full repaint (`sizeChanged`/clears), i.e. the KEEP_DUAL contract test fails |
 | **N8** | Let paint assign the list again (reintroduce D1) | a submit-then-arrow read browses history: `historyIndex` moves, `completion.index` does not |
 | **N9** | Let completion write `inputFolded` | the folded flag changes without a draft change |
@@ -484,12 +632,21 @@ when every one of them turns a named test red.
    (§7.1) unless the gate says otherwise.
 5. The perf audit's P2 (host `commands.list()` per paint) stays out of W-4B; if
    the gate wants it, it is a separate round with its own invalidation design.
+   (The §5.4 keyed derivation is not that cache: it recomputes on a draft change,
+   which is what the current code already does per paint, and it removes the
+   paint-time write.)
+6. D2 stays DEFERRED: no W-4B commit may claim Enter's highlight/execution
+   mismatch is fixed, and P9/P10 stay in the suite as the pinned behaviour.
 
 ---
 
 ## 11. What this round did not do
 
 - No source, test, script, manifest, lockfile or workflow change.
-- No behaviour change: the matrix's CURRENT column is descriptive.
+- No behaviour change **in this round**: the matrix's CURRENT column is descriptive.
+  W-4B itself will change two observable things on purpose — Esc starts dismissing
+  the list (§2.1 D2b) and the list stops being rebuilt during paint (D1) — and
+  will **not** change Enter's refusal of a contains-only or case-mismatched
+  highlight (D2, DEFERRED).
 - No implementation of W-4B, W-5, W-6 or W-7.
 - No merge to `main`, no tag, no release, no publish.
