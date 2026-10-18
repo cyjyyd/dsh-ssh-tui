@@ -2387,18 +2387,25 @@ export class SshTui {
     onFrame: frame => this.consumeReleasedFrame(frame),
   })
   /**
-   * The owner that was reading when a sequence went on hold.
+   * The layer — not just its name — that was up when a sequence went on hold.
    *
-   * `hold()` waits 60 ms for the rest of a sequence. The wizard can close inside that
-   * window, and the released frame then used to be delivered to whoever owns the
-   * screen *now* — the composer behind it. A held `ESC O` released as the literal `O`
-   * and typed into the draft the reader had been writing (F2). The release is
-   * delivered to the owner that held it; an adapter whose layer is gone refuses it
-   * itself (`handleScreenInput` returns when `screen === undefined`), so a dismissed
-   * Screen consumes instead of leaking. Capturing the owner — not a layer comparison —
-   * is also what keeps this out of the input-freeze audit's `ownerReads` count.
+   * `hold()` waits 60 ms for the rest of a sequence, and the layer can change inside
+   * that window. An owner *name* is not a lifecycle: `'surface'` is true of any
+   * Surface and `'screen'` of any Screen, so a held `ESC O` released after its Surface
+   * closed typed `O` into the composer, a late Escape closed a Screen that had opened
+   * in the meantime, and one wizard's held report landed in the next wizard's field.
+   * The pair below is captured from the same locals `observe()` already reads (so the
+   * input-freeze audit's `ownerReads` count is untouched), and a release whose layer
+   * object is gone is consumed instead of delivered.
    */
-  private heldOwner: Owner | undefined
+  private heldInput: {
+    owner: Owner
+    screen: ScreenState | undefined
+    dialog: Dialog | undefined
+  } | undefined
+  /** The layer objects `observe()` last saw — identity, for late-frame provenance. */
+  private layerScreen: ScreenState | undefined
+  private layerDialog: Dialog | undefined
   /**
    * The Router (AD-22, W-2): the one place a unit's owner is decided.
    *
@@ -3341,6 +3348,7 @@ export class SshTui {
     this.renderTimer = undefined
     if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
     this.reader.stop()
+    this.heldInput = undefined
     process.stdin.removeListener('data', this.handleData)
     process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
@@ -12508,6 +12516,10 @@ export class SshTui {
    * everything else is routed (W-2 lifts the routing itself into a Router).
    */
   private handleInputText(text: string): void {
+    // A new read either completes the held sequence (`assemble` prepends it) or
+    // arrives after its window; either way the hold is no longer pending, and its
+    // provenance must not be attributed to a later frame (a paste tail).
+    this.heldInput = undefined
     const combined = this.reader.assemble(text)
 
     // A read is not a key. The Reader decides where one unit ends — complete
@@ -12656,6 +12668,8 @@ export class SshTui {
     const view = this.ownershipView
     const screen = this.screen
     const surface = this.dialog
+    this.layerScreen = screen
+    this.layerDialog = surface
     view.screenKind = screen?.kind
     view.surfaceKind = surface?.kind
     view.surfaceHasField = this.borrowedText !== undefined
@@ -12675,7 +12689,7 @@ export class SshTui {
    */
   private holdInput(unit: string, owner: Owner): boolean {
     if (!this.reader.hold(unit)) return false
-    this.heldOwner = owner
+    this.heldInput = { owner, screen: this.layerScreen, dialog: this.layerDialog }
     return true
   }
 
@@ -12689,13 +12703,22 @@ export class SshTui {
    * which is "consume, do not reinterpret as whoever is on screen now".
    */
   private consumeReleasedFrame(frame: InputFrame): void {
-    const owner = this.heldOwner
-    this.heldOwner = undefined
-    if (owner === undefined || (frame.kind !== 'literal' && frame.kind !== 'escape')) {
+    const held = this.heldInput
+    this.heldInput = undefined
+    // A paste tail is a `paste` frame and never passes through `hold()`, so the kind
+    // is the source discriminator: no hold, no provenance to check.
+    if (held === undefined || (frame.kind !== 'literal' && frame.kind !== 'escape')) {
       this.consumeFrame(frame)
       return
     }
-    this.dispatchWith(owner, frame.kind === 'escape' ? '\x1b' : frame.text)
+    const unit = frame.kind === 'escape' ? '\x1b' : frame.text
+    // Refresh the identities from the current screen/dialog (this is the same read
+    // `dispatch()` does before routing, not a second Router) …
+    this.observe(frame.kind === 'escape' ? 'escape' : 'text', unit)
+    // … and drop the unit when the layer it was pressed in is gone. Same name is not
+    // the same layer: a new Surface, a new Screen, or no layer at all.
+    if (held.screen !== this.layerScreen || held.dialog !== this.layerDialog) return
+    this.dispatchWith(held.owner, unit)
   }
 
   /**
