@@ -452,3 +452,99 @@ test('a configured machine does not open the wizard, resumed or not', async () =
     assert.equal(tui.screen, undefined, `resume=${resume}: the workspace keeps the screen`)
   }
 })
+
+// ── the mouse is not text ───────────────────────────────────────────────────
+//
+// A terminal reports a mouse gesture as a CSI SGR report — `ESC[<b;x;yM` on press,
+// `…m` on release (the `<` is part of the protocol). The wizard has no mouse
+// semantics at any step, so a report must be *consumed*: it is not a character, not
+// an answer, and not a paste. These cases exist because the setup screen matched a
+// report **without** the `<` (and only that shape), so a real right-click fell
+// through to the field and typed `[<2;20;10M` into an API key.
+const SGR_RIGHT_PRESS = '\u001b[<2;20;10M'
+const SGR_RIGHT_RELEASE = '\u001b[<2;20;10m'
+
+test('a right-click report never becomes field text', () => {
+  const { tui } = setup('id')
+  tui.input = 'workspace draft'
+  tui.cursor = 5
+  const rows = tui.rows.length
+  tui.handleData(Buffer.from(SGR_RIGHT_PRESS))
+  tui.handleData(Buffer.from(SGR_RIGHT_RELEASE))
+  assert.equal(tui.onboarding.field, '', 'a mouse report is not typed into the field')
+  assert.equal(tui.onboarding.fieldCursor, 0)
+  assert.equal(tui.onboarding.step, 'id', 'and it is not an answer either')
+  assert.equal(tui.input, 'workspace draft', 'the composer draft is untouched')
+  assert.equal(tui.cursor, 5)
+  assert.equal(tui.rows.length, rows, 'no transcript row is written for a mouse report')
+})
+
+test('a right-click at the key step does not leak into the masked field', () => {
+  const { tui } = setup('key')
+  tui.handleData(Buffer.from(SGR_RIGHT_PRESS))
+  tui.handleData(Buffer.from(SGR_RIGHT_RELEASE))
+  assert.equal(tui.onboarding.key, '', 'the collected key stays what the reader typed')
+  assert.equal(tui.onboarding.field, '')
+  assert.equal(tui.onboarding.saving, false, 'and nothing is saved')
+  const painted = frame(tui).join('\n')
+  assert.equal(painted.includes('<2;'), false, `the report must not be painted:\n${painted}`)
+})
+
+test('a mouse report at the provider list moves neither the cursor nor the step', () => {
+  const { tui } = setup('provider', { providerCursor: 1 })
+  tui.handleData(Buffer.from(SGR_RIGHT_PRESS))
+  assert.equal(tui.onboarding.providerCursor, 1)
+  assert.equal(tui.onboarding.step, 'provider')
+  tui.handleData(Buffer.from('\u001b[<64;5;5M')) // wheel
+  assert.equal(tui.onboarding.providerCursor, 1, 'a wheel is not an arrow in the list')
+  assert.equal(tui.onboarding.step, 'provider')
+})
+
+test('a mouse report at the confirm step is not an answer', () => {
+  const { tui } = setup('confirm')
+  tui.handleData(Buffer.from(SGR_RIGHT_PRESS))
+  tui.handleData(Buffer.from(SGR_RIGHT_RELEASE))
+  assert.equal(tui.onboarding.step, 'confirm', 'the wizard is still asking')
+  assert.equal(tui.onboarding.saving, false, 'and neither saved nor cancelled')
+  assert.equal(tui.screen?.kind, 'setup')
+})
+
+test('a left click and its release are consumed too', () => {
+  const { tui } = setup('base-url')
+  tui.handleData(Buffer.from('\u001b[<0;5;5M'))
+  tui.handleData(Buffer.from('\u001b[<0;5;5m'))
+  assert.equal(tui.onboarding.field, '', 'no step of the wizard has a click target')
+  assert.equal(tui.onboarding.fieldCursor, 0)
+})
+
+test('a mouse report split across two reads is still one report', async () => {
+  const { tui } = setup('id')
+  // The Reader holds a read that could still grow (60 ms), so the halves the pty
+  // delivered are put back together before the wizard sees anything.
+  tui.handleData(Buffer.from('\u001b[<2;20'))
+  await tick(30)
+  tui.handleData(Buffer.from(';10M'))
+  assert.equal(tui.onboarding.field, '')
+  assert.equal(tui.onboarding.fieldCursor, 0)
+})
+
+test('a bracketed paste still lands after a mouse report', () => {
+  // Consuming mouse reports must not become "refuse anything that starts with ESC":
+  // the terminal's own paste shortcut is the one input the wizard cannot do without.
+  const { tui } = setup('key')
+  tui.handleData(Buffer.from(SGR_RIGHT_PRESS))
+  tui.handleData(Buffer.from('\u001b[200~sk-pasted-value\u001b[201~'))
+  assert.equal(tui.onboarding.field, 'sk-pasted-value')
+})
+
+test('a sequence split across reads is held at a Screen too, never typed', async () => {
+  // Same rule as the mouse report, for every sequence: the Screen branch used to
+  // deliver a half-arrived `ESC[` as a key, and the wizard typed the `[`. The ladder
+  // holds it now, so the arrow arrives whole.
+  const { tui } = setup('provider', { providerCursor: 0 })
+  tui.handleData(Buffer.from('\u001b['))
+  await tick(20)
+  tui.handleData(Buffer.from('B'))
+  assert.equal(tui.onboarding.providerCursor, 1, 'the arrow moved the highlight')
+  assert.equal(tui.onboarding.field, '', 'and no partial sequence reached the field')
+})

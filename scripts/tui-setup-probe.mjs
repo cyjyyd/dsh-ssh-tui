@@ -226,6 +226,24 @@ async function runProbe(argv) {
       check(rows.length > 0 && rows.length <= 8, `typing in the field repaints a few rows (${rows.length})`)
     }
 
+    // 3a. A mouse report is protocol, not text. A terminal sends the right button as
+    //     `ESC[<2;x;yM` (press) and `ESC[<2;x;y m` (release); the wizard has no click
+    //     target, so both must be consumed. The setup screen used to match the report
+    //     *without* its `<`, so a real right-click fell through and typed
+    //     `[<2;20;10M` into the field — including the API-key step.
+    const rowsBeforeMouse = await wizardRows(output)
+    const fieldBeforeMouse = fieldRowOf(rowsBeforeMouse)
+    const beforeMouse = output.length
+    term.write('\x1b[<2;20;10M')
+    await delay(250)
+    term.write('\x1b[<2;20;10m')
+    await delay(450)
+    const fieldAfterMouse = fieldRowOf(await wizardRows(output))
+    check(fieldAfterMouse === fieldBeforeMouse,
+      `a right-button report leaves the field alone (${JSON.stringify(fieldBeforeMouse)} → ${JSON.stringify(fieldAfterMouse)})`)
+    check(!plain(output.slice(beforeMouse)).includes('<2;'),
+      `the report is not painted anywhere (${JSON.stringify(plain(output.slice(beforeMouse)).slice(-120))})`)
+
     // 3b. A paste belongs to the field the wizard owns — which is the whole point
     //     of the field being its own. An API key, a base URL and a model list are
     //     copied, not typed, and the terminal delivers that as bracketed paste. The

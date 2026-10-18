@@ -12381,7 +12381,7 @@ export class SshTui {
     // Mouse reports arrive through this same path. A wheel scrolls the Screen (the
     // transcript behind it is not the reader's target and must not move); a click
     // does nothing at all, because nothing behind a Screen is a target either.
-    const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
+    const sgr = SGR_MOUSE_RE.exec(combined)
     if (sgr !== null) {
       if (sgr[4] !== 'M') return
       const button = Number(sgr[1])
@@ -12559,6 +12559,12 @@ export class SshTui {
     // A Screen owns the read outright (AD-20 §4.3 priority 3): nothing below this
     // line runs for it — no keymap action, no Alt chord, no bare ESC for the composer.
     if (owner === 'screen') {
+      // A Screen owns the read it was sent — but a sequence cut in half is not a key
+      // yet. Hold it the way the ladder below holds one, so the report/key it belongs
+      // to arrives whole: a split `ESC[<2;20` + `;10M` used to reach the wizard as
+      // text (`[<2;20`) and edit the field. Complete shapes dispatch unchanged, and
+      // a lone Esc is an `escape` unit, not a sequence, so it is never delayed.
+      if (kind === 'sequence' && !this.isSequenceShape(combined) && this.reader.hold(combined)) return
       this.ownerScreen(combined, moved)
       return
     }
@@ -13421,8 +13427,12 @@ export class SshTui {
       this.markDirty()
       return
     }
-    const sgr = /^\x1b\[(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
-    if (sgr !== null) return
+    // A mouse report is protocol, not text: the wizard has no click target, so every
+    // button (press, release, wheel) is consumed here. The pattern used to be missing
+    // the `<` of the SGR protocol (`ESC[<b;x;yM`), so a real right-click missed this
+    // branch and its payload was typed into the field — an API key with `[<2;20;10M`
+    // in it. One pattern for every mouse-aware surface: `SGR_MOUSE_RE`.
+    if (SGR_MOUSE_RE.test(combined)) return
     const escaped = /^\x1b\[([A-D])$/u.exec(combined)
     if (escaped !== null) {
       if (state.step === 'provider') {
