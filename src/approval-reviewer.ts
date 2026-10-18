@@ -318,22 +318,74 @@ export function nextReviewAction(
 }
 
 /**
+ * The only error names the reviewer will print.
+ *
+ * This is an allowlist, not a syntax check: a syntactically valid name such as
+ * `SecretKey` is still untrusted text, and could be a credential echoed into the
+ * field. Anything not listed becomes `Error`.
+ */
+const REVIEW_ERROR_NAMES: ReadonlySet<string> = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'SyntaxError',
+  'AggregateError',
+  'LlmError',
+  'DOMException',
+  'AbortError',
+  'TimeoutError',
+])
+
+/**
+ * The only error codes the reviewer will print.
+ *
+ * These are stable adapter/runtime categories, not free-form uppercase strings.
+ * A key-shaped code such as `SKLIVE123` is valid syntax and still must not be
+ * shown, so membership — not a regex — is the gate.
+ */
+const REVIEW_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ABORTED',
+  'ACCOUNT_QUOTA',
+  'ACCOUNT_SIGN_IN_REQUIRED',
+  'ACCOUNT_TOKEN_INVALID',
+  'AUTH',
+  'CONTEXT_WINDOW_EXCEEDED',
+  'DISCOVERY_FAILED',
+  'DISCOVERY_UNSUPPORTED',
+  'EMPTY_RESPONSE',
+  'INVALID_CONFIG',
+  'INVALID_CREDENTIAL',
+  'INVALID_REQUEST',
+  'INVALID_RESPONSE',
+  'LLM_STREAM_IDLE_TIMEOUT',
+  'MALFORMED_RESPONSE',
+  'MODEL_UNSUPPORTED',
+  'NO_ADAPTER',
+  'QUOTA',
+  'RATE_LIMIT',
+  'STREAM_CLOSED',
+  'TIMEOUT',
+  'TRANSPORT',
+  'UNSUPPORTED_CONTENT',
+  'UNSUPPORTED_OPTION',
+  'UNSUPPORTED_REASONING_EFFORT',
+])
+
+/**
  * A deliberately small, non-secret error label for diagnostics.
  *
  * Provider error messages can contain an API key, a URL with credentials, or the
  * approval material echoed back. The UI only needs the class/code: `LlmError/AUTH`
- * is actionable, the message is not ours to print.
+ * is actionable, the message is not ours to print. Unknown names map to `Error`;
+ * unknown codes are omitted entirely.
  */
 export function describeReviewError(error: unknown): string {
   const name = error instanceof Error ? error.name : 'Error'
-  // Names are normally Error/TypeError/LlmError; codes are uppercase identifiers
-  // such as AUTH or EMPTY_RESPONSE. Anything else could be a key echoed into a
-  // field, so it is not printed at all.
-  const safeName = /^[A-Z][A-Za-z0-9]{0,39}$/u.test(name) ? name : 'Error'
+  const safeName = REVIEW_ERROR_NAMES.has(name) ? name : 'Error'
   const candidate = typeof error === 'object' && error !== null && 'code' in error
     ? (error as { code?: unknown }).code
     : undefined
-  const code = typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,39}$/u.test(candidate)
+  const code = typeof candidate === 'string' && REVIEW_ERROR_CODES.has(candidate)
     ? candidate
     : undefined
   return code === undefined ? safeName : `${safeName}/${code}`

@@ -72,7 +72,7 @@ function reviewCtx(scripts) {
   }
 }
 
-function approvalTui(ctx, config = {}) {
+function approvalTui(ctx = { get: () => undefined, on() { return () => {} } }, config = {}) {
   const agent = fakeAgent()
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, ...config })
   tui.runCommand('/approval auto')
@@ -372,6 +372,109 @@ test('a late approved stop after the deadline is never accepted or cached', asyn
   assert.match(feedbackText(tui), /0 条/)
 })
 
+test('a pre-cancelled rule allow returns cancelled, not allowed-once', async () => {
+  const { tui, agent } = approvalTui()
+  const request = bashCall(tui, agent, 'c-rule-cancel', 'git status')
+  request.signal = AbortSignal.abort()
+  const outcome = await tui.handleApproval(request,
+    async () => { throw new Error('a cancelled rule decision must not call next()') })
+  assert.equal(outcome, 'cancelled')
+  assert.deepEqual(
+    tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-rule-cancel')?.approval,
+    { state: 'unknown', provenance: 'live' },
+    'cancelled maps to the existing unknown/live card contract',
+  )
+  tui.runCommand('/approval status')
+  assert.match(feedbackText(tui), /已自动放行 0 次/)
+})
+
+test('a pre-cancelled rule deny is cancelled rather than rejected', async () => {
+  const { tui, agent } = approvalTui()
+  const request = bashCall(tui, agent, 'c-rule-deny-cancel', 'rm -rf /tmp/x')
+  request.signal = AbortSignal.abort()
+  const outcome = await tui.handleApproval(request,
+    async () => { throw new Error('a cancelled rule decision must not call next()') })
+  assert.equal(outcome, 'cancelled')
+  assert.deepEqual(
+    tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-rule-deny-cancel')?.approval,
+    { state: 'unknown', provenance: 'live' },
+  )
+  tui.runCommand('/approval status')
+  assert.match(feedbackText(tui), /自动拒绝 0 次/)
+})
+
+test('a pre-cancelled cache hit is cancelled and never approves again', async () => {
+  const { calls, ctx } = reviewCtx([[text(approveJson), usage(), finish('stop')]])
+  const { tui, agent } = approvalTui(ctx)
+  const next = async () => { throw new Error('reviewer verdict must not call next()') }
+  assert.equal(
+    await tui.handleApproval(bashCall(tui, agent, 'c-cache-1', 'python deploy.py'), next),
+    'allowed-once',
+  )
+  const second = bashCall(tui, agent, 'c-cache-2', 'python deploy.py')
+  second.signal = AbortSignal.abort()
+  assert.equal(await tui.handleApproval(second, next), 'cancelled')
+  assert.equal(calls.length, 1, 'the second request never called the model')
+  assert.equal(
+    tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-cache-2')?.approval?.state,
+    'unknown',
+  )
+  tui.runCommand('/approval status')
+  const status = feedbackText(tui)
+  assert.match(status, /已自动放行 1 次/)
+  assert.match(status, /缓存命中 0 次/)
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /1 条/)
+})
+
+test('cancellation after the reviewer returns a verdict prevents cache and allow', async () => {
+  const { calls, ctx } = reviewCtx([[text(approveJson), usage(), finish('stop')]])
+  const { tui, agent } = approvalTui(ctx)
+  const controller = new AbortController()
+  const request = bashCall(tui, agent, 'c-upper', 'python deploy.py')
+  request.signal = controller.signal
+  const originalMarkDirty = tui.markDirty
+  tui.markDirty = () => {
+    originalMarkDirty()
+    if (!controller.signal.aborted
+      && tui.rows.some(row => row.kind === 'system' && String(row.text).includes('自动审批复核 通过'))) {
+      controller.abort()
+    }
+  }
+  const outcome = await tui.handleApproval(request,
+    async () => { throw new Error('a cancelled verdict must not call next()') })
+  assert.equal(outcome, 'cancelled', 'the upper boundary re-checks before deciding')
+  assert.equal(calls.length, 1)
+  const upperCard = tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-upper')?.approval
+  assert.equal(upperCard?.state, 'unknown')
+  assert.equal(upperCard?.provenance, 'live')
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /0 条/, 'the late verdict was not written to the approval cache')
+})
+
+test('an abort fired while recording a reviewed approval prevents cache and allow', async () => {
+  const { calls, ctx } = reviewCtx([[text(approveJson), usage(), finish('stop')]])
+  const { tui, agent } = approvalTui(ctx)
+  const controller = new AbortController()
+  const request = bashCall(tui, agent, 'c-record-cancel', 'python deploy.py')
+  request.signal = controller.signal
+  const originalRecord = tui.recordAutoApproval.bind(tui)
+  tui.recordAutoApproval = (...args) => {
+    originalRecord(...args)
+    controller.abort()
+  }
+  const outcome = await tui.handleApproval(request,
+    async () => { throw new Error('a cancelled verdict must not call next()') })
+  assert.equal(outcome, 'cancelled', 'the final policy boundary re-checks after recording')
+  assert.equal(calls.length, 1)
+  assert.equal(
+    tui.rows.findLast(row => row.kind === 'tool' && row.callId === 'c-record-cancel')?.approval?.state,
+    'unknown',
+  )
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /0 条/, 'the approval was not cached after the abort')
+})
+
 test('rule allow and deny decisions never ask the model', async () => {
   const { calls, ctx } = reviewCtx([[text(approveJson), usage(), finish('stop')]])
   const { tui, agent } = approvalTui(ctx)
@@ -381,6 +484,49 @@ test('rule allow and deny decisions never ask the model', async () => {
   assert.equal(calls.length, 0, 'only the unknown shape reaches the reviewer')
   tui.runCommand('/approval status')
   assert.match(feedbackText(tui), /AI 复核 0 次/)
+})
+
+test('diagnostic error labels only use the allowlist', () => {
+  const secretName = Object.assign(new Error('sk-live-SECRET-message'), { name: 'SecretKey', code: 'SKLIVE123' })
+  assert.equal(describeReviewError(secretName), 'Error')
+  const secretCode = Object.assign(new Error('sk-live-SECRET-message'), { code: 'SKLIVE123' })
+  assert.equal(describeReviewError(secretCode), 'Error')
+  assert.equal(describeReviewError(Object.assign(new Error('x'), { name: 'SecretKey', code: 'AUTH' })), 'Error/AUTH')
+  assert.equal(describeReviewError(Object.assign(new Error('x'), { code: 'AUTH' })), 'Error/AUTH')
+  assert.equal(describeReviewError(Object.assign(new Error('x'), { name: 'LlmError', code: 'RATE_LIMIT' })), 'LlmError/RATE_LIMIT')
+  assert.doesNotMatch(describeReviewError(secretName), /SecretKey|SKLIVE123|sk-live-SECRET/)
+})
+
+test('the failure row never echoes a secret-shaped name, code, or message', async () => {
+  const secret = 'sk-live-SECRET-upper'
+  const error = Object.assign(new Error(`bad credential ${secret}`), {
+    name: 'SecretKey',
+    code: 'SKLIVE123',
+  })
+  const { ctx } = reviewCtx([error])
+  const { tui, agent } = approvalTui(ctx)
+  const pending = tui.handleApproval(bashCall(tui, agent, 'c-secret-error', 'python deploy.py'),
+    async () => { throw new Error('a provider error must not call next()') })
+  const outcome = await answer(tui, pending, 'n')
+  assert.equal(outcome, 'rejected')
+  const row = lastReviewRow(tui)
+  assert.match(row, /复核失败/)
+  assert.match(row, /Error/)
+  assert.doesNotMatch(row, /SecretKey/)
+  assert.doesNotMatch(row, /SKLIVE123/)
+  assert.doesNotMatch(row, /sk-live-SECRET-upper/)
+  assert.doesNotMatch(JSON.stringify(tui.rows), /sk-live-SECRET-upper/)
+})
+
+test('the failure row still shows an allowlisted AUTH category', async () => {
+  const error = Object.assign(new Error('credential rejected'), { name: 'Error', code: 'AUTH' })
+  const { ctx } = reviewCtx([error])
+  const { tui, agent } = approvalTui(ctx)
+  const pending = tui.handleApproval(bashCall(tui, agent, 'c-auth-error', 'python deploy.py'),
+    async () => { throw new Error('a provider error must not call next()') })
+  const outcome = await answer(tui, pending, 'n')
+  assert.equal(outcome, 'rejected')
+  assert.match(lastReviewRow(tui), /Error\/AUTH/)
 })
 
 test('a truncated first answer is retried once with the larger budget and can then approve', async () => {
@@ -506,7 +652,7 @@ test('an already-cancelled request makes no model call and yields cancelled', as
   assert.equal(outcome, 'cancelled', 'the card says cancelled; it never guesses a verdict')
   assert.equal(tui.dialog, undefined)
   assert.equal(calls.length, 0, 'a cancelled approval spends no tokens')
-  assert.match(lastReviewRow(tui), /已取消/)
+  assert.equal(lastReviewRow(tui), '', 'no review row is emitted for a review that never started')
 })
 
 test('detached, an exhausted review denies without a human and without a cached verdict', async () => {

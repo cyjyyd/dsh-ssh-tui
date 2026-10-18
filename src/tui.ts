@@ -9651,6 +9651,33 @@ export class SshTui {
     })
   }
 
+  /** Whether the Host withdrew this approval request. */
+  private approvalCancelled(request: ApprovalRequest): boolean {
+    return request.signal?.aborted === true
+  }
+
+  /** Settle a withdrawn request on the existing Host `cancelled` contract. */
+  private cancelApproval(request: ApprovalRequest): 'cancelled' {
+    this.settleToolApproval(request, 'cancelled', 'live')
+    return 'cancelled'
+  }
+
+  /**
+   * Settle a policy decision, but never after the Host withdrew the request.
+   *
+   * The pre-check catches an abort that landed before this decision; the
+   * post-check catches one fired while the card was being updated. Both return
+   * the Host's existing `cancelled` outcome rather than inventing a value.
+   */
+  private settlePolicyOutcome(
+    request: ApprovalRequest,
+    outcome: 'allowed-once' | 'rejected',
+  ): ApprovalOutcome {
+    if (this.approvalCancelled(request)) return this.cancelApproval(request)
+    this.settleToolApproval(request, outcome, 'policy')
+    return this.approvalCancelled(request) ? this.cancelApproval(request) : outcome
+  }
+
   readonly handleApproval = async (
     request: ApprovalRequest,
     _next: () => Promise<ApprovalOutcome>,
@@ -9661,6 +9688,9 @@ export class SshTui {
     // human is attached — detached turns reject so they complete instead of
     // stalling toward the idle kill.
     if (this.autoApprovalMode === 'auto') {
+      // A cancelled request is not a rule decision, a cache hit, or a reviewer
+      // verdict. Check before all three so an allow cannot win the race.
+      if (this.approvalCancelled(request)) return this.cancelApproval(request)
       this.markApprovalWaiting(request, 'policy')
       const row = request.callId === undefined
         ? undefined
@@ -9680,13 +9710,11 @@ export class SshTui {
       const ruleReason = t(`approval.reason.${classified.reasonKey}`, undefined, classified.reasonKey)
       if (classified.decision === 'allow') {
         this.recordAutoApproval('allow', classified.risk, request.toolName, command, ruleReason)
-        this.settleToolApproval(request, 'allowed-once', 'policy')
-        return 'allowed-once'
+        return this.settlePolicyOutcome(request, 'allowed-once')
       }
       if (classified.decision === 'deny') {
         this.recordAutoApproval('deny', classified.risk, request.toolName, command, ruleReason)
-        this.settleToolApproval(request, 'rejected', 'policy')
-        return 'rejected'
+        return this.settlePolicyOutcome(request, 'rejected')
       }
       // Unknown shape: the rule table cannot judge it — hand it to the
       // subagent-configured model with compact context (AI review). A verdict
@@ -9707,12 +9735,16 @@ export class SshTui {
             : cached.verdict.reason,
           { fromCache: true, ageMs: cached.ageMs },
         )
-        const cachedOutcome: ApprovalOutcome = cached.verdict.approved ? 'allowed-once' : 'rejected'
-        this.settleToolApproval(request, cachedOutcome, 'policy')
-        return cachedOutcome
+        return this.settlePolicyOutcome(
+          request,
+          cached.verdict.approved ? 'allowed-once' : 'rejected',
+        )
       }
       const reviewed = await this.reviewUnknownWithModel(request, command, row?.args)
-      if (reviewed !== undefined && cacheKey !== undefined) this.approvalCache.store(cacheKey, reviewed)
+      // The await is the one place an abort can land between the reviewer's
+      // acceptance gate and this decision. Do not cache or apply a verdict the
+      // caller withdrew while it was being produced.
+      if (this.approvalCancelled(request)) return this.cancelApproval(request)
       if (reviewed?.approved === true) {
         this.recordAutoApproval(
           'allow',
@@ -9721,8 +9753,9 @@ export class SshTui {
           command,
           reviewed.reason === '' ? t('approval.reviewApproved') : reviewed.reason,
         )
-        this.settleToolApproval(request, 'allowed-once', 'policy')
-        return 'allowed-once'
+        const outcome = this.settlePolicyOutcome(request, 'allowed-once')
+        if (outcome === 'allowed-once' && cacheKey !== undefined) this.approvalCache.store(cacheKey, reviewed)
+        return outcome
       }
       if (reviewed !== undefined) {
         this.recordAutoApproval(
@@ -9732,8 +9765,9 @@ export class SshTui {
           command,
           reviewed.reason === '' ? t('approval.reviewRejected') : reviewed.reason,
         )
-        this.settleToolApproval(request, 'rejected', 'policy')
-        return 'rejected'
+        const outcome = this.settlePolicyOutcome(request, 'rejected')
+        if (outcome === 'rejected' && cacheKey !== undefined) this.approvalCache.store(cacheKey, reviewed)
+        return outcome
       }
       if (!this.hasLiveDisplay()) {
         this.detachedDeniedCount += 1
