@@ -153,7 +153,9 @@ export const REVIEW_BUDGETS: readonly number[] = [REVIEW_FIRST_MAX_TOKENS, REVIE
 
 /** Why one attempt produced no verdict. Each maps to a different diagnostic. */
 export type ReviewFailure =
-  | 'aborted'      // the request signal or the deadline ended the stream
+  | 'cancelled'    // the caller aborted the approval
+  | 'deadline'     // the whole review's deadline expired
+  | 'aborted'      // the provider/stream reported `aborted`
   | 'provider'     // the stream finished with `error`
   | 'threw'        // the adapter threw (bad key, quota, unsupported option)
   | 'truncated'    // `max-tokens`: the budget ran out
@@ -241,10 +243,238 @@ export function reviewOutcome(attempt: ReviewAttempt): { verdict?: ReviewVerdict
  * verdict of `rejected`, a provider error, an aborted request or an empty reply
  * never retries — a larger budget is not a second opinion.
  */
-export function shouldRetryReview(attempt: ReviewAttempt, attempts: number, deadlineAt: number): boolean {
+export function shouldRetryReview(
+  attempt: ReviewAttempt,
+  attempts: number,
+  deadlineAt: number,
+  now: () => number = Date.now,
+): boolean {
   if (attempt.finish?.kind !== 'max-tokens') return false
   if (attempts >= REVIEW_BUDGETS.length) return false
-  return Date.now() < deadlineAt
+  return now() < deadlineAt
+}
+
+/** The two reasons to stop a review before it can accept a verdict. */
+export type ReviewStop = 'cancelled' | 'deadline'
+
+/**
+ * Check the caller's cancellation and the review's absolute deadline.
+ *
+ * This is deliberately separate from the adapter's `AbortSignal`: an adapter may
+ * ignore or lag the signal, while the approval still has to return. The caller
+ * checks this before every model call, after the stream reports `done`, and again
+ * immediately before accepting a verdict.
+ *
+ * @param signal - the approval request's signal (not a per-call timeout signal).
+ * @param deadlineAt - absolute epoch milliseconds shared by every attempt.
+ * @param now - clock seam for deterministic tests; production uses `Date.now`.
+ */
+export function reviewStopReason(
+  signal: AbortSignal | undefined,
+  deadlineAt: number,
+  now: () => number = Date.now,
+): ReviewStop | undefined {
+  if (signal?.aborted === true) return 'cancelled'
+  if (now() >= deadlineAt) return 'deadline'
+  return undefined
+}
+
+/**
+ * The acceptance gate for a completed attempt.
+ *
+ * `reviewOutcome` decides whether the text is a verdict; this function decides
+ * whether the review is still allowed to accept one. Cancellation and the shared
+ * deadline outrank a perfectly parsed approval, because a stream that ignores the
+ * abort can deliver `stop` after the caller has already withdrawn the request.
+ */
+export function reviewOutcomeAt(
+  attempt: ReviewAttempt,
+  signal: AbortSignal | undefined,
+  deadlineAt: number,
+  now: () => number = Date.now,
+): { verdict?: ReviewVerdict; failure?: ReviewFailure } {
+  const stopped = reviewStopReason(signal, deadlineAt, now)
+  return stopped === undefined ? reviewOutcome(attempt) : { failure: stopped }
+}
+
+/**
+ * Pick the next review action, with cancellation/deadline outranking a retry.
+ *
+ * A truncated attempt is normally the one case worth escalating. If the caller
+ * aborted in the meantime, or the shared deadline expired, that earlier
+ * `truncated` state is stale: report cancellation/deadline and never spend a
+ * second call or print a "raise the budget" hint.
+ */
+export function nextReviewAction(
+  attempt: ReviewAttempt,
+  attempts: number,
+  deadlineAt: number,
+  signal?: AbortSignal,
+  now: () => number = Date.now,
+): 'retry' | 'stop' | ReviewStop {
+  const stopped = reviewStopReason(signal, deadlineAt, now)
+  if (stopped !== undefined) return stopped
+  return shouldRetryReview(attempt, attempts, deadlineAt, now) ? 'retry' : 'stop'
+}
+
+/**
+ * A deliberately small, non-secret error label for diagnostics.
+ *
+ * Provider error messages can contain an API key, a URL with credentials, or the
+ * approval material echoed back. The UI only needs the class/code: `LlmError/AUTH`
+ * is actionable, the message is not ours to print.
+ */
+export function describeReviewError(error: unknown): string {
+  const name = error instanceof Error ? error.name : 'Error'
+  // Names are normally Error/TypeError/LlmError; codes are uppercase identifiers
+  // such as AUTH or EMPTY_RESPONSE. Anything else could be a key echoed into a
+  // field, so it is not printed at all.
+  const safeName = /^[A-Z][A-Za-z0-9]{0,39}$/u.test(name) ? name : 'Error'
+  const candidate = typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined
+  const code = typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,39}$/u.test(candidate)
+    ? candidate
+    : undefined
+  return code === undefined ? safeName : `${safeName}/${code}`
+}
+
+/** What consuming one model stream produced before any verdict is considered. */
+export interface ReviewConsumption {
+  readonly attempt: ReviewAttempt
+  /** Transport-level stop; a clean stream has no failure here. */
+  readonly failure?: 'cancelled' | 'deadline' | 'threw'
+  /** Sanitized class/code when `failure` is `threw`. */
+  readonly errorCategory?: string
+}
+
+export interface ReviewConsumptionOptions {
+  /** Caller cancellation only. The per-call adapter signal is separate. */
+  readonly signal?: AbortSignal
+  /** Absolute epoch milliseconds shared by every attempt of one review. */
+  readonly deadlineAt: number
+  /** Clock seam for deterministic tests; production uses `Date.now`. */
+  readonly now?: () => number
+}
+
+/**
+ * Consume a model stream without trusting it to honour the abort signal.
+ *
+ * A bare `for await (llm.stream(...))` can wait forever when an adapter ignores
+ * `AbortSignal`; the timeout signal is only a request to the adapter. This
+ * wrapper races every `iterator.next()` against the caller's abort and the
+ * review's absolute deadline, asks the iterator to close when either wins, and
+ * never awaits that close (an uncooperative generator could await forever too).
+ *
+ * A late chunk, a late `stop`, and a late approval all arrive after the wrapper
+ * has already returned `cancelled`/`deadline`; they are ignored by construction.
+ */
+export async function consumeReviewStream(
+  stream: AsyncIterable<StreamChunk>,
+  options: ReviewConsumptionOptions,
+): Promise<ReviewConsumption> {
+  const collector = new ReviewCollector()
+  const now = options.now ?? Date.now
+  let iterator: AsyncIterator<StreamChunk>
+  try {
+    iterator = stream[Symbol.asyncIterator]()
+  } catch (error) {
+    return { attempt: collector.attempt(), failure: 'threw', errorCategory: describeReviewError(error) }
+  }
+  let completed = false
+  try {
+    while (true) {
+      const stopped = reviewStopReason(options.signal, options.deadlineAt, now)
+      if (stopped !== undefined) return { attempt: collector.attempt(), failure: stopped }
+      const next = await nextReviewChunk(iterator, options.signal, options.deadlineAt, now)
+      if (next.kind === 'stop') return { attempt: collector.attempt(), failure: next.reason }
+      if (next.kind === 'threw') {
+        // Cancellation wins even when the adapter explains its failure with an
+        // exception: the caller already withdrew the request.
+        const late = reviewStopReason(options.signal, options.deadlineAt, now)
+        return late === undefined
+          ? { attempt: collector.attempt(), failure: 'threw', errorCategory: describeReviewError(next.error) }
+          : { attempt: collector.attempt(), failure: late }
+      }
+      if (next.result.done === true) {
+        completed = true
+        // Stream completion is not acceptance. Re-check before exposing the
+        // attempt to `reviewOutcome`, so a stop that raced the abort loses.
+        const late = reviewStopReason(options.signal, options.deadlineAt, now)
+        return late === undefined
+          ? { attempt: collector.attempt() }
+          : { attempt: collector.attempt(), failure: late }
+      }
+      collector.push(next.result.value)
+    }
+  } catch (error) {
+    const late = reviewStopReason(options.signal, options.deadlineAt, now)
+    return late === undefined
+      ? { attempt: collector.attempt(), failure: 'threw', errorCategory: describeReviewError(error) }
+      : { attempt: collector.attempt(), failure: late }
+  } finally {
+    if (!completed) closeReviewIterator(iterator)
+  }
+}
+
+type ReviewNext =
+  | { readonly kind: 'chunk'; readonly result: IteratorResult<StreamChunk> }
+  | { readonly kind: 'stop'; readonly reason: ReviewStop }
+  | { readonly kind: 'threw'; readonly error: unknown }
+
+/** Wait for one chunk, but let cancellation/deadline win the race. */
+function nextReviewChunk(
+  iterator: AsyncIterator<StreamChunk>,
+  signal: AbortSignal | undefined,
+  deadlineAt: number,
+  now: () => number,
+): Promise<ReviewNext> {
+  return new Promise<ReviewNext>((resolve) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    function settle(value: ReviewNext): void {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      resolve(value)
+    }
+    function onAbort(): void {
+      settle({ kind: 'stop', reason: 'cancelled' })
+    }
+    const stopped = reviewStopReason(signal, deadlineAt, now)
+    if (stopped !== undefined) {
+      settle({ kind: 'stop', reason: stopped })
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const remaining = deadlineAt - now()
+    timer = setTimeout(
+      () => settle({ kind: 'stop', reason: 'deadline' }),
+      Math.max(0, Math.min(remaining, 2_147_483_647)),
+    )
+    let pending: Promise<IteratorResult<StreamChunk>>
+    try {
+      pending = Promise.resolve(iterator.next())
+    } catch (error) {
+      settle({ kind: 'threw', error })
+      return
+    }
+    void pending.then(
+      result => settle({ kind: 'chunk', result }),
+      error => settle({ kind: 'threw', error }),
+    )
+  })
+}
+
+/** Ask the iterator to close, but never wait for an uncooperative generator. */
+function closeReviewIterator(iterator: AsyncIterator<StreamChunk>): void {
+  try {
+    const closing = iterator.return?.()
+    if (closing !== undefined) void Promise.resolve(closing).catch(() => {})
+  } catch {
+    // The iterator is already detached; there is nothing left to clean up.
+  }
 }
 
 /**

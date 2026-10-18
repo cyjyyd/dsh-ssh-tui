@@ -3,11 +3,16 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
 import {
+  consumeReviewStream,
+  describeReviewError,
+  nextReviewAction,
   ReviewCollector,
   REVIEW_BUDGETS,
   REVIEW_DEADLINE_MS,
   REVIEW_FIRST_MAX_TOKENS,
   reviewOutcome,
+  reviewOutcomeAt,
+  reviewStopReason,
   shouldRetryReview,
 } from '../lib/approval-reviewer.js'
 import { feedbackText } from './wait.mjs'
@@ -67,9 +72,9 @@ function reviewCtx(scripts) {
   }
 }
 
-function approvalTui(ctx) {
+function approvalTui(ctx, config = {}) {
   const agent = fakeAgent()
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false, ...config })
   tui.runCommand('/approval auto')
   return { tui, agent }
 }
@@ -88,6 +93,8 @@ async function answer(tui, pending, key) {
   tui.handleChar(key)
   return pending
 }
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 const lastReviewRow = tui => String(
   tui.rows.findLast(row => row.kind === 'system' && String(row.text).includes('自动审批复核'))?.text ?? '',
@@ -125,6 +132,14 @@ test('reviewOutcome accepts only a parsed verdict after a clean stop', () => {
   assert.equal(hostile?.approved, false, 'high risk can never be approved, whatever the text says')
 })
 
+test('a parsed approval is not accepted after cancellation or the deadline', () => {
+  const approved = attempt({ text: approveJson })
+  assert.equal(reviewOutcomeAt(approved, undefined, Date.now() + 10_000).verdict?.approved, true)
+  assert.equal(reviewOutcomeAt(approved, AbortSignal.abort(), Date.now() + 10_000).failure, 'cancelled')
+  assert.equal(reviewOutcomeAt(approved, undefined, Date.now() - 1).failure, 'deadline')
+  assert.equal(reviewOutcomeAt(approved, AbortSignal.abort(), Date.now() - 1).failure, 'cancelled')
+})
+
 test('only an explicit max-tokens truncation earns the single retry', () => {
   const future = Date.now() + 10_000
   assert.equal(shouldRetryReview(attempt({ finish: { kind: 'max-tokens' } }), 1, future), true)
@@ -135,11 +150,236 @@ test('only an explicit max-tokens truncation earns the single retry', () => {
   assert.equal(shouldRetryReview(attempt({ finish: { kind: 'max-tokens' } }), 1, Date.now() - 1), false)
 })
 
+test('diagnostic error labels cannot echo a secret name or code', () => {
+  const named = Object.assign(new Error('sk-SECRET-message'), { name: 'sk-SECRET', code: 'sk-SECRET' })
+  assert.equal(describeReviewError(named), 'Error')
+  const coded = Object.assign(new Error('sk-SECRET-message'), { code: 'AUTH' })
+  assert.equal(describeReviewError(coded), 'Error/AUTH')
+  assert.doesNotMatch(describeReviewError(named), /sk-SECRET/)
+  assert.doesNotMatch(describeReviewError(coded), /sk-SECRET/)
+})
+
 test('the review budget is bounded: two calls sharing one 20 s deadline', () => {
   assert.deepEqual(REVIEW_BUDGETS, [2048, 8192])
   assert.equal(REVIEW_BUDGETS.length, 2)
   assert.equal(REVIEW_FIRST_MAX_TOKENS, 2048)
   assert.equal(REVIEW_DEADLINE_MS, 20_000)
+})
+
+test('an abort during the stream discards a late approved stop and caches nothing', async () => {
+  const controller = new AbortController()
+  let started
+  const startedPromise = new Promise(resolve => { started = resolve })
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const calls = []
+  let step = 0
+  const iterator = {
+    async next() {
+      step += 1
+      if (step === 1) {
+        started()
+        await gate
+        return { done: false, value: text(approveJson) }
+      }
+      if (step === 2) return { done: false, value: usage() }
+      if (step === 3) return { done: false, value: finish('stop') }
+      return { done: true, value: undefined }
+    },
+    // Deliberately ignores the consumer's close request: this is the adapter
+    // that keeps producing after the abort.
+    async return() { return { done: true, value: undefined } },
+  }
+  const ctx = {
+    get(name) {
+      if (name !== 'llm') return undefined
+      return {
+        stream(options) {
+          calls.push(options)
+          return { [Symbol.asyncIterator]: () => iterator }
+        },
+      }
+    },
+    on() { return () => {} },
+  }
+  const { tui, agent } = approvalTui(ctx)
+  const request = bashCall(tui, agent, 'c-midflight', 'python deploy.py')
+  request.signal = controller.signal
+  const pending = tui.handleApproval(request,
+    async () => { throw new Error('a cancelled review must not call next()') })
+  await startedPromise
+  controller.abort()
+  release()
+  const outcome = await pending
+  assert.equal(outcome, 'cancelled', 'a late approved stop cannot beat the abort')
+  assert.equal(calls.length, 1, 'cancellation never starts a second call')
+  assert.equal(step, 1, 'the consumer never asks the stalled iterator for another chunk')
+  assert.equal(tui.dialog, undefined)
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /0 条/, 'a cancelled verdict is never cached')
+  assert.doesNotMatch(JSON.stringify(tui.rows), /自动审批复核 通过/)
+})
+
+test('reviewStopReason lets cancellation and the deadline outrank a retry', () => {
+  const truncated = attempt({ finish: { kind: 'max-tokens' } })
+  const deadline = Date.now()
+  assert.equal(reviewStopReason(AbortSignal.abort(), deadline), 'cancelled')
+  assert.equal(reviewStopReason(undefined, deadline - 1), 'deadline')
+  assert.equal(reviewStopReason(undefined, Date.now() + 10_000), undefined)
+  assert.equal(nextReviewAction(truncated, 1, deadline + 10_000, undefined, () => deadline), 'retry')
+  assert.equal(nextReviewAction(truncated, 1, deadline, undefined, () => deadline), 'deadline')
+  assert.equal(nextReviewAction(truncated, 1, deadline + 10_000, AbortSignal.abort(), () => deadline), 'cancelled')
+  assert.equal(nextReviewAction(truncated, 2, deadline + 10_000, undefined, () => deadline), 'stop')
+})
+
+test('a stream that never settles is stopped by the deadline and closed once', async () => {
+  let closed = 0
+  const stream = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => new Promise(() => {}),
+        return: async () => { closed += 1; return { done: true, value: undefined } },
+      }
+    },
+  }
+  const started = Date.now()
+  const result = await consumeReviewStream(stream, { deadlineAt: Date.now() + 30 })
+  assert.equal(result.failure, 'deadline')
+  assert.ok(Date.now() - started < 1_000, 'a non-cooperative stream cannot hold the review open')
+  assert.equal(closed, 1, 'the consumer asks the iterator to close exactly once')
+})
+
+test('a stop completed after the deadline is marked deadline, not accepted', async () => {
+  let clock = 0
+  let step = 0
+  const stream = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          step += 1
+          if (step === 1) return { done: false, value: text(approveJson) }
+          if (step === 2) return { done: false, value: finish('stop') }
+          clock = 500
+          return { done: true, value: undefined }
+        },
+        return: async () => ({ done: true, value: undefined }),
+      }
+    },
+  }
+  const result = await consumeReviewStream(stream, { deadlineAt: 100, now: () => clock })
+  assert.equal(result.failure, 'deadline')
+  assert.equal(result.attempt.text, approveJson, 'the late text was collected, but not accepted')
+})
+
+test('a stop completed after cancellation is marked cancelled, not accepted', async () => {
+  const controller = new AbortController()
+  let step = 0
+  const stream = {
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => {
+          step += 1
+          if (step === 1) return { done: false, value: text(approveJson) }
+          controller.abort()
+          return { done: true, value: undefined }
+        },
+        return: async () => ({ done: true, value: undefined }),
+      }
+    },
+  }
+  const result = await consumeReviewStream(stream, {
+    signal: controller.signal,
+    deadlineAt: Date.now() + 10_000,
+  })
+  assert.equal(result.failure, 'cancelled')
+})
+
+test('a stream that ignores abort cannot hold the approval past the deadline', async () => {
+  let started
+  const startedPromise = new Promise(resolve => { started = resolve })
+  const ctx = {
+    get(name) {
+      if (name !== 'llm') return undefined
+      return {
+        stream() {
+          return (async function* ignoresEverything() {
+            started()
+            await new Promise(() => {})
+          })()
+        },
+      }
+    },
+    on() { return () => {} },
+  }
+  const { tui, agent } = approvalTui(ctx, { reviewDeadlineMs: 20 })
+  const pending = tui.handleApproval(bashCall(tui, agent, 'c-hanging', 'python deploy.py'),
+    async () => { throw new Error('a timed-out review must not call next()') })
+  await startedPromise
+  await delay(100)
+  assert.equal(tui.dialog?.kind, 'confirm', 'the approval returns to the human without waiting for the adapter')
+  const card = lastReviewRow(tui)
+  assert.match(card, /截止时间/)
+  assert.match(card, /20 ms/)
+  assert.match(card, /deepseek-official/)
+  tui.handleChar('n')
+  assert.equal(await pending, 'rejected')
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /0 条/)
+})
+
+test('a late approved stop after the deadline is never accepted or cached', async () => {
+  let started
+  const startedPromise = new Promise(resolve => { started = resolve })
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  let step = 0
+  const iterator = {
+    async next() {
+      step += 1
+      if (step === 1) {
+        started()
+        await gate
+        return { done: false, value: text(approveJson) }
+      }
+      if (step === 2) return { done: false, value: usage() }
+      if (step === 3) return { done: false, value: finish('stop') }
+      return { done: true, value: undefined }
+    },
+    async return() { return { done: true, value: undefined } },
+  }
+  const ctx = {
+    get(name) {
+      if (name !== 'llm') return undefined
+      return { stream() { return { [Symbol.asyncIterator]: () => iterator } } }
+    },
+    on() { return () => {} },
+  }
+  const { tui, agent } = approvalTui(ctx, { reviewDeadlineMs: 20 })
+  const pending = tui.handleApproval(bashCall(tui, agent, 'c-late', 'python deploy.py'),
+    async () => { throw new Error('a timed-out review must not call next()') })
+  await startedPromise
+  await delay(80)
+  assert.equal(tui.dialog?.kind, 'confirm')
+  release()
+  await delay(50)
+  assert.equal(step, 1, 'the consumer never resumes a stream it already stopped waiting for')
+  assert.equal(tui.dialog?.kind, 'confirm', 'the late stop did not close the question')
+  tui.handleChar('n')
+  assert.equal(await pending, 'rejected')
+  assert.doesNotMatch(JSON.stringify(tui.rows), /自动审批复核 通过/)
+  tui.runCommand('/approval cache')
+  assert.match(feedbackText(tui), /0 条/)
+})
+
+test('rule allow and deny decisions never ask the model', async () => {
+  const { calls, ctx } = reviewCtx([[text(approveJson), usage(), finish('stop')]])
+  const { tui, agent } = approvalTui(ctx)
+  const next = async () => { throw new Error('rule decisions must not call next()') }
+  assert.equal(await tui.handleApproval(bashCall(tui, agent, 'c-rule-allow', 'git status'), next), 'allowed-once')
+  assert.equal(await tui.handleApproval(bashCall(tui, agent, 'c-rule-deny', 'rm -rf /tmp/x'), next), 'rejected')
+  assert.equal(calls.length, 0, 'only the unknown shape reaches the reviewer')
+  tui.runCommand('/approval status')
+  assert.match(feedbackText(tui), /AI 复核 0 次/)
 })
 
 test('a truncated first answer is retried once with the larger budget and can then approve', async () => {
@@ -185,7 +425,7 @@ test('two truncated answers stop at two calls, ask the human, and cache nothing'
 })
 
 test('a provider error is not retried and falls back to the human', async () => {
-  const { calls, ctx } = reviewCtx([new Error('bad key 401')])
+  const { calls, ctx } = reviewCtx([new Error('bad key sk-SECRET-401')])
   const { tui, agent } = approvalTui(ctx)
   const pending = tui.handleApproval(bashCall(tui, agent, 'c-provider', 'python deploy.py'),
     async () => { throw new Error('reviewer verdict must not call next()') })
@@ -193,11 +433,16 @@ test('a provider error is not retried and falls back to the human', async () => 
   assert.equal(outcome, 'rejected')
   assert.equal(calls.length, 1, 'a larger budget cannot fix a bad key or an unsupported option')
   assert.match(lastReviewRow(tui), /复核失败/)
-  assert.match(lastReviewRow(tui), /bad key 401/)
+  assert.match(lastReviewRow(tui), /Error/, 'the category is useful')
+  assert.match(lastReviewRow(tui), /deepseek-official/, 'the route is finite, useful metadata')
+  assert.match(lastReviewRow(tui), /1 次调用/)
+  assert.doesNotMatch(lastReviewRow(tui), /bad key sk-SECRET-401/, 'the raw provider message may contain a key')
+  assert.doesNotMatch(JSON.stringify(tui.rows), /sk-SECRET-401/)
 })
 
-test('an unparsed clean stop is not retried', async () => {
-  const { calls, ctx } = reviewCtx([[text('not-json'), usage(), finish('stop')]])
+test('an unparsed clean stop is not retried and never echoes the model output', async () => {
+  const secret = 'MODEL-OUTPUT-SECRET-7f3c'
+  const { calls, ctx } = reviewCtx([[text(`${secret} not-json`), usage(), finish('stop')]])
   const { tui, agent } = approvalTui(ctx)
   const pending = tui.handleApproval(bashCall(tui, agent, 'c-unparsed', 'python deploy.py'),
     async () => { throw new Error('reviewer verdict must not call next()') })
@@ -205,6 +450,9 @@ test('an unparsed clean stop is not retried', async () => {
   assert.equal(outcome, 'rejected')
   assert.equal(calls.length, 1)
   assert.match(lastReviewRow(tui), /无可用结论/)
+  assert.match(lastReviewRow(tui), /字符/)
+  assert.doesNotMatch(lastReviewRow(tui), /MODEL-OUTPUT-SECRET/)
+  assert.doesNotMatch(JSON.stringify(tui.rows), /MODEL-OUTPUT-SECRET/)
 })
 
 test('a reasoning-only truncated attempt retries, then a clean stop approves', async () => {
@@ -218,6 +466,19 @@ test('a reasoning-only truncated attempt retries, then a clean stop approves', a
   assert.equal(outcome, 'allowed-once')
   assert.deepEqual(calls.map(call => call.maxTokens), [2048, 8192])
   assert.doesNotMatch(JSON.stringify(tui.rows), /thinking consumed the whole first budget/)
+})
+
+test('an unknown finish kind is reported as other, never echoed', async () => {
+  const secret = 'finish-SECRET-91ab'
+  const { ctx } = reviewCtx([[text('{}'), usage(), { type: 'finish', reason: { kind: secret } }]])
+  const { tui, agent } = approvalTui(ctx)
+  const pending = tui.handleApproval(bashCall(tui, agent, 'c-finish-kind', 'python deploy.py'),
+    async () => { throw new Error('reviewer verdict must not call next()') })
+  const outcome = await answer(tui, pending, 'n')
+  assert.equal(outcome, 'rejected')
+  assert.match(lastReviewRow(tui), /other/)
+  assert.doesNotMatch(lastReviewRow(tui), /finish-SECRET/)
+  assert.doesNotMatch(JSON.stringify(tui.rows), /finish-SECRET/)
 })
 
 test('a provider error finish is not retried and asks the human', async () => {
@@ -244,7 +505,7 @@ test('an already-cancelled request makes no model call and yields cancelled', as
   assert.equal(outcome, 'cancelled', 'the card says cancelled; it never guesses a verdict')
   assert.equal(tui.dialog, undefined)
   assert.equal(calls.length, 0, 'a cancelled approval spends no tokens')
-  assert.match(lastReviewRow(tui), /超时或被取消/)
+  assert.match(lastReviewRow(tui), /已取消/)
 })
 
 test('detached, an exhausted review denies without a human and without a cached verdict', async () => {

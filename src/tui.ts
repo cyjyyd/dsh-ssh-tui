@@ -28,7 +28,7 @@ import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import { METADATA_FILE, readPresetMetadata, type AgentPreset } from './preset-compat.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type StreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   commandAcceptsAttachments,
@@ -82,13 +82,15 @@ import {
 import { screenRuntimeStrip } from './footer-budget.js'
 import {
   buildReviewUserMessage,
-  ReviewCollector,
-  reviewOutcome,
+  consumeReviewStream,
+  describeReviewError,
+  nextReviewAction,
+  reviewOutcomeAt,
+  reviewStopReason,
   reviewSystemPrompt,
   REVIEW_BUDGETS,
   REVIEW_DEADLINE_MS,
   REVIEW_FIRST_MAX_TOKENS,
-  shouldRetryReview,
   type ReviewAttempt,
   type ReviewFailure,
   type ReviewVerdict,
@@ -904,6 +906,12 @@ export interface TuiConfig {
    * link. Defaults from `DSH_TUI_PAINT_MS` (160).
    */
   paintIntervalMs?: number
+  /**
+   * Test seam for the AI reviewer's whole-review deadline. Production always
+   * uses {@link REVIEW_DEADLINE_MS} (20 s); a short value lets tests prove that
+   * a stream which ignores `AbortSignal` cannot hold an approval open.
+   */
+  reviewDeadlineMs?: number
   /** Called after hangup when the Host is kept (busy) so the launcher can update the lock. */
   onHangup?: () => void | Promise<void>
   /** Called when a Display relay attaches after hangup. */
@@ -1716,6 +1724,8 @@ export class SshTui {
   private aiReviewCount = 0
   /** Model calls the reviewer made: a truncated first attempt costs a second one. */
   private aiReviewCallCount = 0
+  /** The reviewer's whole-review deadline; tests can shorten it. */
+  private readonly reviewDeadlineMs: number
   private cacheHitCount = 0
   /** Verdicts this TUI already reviewed, reusable for a bounded time. */
   private readonly approvalCache = new ApprovalVerdictCache()
@@ -2595,6 +2605,10 @@ export class SshTui {
     this.color = this.colorDepth !== 'none'
     this.lastSessionRoute = config.restoredRoute
     this.maxToolOutputLines = Math.max(1, config.maxToolOutputLines ?? 6)
+    this.reviewDeadlineMs = typeof config.reviewDeadlineMs === 'number'
+      && Number.isFinite(config.reviewDeadlineMs) && config.reviewDeadlineMs > 0
+      ? config.reviewDeadlineMs
+      : REVIEW_DEADLINE_MS
     this.showReasoning = config.showReasoning !== false
     this.workspaceView = this.readWorkspaceView()
     this.autoApprovalMode = this.readAutoApprovalMode()
@@ -9356,19 +9370,21 @@ export class SshTui {
       reasoningEffort: ReasoningEffortId('off'),
     }
     // One review, one deadline: the attempts share it, and a retry never gets a fresh
-    // clock. Nothing polls — each attempt's signal is a timeout, and there are at most
-    // two of them.
-    const deadlineAt = Date.now() + REVIEW_DEADLINE_MS
+    // clock. Each attempt also gets an adapter signal, but the deadline guard below
+    // does not rely on the adapter honouring it.
+    const deadlineAt = Date.now() + this.reviewDeadlineMs
     this.aiReviewCount += 1
     let attempts = 0
     let last: ReviewAttempt | undefined
     let lastFailure: ReviewFailure | undefined
-    let lastError: string | undefined
+    let lastErrorCategory: string | undefined
     let lastBudget = REVIEW_FIRST_MAX_TOKENS
     for (const [index, budget] of REVIEW_BUDGETS.entries()) {
-      const remaining = deadlineAt - Date.now()
-      if (remaining <= 0 || request.signal?.aborted === true) {
-        lastFailure ??= 'aborted'
+      // Cancellation and the deadline outrank a retry promised by the previous
+      // attempt: never announce or start a second call once either has happened.
+      const stopped = reviewStopReason(request.signal, deadlineAt)
+      if (stopped !== undefined) {
+        lastFailure = stopped
         break
       }
       if (index > 0) {
@@ -9383,27 +9399,53 @@ export class SshTui {
         }))
         this.markDirty()
       }
-      lastBudget = budget
-      const deadline = AbortSignal.timeout(remaining)
-      const signal = request.signal === undefined ? deadline : AbortSignal.any([request.signal, deadline])
-      const collector = new ReviewCollector()
-      attempts += 1
-      this.aiReviewCallCount += 1
-      try {
-        for await (const chunk of llm.stream({ ...base, maxTokens: budget, signal })) collector.push(chunk)
-      } catch (error: unknown) {
-        // An adapter error is not a budget problem: a bad key, an exhausted quota or an
-        // option the route does not support will not improve with a second attempt.
-        // A signal-driven abort is not a provider failure either — it means the
-        // deadline (or the user) ended the review, which is also never retried.
-        lastError = errorChain(error)
-        const name = error instanceof Error ? error.name : ''
-        lastFailure = name === 'AbortError' || name === 'TimeoutError' ? 'aborted' : 'threw'
+      // Re-check immediately before spending the call: the retry row and dirty
+      // mark above are synchronous, but the clock can still have crossed.
+      const crossed = reviewStopReason(request.signal, deadlineAt)
+      if (crossed !== undefined) {
+        lastFailure = crossed
         break
       }
-      const attempt = collector.attempt()
+      lastBudget = budget
+      const remaining = Math.min(Math.max(1, deadlineAt - Date.now()), 2_147_483_647)
+      const adapterSignal = AbortSignal.timeout(remaining)
+      const signal = request.signal === undefined
+        ? adapterSignal
+        : AbortSignal.any([request.signal, adapterSignal])
+      attempts += 1
+      this.aiReviewCallCount += 1
+      // The adapter signal only asks the provider to stop. `consumeReviewStream`
+      // enforces the actual return path, so a stream that ignores the signal cannot
+      // hold the approval open or deliver a late approval.
+      let stream: AsyncIterable<StreamChunk>
+      try {
+        stream = llm.stream({ ...base, maxTokens: budget, signal })
+      } catch (error: unknown) {
+        // `llm.stream()` can throw before returning an iterator (bad key, quota,
+        // unsupported option). That is not a budget problem and never retries.
+        // If the caller already cancelled, that wins over the exception label.
+        const stopped = reviewStopReason(request.signal, deadlineAt)
+        lastFailure = stopped ?? 'threw'
+        lastErrorCategory = stopped === undefined ? describeReviewError(error) : undefined
+        break
+      }
+      const consumed = await consumeReviewStream(stream, {
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+        deadlineAt,
+      })
+      const attempt = consumed.attempt
       last = attempt
-      const outcome = reviewOutcome(attempt)
+      if (consumed.failure !== undefined) {
+        // A stream-level failure can race a caller abort; cancellation wins.
+        const stopped = reviewStopReason(request.signal, deadlineAt)
+        lastFailure = stopped ?? consumed.failure
+        lastErrorCategory = stopped === undefined ? consumed.errorCategory : undefined
+        break
+      }
+      // Completion is not acceptance: the abort/deadline may have won between
+      // the final chunk and this line. `reviewOutcomeAt` refuses to turn a late
+      // approved JSON into a verdict.
+      const outcome = reviewOutcomeAt(attempt, request.signal, deadlineAt)
       if (outcome.verdict !== undefined) {
         this.pushRow(represent('approval-warning', {
           kind: 'system',
@@ -9417,46 +9459,85 @@ export class SshTui {
         this.markDirty()
         return outcome.verdict
       }
+      if (outcome.failure === 'cancelled' || outcome.failure === 'deadline') {
+        // The acceptance gate already decided the review is over; do not let a
+        // clock that moved backwards turn that decision into a retry.
+        lastFailure = outcome.failure
+        break
+      }
+      const action = nextReviewAction(attempt, attempts, deadlineAt, request.signal)
+      if (action === 'cancelled' || action === 'deadline') {
+        // Do not let an earlier `truncated` description survive the abort/deadline.
+        lastFailure = action
+        break
+      }
       lastFailure = outcome.failure
-      // A cancelled request and a broken stream both land in `aborted`, which the
-      // policy never retries; only an explicit truncation is worth a second call.
-      if (!shouldRetryReview(attempt, attempts, deadlineAt)) break
+      if (action !== 'retry') break
     }
-    this.reportReviewFailure(lastFailure, last, attempts, lastBudget, lastError)
+    this.reportReviewFailure({
+      ...(lastFailure === undefined ? {} : { failure: lastFailure }),
+      ...(last === undefined ? {} : { attempt: last }),
+      attempts,
+      budget: lastBudget,
+      provider,
+      model,
+      ...(lastErrorCategory === undefined ? {} : { errorCategory: lastErrorCategory }),
+    })
     return undefined
   }
 
   /**
-   * Say why a review produced no verdict, without the reasoning or the material.
+   * Say why a review produced no verdict, using finite, non-secret metadata.
    *
    * The reader has to be able to tell "the model said no" from "the model never got
    * to answer", because the two need different actions: a bigger budget is worth
    * trying, a provider error is not, and an empty reply means the route cannot do
-   * this job at all.
+   * this job at all. Raw model text, reasoning and provider exception messages are
+   * deliberately absent: they can contain the very secrets the review protects.
    */
-  private reportReviewFailure(
-    failure: ReviewFailure | undefined,
-    attempt: ReviewAttempt | undefined,
-    attempts: number,
-    budget: number,
-    error: string | undefined,
-  ): void {
-    const finish = attempt?.finish?.kind ?? 'none'
+  private reportReviewFailure(input: {
+    failure?: ReviewFailure
+    attempt?: ReviewAttempt
+    attempts: number
+    budget: number
+    provider: string
+    model: string
+    errorCategory?: string
+  }): void {
+    const { failure, attempt, attempts, budget, provider, model } = input
+    const rawFinish = attempt?.finish?.kind
+    const finish = rawFinish === undefined
+      ? 'none'
+      : rawFinish === 'stop' || rawFinish === 'max-tokens' || rawFinish === 'tool-calls'
+        || rawFinish === 'aborted' || rawFinish === 'error'
+        ? rawFinish
+        : 'other'
+    const output = attempt?.usage?.outputTokens
+    const outputText = typeof output === 'number' && Number.isFinite(output) ? String(output) : 'unknown'
+    const common = {
+      provider,
+      model,
+      attempts: String(attempts),
+      finish,
+      output: outputText,
+    }
     const text = (() => {
       if (failure === 'unparsed') {
-        return t('approval.reviewUnparsed', { output: (attempt?.text ?? '').trim().slice(0, 160) })
+        return t('approval.reviewUnparsed', { ...common, chars: String(attempt?.text.length ?? 0) })
       }
-      if (failure === 'threw') return t('approval.reviewFailed', { error: error ?? 'unknown' })
-      if (failure === 'aborted') return t('approval.reviewAborted', { attempts: String(attempts) })
-      if (failure === 'truncated') {
-        return t('approval.reviewBudget', { budget: String(budget), finish, attempts: String(attempts) })
+      if (failure === 'threw') {
+        return t('approval.reviewFailed', { ...common, category: input.errorCategory ?? 'Error' })
       }
+      if (failure === 'cancelled') return t('approval.reviewCancelled', common)
+      if (failure === 'deadline') return t('approval.reviewDeadline', { ...common, ms: String(this.reviewDeadlineMs) })
+      if (failure === 'aborted') return t('approval.reviewAborted', common)
+      if (failure === 'truncated') return t('approval.reviewBudget', { ...common, budget: String(budget) })
       if (failure === 'empty') {
         return attempt?.sawReasoning === true
-          ? t('approval.reviewReasoningOnly', { attempts: String(attempts) })
-          : t('approval.reviewNoReply')
+          ? t('approval.reviewReasoningOnly', common)
+          : t('approval.reviewNoReply', common)
       }
-      return t('approval.reviewFinished', { finish, attempts: String(attempts) })
+      return t('approval.reviewFinished', common)
     })()
     this.pushRow(represent('approval-warning', { kind: 'system', text }))
     this.markDirty()
