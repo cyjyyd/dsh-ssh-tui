@@ -249,7 +249,8 @@ test('a stream that never settles is stopped by the deadline and closed once', a
   assert.equal(closed, 1, 'the consumer asks the iterator to close exactly once')
 })
 
-test('a stop completed after the deadline is marked deadline, not accepted', async () => {
+test('a stop completed after the production 20 s deadline is marked deadline, not accepted', async () => {
+  const deadlineAt = REVIEW_DEADLINE_MS
   let clock = 0
   let step = 0
   const stream = {
@@ -259,14 +260,14 @@ test('a stop completed after the deadline is marked deadline, not accepted', asy
           step += 1
           if (step === 1) return { done: false, value: text(approveJson) }
           if (step === 2) return { done: false, value: finish('stop') }
-          clock = 500
+          clock = deadlineAt
           return { done: true, value: undefined }
         },
         return: async () => ({ done: true, value: undefined }),
       }
     },
   }
-  const result = await consumeReviewStream(stream, { deadlineAt: 100, now: () => clock })
+  const result = await consumeReviewStream(stream, { deadlineAt, now: () => clock })
   assert.equal(result.failure, 'deadline')
   assert.equal(result.attempt.text, approveJson, 'the late text was collected, but not accepted')
 })
