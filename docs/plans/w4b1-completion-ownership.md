@@ -39,8 +39,10 @@ close and dismissal are not lost. It is called by:
 - the read boundary before every frame and once after the read;
 - `consumeReleasedFrame()` for late Esc/paste frames;
 - `commands/change` (bump revision, refresh, repaint only for a slash draft);
-- Screen/Surface open/close, locale change, and the `/clear`/submit paths through
-  `setDraft('')`.
+- `onLocaleChange()` (the live notification reached by `installUiLocale()` →
+  `applySavedLocale()` → `refreshLocale()`), which refreshes and repaints without a
+  keystroke; the listener is released by the TUI's disposer list;
+- Screen/Surface open/close and the `/clear`/submit paths through `setDraft('')`.
 
 Paint reads `this.completionState`. It does not call `commands.list()`, does not
 clamp/write the index, and does not initialize the state. The 12-row window, markers,
@@ -65,7 +67,8 @@ D2 (`/ag` → `diag`, `/HELP` → `help`) remains **DEFERRED** and is pinned by 
 
 - `tests/completion-state.test.mjs` — pure transitions and clamping.
 - `tests/completion-ownership.test.mjs` — P3–P13 and N1–N10 through `handleData`/`render`,
-  plus the source guard.
+  the source guard, G1's real settings-path locale refresh, and G2's composer/Screen/
+  Surface Ctrl+L repaint contract.
 - `tests/completion-baseline.test.mjs` — D1 and D2b rewritten for the new contract;
   D2 remains the pinned negative case; Surface/Screen/lifecycle baselines kept.
 - `scripts/tui-stdio-probe.mjs` — real `DSH_TUI_DISPLAY=stdio` pipe: list, arrow,

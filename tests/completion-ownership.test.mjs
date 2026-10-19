@@ -8,7 +8,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { setLocale } from '../lib/i18n/index.js'
+import { getLocale, installUiLocale, setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
 import { checkCompletionWrites } from '../scripts/completion-write-guard.mjs'
 import { tick } from './wait.mjs'
@@ -173,6 +173,67 @@ test('P8: a paste is materialized before the next unit, with no paint in between
   assert.deepEqual(tui.completion.items, [])
 })
 
+test('G1: a real settings locale change re-lists Host and local descriptions without a key', () => {
+  setLocale('zh')
+  let hooks
+  let saved = { language: 'zh' }
+  const host = [{ name: 'permission', description: 'host permission', input: { hint: '<preset>' } }]
+  const commands = { list: () => host }
+  const ctx = {
+    get(name) { return name === 'commands' ? commands : undefined },
+    on() { return () => {} },
+    inject(_services, callback) {
+      callback({
+        settings: {
+          installSection(_ctx, _ns, _schema, _entry, handlers) {
+            hooks = handlers
+            handlers.setSource(() => saved)
+          },
+        },
+      })
+    },
+  }
+  installUiLocale(ctx)
+  const agent = {
+    id: 'main-session', options: {}, status: 'idle',
+    session: { id: 'main-session', events: [] }, cancel() {},
+  }
+  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  tui.displayHost = { attached: true, pendingBytes: () => 0, sendStdout() {}, sendGoodbye() {}, close: async () => {} }
+  tui.write = () => {}
+  tui.handleData(Buffer.from('/'))
+  tui.handleData(Buffer.from('\x1b[B\x1b[B'))
+  const beforeHelp = tui.completion.items.find(item => item.name === 'help')?.description
+  const beforeHost = tui.completion.items.find(item => item.name === 'permission')?.description
+  assert.match(beforeHelp, /显示所有命令/u)
+  assert.match(beforeHost, /权限预设/u)
+  saved = { language: 'en' }
+  hooks.onChange()
+  assert.equal(getLocale(), 'en')
+  assert.match(tui.completion.items.find(item => item.name === 'help')?.description, /List all slash commands/u)
+  assert.match(tui.completion.items.find(item => item.name === 'permission')?.description, /Permission preset/u)
+  assert.equal(tui.completion.query, '/')
+  assert.equal(tui.completion.index, 2)
+  assert.equal(tui.completion.dismissedFor, undefined)
+  assert.equal(tui.input, '/')
+  assert.equal(tui.cursor, 1)
+  assert.equal(tui.dirty, true, 'the locale notification requested a repaint')
+  setLocale('zh')
+})
+
+test('G1b: the locale listener is released with the TUI', async () => {
+  const { tui } = makeTui()
+  tui.handleData(Buffer.from('/'))
+  const original = tui.refreshCompletion.bind(tui)
+  let calls = 0
+  tui.refreshCompletion = () => { calls += 1; return original() }
+  await tui.dispose()
+  calls = 0
+  setLocale('en')
+  assert.equal(calls, 0, 'a disposed TUI is not refreshed by a later locale change')
+  setLocale('zh')
+})
+
 test('P12: commands/change refreshes without a key, and the no-event host waits for the next draft', () => {
   const host = [{ name: 'hosted', description: 'before', input: { kind: 'text' } }]
   const commands = { list: () => host }
@@ -302,14 +363,51 @@ test('N6: submit resets the state; the list can only return after a new draft', 
   assert.equal(tui.completion.phase, 'dismissed')
 })
 
-test('N7: Ctrl+L stays KEEP_DUAL and does not take the completion branch', () => {
+test('N7: Ctrl+L keeps completion state and really repaints the composer', () => {
   const { tui } = makeTui()
   tui.handleData(Buffer.from('/'))
+  tui.handleData(Buffer.from('\x1b[B'))
+  const frameBefore = paint(tui)
   const before = fingerprint(tui)
+  let renders = 0
+  const originalRender = tui.render.bind(tui)
+  tui.render = () => { renders += 1; return originalRender() }
   tui.handleData(Buffer.from('\x0c'))
-  assert.equal(tui.completion.index, before.completion.index)
-  assert.equal(tui.completion.visible, true)
-  assert.equal(tui.forceFullPaint ?? false, false, 'Ctrl+L is an incremental repaint here')
+  assert.equal(renders, 1, 'repaintNow rendered instead of being a no-op')
+  assert.deepEqual(fingerprint(tui).completion, before.completion, 'query/index/dismissal are untouched')
+  assert.equal(tui.input, '/')
+  const after = paint(tui)
+  assert.deepEqual(listRows(after), listRows(frameBefore), 'the rebuilt frame is correct')
+  assert.ok(listRows(after).some(line => line.includes(`/${tui.completion.items[tui.completion.index].name}`)))
+})
+
+test('N7b: Ctrl+L in a Screen requests its full repaint and leaves the Screen in place', () => {
+  const { tui } = makeTui()
+  tui.handleData(Buffer.from('/help\r'))
+  paint(tui)
+  tui.screenNeedsFullPaint = false
+  tui.handleData(Buffer.from('\x0c'))
+  assert.equal(tui.screenNeedsFullPaint, true)
+  assert.equal(tui.screen?.kind, 'report')
+  assert.equal(tui.completion.visible, false)
+  assert.ok(paint(tui).some(line => line.includes('/disconnect')))
+})
+
+test('N7c: Ctrl+L with a Surface still repaints, and does not touch the Surface', () => {
+  const { tui } = makeTui()
+  tui.handleData(Buffer.from('/'))
+  paint(tui)
+  tui.openConfirm('prompt', 'hint', () => {})
+  const dialog = tui.dialog
+  paint(tui)
+  let renders = 0
+  const originalRender = tui.render.bind(tui)
+  tui.render = () => { renders += 1; return originalRender() }
+  tui.handleData(Buffer.from('\x0c'))
+  assert.equal(renders, 1)
+  assert.equal(tui.dialog, dialog)
+  assert.equal(tui.completion.visible, false)
+  assert.ok(paint(tui).some(line => line.includes('prompt')))
 })
 
 test('N8: clearing the draft then an arrow browses history, not a paint-written list', () => {

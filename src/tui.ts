@@ -229,6 +229,7 @@ import {
   getLocale,
   localeDisplayName,
   localeFromTag,
+  onLocaleChange,
   setLocale,
   t,
   UI_LOCALE_NAMESPACE,
@@ -2029,6 +2030,8 @@ export class SshTui {
   private completionKey: string | undefined
   /** Bumped by the real `commands/change` observer, never by a timer. */
   private completionRevision = 0
+  /** The locale listener is installed on the first completion materialization. */
+  private localeSubscribed = false
   /** Host suggestions for the current key; replaced, never mutated. */
   private completionForeign: readonly CommandSuggestion[] = []
   private focusedRow: FocusTarget | null = null
@@ -7031,6 +7034,10 @@ export class SshTui {
    * presence) changes, so a repaint or an arrow cannot rebuild the catalog.
    */
   private refreshCompletion(): void {
+    if (!this.localeSubscribed && !this.disposed) {
+      this.localeSubscribed = true
+      this.disposers.push(onLocaleChange(this.handleLocaleChange))
+    }
     if (this.disposed || this.lineMode) {
       this.completionState = resetCompletion()
       this.completionKey = undefined
@@ -7092,6 +7099,13 @@ export class SshTui {
     if (this.disposed) return
     this.refreshCompletion()
     if (this.input.startsWith('/')) this.markDirty()
+  }
+
+  /** Live locale change: re-derive descriptions and repaint, without a keystroke. */
+  private readonly handleLocaleChange = (): void => {
+    if (this.disposed) return
+    this.refreshCompletion()
+    this.markDirty()
   }
 
   private currentProviderId(): string {
