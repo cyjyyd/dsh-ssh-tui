@@ -872,14 +872,14 @@
       ]
     ],
     "state": {
-      "input": "/find ",
-      "cursor": 6,
+      "input": "",
+      "cursor": 0,
       "historyIndex": -1,
       "historyLength": 0,
       "folded": false,
       "scrollOffset": 0,
-      "screen": null,
-      "screenOffset": null,
+      "screen": "search",
+      "screenOffset": 0,
       "dialog": null,
       "focusedKind": null,
       "rowsAdded": 0,

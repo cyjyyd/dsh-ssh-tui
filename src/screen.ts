@@ -14,6 +14,7 @@
  */
 import type { Dialog, InspectDialog } from './dialogs.js'
 import type { DiffDisplayLine } from './tool-present.js'
+import type { SearchScreenState } from './search-screen.js'
 
 /**
  * Which Screen is up. Adding one here is the only way to add one at all.
@@ -23,7 +24,7 @@ import type { DiffDisplayLine } from './tool-present.js'
  * owns the whole view, it owns its input, it never enters the dialog queue, and it is
  * rebuilt from state after a reattach (B2.6).
  */
-export type ScreenKind = 'inspect' | 'report' | 'setup'
+export type ScreenKind = 'inspect' | 'report' | 'setup' | 'search'
 
 /** The report a `report` Screen is showing. */
 export type ReportKind = 'status' | 'usage' | 'diag' | 'doctor' | 'help' | 'subagents'
@@ -47,6 +48,8 @@ export interface ScreenState {
   offset: number
   /** Which report this is, when `kind === 'report'`. */
   report?: ReportKind
+  /** Search query/hits/selection when `kind === 'search'`. */
+  search?: SearchScreenState
   /** What the copy key takes while this screen is up. */
   copyText?: string
   /**

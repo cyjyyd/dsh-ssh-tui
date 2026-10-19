@@ -78,6 +78,13 @@ export interface InputReaderOptions {
   /** A frame the Reader produced on its own: paste traffic, or a released hold. */
   onFrame: (frame: InputFrame) => void
   /**
+   * The first complete `ESC[200~` of a bracketed paste. The TUI uses this to
+   * capture the layer that owns the paste before any payload frame is delivered;
+   * the end marker is observed through {@link InputReader.isPasting}. Read-only
+   * provenance, not a second input state machine.
+   */
+  onPasteStart?: () => void
+  /**
    * How long a stalled paste may hold the reader before it is abandoned.
    *
    * A seam for tests only — the default is the release value. A test that waited the
@@ -158,6 +165,18 @@ export class InputReader {
     const decoded = this.decoder.write(chunk)
     if (decoded === '') return
     this.guard.push(decoded)
+  }
+
+  /**
+   * Whether the Reader is currently inside a bracketed paste.
+   *
+   * The bytes alone do not say which Screen started the paste. The TUI uses this
+   * as the transition signal for provenance: the first read while it is true
+   * captures the layer, and the layer identity is checked until the close marker.
+   * This is a read-only observation, not a second input state machine.
+   */
+  isPasting(): boolean {
+    return this.inPaste
   }
 
   /** The read with any held prefix in front of it. The hold window is over. */
@@ -330,6 +349,7 @@ export class InputReader {
     let index = 0
     while (index < combined.length) {
       if (combined.startsWith('\x1b[200~', index)) {
+        if (!this.inPaste) this.options.onPasteStart?.()
         this.inPaste = true
         index += 6
         continue

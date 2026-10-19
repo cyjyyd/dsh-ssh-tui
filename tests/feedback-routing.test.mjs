@@ -344,16 +344,18 @@ test('the Surface queue and a Screen are not disturbed by /clear', async () => {
 test('local /find searches the visible view, not the log behind the cutoff', async () => {
   const { tui } = fixture()
   tui.runCommand('/find 行 20')
-  await waitForFeedback(tui, '行 20')
-  assert.equal(tui.searchHits.length, 1, 'the visible hit is found')
+  assert.equal(tui.screen?.search?.hits.length, 1, 'the visible hit is found')
+  tui.handleData(Buffer.from('\x03'))
+  await tick(20)
+  assert.equal(tui.screen, undefined)
 
-  tui.handleEscape()
   tui.runCommand('/clear')
   await tick(20)
   tui.runCommand('/find 行 20')
+  assert.equal(tui.screen?.search?.hits.length, 0, 'the same needle finds nothing once the view is cut')
+  assert.match(String(tui.screen?.notice), /只搜索当前可见|on screen/u, 'and the boundary is explained')
+  tui.handleData(Buffer.from('\x03'))
   await tick(20)
-  assert.equal(tui.searchHits.length, 0, 'the same needle finds nothing once the view is cut')
-  assert.match(String(tui.currentNotice()), /只搜索当前可见|on screen/u, 'and the boundary is explained')
 
   tui.handleSessionEvent({ id: 'main-session' }, {
     type: 'assistant/message',
@@ -362,8 +364,9 @@ test('local /find searches the visible view, not the log behind the cutoff', asy
     data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '行 20 之后的答案' }] } },
   })
   tui.runCommand('/find 行 20')
+  assert.equal(tui.screen?.search?.hits.length, 1, 'new content is searchable')
+  tui.handleData(Buffer.from('\x03'))
   await tick(20)
-  assert.equal(tui.searchHits.length, 1, 'new content is searchable')
 })
 
 // ── D. the Screen keeps its keyboard, and says so ───────────────────────────

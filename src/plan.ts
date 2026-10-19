@@ -248,20 +248,33 @@ export function compactionHeaderText(row: {
   return t('compact.done', { detail: recovered })
 }
 
+/** A category + query pair after the one `/find` parse. */
+export interface FindRequest {
+  category?: CardCategory
+  query: string
+}
+
+/** Filter rows for a structured request; the only matcher implementation. */
+export function matchTranscriptRowsFor(
+  rows: readonly Row[],
+  request: FindRequest,
+): Row[] {
+  const needle = request.query.trim().toLowerCase()
+  return rows.filter(row => {
+    const kind = cardCategoryOf(row)
+    if (kind === undefined) return false
+    if (request.category !== undefined && kind !== request.category) return false
+    if (needle === '') return SEARCHABLE_CATEGORIES.includes(kind) || request.category !== undefined
+    return rowSearchHaystack(row).toLowerCase().includes(needle)
+  })
+}
+
 /** Transcript rows matching a `/find` query, newest last. */
 export function matchTranscriptRows(
   rows: readonly Row[],
   raw: string,
 ): Row[] {
-  const { category, query } = parseFindQuery(raw)
-  const needle = query.toLowerCase()
-  return rows.filter(row => {
-    const kind = cardCategoryOf(row)
-    if (kind === undefined) return false
-    if (category !== undefined && kind !== category) return false
-    if (needle === '') return SEARCHABLE_CATEGORIES.includes(kind) || category !== undefined
-    return rowSearchHaystack(row).toLowerCase().includes(needle)
-  })
+  return matchTranscriptRowsFor(rows, parseFindQuery(raw))
 }
 
 /** One-line note under an expanded plan strip. */
