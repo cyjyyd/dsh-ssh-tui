@@ -181,7 +181,66 @@ try {
   const probed = await waitFor(() => answered > 0, STEP_TIMEOUT_MS, 'a cursor probe')
   check(probed, `the child probed the terminal and we answered (${answered} answers)`)
 
-  // 2. Keystrokes typed into the pipe reach the input box.
+  // 2. Completion over the pipe: the list appears, an arrow moves the
+  // highlight, Tab accepts, and Enter runs the accepted name. Each step is
+  // written separately so an intermediate frame can be asserted.
+  let mark = output.length
+  child.stdin.write('/')
+  const listed = await waitFor(
+    () => plain(output.slice(mark)).includes('/disconnect'),
+    STEP_TIMEOUT_MS,
+    'the completion list',
+  )
+  check(listed, 'a slash on the pipe paints the completion list')
+  mark = output.length
+  child.stdin.write('\u001b[B')
+  const moved = await waitFor(
+    () => /› \/model/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the moved highlight',
+  )
+  check(moved, 'an arrow on the pipe moves the completion highlight')
+  child.stdin.write('\u0015')
+  mark = output.length
+  child.stdin.write('/hel')
+  const filtered = await waitFor(
+    () => plain(output.slice(mark)).includes('/help'),
+    STEP_TIMEOUT_MS,
+    'the filtered list',
+  )
+  check(filtered, 'typing a prefix filters the list on the pipe')
+  mark = output.length
+  child.stdin.write('\t')
+  const accepted = await waitFor(
+    () => /(?:❯|>) \/help\s/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the accepted draft',
+  )
+  check(accepted, 'Tab accepts the command on the pipe')
+  mark = output.length
+  child.stdin.write('\r')
+  const ran = await waitFor(
+    () => /(?:全文|full) \d+[–-]/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the help report',
+  )
+  check(ran, 'Enter runs the accepted command on the pipe')
+  child.stdin.write('\u001b')
+  await delay(200)
+
+  // 3. The same four units in one write: no intermediate paint may be required.
+  mark = output.length
+  child.stdin.write('/hel\t\r')
+  const sameRead = await waitFor(
+    () => /(?:全文|full) \d+[–-]/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the one-write help report',
+  )
+  check(sameRead, 'one continuous pipe write completes and runs without an intermediate frame')
+  child.stdin.write('\u001b')
+  await delay(200)
+
+  // 4. Keystrokes typed into the pipe reach the input box.
   //
   // The prompt is `❯ ` on a colour terminal and `> ` on a plain one, and this
   // probe declares truecolor (COLORTERM above), so both spellings are accepted:
@@ -197,7 +256,7 @@ try {
   )
   check(echoed, 'a keystroke on the pipe is painted in the input box')
 
-  // 3. A resize: the parent reports the new size the way a terminal does.
+  // 5. A resize: the parent reports the new size the way a terminal does.
   const beforeResize = output.length
   child.stdin.write(`\u001b[8;${HEIGHT + 10};${RESIZED_WIDTH}t`)
   const resized = await waitFor(
@@ -213,7 +272,7 @@ try {
     'the size report is not painted as typing',
   )
 
-  // 4. Quit from the keyboard: the session ends and the child goes. The echo
+  // 6. Quit from the keyboard: the session ends and the child goes. The echo
   // check above left a character in the input box, and `/exit` behind it would
   // be a prompt — a turn, not a command — so clear the line first.
   child.stdin.write('\u007f'.repeat(8))
