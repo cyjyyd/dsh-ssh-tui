@@ -847,6 +847,24 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       )
     }
 
+    // 6f. The Search Screen has its own field, independent of the composer.
+    {
+      const beforeFind = output.length
+      term.write('/find\r')
+      await waitFor(text => /(?:搜索|search)/u.test(plain(text.slice(beforeFind))), 20_000, 'the Search Screen')
+      const opened = plain(output.slice(beforeFind))
+      check(/›\s*$/u.test(opened) || /›\s/u.test(opened), 'Search owns a field')
+      const beforeType = output.length
+      term.write('abc')
+      await waitFor(text => /(?:›|>)\s*abc/u.test(plain(text.slice(beforeType))), 20_000, 'the Search field text')
+      check(true, 'typing reaches the Search field')
+      const beforeClose = output.length
+      term.write('\x1b')
+      await new Promise(resolve => setTimeout(resolve, 800))
+      const back = plain(output.slice(beforeClose))
+      check(/❯|>/u.test(back) && !/^\s*搜索\s*$/mu.test(back), 'Esc returns to the workspace composer')
+    }
+
     // 7. `/exit` hands the terminal back. The launcher's graceful shutdown only
     //    sets process.exitCode, and a lingering watcher handle used to keep it
     //    alive in front of a shell that never got its prompt back — the user

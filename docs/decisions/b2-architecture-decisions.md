@@ -247,6 +247,23 @@ Screen 期间用户看不到 footer 两行，因此：
 - **可以跨 `/clear`**（因为读的是 log，不是内存行）与 **跨 resume**；
 - 结果是**索引**（seq / 时间 / 来源 / 片段），本身不是叙事 → 不进 transcript。
 
+### 6.1a W-5B amendment — local Search Screen (added 2026-10-16)
+
+The original AD-9 paragraph above remains the historical decision. W-5B changes
+only the **local interaction vehicle**, not the scope:
+
+- local `/find` opens a Dedicated Search Screen over `visibleRows()` (the rows
+  after the current `/clear` cutoff); it does not read the durable session log and
+  does not cross `/clear` or resume;
+- the Search Screen has its own query/caret/hits/selection/preview state, depth one,
+  read-only copy, and no composer/history/borrowed-field mutation;
+- the historical durable-log Search Screen described in AD-9 remains future and is
+  **not** this Screen.
+
+This amendment is recorded separately so the original AD-9 text is not rewritten.
+The W-5A contract is `docs/plans/w5a-search-screen-contract.md`; W-5B implements its
+defaults.
+
 ### 6.2 今天的事实
 
 `/find` 只搜内存 `rows`（`runFindCommand`，`src/tui.ts:4550`）；`/clear` 之后命中清零（实测 `search hits after clear: 0`）；不读 session log。Local 语义在 AD-4 之下仍然自洽（cutoff 之后不可见即不搜），但**用户需要知道这个边界**：Screen 版才跨 `/clear`。
