@@ -173,6 +173,15 @@ import {
 } from './dialogs.js'
 import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
 import {
+  acceptCompletion,
+  completionFor,
+  dismissCompletion,
+  EMPTY_COMPLETION,
+  moveCompletion,
+  resetCompletion,
+  type CompletionState,
+} from './completion.js'
+import {
   archiveStalePlans,
   boundTranscriptRows,
   findLivePlanRow,
@@ -2014,8 +2023,14 @@ export class SshTui {
   private osc52HintShown = false
   private agentGone = false
   private onboarding: OnboardingState | undefined
-  private commandSuggestions: { name: string; description: string; local: boolean }[] = []
-  private suggestionIndex = 0
+  /** The single authoritative completion state; paint only reads it. */
+  private completionState: CompletionState = EMPTY_COMPLETION
+  /** Host/local materialization key (draft, locale, agent, revision, host presence). */
+  private completionKey: string | undefined
+  /** Bumped by the real `commands/change` observer, never by a timer. */
+  private completionRevision = 0
+  /** Host suggestions for the current key; replaced, never mutated. */
+  private completionForeign: readonly CommandSuggestion[] = []
   private focusedRow: FocusTarget | null = null
   /**
    * The active palette. Roles resolve through `theme.ts`, so switching themes is
@@ -2742,6 +2757,7 @@ export class SshTui {
   private bindAgentEvents(): void {
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
+      this.ctx.on('commands/change', this.handleCommandsChange),
       listenHostEvent(this.ctx, 'agent/assistant-stream', this.handleAssistantStream),
       this.ctx.on('agent/status', this.handleStatus),
       this.ctx.on('agent/error', this.handleError),
@@ -4987,9 +5003,11 @@ export class SshTui {
    */
   private openScreen(screen: ScreenState): void {
     this.screen = screen
+    this.layerScreen = screen
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
     this.screenNeedsFullPaint = true
+    this.refreshCompletion()
     this.markDirty()
   }
 
@@ -4997,9 +5015,11 @@ export class SshTui {
   closeScreen(): void {
     if (this.screen === undefined) return
     this.screen = undefined
+    this.layerScreen = undefined
     this.screenDismissals += 1
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
+    this.refreshCompletion()
     // One full repaint when a Screen closes, and it is deliberate: the transcript
     // may have grown (or been compacted) while the reader was away, so the frame
     // that returns has to be rebuilt anyway. It is measured in the Screen contract
@@ -6502,29 +6522,30 @@ export class SshTui {
     if (this.scrollOffset > 0) {
       headerLines.push(this.styleLine('system', fitLine(t('dialog.scrolled', { count: this.scrollOffset }))))
     }
-    this.commandSuggestions = this.dialog === undefined ? this.buildSuggestions() : []
-    if (this.suggestionIndex >= this.commandSuggestions.length) {
-      this.suggestionIndex = Math.max(0, this.commandSuggestions.length - 1)
-    }
+    // Paint reads the one materialized state. It must not query commands, clamp
+    // the index, or build a list: a frame is never the first writer of completion.
+    const completion = this.completionState
+    const suggestionItems = completion.visible ? completion.items : []
+    const suggestionIndex = completion.index
     const suggestionLines: string[] = []
-    const suggestionStart = pickerWindowStart(this.suggestionIndex, this.commandSuggestions.length)
-    const suggestionEnd = Math.min(this.commandSuggestions.length, suggestionStart + PICKER_WINDOW)
+    const suggestionStart = pickerWindowStart(suggestionIndex, suggestionItems.length)
+    const suggestionEnd = Math.min(suggestionItems.length, suggestionStart + PICKER_WINDOW)
     if (suggestionStart > 0) {
       suggestionLines.push(this.styleLine('system', fitLine(`  ${t('suggest.moreAbove', { count: suggestionStart })}`)))
     }
     for (let index = suggestionStart; index < suggestionEnd; index += 1) {
-      const command = this.commandSuggestions[index]
+      const command = suggestionItems[index]
       if (command === undefined) continue
-      const marker = index === this.suggestionIndex ? '›' : ' '
+      const marker = index === suggestionIndex ? '›' : ' '
       const line = `  ${marker} /${command.name.padEnd(14)} ${command.description}${command.local ? '' : '  (dsh)'}`
-      suggestionLines.push(index === this.suggestionIndex
+      suggestionLines.push(index === suggestionIndex
         ? this.selectLine(fitLine(line), true)
         : this.styleLine('system', fitLine(line)))
     }
-    if (suggestionEnd < this.commandSuggestions.length) {
+    if (suggestionEnd < suggestionItems.length) {
       suggestionLines.push(this.styleLine(
         'system',
-        fitLine(`  ${t('suggest.moreBelow', { count: this.commandSuggestions.length - suggestionEnd })}`),
+        fitLine(`  ${t('suggest.moreBelow', { count: suggestionItems.length - suggestionEnd })}`),
       ))
     }
 
@@ -7001,14 +7022,56 @@ export class SshTui {
     this.markDirty()
   }
 
-  private buildSuggestions(): CommandSuggestion[] {
-    // Called on every paint: leave the host command service alone unless the
-    // line is actually a slash command.
-    if (!this.input.startsWith('/')) return []
-    // The host's commands arrive last (a local name wins the duplicate) and are
-    // localized here, where the i18n catalog is already loaded.
-    const foreign: CommandSuggestion[] = (this.ctx.get('commands')?.list(this.agent) ?? [])
-      .map(command => {
+  /**
+   * Materialize the completion state for the current draft.
+   *
+   * This is the only place that may query the Host command service and write the
+   * state. `commands/change` and the read boundary call it; `paint()` never does.
+   * The Host list is queried only when the key (draft/locale/agent/revision/host
+   * presence) changes, so a repaint or an arrow cannot rebuild the catalog.
+   */
+  private refreshCompletion(): void {
+    if (this.disposed || this.lineMode) {
+      this.completionState = resetCompletion()
+      this.completionKey = undefined
+      return
+    }
+    const draft = this.input
+    if (!draft.startsWith('/')) {
+      this.completionState = resetCompletion()
+      this.completionKey = undefined
+      return
+    }
+    const host = this.ctx.get('commands')
+    const key = [
+      draft,
+      getLocale(),
+      String(this.agent.id),
+      String(this.completionRevision),
+      host === undefined ? '0' : '1',
+    ].join('\u0000')
+    if (key !== this.completionKey) {
+      this.completionForeign = this.buildForeignSuggestions()
+      this.completionKey = key
+    }
+    this.completionState = completionFor({
+      query: draft,
+      items: commandSuggestions(draft, this.completionForeign),
+      previous: this.completionState,
+      layerOpen: this.dialog !== undefined || this.layerScreen !== undefined,
+      lineMode: this.lineMode,
+    })
+  }
+
+  /**
+   * The Host's commands, localized. A failing service degrades to the local
+   * catalog; a previous Host list is never reused as if it were current.
+   */
+  private buildForeignSuggestions(): CommandSuggestion[] {
+    const commands = this.ctx.get('commands')
+    if (commands === undefined) return []
+    try {
+      return (commands.list(this.agent) ?? []).map(command => {
         const desc = t(`cmd.${command.name}`, undefined, command.description)
         return {
           name: command.name,
@@ -7018,11 +7081,17 @@ export class SshTui {
           local: false,
         }
       })
-    return commandSuggestions(this.input, foreign)
+    } catch {
+      return []
+    }
   }
 
-  private suggestionsVisible(): boolean {
-    return this.commandSuggestions.length > 0 && this.dialog === undefined
+  /** The Host's registry changed: bump the revision, refresh, repaint if relevant. */
+  private readonly handleCommandsChange = (): void => {
+    this.completionRevision += 1
+    if (this.disposed) return
+    this.refreshCompletion()
+    if (this.input.startsWith('/')) this.markDirty()
   }
 
   private currentProviderId(): string {
@@ -9754,15 +9823,36 @@ export class SshTui {
     return this.borrowedText?.cursor ?? this.cursor
   }
 
+  /** Write the composer draft and materialize its completion state now. */
+  private setDraft(text: string, cursor: number): void {
+    this.input = text
+    this.cursor = cursor
+    this.refreshCompletion()
+  }
+
   /** Write the field the keyboard is editing, wherever it lives. */
   private setField(text: string, cursor: number): void {
     if (this.borrowedText === undefined) {
-      this.input = text
-      this.cursor = cursor
+      this.setDraft(text, cursor)
       return
     }
     this.borrowedText.text = text
     this.borrowedText.cursor = cursor
+  }
+
+  /** Read-only test/adaptor view of the one completion state. */
+  private get completion(): CompletionState {
+    return this.completionState
+  }
+
+  /** Backwards-compatible read of the materialized list (tests and paint helpers). */
+  private get commandSuggestions(): readonly CommandSuggestion[] {
+    return this.completionState.items
+  }
+
+  /** Backwards-compatible read of the materialized highlight. */
+  private get suggestionIndex(): number {
+    return this.completionState.index
   }
 
   /** Insert at the caret of whichever field owns the keyboard. */
@@ -10024,6 +10114,7 @@ export class SshTui {
       this.dialogRole = role
       this.borrowTextFor(dialog)
       this.echoLineModeDialog(dialog)
+      this.refreshCompletion()
     } else {
       const rank = surfacePriority(role)
       const at = this.dialogQueue.findIndex(entry => surfacePriority(entry.role) < rank)
@@ -10041,6 +10132,7 @@ export class SshTui {
       this.dialogRole = next.role
       this.borrowTextFor(next.dialog)
       this.echoLineModeDialog(next.dialog)
+      this.refreshCompletion()
       this.markDirty()
     }
   }
@@ -10099,6 +10191,7 @@ export class SshTui {
     }
     finish()
     this.showNextDialog()
+    this.refreshCompletion()
     this.markDirty()
   }
 
@@ -10121,6 +10214,7 @@ export class SshTui {
     this.releaseBorrowedText()
     dialog.resolve(value)
     this.showNextDialog()
+    this.refreshCompletion()
     this.markDirty()
   }
 
@@ -10132,6 +10226,7 @@ export class SshTui {
       this.releaseBorrowedText()
       dialog.resolve('cancel')
       this.showNextDialog()
+      this.refreshCompletion()
       this.markDirty()
       return
     }
@@ -11543,6 +11638,9 @@ export class SshTui {
       next = picked === t('lang.en') ? 'en' : 'zh'
     }
     setLocale(next)
+    // Locale is part of the materialization key: descriptions must change even
+    // when the draft does not.
+    this.refreshCompletion()
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
       this.pushRow(represent('command-error', { kind: 'error', text: t('lang.settingsMissing') }))
@@ -12538,10 +12636,21 @@ export class SshTui {
     // of the read is routed on (`yes` typed at a confirm is refused by the Surface and
     // leaves the draft alone — pinned by `yes-typed-at-dialog`).
     const dismissals = this.screenDismissals
+    // The state before unit N must include unit N−1's draft write, even when both
+    // arrive in one raw read; `setDraft()` refreshes as well, but this boundary is
+    // what makes programmatic and Reader-borne changes meet the same contract.
+    this.refreshCompletion()
     for (const frame of this.reader.read(combined)) {
-      if (this.screenDismissals !== dismissals) return
+      if (this.screenDismissals !== dismissals) {
+        // A Screen closed inside this read: the tail belongs to it, and no stale
+        // completion state may be left describing the unit before the close.
+        this.refreshCompletion()
+        return
+      }
+      this.refreshCompletion()
       this.consumeFrame(frame)
     }
+    this.refreshCompletion()
   }
 
   /** One framed unit, at the owner that takes it. */
@@ -12644,8 +12753,7 @@ export class SshTui {
       // field, which is exactly `borrowedText === undefined`.
       if (alt === 'f' || alt === 'F' || alt === '/') {
         if (this.textIsEditable() && this.borrowedText === undefined) {
-          this.input = '/find '
-          this.cursor = this.input.length
+          this.setDraft('/find ', 6)
           this.markDirty()
         }
         return
@@ -12705,10 +12813,14 @@ export class SshTui {
   private consumeReleasedFrame(frame: InputFrame): void {
     const held = this.heldInput
     this.heldInput = undefined
+    // A late Escape or paste tail is a draft mutation boundary too. Refresh before
+    // deciding, so the released unit sees the current draft, and not a paint-time list.
+    this.refreshCompletion()
     // A paste tail is a `paste` frame and never passes through `hold()`, so the kind
     // is the source discriminator: no hold, no provenance to check.
     if (held === undefined || (frame.kind !== 'literal' && frame.kind !== 'escape')) {
       this.consumeFrame(frame)
+      this.refreshCompletion()
       return
     }
     const unit = frame.kind === 'escape' ? '\x1b' : frame.text
@@ -12717,8 +12829,12 @@ export class SshTui {
     this.observe(frame.kind === 'escape' ? 'escape' : 'text', unit)
     // … and drop the unit when the layer it was pressed in is gone. Same name is not
     // the same layer: a new Surface, a new Screen, or no layer at all.
-    if (held.screen !== this.layerScreen || held.dialog !== this.layerDialog) return
+    if (held.screen !== this.layerScreen || held.dialog !== this.layerDialog) {
+      this.refreshCompletion()
+      return
+    }
     this.dispatchWith(held.owner, unit)
+    this.refreshCompletion()
   }
 
   /**
@@ -12875,10 +12991,8 @@ export class SshTui {
 
   /** An arrow the composer keeps: the suggestion list while it is up, else history. */
   private arrowHistory(direction: -1 | 1): void {
-    if (this.suggestionsVisible()) {
-      this.suggestionIndex = direction < 0
-        ? Math.max(0, this.suggestionIndex - 1)
-        : Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
+    if (this.completionState.visible) {
+      this.completionState = moveCompletion(this.completionState, direction)
       this.markDirty()
       return
     }
@@ -12972,25 +13086,19 @@ export class SshTui {
       return
     }
     if (unit === '\x1f') {
-      this.input = '/find '
-      this.cursor = this.input.length
+      this.setDraft('/find ', 6)
       this.markDirty()
       return
     }
     if (unit === '\t') {
-      if (this.suggestionsVisible()) {
-        const selected = this.commandSuggestions[this.suggestionIndex]
-        if (selected !== undefined) {
-          this.input = `/${selected.name} `
-          this.cursor = this.input.length
-          this.commandSuggestions = []
-          this.suggestionIndex = 0
-          this.markDirty()
-          return
-        }
+      const accepted = acceptCompletion(this.completionState, this.input, 'tab')
+      if (accepted !== undefined) {
+        this.completionState = accepted.state
+        this.setDraft(accepted.text, accepted.cursor)
+        this.markDirty()
+        return
       }
-      this.input = `${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`
-      this.cursor += 2
+      this.setField(`${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`, this.cursor + 2)
       this.markDirty()
       return
     }
@@ -14320,9 +14428,8 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if (this.suggestionsVisible()) {
-      this.commandSuggestions = []
-      this.suggestionIndex = 0
+    if (this.completionState.visible) {
+      this.completionState = dismissCompletion(this.completionState, this.input)
       this.markDirty()
       return
     }
@@ -14730,12 +14837,10 @@ export class SshTui {
       this.toggleCollapsible()
       return
     }
-    if (this.suggestionsVisible()) {
-      const selected = this.commandSuggestions[this.suggestionIndex]
-      if (selected !== undefined && selected.name.startsWith(this.input.slice(1))) {
-        this.input = `/${selected.name}`
-        this.cursor = this.input.length
-      }
+    const accepted = acceptCompletion(this.completionState, this.input, 'enter')
+    if (accepted !== undefined) {
+      this.completionState = accepted.state
+      this.setDraft(accepted.text, accepted.cursor)
     }
     const text = this.input.trim()
     if (text === '') return
@@ -14754,8 +14859,7 @@ export class SshTui {
     this.historyDraft = ''
     this.sawUserInput = true
     this.lastUserText = text
-    this.input = ''
-    this.cursor = 0
+    this.setDraft('', 0)
     this.inputFolded = false
     const message = createUserMessage({
       content: [{ type: 'text', text }],
@@ -15213,8 +15317,7 @@ export class SshTui {
         }
         break
     }
-    this.input = ''
-    this.cursor = 0
+    this.setDraft('', 0)
     this.inputFolded = false
     this.markDirty()
   }
@@ -15309,18 +15412,18 @@ export class SshTui {
     if (this.historyIndex === this.history.length) this.historyDraft = this.input
     if (this.historyIndex <= 0) return
     this.historyIndex -= 1
-    this.input = this.history[this.historyIndex] ?? ''
-    this.cursor = this.input.length
+    const recalled = this.history[this.historyIndex] ?? ''
+    this.setDraft(recalled, recalled.length)
     this.markDirty()
   }
 
   private historyForward(): void {
     if (this.historyIndex < 0 || this.historyIndex >= this.history.length) return
     this.historyIndex += 1
-    this.input = this.historyIndex >= this.history.length
+    const recalled = this.historyIndex >= this.history.length
       ? this.historyDraft
       : (this.history[this.historyIndex] ?? '')
-    this.cursor = this.input.length
+    this.setDraft(recalled, recalled.length)
     this.markDirty()
   }
 
