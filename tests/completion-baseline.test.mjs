@@ -1,10 +1,10 @@
 /**
  * Completion — the baseline W-4B.1 has to keep, and the behaviour it must change.
  *
- * This file is a **safety net, not the W-4B.1 contract**. It records what the
- * completion list does today, at the state level, so the extraction in W-4B.1 can
- * be measured against it (the P/N matrix in `docs/plans/w4a-completion-ownership.md`
- * is the contract; this is its "before" column, executable).
+ * This file is the **before/after safety net** for W-4B.1. The P/N matrix in
+ * `docs/plans/w4a-completion-ownership.md` is the contract; this file keeps the
+ * baseline cases and rewrites the two pinned defects (D1/D2b) when the state
+ * extraction changes them. D2 stays the pinned negative case.
  *
  * Three kinds of case live here, and the difference matters when one fails:
  *
@@ -142,55 +142,55 @@ test('PINNED D2: Enter refuses a case-mismatched highlight', () => {
   assert.ok(String(tui.currentNotice() ?? '').includes('/HELP'))
 })
 
-test('PINNED D2b: Esc clears the list, and the next frame rebuilds it', async () => {
-  // Today Esc cannot dismiss the list: `handleEscape` empties the array, `markDirty`
-  // schedules a frame, and the frame calls `buildSuggestions()` on the unchanged
-  // draft. W-4B.1 replaces this with a dismissal that lasts until the draft changes
-  // (`dismissedFor`); this case is the "before" state and must be rewritten then.
+test('D2b FIXED: Esc dismisses the list, and it stays dismissed until the draft changes', async () => {
+  // W-4B.1 replaced the paint-time rebuild with `dismissedFor`: the released
+  // Escape records the exact draft, so the next frames must not resurrect it.
   const tui = makeTui()
   typeDraft(tui, '/')
+  assert.equal(tui.completion.visible, true)
   tui.handleData(Buffer.from('\x1b'))
   // A lone Escape is held for 60 ms before the Reader frames it.
   await tick(140)
-  assert.equal(tui.commandSuggestions.length, 0, 'the released escape cleared the array')
-  assert.equal(tui.suggestionIndex, 0)
+  assert.equal(tui.completion.phase, 'dismissed')
+  assert.equal(tui.completion.dismissedFor, '/')
+  assert.equal(tui.completion.items.length, 0)
   const after = paint(tui)
-  assert.equal(tui.commandSuggestions.length, 27, 'the frame rebuilt it')
-  assert.equal(listRows(after).length, 12, 'and the reader sees it again')
+  assert.equal(listRows(after).length, 0, 'the reader sees no list after Esc')
+  assert.equal(listRows(paint(tui)).length, 0, 'and the next frame does not rebuild it')
+  tui.handleData(Buffer.from('m'))
+  assert.equal(tui.input, '/m')
+  assert.equal(tui.completion.visible, true, 'a real draft change re-lists the new query')
+  assert.ok(listRows(paint(tui)).length > 0)
 })
 
-test('PINNED D1: a paste updates the list on the next paint, not before', () => {
-  // The list is written by the painter. Before the frame lands, the state still
-  // describes the previous draft — the window W-4B.1 closes by materializing at the
-  // read boundary.
+test('D1 FIXED: a paste materializes the list before the next unit, without a paint', () => {
+  // The read boundary (and the draft setter) now refresh the state, so the next
+  // key sees the post-paste list rather than the previous frame's answer.
   const tui = makeTui()
   typeDraft(tui, '/model')
-  assert.deepEqual(tui.commandSuggestions.map(item => item.name), ['model', 'submodel'])
+  assert.deepEqual(tui.completion.items.map(item => item.name), ['model', 'submodel'])
   tui.handleData(Buffer.from('\x1b[200~s\x1b[201~'))
   assert.equal(tui.input, '/models', 'the paste is in the draft')
-  assert.deepEqual(tui.commandSuggestions.map(item => item.name), ['model', 'submodel'], 'the list is still the old one')
-  paint(tui)
-  assert.deepEqual(tui.commandSuggestions, [], 'the frame brings it up to date (no match)')
+  assert.equal(tui.completion.visible, false, 'no paint was needed to refresh it')
+  assert.deepEqual(tui.completion.items, [], 'the stale /model list is gone')
 })
 
-test('BASELINE: a Surface suppresses the list without destroying it', () => {
+test('BASELINE: a Surface hides the list without destroying its state', () => {
+  // The state stays materialized while the Surface owns the keyboard; paint must
+  // not show it and input must not receive it, then it returns when the Surface
+  // closes. This deliberately does not assert the old "paint empties the array"
+  // internal detail.
   const tui = makeTui()
   typeDraft(tui, '/')
-  const items = tui.commandSuggestions.length
-  tui.dialog = {
-    kind: 'questions',
-    question: { id: 'pick', question: 'choose', options: [{ label: 'a' }] },
-    index: 0, total: 1, selected: new Set([0]), cursor: 0,
-    resolve() {}, reject() {},
-  }
-  const frame = paint(tui)
-  assert.equal(listRows(frame).length, 0, 'nothing of the list is painted under a Surface')
-  assert.equal(tui.commandSuggestions.length, 0, 'the frame empties the array while the Surface is up')
-  assert.ok(items > 0)
-  tui.dialog = undefined
+  assert.equal(tui.completion.visible, true)
+  tui.openConfirm('prompt', 'hint', () => {})
+  const hidden = paint(tui)
+  assert.equal(listRows(hidden).length, 0, 'nothing of the list is painted under a Surface')
+  assert.equal(tui.completion.visible, false, 'and completion is not offered input')
+  tui.closeConfirm('n')
   const back = paint(tui)
-  assert.equal(tui.commandSuggestions.length, 27, 'the array is rebuilt when the Surface closes')
-  assert.equal(listRows(back).length, 12, 'and the reader sees the list again')
+  assert.equal(tui.completion.visible, true, 'the state returns with the workspace')
+  assert.equal(listRows(back).length, 12)
 })
 
 test('BASELINE: a Screen owns the read — the list neither sees its keys nor its tail', () => {

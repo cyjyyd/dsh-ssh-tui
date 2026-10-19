@@ -640,8 +640,7 @@ test('slash suggestions on a bare slash include /disconnect', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.input = '/'
-  tui.cursor = 1
+  tui.handleData(Buffer.from('/'))
   const text = tui.captureFrame(88, 28).join('\n')
   assert.ok(text.includes('/disconnect'))
   assert.ok(text.includes('断线策略'))
@@ -656,10 +655,9 @@ test('slash suggestions slide a 12-row window with the selected command', () => 
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.input = '/'
-  tui.cursor = 1
+  tui.handleData(Buffer.from('/'))
   tui.captureFrame(88, 32)
-  tui.suggestionIndex = Math.max(0, tui.commandSuggestions.length - 1)
+  for (let step = 0; step < tui.commandSuggestions.length; step += 1) tui.handleData(Buffer.from('\x1b[B'))
   const frame = tui.captureFrame(88, 32)
   const text = frame.join('\n')
   if (tui.commandSuggestions.length > 12) assert.ok(text.includes('↑ 还有'))
