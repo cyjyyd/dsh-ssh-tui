@@ -26,6 +26,7 @@ export interface SearchScreenState {
   readonly category: CardCategory | undefined
   readonly hits: readonly SearchHit[]
   readonly selected: number
+  /** First visible result row. Wheel owns it; a selection move may reveal a row. */
   readonly listOffset: number
   readonly mode: 'list' | 'preview'
   readonly previewOffset: number
@@ -184,6 +185,40 @@ export function pageSearchSelection(state: SearchScreenState, page: number, delt
   const from = state.selected < 0 ? state.hits.length - 1 : state.selected
   const selected = clampIndex(from + Math.sign(delta) * Math.max(1, page), state.hits.length)
   return selected === state.selected ? state : { ...state, selected, mode: 'list', previewOffset: 0 }
+}
+
+/** The page size and the last possible first-visible row. */
+function listViewport(state: SearchScreenState, page: number): { rows: number; maxOffset: number } {
+  const rows = Math.max(1, Number.isFinite(page) ? Math.trunc(page) : 1)
+  return { rows, maxOffset: Math.max(0, state.hits.length - rows) }
+}
+
+/** Clamp the viewport to a whole page without moving selection. */
+export function clampSearchListOffset(state: SearchScreenState, page: number): SearchScreenState {
+  const { maxOffset } = listViewport(state, page)
+  const requested = Number.isFinite(state.listOffset) ? Math.trunc(state.listOffset) : 0
+  const listOffset = Math.max(0, Math.min(requested, maxOffset))
+  return listOffset === state.listOffset ? state : { ...state, listOffset }
+}
+
+/**
+ * Bring the selected hit into the visible page after it moves.
+ *
+ * This deliberately runs on a selection transition, not on every paint: a wheel
+ * may scroll the selected row out of view, and a painter that always re-revealed
+ * it would make the wheel appear to do nothing. The viewport is still the one
+ * `listOffset` field; this only decides its new first row.
+ */
+export function ensureSearchSelectionVisible(state: SearchScreenState, page: number): SearchScreenState {
+  const { rows, maxOffset } = listViewport(state, page)
+  const requested = Number.isFinite(state.listOffset) ? Math.trunc(state.listOffset) : 0
+  let listOffset = Math.max(0, Math.min(requested, maxOffset))
+  if (state.selected >= 0 && state.selected < state.hits.length) {
+    if (state.selected < listOffset) listOffset = state.selected
+    else if (state.selected >= listOffset + rows) listOffset = state.selected - rows + 1
+    listOffset = Math.max(0, Math.min(listOffset, maxOffset))
+  }
+  return listOffset === state.listOffset ? state : { ...state, listOffset }
 }
 
 export function openSearchPreview(state: SearchScreenState): SearchScreenState {

@@ -174,8 +174,10 @@ import {
 import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
 import {
   backspaceSearchText,
+  clampSearchListOffset,
   cycleSearchSelection,
   deleteSearchText,
+  ensureSearchSelectionVisible,
   insertSearchText,
   moveSearchCursor,
   searchFieldViewport,
@@ -5524,11 +5526,11 @@ export class SshTui {
       return { lines, cursorRow: undefined }
     }
 
-    let startRow = Math.max(0, Math.min(search.listOffset, Math.max(0, search.hits.length - 1)))
-    if (search.selected >= 0 && available > 0) {
-      if (search.selected < startRow) startRow = search.selected
-      else if (search.selected >= startRow + available) startRow = search.selected - available + 1
-    }
+    // The wheel owns the viewport: painting clamps it to a whole page but never
+    // drags it back to the selection. Selection transitions reveal their row in
+    // `ensureSearchSelectionVisible`; a paint after a wheel must leave it alone.
+    const maxStart = Math.max(0, search.hits.length - Math.max(1, available))
+    const startRow = Math.max(0, Math.min(search.listOffset, maxStart))
     for (let offset = startRow; offset < search.hits.length && lines.length < bodyRows; offset += 1) {
       const hit = search.hits[offset]
       if (hit === undefined) continue
@@ -5973,6 +5975,9 @@ export class SshTui {
       const selected = Math.max(0, Math.min(selectedOrdinal, state.hits.length - 1))
       state = { ...state, selected, mode: 'list', previewOffset: 0 }
     }
+    // Opening starts from the newest hit, so the first page is the one that
+    // contains it. Later wheel movement is not re-clamped to selection by paint.
+    state = ensureSearchSelectionVisible(state, this.searchPage())
     this.lastSearch = {
       query: state.query,
       category: state.category,
@@ -6019,12 +6024,20 @@ export class SshTui {
   private commitSearchState(next: SearchScreenState): void {
     const screen = this.layerScreen
     if (screen === undefined || screen.kind !== 'search') return
-    screen.search = next
-    screen.copyText = searchCopyText(next)
+    const previous = screen.search
+    // A changed selection (or a return from Preview) reveals its row. An unchanged
+    // selection keeps the wheel's viewport; only the page boundary is clamped.
+    const committed = next.mode !== 'list'
+      ? next
+      : previous?.mode !== 'list' || previous.selected !== next.selected
+        ? ensureSearchSelectionVisible(next, this.searchPage())
+        : clampSearchListOffset(next, this.searchPage())
+    screen.search = committed
+    screen.copyText = searchCopyText(committed)
     this.lastSearch = {
-      query: next.query,
-      category: next.category,
-      ordinal: next.selected,
+      query: committed.query,
+      category: committed.category,
+      ordinal: committed.selected,
     }
     this.markDirty()
   }
@@ -6159,8 +6172,8 @@ export class SshTui {
       if (sgr[4] !== 'M') return
       const button = Number(sgr[1])
       if (button === 64 || button === 65) {
-        const max = Math.max(0, state.hits.length - 1)
-        apply({ ...state, listOffset: Math.max(0, Math.min(max, state.listOffset + (button === 64 ? -3 : 3))) })
+        const listOffset = state.listOffset + (button === 64 ? -3 : 3)
+        apply(clampSearchListOffset({ ...state, listOffset }, this.searchPage()))
       }
       return
     }
@@ -13084,12 +13097,19 @@ export class SshTui {
     // the list below; this guard keeps the payload from being interpreted as
     // Enter-then-text. Bracketed/split paste is handled by the Reader frames and
     // the common `insertSearchPaste` guard.
+    //
+    // A control byte is a key, not paste text. An unmarked payload containing
+    // Ctrl+C must still close Search (and the Reader then consumes the rest of
+    // that read), so the conservative paste reading is limited to text with no
+    // C0 control bytes other than CR/LF. With no terminal signal saying
+    // "unbracketed paste", a payload that also carries control bytes is
+    // inherently ambiguous; it takes the key path rather than losing a key.
     if (!this.reader.isPasting()
       && this.layerScreen?.kind === 'search'
       && this.layerScreen.search?.mode === 'preview'
       && /[\r\n]/u.test(combined)
       && /[^\r\n]/u.test(combined)
-      && !combined.startsWith('\x1b')) return
+      && !/[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/u.test(combined)) return
 
     // A read is not a key. The Reader decides where one unit ends — complete
     // sequences, Alt chords, control bytes, CR/LF, and runs of typing — and each unit

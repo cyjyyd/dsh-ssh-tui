@@ -1,6 +1,10 @@
 # W-5A — Search Screen ownership & interaction contract
 
 > **Status: design / baseline audit. W-5B now implements the defaults below.**
+> **W-5B.1b repair:** the list wheel scrolls the visible page and leaves the
+> selection where it is; a keyboard selection move re-reveals its row. The
+> unbracketed Preview paste guard leaves explicit control keys alone, so Ctrl+C
+> still closes Search and the Screen consumes the rest of that read.
 > **W-5B.1a repair:** Preview ignores every paste payload; list wheel 64/65
 > moves up/down in the same direction as a Report Screen.
 > **W-5B.1 repair:** grapheme-boundary cursor/delete, display-cell field
@@ -116,7 +120,7 @@ export interface SearchScreenState {
   category?: CardCategory    // fixed by /find [category]; undefined = all
   hits: readonly SearchHit[]
   selected: number           // -1 = no selection
-  listOffset: number         // first visible result row
+  listOffset: number         // first visible result row; wheel-owned viewport
   mode: 'list' | 'preview'
   previewOffset: number      // read-only preview scroll
   revision: number           // transcriptRevision used for hits
@@ -173,7 +177,9 @@ Rules:
 - Selection is preserved by row object identity. If the row disappeared or no
   longer matches, select the nearest surviving hit by its old ordinal; if none,
   `selected = -1`, `mode = 'list'`, zero-hit state.
-- `listOffset` keeps `selected` visible and is clamped to the last page.
+- `listOffset` is the wheel-owned first visible row and is clamped to the last
+  page. A selection transition (or a return from Preview) re-reveals its row;
+  painting never drags the viewport back to an unchanged selection.
 - `revision`/`sourceCutoff` mismatch means hits are stale; reconcile before the next
   render or input decision. Stale hits are never painted as current.
 - `mode='preview'` is a detail mode inside the same Screen; it never opens
@@ -240,7 +246,7 @@ keeps the existing Surface/Composer exception and the Screen full-repaint path.
 | Ctrl+N / Ctrl+P | no-op (workspace focus ring inaccessible) | no-op |
 | Ctrl+L | full Screen repaint | full Screen repaint |
 | copy key | copy selected hit | copy preview body |
-| mouse wheel | scroll list, selection unchanged | scroll preview |
+| mouse wheel | scroll list by 3 rows, selection unchanged | scroll preview |
 | mouse click/drag | ignored | ignored |
 | unknown CSI | consumed | consumed |
 | paste | insert, no submit | ignored |
@@ -260,6 +266,24 @@ returns to the list. Search has no composer, borrowed field or completion.
   not invent a second selection model).
 - Copy is `screen.copyText` through the existing Screen copy path; it never touches
   workspace selection, focus or history.
+
+### 3.4 Unbracketed Preview paste policy (W-5B.1b)
+
+A complete bracketed paste remains ignored, at every split. For an unmarked read,
+the conservative rule is byte-level:
+
+- printable text plus CR/LF and **no other C0 control byte** is read as a paste and
+  ignored in Preview;
+- any explicit control byte routes as a key first. Ctrl+C therefore closes Search,
+  and the existing Screen-dismissal rule consumes the rest of that read;
+- a read that mixes a control byte with text and a newline cannot be distinguished
+  from an unbracketed paste carrying that control byte. It takes the key path rather
+  than swallowing a key, and no timing or terminal signal is invented to guess;
+- `\r` plus text in one read is likewise indistinguishable from a one-line paste, so
+  the paste policy wins there. A lone Enter still returns to the list.
+
+`InputReader`'s 60 ms escape hold and `TerminalInputGuard`'s 30 ms reply hold are
+unchanged; this policy adds no timer and no owner.
 
 ---
 
