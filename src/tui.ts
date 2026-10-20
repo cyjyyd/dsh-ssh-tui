@@ -6068,7 +6068,10 @@ export class SshTui {
 
   private insertSearchPaste(text: string): void {
     const state = this.syncSearchScreen()
-    if (state === undefined) return
+    // Preview is read-only. This is the common paste entry for bracketed paste,
+    // non-bracketed bursts and split-read payloads, so the guard covers every
+    // terminal form without reinterpreting payload as keys.
+    if (state === undefined || state.mode === 'preview') return
     const flat = text.split(/\r?\n/u).map(part => part.trim()).filter(part => part !== '').join(' ')
     if (flat === '') return
     this.commitSearchState(insertSearchText(state, flat, [...this.visibleRows()]))
@@ -6157,7 +6160,7 @@ export class SshTui {
       const button = Number(sgr[1])
       if (button === 64 || button === 65) {
         const max = Math.max(0, state.hits.length - 1)
-        apply({ ...state, listOffset: Math.max(0, Math.min(max, state.listOffset + (button === 64 ? 3 : -3))) })
+        apply({ ...state, listOffset: Math.max(0, Math.min(max, state.listOffset + (button === 64 ? -3 : 3))) })
       }
       return
     }
@@ -13075,6 +13078,18 @@ export class SshTui {
     // provenance must not be attributed to a later frame (a paste tail).
     this.heldInput = undefined
     const combined = this.reader.assemble(text)
+
+    // A non-bracketed multi-line paste in Preview is one read with printable text
+    // around a newline. Preview is read-only, and a lone Enter still returns to
+    // the list below; this guard keeps the payload from being interpreted as
+    // Enter-then-text. Bracketed/split paste is handled by the Reader frames and
+    // the common `insertSearchPaste` guard.
+    if (!this.reader.isPasting()
+      && this.layerScreen?.kind === 'search'
+      && this.layerScreen.search?.mode === 'preview'
+      && /[\r\n]/u.test(combined)
+      && /[^\r\n]/u.test(combined)
+      && !combined.startsWith('\x1b')) return
 
     // A read is not a key. The Reader decides where one unit ends — complete
     // sequences, Alt chords, control bytes, CR/LF, and runs of typing — and each unit

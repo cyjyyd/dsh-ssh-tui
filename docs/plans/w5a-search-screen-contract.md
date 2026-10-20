@@ -1,6 +1,8 @@
 # W-5A — Search Screen ownership & interaction contract
 
 > **Status: design / baseline audit. W-5B now implements the defaults below.**
+> **W-5B.1a repair:** Preview ignores every paste payload; list wheel 64/65
+> moves up/down in the same direction as a Report Screen.
 > **W-5B.1 repair:** grapheme-boundary cursor/delete, display-cell field
 > scrolling, wrapped-display-line Preview navigation, and original
 > `visibleRows()` ordinals with nearest-ordinal fallback.
