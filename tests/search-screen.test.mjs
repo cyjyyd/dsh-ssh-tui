@@ -905,3 +905,157 @@ test('F2: list wheel 64 scrolls up and 65 scrolls down', () => {
   assert.equal(tui.historyIndex, before.historyIndex)
   assert.equal(tui.scrollOffset, before.scrollOffset)
 })
+
+// ── W-5B.1b: visible list scroll and control-key boundary ───────────────────
+
+function visibleHitNumbers(tui) {
+  return plainFrame(tui, 80, 20).flatMap(line => {
+    const match = /(\d+)\. \[/u.exec(line)
+    return match === null ? [] : [Number(match[1])]
+  })
+}
+
+function listWithThirty() {
+  const { tui } = makeTui()
+  tui.headlessDisplay = true
+  tui.relayColumns = 80
+  tui.relayRows = 20
+  for (let i = 0; i < 30; i++) {
+    tui.rows.push({ kind: 'assistant', text: `deploy result ${String(i + 1).padStart(2, '0')}` })
+  }
+  tui.history.push('history')
+  tui.historyIndex = 1
+  tui.scrollOffset = 4
+  tui.runCommand('/find deploy')
+  tui.captureFrame(80, 20)
+  const state = stateOf(tui)
+  // The test's starting view is the last page, with the newest hit selected.
+  tui.screen.search = { ...state, selected: 29, listOffset: 16 }
+  tui.input = 'draft'
+  tui.cursor = 2
+  tui.captureFrame(80, 20)
+  return tui
+}
+
+test('G1: wheel scrolls the visible list page while selection stays put', () => {
+  const tui = listWithThirty()
+  assert.deepEqual(visibleHitNumbers(tui), [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30])
+  const selected = stateOf(tui)?.selected
+  const query = stateOf(tui)?.query
+  assert.equal(selected, 29)
+
+  tui.handleData(Buffer.from('\x1b[<64;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 13, '64 moves the viewport up one wheel step')
+  assert.deepEqual(
+    visibleHitNumbers(tui),
+    [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
+    'the first visible hit changes with the viewport',
+  )
+  assert.equal(stateOf(tui)?.selected, selected, 'wheel does not move the selection')
+  assert.equal(stateOf(tui)?.query, query, 'wheel does not edit the query')
+  assert.equal(tui.historyIndex, 1, 'wheel does not move workspace history')
+  assert.equal(tui.scrollOffset, 4, 'wheel does not move the workspace')
+
+  const wheelBytes = paintedBytes(tui, 80, 20)
+  assert.doesNotMatch(wheelBytes, /\x1b\[(?:2J|3J|H\x1b\[J)/u, 'wheel repaints incrementally, never clears')
+
+  tui.handleData(Buffer.from('\x1b[<65;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 16, '65 moves the viewport back down')
+  assert.deepEqual(
+    visibleHitNumbers(tui),
+    [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+    'the last page is intact and never overshoots',
+  )
+  assert.equal(stateOf(tui)?.selected, selected)
+  assert.equal(tui.scrollOffset, 4)
+})
+
+test('G1: list boundaries clamp and keyboard selection returns into view', () => {
+  const tui = listWithThirty()
+  for (let i = 0; i < 20; i++) tui.handleData(Buffer.from('\x1b[<64;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 0, 'the viewport clamps at the first page')
+  assert.deepEqual(visibleHitNumbers(tui), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+  assert.equal(stateOf(tui)?.selected, 29, 'scrolling to the top does not move selection')
+
+  for (let i = 0; i < 20; i++) tui.handleData(Buffer.from('\x1b[<65;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 16, 'the viewport clamps at the last page, not hits.length')
+  assert.deepEqual(visibleHitNumbers(tui), [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30])
+
+  tui.handleData(Buffer.from('\x1b[<64;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 13)
+  assert.equal(visibleHitNumbers(tui).includes(29), false, 'selection may sit outside the wheel viewport')
+
+  tui.handleData(Buffer.from('\x1b[A'))
+  assert.equal(stateOf(tui)?.selected, 28)
+  assert.equal(stateOf(tui)?.listOffset, 15, 'Up reveals the moved selection')
+  assert.equal(visibleHitNumbers(tui).includes(28), true, 'the moved selection is on the visible page')
+
+  tui.handleData(Buffer.from('\x1b[B'))
+  assert.equal(stateOf(tui)?.selected, 29)
+  assert.equal(stateOf(tui)?.listOffset, 16, 'Down reveals the moved selection again')
+  assert.equal(visibleHitNumbers(tui).includes(29), true)
+
+  const beforeResize = { selected: stateOf(tui)?.selected, query: stateOf(tui)?.query, scroll: tui.scrollOffset }
+  tui.relayColumns = 48
+  const resized = plainFrame(tui, 48, 20)
+  assert.equal(stateOf(tui)?.selected, beforeResize.selected)
+  assert.equal(stateOf(tui)?.query, beforeResize.query)
+  assert.equal(tui.scrollOffset, beforeResize.scroll)
+  for (const line of resized) assert.ok([...line].length <= 48, 'resize still fits the frame')
+
+  tui.handleData(Buffer.from('\r'))
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  const listOffset = stateOf(tui)?.listOffset
+  tui.handleData(Buffer.from('\x1b[<65;5;5M'))
+  assert.equal(stateOf(tui)?.mode, 'preview', 'wheel remains inside Preview')
+  assert.equal(stateOf(tui)?.previewOffset, 0, 'short Preview content clamps its own offset')
+  assert.equal(stateOf(tui)?.listOffset, listOffset, 'Preview wheel never edits the list viewport')
+  assert.equal(stateOf(tui)?.selected, 29)
+  assert.equal(tui.scrollOffset, 4, 'workspace scroll is still untouched')
+  tui.handleData(Buffer.from('\r'))
+  assert.equal(stateOf(tui)?.mode, 'list', 'Enter still returns to the list')
+})
+
+test('G2: Ctrl+C alone closes a Preview Search', () => {
+  const { tui } = previewWithState()
+  const hidden = {
+    input: tui.input,
+    cursor: tui.cursor,
+    historyIndex: tui.historyIndex,
+    historyLength: tui.history.length,
+    borrowed: tui.borrowedText,
+    scrollOffset: tui.scrollOffset,
+  }
+  tui.handleData(Buffer.from('\x03'))
+  assert.equal(tui.screen, undefined, 'Ctrl+C closes Search')
+  assert.deepEqual({
+    input: tui.input,
+    cursor: tui.cursor,
+    historyIndex: tui.historyIndex,
+    historyLength: tui.history.length,
+    borrowed: tui.borrowedText,
+    scrollOffset: tui.scrollOffset,
+  }, hidden, 'the hidden composer/history/borrowed/workspace state is unchanged')
+})
+
+test('G2: Ctrl+C in a mixed read wins and the tail never leaks', () => {
+  const { tui } = previewWithState()
+  tui.handleData(Buffer.from('\x03x\r'))
+  assert.equal(tui.screen, undefined, 'Ctrl+C still closes Search in a mixed read')
+  assert.equal(tui.input, 'draft', 'the tail does not append to the hidden composer draft')
+  assert.equal(tui.cursor, 2, 'the tail does not move the composer caret')
+  assert.equal(tui.historyIndex, 1)
+  assert.equal(tui.history.length, 1)
+  assert.deepEqual(tui.borrowedText, { text: 'borrowed', cursor: 8 })
+  assert.equal(tui.scrollOffset, 4)
+})
+
+test('G2: plain Enter returns to the list and ordinary read-only input stays inert', () => {
+  const { tui, before } = previewWithState()
+  tui.handleData(Buffer.from('ordinary text'))
+  assertPreviewUnchanged(tui, before)
+  tui.handleData(Buffer.from('\r'))
+  assert.equal(tui.screen?.kind, 'search')
+  assert.equal(stateOf(tui)?.mode, 'list')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
+})
