@@ -1,6 +1,9 @@
 # W-5A — Search Screen ownership & interaction contract
 
 > **Status: design / baseline audit. W-5B now implements the defaults below.**
+> **W-5B.1 repair:** grapheme-boundary cursor/delete, display-cell field
+> scrolling, wrapped-display-line Preview navigation, and original
+> `visibleRows()` ordinals with nearest-ordinal fallback.
 > **W-5B implementation:** `src/search-screen.ts`, `ScreenKind 'search'`, the pure
 > renderer and the probes. This document remains the contract, not a runtime file.
 > Baseline: gated W-4B HEAD `4fa570f662c2ac100088cc4b8d9156153b0c2825`

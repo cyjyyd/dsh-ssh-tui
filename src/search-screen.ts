@@ -7,6 +7,7 @@
  * read-only preview mode. The TUI supplies rows and revisions and renders state.
  */
 import { lineModeLines } from './line-mode.js'
+import { displayWidth, wrap } from './term-text.js'
 import { matchTranscriptRowsFor, parseFindQuery, type FindRequest } from './plan.js'
 import type { CardCategory } from './plan.js'
 import type { Row } from './transcript-types.js'
@@ -57,7 +58,17 @@ export function searchRows(rows: readonly Row[], request: FindRequest): Row[] {
 }
 
 function hitsFor(rows: readonly Row[], request: FindRequest): SearchHit[] {
-  return searchRows(rows, request).map((row, ordinal) => ({ row, ordinal }))
+  const matching = searchRows(rows, request)
+  // Preserve the original visibleRows position. The matcher returns a filtered
+  // list; its index is not the workspace ordinal the selection fallback needs.
+  const hits: SearchHit[] = []
+  let at = 0
+  for (let ordinal = 0; ordinal < rows.length && at < matching.length; ordinal += 1) {
+    if (rows[ordinal] !== matching[at]) continue
+    hits.push({ row: matching[at], ordinal })
+    at += 1
+  }
+  return hits
 }
 
 function clampIndex(index: number, length: number): number {
@@ -80,23 +91,33 @@ export function searchStateFor(input: SearchStateInput): SearchScreenState {
   const category = categoryOf(input)
   const hits = hitsFor(input.rows, { ...(category === undefined ? {} : { category }), query })
   const previous = input.previous
+  const oldSelected = previous?.selected ?? -1
+  const oldHit = previous !== undefined && oldSelected >= 0 ? previous.hits[oldSelected] : undefined
   let selected = -1
   if (hits.length > 0) {
-    const oldRow = previous !== undefined && previous.selected >= 0
-      ? previous.hits[previous.selected]?.row
-      : undefined
-    const identity = oldRow === undefined ? -1 : hits.findIndex(hit => hit.row === oldRow)
-    selected = identity >= 0
-      ? identity
-      : previous !== undefined && previous.selected >= 0
-        ? clampIndex(previous.selected, hits.length)
-        : hits.length - 1
+    const identity = oldHit === undefined ? -1 : hits.findIndex(hit => hit.row === oldHit.row)
+    if (identity >= 0) {
+      selected = identity
+    } else if (oldHit !== undefined) {
+      // The selected row is gone. Pick the surviving hit nearest its original
+      // workspace position, not the nearest filtered index.
+      let bestDistance = Number.POSITIVE_INFINITY
+      for (let index = 0; index < hits.length; index += 1) {
+        const distance = Math.abs(hits[index].ordinal - oldHit.ordinal)
+        if (distance < bestDistance) {
+          selected = index
+          bestDistance = distance
+        }
+      }
+    } else {
+      selected = hits.length - 1
+    }
   }
-  const oldSelected = previous?.selected ?? -1
   const listOffset = selected < 0
     ? 0
     : Math.max(0, Math.min(previous?.listOffset ?? 0, hits.length - 1))
   const mode = previous?.mode === 'preview' && selected >= 0 ? 'preview' : 'list'
+  const sameSelection = oldHit !== undefined && selected >= 0 && hits[selected]?.row === oldHit.row
   return {
     query,
     cursor,
@@ -105,7 +126,7 @@ export function searchStateFor(input: SearchStateInput): SearchScreenState {
     selected,
     listOffset,
     mode,
-    previewOffset: mode === 'preview' && selected === oldSelected ? (previous?.previewOffset ?? 0) : 0,
+    previewOffset: mode === 'preview' && sameSelection ? (previous?.previewOffset ?? 0) : 0,
     revision: input.revision ?? previous?.revision ?? 0,
     sourceCutoff: input.cutoff ?? previous?.sourceCutoff ?? 0,
     notice: undefined,
@@ -140,12 +161,21 @@ export function moveSearchSelection(state: SearchScreenState, delta: number): Se
 }
 
 /** Move by one result with wrapping (Alt+n/p, Ctrl+G). */
-export function cycleSearchSelection(state: SearchScreenState, delta: number): SearchScreenState {
+export function cycleSearchSelection(
+  state: SearchScreenState,
+  delta: number,
+  keepPreview = false,
+): SearchScreenState {
   const count = state.hits.length
   if (count === 0) return state
   const from = state.selected < 0 ? count - 1 : state.selected
   const selected = ((from + delta) % count + count) % count
-  return { ...state, selected, mode: 'list', previewOffset: 0 }
+  return {
+    ...state,
+    selected,
+    mode: keepPreview && state.mode === 'preview' ? 'preview' : 'list',
+    previewOffset: 0,
+  }
 }
 
 /** Move by a page without wrapping. */
@@ -237,8 +267,9 @@ export function deleteSearchText(
   const at = state.cursor
   let end = state.query.length
   for (const segment of GRAPHEMES.segment(state.query)) {
-    if (segment.index > at) {
-      end = segment.index + segment.segment.length
+    const segmentEnd = segment.index + segment.segment.length
+    if (at < segmentEnd) {
+      end = segmentEnd
       break
     }
   }
@@ -260,9 +291,50 @@ export function moveSearchCursor(state: SearchScreenState, delta: number): Searc
   }
   if (state.cursor >= state.query.length) return state
   for (const segment of GRAPHEMES.segment(state.query)) {
-    if (segment.index > state.cursor) return { ...state, cursor: segment.index + segment.segment.length }
+    const end = segment.index + segment.segment.length
+    if (state.cursor < end) return { ...state, cursor: end }
   }
   return { ...state, cursor: state.query.length }
+}
+
+/**
+ * The visible slice of the Search field and the caret's cell offset.
+ *
+ * The viewport is measured in terminal cells, not UTF-16 code units: a CJK
+ * grapheme takes two cells, an emoji can take two, and a combining cluster is
+ * one grapheme. The query itself is never sliced; only the displayed slice is.
+ * The caller adds the fixed prefix width to `caretCell` to place the terminal
+ * cursor.
+ */
+export function searchFieldViewport(
+  query: string,
+  cursor: number,
+  availableCells: number,
+): { text: string; caretCell: number } {
+  const width = Math.max(1, availableCells)
+  const graphemes = [...GRAPHEMES.segment(query)]
+  const widths = graphemes.map(segment => displayWidth(segment.segment))
+  const at = Math.max(0, Math.min(cursor, query.length))
+  let cursorIndex = 0
+  while (cursorIndex < graphemes.length && graphemes[cursorIndex].index + graphemes[cursorIndex].segment.length <= at) {
+    cursorIndex += 1
+  }
+  let start = cursorIndex
+  let before = 0
+  while (start > 0 && before + widths[start - 1] <= width - 1) {
+    before += widths[start - 1]
+    start -= 1
+  }
+  let end = cursorIndex
+  let total = before
+  while (end < graphemes.length && total + widths[end] <= width) {
+    total += widths[end]
+    end += 1
+  }
+  return {
+    text: graphemes.slice(start, end).map(segment => segment.segment).join(''),
+    caretCell: before,
+  }
 }
 
 export function setSearchCursor(state: SearchScreenState, cursor: number): SearchScreenState {
@@ -270,8 +342,24 @@ export function setSearchCursor(state: SearchScreenState, cursor: number): Searc
   return at === state.cursor ? state : { ...state, cursor: at }
 }
 
-export function setSearchPreviewOffset(state: SearchScreenState, offset: number, lines: number): SearchScreenState {
-  const max = Math.max(0, lines - 1)
+/** The selected hit after its logical lines have been wrapped to display lines. */
+export function searchPreviewDisplayLines(hit: SearchHit, width: number): string[] {
+  const inner = Math.max(1, width)
+  const display: string[] = []
+  for (const line of searchHitLines(hit)) {
+    for (const piece of wrap(line, inner)) display.push(piece)
+  }
+  return display
+}
+
+/** Clamp Preview to whole pages: End leaves the final page visible, not one line. */
+export function setSearchPreviewOffset(
+  state: SearchScreenState,
+  offset: number,
+  lines: number,
+  page = 1,
+): SearchScreenState {
+  const max = Math.max(0, lines - Math.max(1, page))
   return { ...state, previewOffset: Math.max(0, Math.min(offset, max)) }
 }
 

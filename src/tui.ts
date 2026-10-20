@@ -178,6 +178,8 @@ import {
   deleteSearchText,
   insertSearchText,
   moveSearchCursor,
+  searchFieldViewport,
+  searchPreviewDisplayLines,
   moveSearchSelection,
   openSearchPreview,
   pageSearchSelection,
@@ -5472,15 +5474,11 @@ export class SshTui {
     const lines: string[] = []
     if (bodyRows <= 0) return { lines }
     const prefix = '  › '
-    const maxField = Math.max(1, width - displayWidth(prefix))
-    const chars = Array.from(search.query)
-    const beforeCount = Array.from(search.query.slice(0, search.cursor)).length
-    const start = Math.max(0, beforeCount - maxField + 1)
-    const shown = chars.slice(start, start + maxField).join('')
-    const beforeShown = chars.slice(start, beforeCount).join('')
-    const field = `${prefix}${shown}`
+    const prefixWidth = displayWidth(prefix)
+    const fieldView = searchFieldViewport(search.query, search.cursor, Math.max(1, width - prefixWidth))
+    const field = `${prefix}${fieldView.text}`
     lines.push(this.styleLine('system', fit(field)))
-    const cursorColumn = 1 + displayWidth(prefix) + displayWidth(beforeShown)
+    const cursorColumn = 1 + prefixWidth + fieldView.caretCell
     if (bodyRows === 1) {
       return { lines, cursorRow: 0, cursorColumn: search.mode === 'preview' ? undefined : cursorColumn }
     }
@@ -5504,11 +5502,7 @@ export class SshTui {
     if (search.mode === 'preview') {
       const hit = search.hits[search.selected]
       if (hit === undefined) return { lines, cursorRow: undefined }
-      const raw = searchHitLines(hit)
-      const wrapped: string[] = []
-      for (const line of raw) {
-        for (const piece of wrap(line, Math.max(1, width - 2))) wrapped.push(piece)
-      }
+      const wrapped = searchPreviewDisplayLines(hit, Math.max(1, width - 2))
       const startLine = Math.max(0, Math.min(search.previewOffset, Math.max(0, wrapped.length - 1)))
       const needle = search.query.trim()
       let inlineHit = false
@@ -6115,11 +6109,10 @@ export class SshTui {
       return
     }
     if (state.mode === 'preview') {
-      // Preview is read-only: only navigation/close/copy keys below are live.
-      if (combined === '\x15' || combined === '\x0b' || combined === '\x01' || combined === '\x05'
-        || combined === '\x7f' || combined === '\x08' || combined === '\t'
-        || combined === '\x0e' || combined === '\x10') return
-    } else {
+      apply(this.handleSearchPreviewKey(state, combined))
+      return
+    }
+    {
       if (combined === '\x15') {
         apply(setSearchQuery(state, '', rows, state.revision, state.sourceCutoff, 0))
         return
@@ -6151,39 +6144,18 @@ export class SshTui {
     const nav = /^\x1b\[(H|F|1~|4~|3~|5~|6~)$/u.exec(combined)
     if (nav !== null) {
       const key = nav[1]
-      if (key === 'H' || key === '1~') {
-        if (state.mode === 'preview') apply({ ...state, previewOffset: 0 })
-        else apply(setSearchCursor(state, 0))
-      } else if (key === 'F' || key === '4~') {
-        if (state.mode === 'preview') {
-          const hit = state.hits[state.selected]
-          const count = hit === undefined ? 0 : searchHitLines(hit).length
-          apply(setSearchPreviewOffset(state, count, count))
-        } else apply(setSearchCursor(state, state.query.length))
-      } else if (key === '3~') {
-        if (state.mode === 'list') apply(deleteSearchText(state, rows))
-      } else if (key === '5~') {
-        if (state.mode === 'preview') {
-          const hit = state.hits[state.selected]
-          apply(setSearchPreviewOffset(state, state.previewOffset - 1, hit === undefined ? 0 : searchHitLines(hit).length))
-        } else apply(pageSearchSelection(state, this.searchPage(), -1))
-      } else if (key === '6~') {
-        if (state.mode === 'preview') {
-          const hit = state.hits[state.selected]
-          apply(setSearchPreviewOffset(state, state.previewOffset + 1, hit === undefined ? 0 : searchHitLines(hit).length))
-        } else apply(pageSearchSelection(state, this.searchPage(), 1))
-      }
+      if (key === 'H' || key === '1~') apply(setSearchCursor(state, 0))
+      else if (key === 'F' || key === '4~') apply(setSearchCursor(state, state.query.length))
+      else if (key === '3~') apply(deleteSearchText(state, rows))
+      else if (key === '5~') apply(pageSearchSelection(state, this.searchPage(), -1))
+      else if (key === '6~') apply(pageSearchSelection(state, this.searchPage(), 1))
       return
     }
     const sgr = SGR_MOUSE_RE.exec(combined)
     if (sgr !== null) {
       if (sgr[4] !== 'M') return
       const button = Number(sgr[1])
-      if (state.mode === 'preview' && (button === 64 || button === 65)) {
-        const hit = state.hits[state.selected]
-        const lines = hit === undefined ? 0 : searchHitLines(hit).length
-        apply(setSearchPreviewOffset(state, state.previewOffset + (button === 64 ? 1 : -1), lines))
-      } else if (button === 64 || button === 65) {
+      if (button === 64 || button === 65) {
         const max = Math.max(0, state.hits.length - 1)
         apply({ ...state, listOffset: Math.max(0, Math.min(max, state.listOffset + (button === 64 ? 3 : -3))) })
       }
@@ -6195,8 +6167,47 @@ export class SshTui {
       // Alt+f/F// at Search is a no-op; other CSI is consumed by the Screen.
       return
     }
-    if (state.mode === 'preview') return
     if (combined !== '') apply(insertSearchText(state, combined, rows))
+  }
+
+  /**
+   * Preview navigation. The offset and page height are in wrapped **display**
+   * lines, never in the logical `lineModeLines` entries: one long reply can be
+   * many screens. Arrows scroll one display line; PgUp/PgDn one visible page;
+   * Home/End the first/last page. Hit changes keep Preview and reset the offset.
+   */
+  private handleSearchPreviewKey(state: SearchScreenState, combined: string): SearchScreenState {
+    const hit = state.hits[state.selected]
+    if (hit === undefined) return { ...state, mode: 'list', previewOffset: 0 }
+    const page = Math.max(1, this.searchPage())
+    const total = searchPreviewDisplayLines(hit, Math.max(1, this.screenColumns() - 2)).length
+    const scroll = (delta: number): SearchScreenState =>
+      setSearchPreviewOffset(state, state.previewOffset + delta, total, page)
+    const alt = /^\x1b([nNpP])$/u.exec(combined)
+    if (alt !== null) {
+      return cycleSearchSelection(state, alt[1] === 'n' || alt[1] === 'N' ? 1 : -1, true)
+    }
+    if (combined === '\x07') return cycleSearchSelection(state, 1, true)
+    const arrow = /^\x1b\[([A-D])$/u.exec(combined)
+    if (arrow !== null) {
+      if (arrow[1] === 'A') return scroll(-1)
+      if (arrow[1] === 'B') return scroll(1)
+      return state
+    }
+    const nav = /^\x1b\[(H|F|1~|4~|5~|6~)$/u.exec(combined)
+    if (nav !== null) {
+      if (nav[1] === 'H' || nav[1] === '1~') return { ...state, previewOffset: 0 }
+      if (nav[1] === 'F' || nav[1] === '4~') return setSearchPreviewOffset(state, Number.MAX_SAFE_INTEGER, total, page)
+      if (nav[1] === '5~') return scroll(-page)
+      return scroll(page)
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null && sgr[4] === 'M') {
+      const button = Number(sgr[1])
+      if (button === 64) return scroll(-1)
+      if (button === 65) return scroll(1)
+    }
+    return state
   }
 
   private runTextFind(arg: string): void {
