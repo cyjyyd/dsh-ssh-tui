@@ -799,3 +799,109 @@ test('R1: removing every hit exits Preview and selects nothing', async () => {
   assert.equal(stateOf(tui)?.mode, 'list')
   assert.equal(stateOf(tui)?.previewOffset, 0)
 })
+
+// ── W-5B.1a: Preview paste isolation and list wheel direction ──────────────
+
+function previewWithState() {
+  const { tui } = makeTui()
+  seed(tui, ['deploy one', 'deploy two'])
+  tui.rows.push({ kind: 'assistant', text: 'deploy three' })
+  tui.scrollOffset = 4
+  tui.runCommand('/find deploy')
+  tui.input = 'draft'
+  tui.cursor = 2
+  tui.history.push('history')
+  tui.historyIndex = 1
+  tui.borrowedText = { text: 'borrowed', cursor: 8 }
+  tui.captureFrame(80, 20)
+  press(tui, '\r')
+  const state = stateOf(tui)
+  const hidden = {
+    input: tui.input,
+    cursor: tui.cursor,
+    historyIndex: tui.historyIndex,
+    historyLength: tui.history.length,
+    borrowed: tui.borrowedText,
+    scrollOffset: tui.scrollOffset,
+  }
+  const before = {
+    query: state?.query,
+    cursor: state?.cursor,
+    selected: state?.selected,
+    hits: state?.hits.map(hit => hit.row),
+    mode: state?.mode,
+    previewOffset: state?.previewOffset,
+    copyText: tui.screen?.copyText,
+    hidden,
+  }
+  return { tui, before }
+}
+
+function assertPreviewUnchanged(tui, before) {
+  const state = stateOf(tui)
+  assert.equal(state?.query, before.query, 'query unchanged')
+  assert.equal(state?.cursor, before.cursor, 'cursor unchanged')
+  assert.equal(state?.selected, before.selected, 'selected unchanged')
+  assert.deepEqual(state?.hits.map(hit => hit.row), before.hits, 'hits unchanged')
+  assert.equal(state?.mode, 'preview', 'still in preview')
+  assert.equal(state?.previewOffset, before.previewOffset, 'preview offset unchanged')
+  assert.equal(tui.screen?.copyText, before.copyText, 'copy text unchanged')
+  assert.deepEqual({
+    input: tui.input,
+    cursor: tui.cursor,
+    historyIndex: tui.historyIndex,
+    historyLength: tui.history.length,
+    borrowed: tui.borrowedText,
+    scrollOffset: tui.scrollOffset,
+  }, before.hidden, 'hidden composer/history/borrowed/workspace unchanged')
+}
+
+test('F1: a complete bracketed paste is ignored in Preview', () => {
+  const { tui, before } = previewWithState()
+  tui.handleData(Buffer.from('\x1b[200~secret\x1b[201~'))
+  assertPreviewUnchanged(tui, before)
+})
+
+test('F1: a plain multi-line paste is ignored in Preview', () => {
+  const { tui, before } = previewWithState()
+  tui.handleData(Buffer.from('secret one\nsecret two'))
+  assertPreviewUnchanged(tui, before)
+})
+
+test('F1: a cross-read paste is ignored in Preview at every fragment', () => {
+  const { tui, before } = previewWithState()
+  tui.handleData(Buffer.from('\x1b[200~sec'))
+  assertPreviewUnchanged(tui, before)
+  tui.handleData(Buffer.from('ret\x1b[201~'))
+  assertPreviewUnchanged(tui, before)
+})
+
+test('F2: list wheel 64 scrolls up and 65 scrolls down', () => {
+  const { tui } = makeTui()
+  for (let i = 0; i < 30; i++) tui.rows.push({ kind: 'assistant', text: `deploy result ${i}` })
+  tui.history.push('history')
+  tui.historyIndex = 1
+  tui.scrollOffset = 4
+  tui.runCommand('/find deploy')
+  tui.captureFrame(80, 20)
+  const state = stateOf(tui)
+  tui.screen.search = { ...state, listOffset: 10 }
+  const before = {
+    selected: stateOf(tui)?.selected,
+    query: stateOf(tui)?.query,
+    historyIndex: tui.historyIndex,
+    scrollOffset: tui.scrollOffset,
+  }
+  tui.handleData(Buffer.from('\x1b[<64;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 7, 'button 64 moves up')
+  assert.equal(stateOf(tui)?.selected, before.selected)
+  assert.equal(stateOf(tui)?.query, before.query)
+  assert.equal(tui.historyIndex, before.historyIndex)
+  assert.equal(tui.scrollOffset, before.scrollOffset)
+  tui.handleData(Buffer.from('\x1b[<65;5;5M'))
+  assert.equal(stateOf(tui)?.listOffset, 10, 'button 65 moves down')
+  assert.equal(stateOf(tui)?.selected, before.selected)
+  assert.equal(stateOf(tui)?.query, before.query)
+  assert.equal(tui.historyIndex, before.historyIndex)
+  assert.equal(tui.scrollOffset, before.scrollOffset)
+})
