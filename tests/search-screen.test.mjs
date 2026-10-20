@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
 import { feedbackText, tick } from './wait.mjs'
+import { wrap } from '../lib/term-text.js'
 
 setLocale('zh')
 
@@ -535,4 +536,266 @@ test('S-P13b: an updated row that stops matching leaves the selected list valid'
   assert.equal(searchState(tui)?.hits.length, 1)
   assert.ok((searchState(tui)?.selected ?? -1) >= 0)
   assert.equal(searchState(tui)?.hits[searchState(tui)?.selected ?? -1]?.row.text, 'deploy one')
+})
+
+// ── W-5B.1: U1 grapheme cursor/delete ──────────────────────────────────────
+
+function emptySearch() {
+  const { tui } = makeTui()
+  openFind(tui, '/find')
+  return tui
+}
+
+const press = (tui, sequence) => tui.handleData(Buffer.from(sequence))
+const stateOf = tui => tui.screen?.search
+
+test('U1: Right moves from abc cursor 0 to 1, not past a code point', () => {
+  const tui = emptySearch()
+  press(tui, 'abc')
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, 1)
+})
+
+test('U1: Delete at cursor 0 removes only the first grapheme', () => {
+  const tui = emptySearch()
+  press(tui, 'abc')
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[3~')
+  assert.equal(stateOf(tui)?.query, 'bc')
+  assert.equal(stateOf(tui)?.cursor, 0)
+})
+
+test('U1: emoji, combining clusters and ZWJ never split at a cursor boundary', () => {
+  const tui = emptySearch()
+  press(tui, 'a🚀b')
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, 1, 'after a')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, 3, 'after the whole emoji')
+  press(tui, '\x1b[3~')
+  assert.equal(stateOf(tui)?.query, 'a🚀')
+
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, 1)
+  press(tui, '\x7f')
+  assert.equal(stateOf(tui)?.query, '🚀')
+
+  press(tui, '\x15')
+  const cluster = 'a\u0301b'
+  press(tui, cluster)
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, 2, 'after the combining cluster a◌́')
+  press(tui, '\x1b[3~')
+  assert.equal(stateOf(tui)?.query, 'a\u0301')
+
+  press(tui, '\x15')
+  const family = '👨‍👩‍👧‍👦'
+  press(tui, family)
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, family.length, 'after the whole ZWJ cluster')
+  press(tui, '\x1b[H')
+  press(tui, '\x1b[3~')
+  assert.equal(stateOf(tui)?.query, '')
+})
+
+test('U1: repeated cursor/delete/backspace stays inside the query', () => {
+  const tui = emptySearch()
+  press(tui, '中文abc')
+  for (let i = 0; i < 20; i++) {
+    press(tui, '\x1b[H')
+    press(tui, '\x1b[C')
+    press(tui, '\x1b[D')
+  }
+  assert.equal(stateOf(tui)?.cursor, 0)
+  for (let i = 0; i < 20; i++) press(tui, '\x1b[F')
+  for (let i = 0; i < 20; i++) press(tui, '\x7f')
+  assert.equal(stateOf(tui)?.query, '')
+  assert.equal(stateOf(tui)?.cursor, 0)
+})
+
+// ── W-5B.1: U2 terminal-grid cursor ───────────────────────────────────────
+
+test('U2: the field caret stays inside the terminal at 12/16/40 columns', () => {
+  const tui = emptySearch()
+  const query = '中文abc🚀def'
+  press(tui, query)
+  for (const width of [12, 16, 40]) {
+    press(tui, '\x1b[H')
+    for (let at = 0; at <= query.length; at++) {
+      const frame = tui.captureFrame(width, 20)
+      assert.ok(tui.lastPaintCursorColumn >= 1, `${width}@${at}: cursor column ≥ 1`)
+      assert.ok(tui.lastPaintCursorColumn <= width, `${width}@${at}: cursor column ${tui.lastPaintCursorColumn} ≤ ${width}`)
+      for (const line of frame) {
+        const plain = line.replace(/\u001b\[[0-9;?]*[a-zA-Z]/gu, '')
+        assert.ok([...plain].length <= width, `${width}@${at}: row fits`)
+      }
+      press(tui, '\x1b[C')
+    }
+    press(tui, '\x1b[F')
+  }
+  assert.equal(stateOf(tui)?.query, query, 'horizontal scrolling never rewrites the query')
+})
+
+test('U2: wide-character field scrolling uses display cells and remains incremental', () => {
+  const tui = emptySearch()
+  press(tui, '中文🚀abc')
+  press(tui, '\x1b[H')
+  for (let i = 0; i < 4; i++) press(tui, '\x1b[C')
+  const frame = tui.captureFrame(12, 20)
+  assert.ok(tui.lastPaintCursorColumn <= 12)
+  assert.ok(frame.some(line => line.includes('中文') || line.includes('🚀')))
+  const bytes = paintedBytes(tui, 12, 20)
+  press(tui, 'x')
+  const typed = paintedBytes(tui, 12, 20)
+  assert.equal(/\u001b\[H\u001b\[J|\u001b\[2J|\u001b\[3J/u.test(typed), false)
+  assert.ok(bytes.length >= 0)
+})
+
+// ── W-5B.1: P1 preview navigation ─────────────────────────────────────────
+
+function openWrappedPreview(tui, width = 40) {
+  tui.headlessDisplay = true
+  tui.relayColumns = width
+  tui.relayRows = 20
+  const long = 'word '.repeat(800)
+  tui.rows.push({ kind: 'assistant', text: long })
+  tui.runCommand('/find word')
+  tui.captureFrame(width, 20)
+  tui.handleData(Buffer.from('\r'))
+  return {
+    displayLines: wrap(long, Math.max(1, width - 2)),
+    page: Math.max(1, tui.searchPage()),
+  }
+}
+
+test('P1: Preview arrows and paging scroll wrapped display lines, not hits', () => {
+  const tui = emptySearch()
+  const { displayLines, page } = openWrappedPreview(tui, 40)
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
+  assert.ok(displayLines.length > page)
+  press(tui, '\x1b[A')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.equal(stateOf(tui)?.previewOffset, 0, 'Up at the top is clamped')
+  press(tui, '\x1b[B')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.equal(stateOf(tui)?.previewOffset, 1, 'Down moves one display line')
+  press(tui, '\x1b[6~')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.equal(stateOf(tui)?.previewOffset, 1 + page, 'PgDn moves one visible page')
+  press(tui, '\x1b[H')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
+  press(tui, '\x1b[F')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.ok((stateOf(tui)?.previewOffset ?? 0) > page, 'End reaches the last page')
+  press(tui, '\x1b[99;6u')
+  assert.ok(tui.copyYank.length > 0, 'copy still targets the selected hit')
+  press(tui, '\r')
+  assert.equal(stateOf(tui)?.mode, 'list')
+})
+
+test('P1: Preview hit changes keep Preview and reset the offset', async () => {
+  const tui = emptySearch()
+  seed(tui, ['deploy one', 'deploy two'])
+  tui.runCommand('/find deploy')
+  tui.captureFrame(40, 20)
+  press(tui, '\r')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  press(tui, '\x1bn')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
+  const first = stateOf(tui)?.selected
+  press(tui, '\x07')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+  assert.notEqual(stateOf(tui)?.selected, first)
+  const cursor = stateOf(tui)?.cursor
+  press(tui, '\x1b[C')
+  assert.equal(stateOf(tui)?.cursor, cursor, 'Preview Right does not edit or move the field')
+  press(tui, '\x1b')
+  await tick(140)
+  assert.equal(stateOf(tui)?.mode, 'list')
+})
+
+test('P1: Preview wheel and boundaries use wrapped display lines', () => {
+  const tui = emptySearch()
+  const { displayLines, page } = openWrappedPreview(tui, 30)
+  const total = displayLines.length
+  press(tui, '\x1b[<65;5;5M')
+  assert.equal(stateOf(tui)?.previewOffset, 1)
+  press(tui, '\x1b[<64;5;5M')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
+  press(tui, '\x1b[6~')
+  assert.equal(stateOf(tui)?.previewOffset, page)
+  press(tui, '\x1b[F')
+  assert.equal(stateOf(tui)?.previewOffset, Math.max(0, total - page))
+  assert.ok(total > 1, 'one logical line became multiple display lines')
+})
+
+// ── W-5B.1: R1 original ordinal and sparse fallback ───────────────────────
+
+test('R1: hit ordinals are positions in visibleRows, not filtered indexes', () => {
+  const tui = emptySearch()
+  const base = tui.rows.length
+  tui.rows.push(
+    { kind: 'system', text: 'zero' },
+    { kind: 'assistant', text: 'deploy at one' },
+    { kind: 'system', text: 'two' },
+    { kind: 'assistant', text: 'deploy at three' },
+    { kind: 'system', text: 'four' },
+  )
+  tui.runCommand('/find deploy')
+  assert.deepEqual(stateOf(tui)?.hits.map(hit => hit.ordinal), [base + 1, base + 3])
+  assert.equal(stateOf(tui)?.hits[0].row.text, 'deploy at one')
+  assert.equal(stateOf(tui)?.hits[1].row.text, 'deploy at three')
+})
+
+test('R1: removing the selected sparse hit falls back to the nearest original ordinal', async () => {
+  const tui = emptySearch()
+  const base = tui.rows.length
+  tui.rows.push(
+    { kind: 'system', text: 'zero' },
+    { kind: 'assistant', text: 'deploy at one' },
+    { kind: 'system', text: 'two' },
+    { kind: 'assistant', text: 'deploy at four' },
+    { kind: 'system', text: 'five' },
+    { kind: 'system', text: 'six' },
+    { kind: 'system', text: 'seven' },
+    { kind: 'system', text: 'eight' },
+    { kind: 'system', text: 'nine' },
+    { kind: 'assistant', text: 'deploy at ten' },
+  )
+  tui.runCommand('/find deploy')
+  assert.deepEqual(stateOf(tui)?.hits.map(hit => hit.ordinal), [base + 1, base + 3, base + 9])
+  // Select the middle hit (ordinal 4), enter Preview, then remove it.
+  press(tui, '\x1b[A')
+  assert.equal(stateOf(tui)?.selected, 1)
+  press(tui, '\r')
+  const removed = stateOf(tui)?.hits[1]?.row
+  tui.rows.splice(tui.rows.indexOf(removed), 1)
+  tui.bumpTranscriptRevision()
+  await tick(20)
+  assert.equal(stateOf(tui)?.hits.length, 2)
+  assert.equal(stateOf(tui)?.hits[stateOf(tui)?.selected ?? -1]?.ordinal, base + 1, 'ordinal 1 is nearer than ordinal 9')
+  assert.equal(stateOf(tui)?.hits[stateOf(tui)?.selected ?? -1]?.row.text, 'deploy at one')
+  assert.equal(stateOf(tui)?.mode, 'preview')
+})
+
+test('R1: removing every hit exits Preview and selects nothing', async () => {
+  const tui = emptySearch()
+  tui.rows.push({ kind: 'assistant', text: 'deploy one' }, { kind: 'system', text: 'two' })
+  tui.runCommand('/find deploy')
+  press(tui, '\r')
+  const hit = stateOf(tui)?.hits[0]?.row
+  tui.rows.splice(tui.rows.indexOf(hit), 1)
+  tui.bumpTranscriptRevision()
+  await tick(20)
+  assert.equal(stateOf(tui)?.hits.length, 0)
+  assert.equal(stateOf(tui)?.selected, -1)
+  assert.equal(stateOf(tui)?.mode, 'list')
+  assert.equal(stateOf(tui)?.previewOffset, 0)
 })
