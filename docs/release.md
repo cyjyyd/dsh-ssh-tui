@@ -2,6 +2,13 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.4 稳定候选准备中（2026-10-22，尚未 tag / GitHub Release / npm publish）**：稳定分支
+> `release/0.8.4` 从 `83a8c7e`（RC 发布回执完成、W-4 尚未开始）切出，版本改为 `0.8.4`。该分支只包含
+> RC → Stable 转正所需的版本元数据、发版材料与**仅扩展 `push.branches` 的 CI 例外**（使
+> `release/0.8.4` 的 push 也能运行现有完整 workflow）；不包含 W-4 Completion 或 W-5 Search Screen
+> 的产品代码。清理构建的 `lib/` 与已发布 `0.8.4-rc.1` registry tarball 逐字节一致。正式发布动作
+> （tag / Release / npm）必须等独立 Final Release Gate 通过后执行。
+
 > **0.8.4-rc.1 已发布（2026-10-17，只上 `next`，候选版）**：版本提交 `0e1342a` → CI 四条腿全 success
 > （run [39046019169](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39046019169)，`head_branch: main`）。
 > 默认腿（`test (0.2.1-rc.2)`）与 `test-windows` 上的**三道阻塞门全部实际执行并 success**：首启向导（含粘贴
@@ -104,7 +111,7 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    `npm dist-tag add dsh-ssh-tui@X.Y.Z next`。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   当前四条腿（0.8.4-rc.1 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
+   当前四条腿（0.8.4 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
    `test-windows` —— **全部 success** 才 `npm publish`。（`0.1.7-rc.2` / `0.1.7-rc.1` 两条腿在
    0.8.4-rc.1 随该线一起摘除；更早的 0.1.5 两条腿在 0.8.0 摘除。）
    其中**默认腿（`0.2.1-rc.2`）与 `test-windows`** 另外跑三条发布前阻塞门（0.8.4 起）：
