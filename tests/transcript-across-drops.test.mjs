@@ -100,9 +100,10 @@ async function withLiveTui(t) {
   const previousHome = process.env.DSH_HOME
   const previousKey = process.env.DEEPSEEK_API_KEY
   process.env.DSH_HOME = home
-  // A key in the environment keeps the first-run wizard from opening a dialog
-  // over the transcript this test is about.
-  process.env.DEEPSEEK_API_KEY = 'sk-transcript-test'
+  // Configured credentials, not an environment key, keep the first-run wizard
+  // away. An env key would also add its (asynchronous) "already in use" notice
+  // to the transcript this test is fingerprinting.
+  process.env.DEEPSEEK_API_KEY = ''
   t.after(async () => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
@@ -114,8 +115,13 @@ async function withLiveTui(t) {
   const agent = { id: sessionId, options: {}, status: 'idle', session: { id: sessionId, events: [] }, cancel() {} }
   // `ctxWithCredentials`: without it the first-run check opens the setup Screen and
   // covers the transcript these cases are about — which is what a CI runner, with no
-  // `$DSH_HOME/.credentials.yaml`, would have done all along.
-  const tui = new SshTui(ctxWithCredentials(), agent, { sessionId, color: false, headlessDisplay: true })
+  // `$DSH_HOME/.credentials.yaml`, would have done all along. The tool registry
+  // says this fixture's agent plane is already composed, so the boot repair does
+  // not write or announce anything in the middle of the snapshot.
+  const tools = {
+    get: name => (name === 'ask_user_question' || name === 'present' ? { name } : undefined),
+  }
+  const tui = new SshTui(ctxWithCredentials({ tools }), agent, { sessionId, color: false, headlessDisplay: true })
   t.after(() => tui.dispose())
   const sock = sessionSockPath(sessionId, home)
   if (!isPipePath(sock)) await mkdir(dirname(sock), { recursive: true, mode: 0o700 })
