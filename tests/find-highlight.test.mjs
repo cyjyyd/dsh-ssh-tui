@@ -75,8 +75,7 @@ test('a wrapped long line is highlighted per preview line, without drifting', t 
   const width = 40
   const frame = frameOf(tui, width, 30)
   const spans = frame.flatMap(highlightedSpans)
-  assert.ok(spans.length >= 1, `the needle is highlighted after the wrap: ${JSON.stringify(frame)}`)
-  for (const span of spans) assert.equal(span, 'deploy')
+  assert.deepEqual(spans, ['deploy', 'deploy'], 'both wrapped matches, exactly the word')
   for (const line of frame) assert.ok(displayWidth(plain(line)) <= width, `no line overflows: ${JSON.stringify(plain(line))}`)
 })
 
@@ -132,14 +131,19 @@ test('the highlight follows the search, which is case-insensitive', t => {
   assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), ['Deploy'], 'the matched word is highlighted in its own casing')
 })
 
-test('a needle the wrap split is still pointed at', t => {
+test('a needle the wrap split marks only its two real fragments', t => {
   terminal(t, { color: true })
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: `${'x'.repeat(30)} deploy --dry-run here` })
   find(tui, 'deploy --dry')
   preview(tui)
-  const marked = frameOf(tui, 40, 30).filter(line => line.includes('\x1b[7m'))
-  assert.ok(marked.length >= 1, 'the preview points at the split match')
+  const frame = frameOf(tui, 40, 30)
+  assert.deepEqual(
+    frame.flatMap(highlightedSpans),
+    ['deploy ', '--dry'],
+    'the split match is two fragments, never the whole first row',
+  )
+  assert.match(plain(frame.join('\n')).replace(/\s+/gu, ' '), /deploy --dry-run here/u)
 })
 
 test('an emoji before the match does not shift the highlight', t => {
@@ -149,4 +153,54 @@ test('an emoji before the match does not shift the highlight', t => {
   find(tui, 'deploy')
   preview(tui)
   assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), ['deploy', 'deploy'], 'both matches, exactly the word')
+})
+
+test('CJK and emoji keep multiple match positions exact', t => {
+  terminal(t, { color: true })
+  const tui = fixture()
+  tui.rows.push({ kind: 'assistant', text: '前 中文🚀 Deploy 中 deploy 后' })
+  find(tui, 'deploy')
+  preview(tui)
+  const frame = frameOf(tui)
+  assert.deepEqual(frame.flatMap(highlightedSpans), ['Deploy', 'deploy'], 'both real occurrences, in their own casing')
+  assert.match(plain(frame.join('\n')), /中文🚀 Deploy 中 deploy 后/u)
+})
+
+function pagedPreview({ color }) {
+  const tui = fixture({ color })
+  tui.relayColumns = 24
+  tui.relayRows = 20
+  const text = ['deploy first page', ...Array.from({ length: 60 }, (_, i) => `filler line ${i}`)].join('\n')
+  tui.rows.push({ kind: 'assistant', text })
+  find(tui, 'deploy')
+  preview(tui)
+  return tui
+}
+
+test('a Preview page without the needle has no forged highlight', t => {
+  terminal(t, { color: true })
+  const tui = pagedPreview({ color: true })
+  const page = tui.searchPage()
+  assert.deepEqual(frameOf(tui, 24, 20).flatMap(highlightedSpans), ['deploy'], 'the first page has the real match')
+
+  tui.handleData(Buffer.from('\x1b[6~'))
+  assert.equal(tui.screen?.search?.previewOffset, page, 'PgDn moved one Preview page')
+  const later = frameOf(tui, 24, 20)
+  assert.deepEqual(later.flatMap(highlightedSpans), [], 'a page with no needle must not reverse the first row')
+  assert.equal(tui.screen?.search?.previewOffset, page, 'painting did not move the Preview offset')
+  for (const line of later) assert.ok(displayWidth(plain(line)) <= 24, `no overflow: ${JSON.stringify(plain(line))}`)
+})
+
+test('without color a Preview page without the needle has no forged marker', t => {
+  terminal(t, { color: false })
+  const tui = pagedPreview({ color: false })
+  const page = tui.searchPage()
+  const first = frameOf(tui, 24, 20).map(plain).filter(line => line.startsWith('» '))
+  assert.equal(first.length, 1, 'only the first page’s real match is marked')
+
+  tui.handleData(Buffer.from('\x1b[6~'))
+  assert.equal(tui.screen?.search?.previewOffset, page)
+  const later = frameOf(tui, 24, 20).map(plain).filter(line => line.startsWith('» '))
+  assert.deepEqual(later, [], 'a page with no needle must not invent a » marker')
+  assert.equal(tui.screen?.search?.previewOffset, page, 'painting did not move the Preview offset')
 })
