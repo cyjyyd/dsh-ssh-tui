@@ -477,22 +477,29 @@ export function planDuplicateRepair(existing: string): PatchRepair | undefined {
  * @param profile - the profile to patch.
  * @param missing - the rows to mount; defaults to the 0.1.5 set.
  * @param generation - which host line the profile boots on.
+ * @param stamp - filename-safe backups stamp, injectable for tests.
  * @returns `present` when the row already exists, else `written`.
- * @throws when the existing patch is not valid YAML; a blocked file is not
- * appended to.
+ * @throws when the existing patch cannot be read, is not valid YAML, or cannot
+ * be backed up; a file that cannot be preserved is not overwritten.
  */
 export async function ensureRosterRows(
   home: string,
   profile: string,
   missing: readonly RosterRow[] = ROSTER_ROWS,
   generation: HostGeneration = 'legacy',
+  stamp?: string,
 ): Promise<'present' | 'written'> {
   const path = rosterPatchPath(home, profile)
   let existing: string | undefined
   try {
     existing = await readFile(path, 'utf8')
-  } catch {
-    // Missing file: start from the template the launcher would have written.
+  } catch (error) {
+    // Only a missing file means "start from the template". EACCES, EISDIR,
+    // EIO and every other read failure must abort the repair: treating them as
+    // absence would overwrite a profile the process could not read.
+    if (!isEnoent(error)) {
+      throw new Error(`cannot read profile patch ${path}; refusing to repair: ${errorMessage(error)}`, { cause: error })
+    }
   }
   const repair = planRosterRepair(existing ?? PATCH_TEMPLATE, missing, generation)
   if (repair === undefined) return 'present'
@@ -501,22 +508,41 @@ export async function ensureRosterRows(
     await writeFile(path, repair.text, 'utf8')
   } else {
     // The same rule `/doctor --fix` follows: a file the user owns is backed up
-    // before it is replaced. The backup write is best-effort inside the helper,
-    // but the repair itself is not silently skipped.
-    await writePatchWithBackup(path, repair.text)
+    // before it is replaced, and a failed backup aborts the write.
+    await writePatchWithBackup(path, repair.text, stamp)
   }
   return 'written'
+}
+
+/** A filesystem error's code, when it has one. */
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined
+}
+
+/** A human-readable message for a caught filesystem error. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Whether a read failure means the file is absent, and nothing else. */
+function isEnoent(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT'
 }
 
 /**
  * Write a repaired patch next to a copy of the previous content.
  *
- * `/doctor` changes a file the user owns, so the old text is kept beside it
- * before anything is replaced. A file that does not exist yet needs no backup.
+ * `/doctor` and the automatic repair change a file the user owns, so the old
+ * text is kept beside it before anything is replaced. A source that vanished
+ * between the read and the copy needs no backup; any other backup failure
+ * aborts before the write, leaving the original untouched.
  * @param path - the patch file to replace.
  * @param text - the new content.
  * @param stamp - filename-safe timestamp for the backup, injectable for tests.
  * @returns the backup path, or `undefined` when there was nothing to back up.
+ * @throws when the backup cannot be written; the destination is not touched.
  */
 export async function writePatchWithBackup(
   path: string,
@@ -527,7 +553,12 @@ export async function writePatchWithBackup(
   try {
     backup = `${path}.bak-${stamp}`
     await copyFile(path, backup)
-  } catch {
+  } catch (error) {
+    if (!isEnoent(error)) {
+      throw new Error(`cannot back up profile patch ${path}; refusing to write: ${errorMessage(error)}`, { cause: error })
+    }
+    // The source disappeared after the caller read it. There is no user content
+    // left to preserve, so the repair may create the file fresh.
     backup = undefined
   }
   await mkdir(dirname(path), { recursive: true })

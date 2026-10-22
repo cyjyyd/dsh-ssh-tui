@@ -163,6 +163,43 @@ test('a repair backs up the profile patch before replacing it', async () => {
   }
 })
 
+test('a failed backup refuses to overwrite the user profile', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-backup-fail-'))
+  try {
+    const path = rosterPatchPath(home, 'tui')
+    const original = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-host-webserver'\n"
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, original)
+    // A directory at the exact backup name makes copyFile fail without relying
+    // on POSIX permissions, which root and Windows runners do not honour the
+    // same way. The original must remain byte-for-byte untouched.
+    await mkdir(`${path}.bak-blocked`, { recursive: true })
+    await assert.rejects(
+      () => ensureRosterRows(home, 'tui', rosterRows('forms'), 'forms', 'blocked'),
+      /cannot back up profile patch.*refusing to write/u,
+    )
+    assert.equal(await readFile(path, 'utf8'), original)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a non-ENOENT read failure aborts instead of treating the patch as absent', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-read-fail-'))
+  try {
+    const path = rosterPatchPath(home, 'tui')
+    // A directory at the patch path is a read failure, not an absent file.
+    await mkdir(path, { recursive: true })
+    await assert.rejects(
+      () => ensureRosterRows(home, 'tui'),
+      /cannot read profile patch.*refusing to repair/u,
+    )
+    assert.deepEqual(await readdir(path), [], 'the directory was not replaced by a file')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('ensureRosterRows creates, then leaves the profile patch alone', async () => {
   const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-'))
   try {

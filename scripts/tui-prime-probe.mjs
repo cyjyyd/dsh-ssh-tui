@@ -14,7 +14,6 @@
  * must reach the wizard itself.
  */
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
@@ -22,6 +21,12 @@ const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
 const home = process.env.PROBE_HOME ?? process.env.DSH_HOME
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+const requirePrime = process.env.PROBE_REQUIRE_PRIME === '1'
+
+/** A machine-readable verdict the outer bootstrap must consume. */
+function reportPrime(kind, detail = '') {
+  console.log(`PRIME: ${kind}${detail === '' ? '' : ` ${detail}`}`)
+}
 
 async function loadPty() {
   try {
@@ -36,15 +41,15 @@ async function loadPty() {
 }
 
 if (home === undefined) {
-  console.log('SKIP: tui-prime-probe needs PROBE_HOME')
-  process.exit(0)
+  reportPrime(requirePrime ? 'FAIL' : 'SKIP', 'PROBE_HOME is not set')
+  process.exit(requirePrime ? 1 : 0)
 }
 const pty = await loadPty()
 if (pty === undefined) {
-  // The real probe treats a missing pty as a skip too; do not turn a machine
-  // without node-pty into a bootstrap failure.
-  console.log('SKIP: node-pty is unavailable')
-  process.exit(0)
+  // A normal developer machine may skip, but a forced CI run must not call the
+  // missing PTY a completed prime.
+  reportPrime(requirePrime ? 'FAIL' : 'SKIP', 'node-pty is unavailable')
+  process.exit(requirePrime ? 1 : 0)
 }
 
 const term = pty.spawn(process.execPath, [CLI, '--profile', 'tui'], {
@@ -80,13 +85,14 @@ try {
     60_000,
   )
   if (!started) {
-    console.error('FAIL: the prime boot painted neither the workspace nor the wizard')
+    reportPrime('FAIL', 'the prime boot painted neither the workspace nor the wizard')
     console.error(output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/gu, '').slice(-1200))
     process.exitCode = 1
   } else if (/安装向导|Setup \d\/9/u.test(output)) {
-    // This home is unconfigured. The setup probe owns that path; leave without
-    // pretending the prime boot repaired anything.
-    console.log('SKIP: the home is unconfigured, so the wizard owns this boot')
+    // probe-home invokes the prime only for a configured home. A wizard here
+    // means the home was misclassified; it is not a completed prime.
+    reportPrime(requirePrime ? 'FAIL' : 'SKIP', 'unexpected first-run wizard on a configured-home prime')
+    if (requirePrime) process.exitCode = 1
   } else {
     // Let the boot repair and its notification settle before `/exit`: the next
     // process is the restart the user would perform after reading it.
@@ -94,14 +100,14 @@ try {
     term.write('/exit\r')
     const done = await waitFor(() => exited !== undefined, 20_000)
     if (!done) {
-      console.error('FAIL: the prime boot did not exit after /exit')
+      reportPrime('FAIL', 'the prime boot did not exit after /exit')
       console.error(output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/gu, '').slice(-1200))
       process.exitCode = 1
     } else if (exited.exitCode !== 0) {
-      console.error(`FAIL: the prime boot exited ${exited.exitCode}`)
+      reportPrime('FAIL', `the prime boot exited ${exited.exitCode}`)
       process.exitCode = 1
     } else {
-      console.log('OK: prime boot reached the workspace and exited; the probe will start on the restart')
+      reportPrime('OK', 'workspace reached and /exit returned 0; the probe will start on the restart')
     }
   }
 } finally {
