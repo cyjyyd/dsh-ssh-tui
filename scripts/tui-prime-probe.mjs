@@ -16,6 +16,7 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
@@ -24,7 +25,11 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 async function loadPty() {
   try {
-    return await import(require.resolve('node-pty', { paths: [process.cwd()] })).then(mod => mod.default ?? mod)
+    // `import()` needs a URL on Windows: a D:\ path is rejected as an unknown
+    // scheme. The other PTY probes already normalise this; the prime boot must
+    // do the same or Windows silently skips the repair restart.
+    const resolved = require.resolve('node-pty', { paths: [process.cwd()] })
+    return await import(pathToFileURL(resolved).href).then(mod => mod.default ?? mod)
   } catch {
     return undefined
   }
