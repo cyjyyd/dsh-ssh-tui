@@ -9332,6 +9332,13 @@ export class SshTui {
     const options: GenerateOptions = {
       provider,
       model,
+      // The reviewer is a direct LLM call outside the Agent loop; the loop normally
+      // supplies this identity. OpenCode requires a per-conversation session
+      // signal: pi-ai's built-in provider turns this into `x-opencode-session`,
+      // while the configured openai-responses route sends `session_id`. Other
+      // providers may use it for their own affinity/cache routing. It must be the
+      // Session that actually asked for approval, never a shared or random id.
+      sessionId: request.agent.session.id,
       messages: [createUserMessage({
         content: [{ type: 'text', text: buildReviewUserMessage({
           userText,
