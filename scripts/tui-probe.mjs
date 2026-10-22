@@ -5,7 +5,9 @@
  *
  * `npm test` covers the paint math on a headless screen grid; this covers the
  * parts that only exist end to end — a session that boots, a resize that must
- * not resurrect a finished screen, and a `/diag` report on a live session.
+ * not resurrect a finished screen, a `/diag` report on a live session, and the
+ * Search list/Preview/Workspace ownership round trip. The Search hit is a
+ * synthetic persisted assistant row, so it needs no model turn or provider key.
  * Unlike `scripts/pty-acceptance.py` (which drives the display relay with fake
  * launchers), this drives `dsh --profile tui` itself.
  *
@@ -48,6 +50,17 @@ const { PTY_IS_CONPTY } = await import(
 const { isFirstRun, printFirstRunSkip } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'probe-onboarding.mjs')).href,
 )
+// A deterministic Search hit, without a model turn or a provider key.
+const { writeSessionWithAssistant } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'session-fixture.mjs')).href,
+)
+// The real terminal grid, for assertions about the screen after an operation.
+const { screen: newGrid } = await import(
+  pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), '../tests/screen.mjs')).href,
+)
+
+/** A token the synthetic assistant reply carries, so Search has a known hit. */
+const SEARCH_TOKEN = 'W5B-SEARCH-PROBE-TOKEN'
 
 const USAGE = `usage: node scripts/tui-probe.mjs [--session <id>] [--keep] [--home <dir>]
 
@@ -117,6 +130,19 @@ function screenRows(text) {
   const pattern = /\x1b\[(\d+);1H([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?7h|$)/gu
   for (const match of text.matchAll(pattern)) rows.set(Number(match[1]), plain(match[2] ?? ''))
   return rows
+}
+
+/**
+ * The visible rows a real terminal grid holds after replaying the probe's bytes.
+ *
+ * The byte-stream reconstruction above is enough for the status row, but an
+ * assertion about a mode transition needs the terminal's own screen. ConPTY
+ * rewrites frame shape, so this reads the grid rather than parsing addresses.
+ */
+async function terminalGridLines(text, columns = 100, rows = 30) {
+  const grid = newGrid(columns, rows)
+  await grid.write(text)
+  return grid.grid().map(line => line.trimEnd())
 }
 
 function plain(text) {
@@ -254,6 +280,16 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
   }
   console.log(`probe home: ${home}`)
   console.log(`probe session: ${createdSessionId}${sessionId === undefined ? ' (created, removed on exit)' : ' (existing, kept)'}`)
+
+  // A fresh probe session gets one persisted assistant row. Search needs a
+  // deterministic result, and starting a model turn would need a provider key.
+  if (sessionId === undefined && lineMode !== true) {
+    const seeded = writeSessionWithAssistant(home, createdSessionId, {
+      cwd: process.cwd(),
+      text: `Synthetic probe reply. The searchable token is ${SEARCH_TOKEN} and it ends here.`,
+    })
+    console.log(`seeded Search fixture: ${seeded}`)
+  }
 
   const term = pty.spawn(process.execPath, [CLI, '--profile', 'tui', `--resume=${createdSessionId}`], {
     name: 'xterm-256color',
@@ -847,8 +883,11 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       )
     }
 
-    // 6f. The Search Screen has its own field, independent of the composer.
-    {
+    // 6f. The Search Screen has its own field and Preview. A fresh probe session
+    //    has a synthetic assistant row, so every state below reads a real grid.
+    //    A caller-supplied session cannot promise that row; keep the original
+    //    field/owner smoke check rather than mutating their session.
+    if (sessionId !== undefined) {
       const beforeFind = output.length
       term.write('/find\r')
       await waitFor(text => /(?:搜索|search)/u.test(plain(text.slice(beforeFind))), 20_000, 'the Search Screen')
@@ -858,11 +897,120 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
       term.write('abc')
       await waitFor(text => /(?:›|>)\s*abc/u.test(plain(text.slice(beforeType))), 20_000, 'the Search field text')
       check(true, 'typing reaches the Search field')
+      const beforeListEscape = output.length
+      term.write('\x1b')
+      await waitFor(
+        text => /(?:↑\/↓ 选择|↑\/↓ select)/u.test(plain(text.slice(beforeListEscape))),
+        20_000,
+        'the Search list after the first Esc',
+      )
       const beforeClose = output.length
       term.write('\x1b')
-      await new Promise(resolve => setTimeout(resolve, 800))
-      const back = plain(output.slice(beforeClose))
-      check(/❯|>/u.test(back) && !/^\s*搜索\s*$/mu.test(back), 'Esc returns to the workspace composer')
+      await waitFor(text => /❯|>/u.test(plain(text.slice(beforeClose))), 20_000, 'the Workspace composer')
+      check(/❯|>/u.test(plain(output.slice(beforeClose))), 'Esc returns to the workspace composer')
+      console.log('search: existing session field/owner smoke passed')
+    } else {
+      const beforeFind = output.length
+      term.write(`/find ${SEARCH_TOKEN}\r`)
+      await waitFor(
+        text => {
+          const seen = plain(text.slice(beforeFind))
+          return /(?:搜索|Search)/u.test(seen) && /(?:1 条结果|1 results?)/u.test(seen)
+        },
+        20_000,
+        'the Search result list',
+      )
+      const listLines = await terminalGridLines(output)
+      check(listLines.some(line => /^(?:搜索|Search)$/u.test(line.trim())), 'Search opens as its own Screen')
+      check(
+        listLines.some(line => line.trimStart().startsWith(`› ${SEARCH_TOKEN}`)),
+        `the Search field must show the query: ${JSON.stringify(listLines)}`,
+      )
+      check(
+        listLines.some(line => /\b1\.\s*\[/u.test(line) && line.includes(SEARCH_TOKEN)),
+        `the Search list must show the deterministic result: ${JSON.stringify(listLines)}`,
+      )
+      check(
+        !listLines.some(line => /^\s*[❯>]\s/u.test(line)),
+        'the Workspace composer must not be visible behind Search',
+      )
+
+      const beforePreview = output.length
+      term.write('\r')
+      await waitFor(
+        text => /(?:返回列表|back to list)/u.test(plain(text.slice(beforePreview))),
+        20_000,
+        'the Search Preview',
+      )
+      const previewLines = await terminalGridLines(output)
+      check(
+        previewLines.some(line => line.includes(SEARCH_TOKEN)),
+        `Preview must show the selected reply: ${JSON.stringify(previewLines)}`,
+      )
+      check(
+        previewLines.some(line => /返回列表|back to list/u.test(line)),
+        'Preview must announce how to return to the list',
+      )
+      check(
+        !previewLines.some(line => /\b1\.\s*\[/u.test(line)),
+        'Preview must not still be painting the result list',
+      )
+
+      const beforeListEscape = output.length
+      term.write('\x1b')
+      await waitFor(
+        text => /(?:↑\/↓ 选择|↑\/↓ select)/u.test(plain(text.slice(beforeListEscape))),
+        20_000,
+        'the Search list after the first Esc',
+      )
+      const backList = await terminalGridLines(output)
+      check(
+        backList.some(line => /\b1\.\s*\[/u.test(line) && line.includes(SEARCH_TOKEN)),
+        'the first Esc must restore the result list',
+      )
+      check(
+        backList.some(line => /↑\/↓ 选择|↑\/↓ select/u.test(line)),
+        'the restored list must carry its selection hint',
+      )
+
+      const beforeWorkspaceEscape = output.length
+      term.write('\x1b')
+      await waitFor(
+        text => /❯|>/u.test(plain(text.slice(beforeWorkspaceEscape))),
+        20_000,
+        'the Workspace composer after the second Esc',
+      )
+      const workspaceLines = await terminalGridLines(output)
+      const composerLine = workspaceLines.find(line => /^\s*[❯>]\s/u.test(line))
+      check(composerLine !== undefined, 'the second Esc must restore the Workspace composer')
+      check(
+        composerLine !== undefined && !composerLine.includes(SEARCH_TOKEN),
+        'the Search query must not leak into the composer',
+      )
+      check(
+        !workspaceLines.some(line => /^(?:搜索|Search)$/u.test(line.trim())),
+        'the Search Screen must be gone before the composer is used',
+      )
+
+      const beforeOwnerType = output.length
+      term.write('OWNER-OK')
+      await waitFor(
+        text => plain(text.slice(beforeOwnerType)).includes('OWNER-OK'),
+        10_000,
+        'typing in the restored composer',
+      )
+      const ownerLines = await terminalGridLines(output)
+      const ownerLine = ownerLines.find(line => line.includes('OWNER-OK'))
+      check(
+        ownerLine !== undefined && /^\s*[❯>]\s+OWNER-OK\s*$/u.test(ownerLine),
+        `the restored composer must accept typing alone: ${JSON.stringify(ownerLine)}`,
+      )
+      check(
+        ownerLine !== undefined && !ownerLine.includes(SEARCH_TOKEN),
+        'Search input must not be present in the restored composer',
+      )
+      console.log('search: list → Preview → list → Workspace; composer OWNER-OK accepted')
+      term.write('\x15')
     }
 
     // 7. `/exit` hands the terminal back. The launcher's graceful shutdown only
