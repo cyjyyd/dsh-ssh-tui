@@ -182,6 +182,7 @@ import {
   moveSearchCursor,
   searchFieldViewport,
   searchPreviewDisplayLines,
+  searchPreviewLines,
   moveSearchSelection,
   openSearchPreview,
   pageSearchSelection,
@@ -348,6 +349,7 @@ import {
   fmtElapsedCompact,
   foldInputView,
   highlightAnsiNeedle,
+  highlightAnsiRanges,
   hrefAtColumn,
   lastCodePoints,
   osc52Clipboard,
@@ -5504,24 +5506,26 @@ export class SshTui {
     if (search.mode === 'preview') {
       const hit = search.hits[search.selected]
       if (hit === undefined) return { lines, cursorRow: undefined }
-      const wrapped = searchPreviewDisplayLines(hit, Math.max(1, width - 2))
-      const startLine = Math.max(0, Math.min(search.previewOffset, Math.max(0, wrapped.length - 1)))
       const needle = search.query.trim()
-      let inlineHit = false
-      const previewStart = lines.length
+      const wrapped = searchPreviewLines(hit, Math.max(1, width - 2), needle)
+      const startLine = Math.max(0, Math.min(search.previewOffset, Math.max(0, wrapped.length - 1)))
+      const previewPrefix = '  '
       for (const row of wrapped.slice(startLine, startLine + available)) {
-        let styled = this.styleLine('system', fit(`  ${row}`))
-        if (needle !== '') {
-          if (this.color) styled = highlightAnsiNeedle(styled, needle)
-          else if (searchContains(row, needle)) styled = `» ${styled}`
-          if (searchContains(row, needle)) inlineHit = true
+        let styled = this.styleLine('system', fit(`${previewPrefix}${row.text}`))
+        if (row.highlights.length > 0) {
+          if (this.color) {
+            styled = highlightAnsiRanges(
+              styled,
+              row.highlights.map(range => ({
+                start: range.start + previewPrefix.length,
+                end: range.end + previewPrefix.length,
+              })),
+            )
+          } else {
+            styled = `» ${styled}`
+          }
         }
         lines.push(styled)
-      }
-      if (needle !== '' && !inlineHit && lines.length > previewStart) {
-        const index = previewStart
-        const line = lines[index] ?? ''
-        lines[index] = this.color ? `\x1b[7m${line}\x1b[27m` : `» ${line}`
       }
       return { lines, cursorRow: undefined }
     }

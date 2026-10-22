@@ -7,7 +7,7 @@
  * read-only preview mode. The TUI supplies rows and revisions and renders state.
  */
 import { lineModeLines } from './line-mode.js'
-import { displayWidth, wrap } from './term-text.js'
+import { displayWidth, sanitizeTerminalText, wrapTracked, type TextRange } from './term-text.js'
 import { matchTranscriptRowsFor, parseFindQuery, type FindRequest } from './plan.js'
 import type { CardCategory } from './plan.js'
 import type { Row } from './transcript-types.js'
@@ -377,14 +377,61 @@ export function setSearchCursor(state: SearchScreenState, cursor: number): Searc
   return at === state.cursor ? state : { ...state, cursor: at }
 }
 
-/** The selected hit after its logical lines have been wrapped to display lines. */
-export function searchPreviewDisplayLines(hit: SearchHit, width: number): string[] {
+export interface SearchPreviewLine {
+  readonly text: string
+  /** Real needle fragments on this display row, in UTF-16 offsets. */
+  readonly highlights: readonly TextRange[]
+}
+
+/** Case-insensitive, length-preserving needle ranges on one plain line. */
+function previewNeedleRanges(line: string, needle: string): TextRange[] {
+  if (needle === '') return []
+  const lower = needle.toLowerCase()
+  const haystack = line.toLowerCase()
+  // The same guard as `highlightAnsiNeedle`: when lowercasing changes the
+  // text's length, a range mapped back to the original would be a lie.
+  if (lower === '' || haystack.length !== line.length) return []
+  const ranges: TextRange[] = []
+  let from = 0
+  for (;;) {
+    const at = haystack.indexOf(lower, from)
+    if (at === -1) break
+    ranges.push({ start: at, end: at + lower.length })
+    from = at + lower.length
+  }
+  return ranges
+}
+
+/**
+ * The selected hit as display rows, with exact match fragments.
+ *
+ * Wrapping is tracked per logical line so a needle split across display rows
+ * keeps two real fragments instead of becoming a whole-row guess. `needle` is
+ * optional: pagination only needs the rows, while Preview paint passes the
+ * query. No matcher runs here; this is a view of the already-selected hit.
+ */
+export function searchPreviewLines(hit: SearchHit, width: number, needle = ''): SearchPreviewLine[] {
   const inner = Math.max(1, width)
-  const display: string[] = []
-  for (const line of searchHitLines(hit)) {
-    for (const piece of wrap(line, inner)) display.push(piece)
+  const display: SearchPreviewLine[] = []
+  for (const source of searchHitLines(hit)) {
+    const line = sanitizeTerminalText(source)
+    const matches = previewNeedleRanges(line, needle)
+    for (const piece of wrapTracked(line, inner)) {
+      const highlights: TextRange[] = []
+      for (const match of matches) {
+        const start = Math.max(match.start, piece.start)
+        const end = Math.min(match.end, piece.end)
+        if (end > start) highlights.push({ start: start - piece.start, end: end - piece.start })
+      }
+      display.push({ text: piece.line, highlights })
+    }
   }
   return display
+}
+
+/** The selected hit after its logical lines have been wrapped to display lines. */
+export function searchPreviewDisplayLines(hit: SearchHit, width: number): string[] {
+  return searchPreviewLines(hit, width).map(line => line.text)
 }
 
 /** Clamp Preview to whole pages: End leaves the final page visible, not one line. */

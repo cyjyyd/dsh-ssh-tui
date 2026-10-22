@@ -1,6 +1,9 @@
 # W-5A — Search Screen ownership & interaction contract
 
 > **Status: design / baseline audit. W-5B now implements the defaults below.**
+> **W-5B.FG1 repair:** Preview marks only real needle fragments in the visible
+> page. A match split by wrapping keeps its exact per-row fragments; a page with
+> no match draws no reverse row and no `»` marker.
 > **W-5B.1b repair:** the list wheel scrolls the visible page and leaves the
 > selection where it is; a keyboard selection move re-reveals its row. The
 > unbracketed Preview paste guard leaves explicit control keys alone, so Ctrl+C
@@ -97,7 +100,7 @@ Line mode keeps its current textual search behavior and never composes a Screen.
 | R6 Screen hides cursor | `paintScreen()` always sets `hideCursor:true` | Search branch places the caret; report/setup/inspect unchanged |
 | R7 q/Enter close reports | `inspectClosesOn()` closes report/inspect on q, Enter, Ctrl+C, Esc | Search branch runs earlier; q/Enter are field/list keys, Esc/Ctrl+C close |
 | R8 copy mutates workspace | Copy paths previously cleared the composer (G-10) | Copy only `screen.copyText`; never `copyFocusedCard` or workspace selection |
-| R9 delayed frames | A held Esc/paste can arrive after Search closed | Keep `held.screen` object identity; Search close increments `screenDismissals`; no Reader API change |
+| R9 delayed frames | A held Esc/paste can arrive after Search closed | Keep `held.screen` object identity; Search close increments `screenDismissals`; the only Reader exception is the additive paste-provenance API in §10.1, with framing and holds unchanged |
 | R10 full repaint per query | Weak links and 1 vCPU cannot afford a clear per key | Derived body rows through `composePaintFrame`; only Ctrl+L explicitly clears |
 | R11 unbounded memory | 5000 hits × full text is unnecessary | Hits are refs + ordinals; only visible page and selected preview are formatted |
 | R12 `/clear` ambiguity | Current search can outlive a cutoff | Always search `visibleRows()`; reconcile on cutoff/revision; no `/clear` from a Screen's keyboard |
@@ -436,8 +439,9 @@ return screen, not a stack, and is not in W-5B.
   or composer.
 - Search close increments `screenDismissals`; the rest of the raw read is discarded
   by the existing rule. A new read routes from scratch.
-- `TerminalInputGuard` 30 ms source attribution remains independent OPEN; no Reader
-  API/hold-window change.
+- `TerminalInputGuard` 30 ms source attribution remains independent OPEN. W-5B did
+  add two Reader members for paste provenance (`onPasteStart` and `isPasting()`;
+  §10.1); framing, hold windows and paste protocol semantics are unchanged.
 - Pastes spanning reads stay with the Screen instance from the first read; closing
   mid-paste triggers the stale-layer rule.
 
@@ -534,8 +538,25 @@ migrate framed `/find` assertions, never delete them.
    probes, Windows CI, docs.
 
 First commit is RED (Screen and search state absent); second makes it green. No W-5B
-change may alter Router/Owner union, Reader API, keymap defaults, completion, setup,
-or APPR.
+change may alter Router/Owner union, keymap defaults, completion, setup, or APPR.
+The sole Reader API exception is the additive paste-provenance extension below.
+
+### 10.1 Reader API exception (accepted W-5B)
+
+W-5B added exactly two additive members to the Reader surface:
+
+- `InputReaderOptions.onPasteStart` — a notification that the first complete
+  `ESC[200~` opened a paste, so the TUI can capture the layer that owns it before
+  any payload frame is routed;
+- `InputReader.isPasting()` — a read-only observation of whether the Reader is
+  currently inside that paste.
+
+They exist for cross-read paste provenance: a paste may span raw reads and arrive
+after its layer closed, and the layer identity must be captured at the start marker
+rather than guessed later. They do **not** change Reader framing, the 60 ms escape
+hold, the `TerminalInputGuard` 30 ms reply hold, paste markers or protocol semantics,
+the Router/Owner union, or any key binding. This is a limited, additive API
+extension, not an invitation to redesign the Reader.
 
 ---
 

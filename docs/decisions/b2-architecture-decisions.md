@@ -23,7 +23,7 @@
 | AD-6 | Context segment 以 user turn 为 candidate boundary；Active → Compressed → Archived → Deleted；默认不自动删、不 destructive prune | 未来 |
 | AD-7 | 报告类命令默认进 Dedicated Screen，不进 transcript；默认 ephemeral，不自动落盘 | B2.1 |
 | AD-8 | Dedicated Screen 不保留普通聊天 composer；保留 compact global runtime/status strip | B2.1 |
-| AD-9 | Search 两级：local `/find` = Workspace Surface；历史搜索 = Dedicated Search Screen | B2.1 / 未来 |
+| AD-9 | Search 两级（原始决策）：local `/find` = Workspace Surface；历史搜索 = Dedicated Search Screen。W-5B 仅把 local 载体改为 Dedicated Search Screen，搜索范围不变（§6.1a） | B2.1 / 未来 |
 | AD-10 | Renderer does not decide existence；Event/Command → Representation Policy → Representation → Renderer | B2.3a |
 | AD-11 | 同一 semantic event 最多一个 primary transcript representation；表示分 A/B/C/D 四类并带 durability 标签 | B2.3a |
 | AD-12 | 实时变化（streaming / tool running / reconnecting / waiting）默认不进 transcript，进 runtime-live layer 或 footer | B2.2 |
@@ -130,7 +130,8 @@ Screen 内部： screenSurface                 （Screen 自己的动作 Surface
 
 - **cutoff 是 Host 内存态**，不写日志；resume 后历史重新可见（预期）；
 - `/clear` **不影响** `searchHits` 之外的工作区状态：focus / draft / scrollOffset 必须被明确处理（今天 focus 与 search 被重置）；
-- 历史搜索（AD-9 的 Search Screen）读的是 **durable session log**，因此**可以跨 `/clear`**。
+- Future Historical Search（AD-9 的 Dedicated Search Screen，不是 W-5B 的 Current
+  Local Search Screen）读的是 **durable session log**，因此**可以跨 `/clear`**。
 
 ---
 
@@ -266,7 +267,10 @@ defaults.
 
 ### 6.2 今天的事实
 
-`/find` 只搜内存 `rows`（`runFindCommand`，`src/tui.ts:4550`）；`/clear` 之后命中清零（实测 `search hits after clear: 0`）；不读 session log。Local 语义在 AD-4 之下仍然自洽（cutoff 之后不可见即不搜），但**用户需要知道这个边界**：Screen 版才跨 `/clear`。
+`/find` 只搜内存 `rows`（`runFindCommand`，`src/tui.ts`）；`/clear` 之后命中清零；不读 session log。Local 语义在 AD-4 之下仍然自洽（cutoff 之后不可见即不搜），但**用户需要知道这个边界**。
+
+- **Current Local Search Screen（W-5B）**：仅搜索 `visibleRows()`；不能跨 `/clear`，不能跨进程 resume，不读 durable session log。
+- **Future Historical Search（AD-9 §6.1，未实现）**：可以读 durable session log，因此可以跨 `/clear` 与 resume；它仍属未来设计，不是 W-5B 的 Current Local Search Screen。
 
 ---
 
@@ -586,7 +590,7 @@ Plan Artifact view
 6. **AD-6** Context segment：user turn = candidate boundary（不保证独立成段）；Active → Compressed → Archived → Deleted；默认不自动删除、不 destructive prune、用户主动、可预览、优先可恢复。
 7. **AD-7** `/status` `/usage` `/diag` `/doctor` `/help` `/subagents` 默认进 Screen、不进 transcript、默认 ephemeral 不自动落盘；未来允许显式 `--save`；命令失败仍写 error 行。
 8. **AD-8** Screen 不保留普通聊天 composer；保留 compact global runtime/status strip（至少能答"还在跑吗 / 有没有在等"）；strip 优先于 Screen 自身提示行。
-9. **AD-9** Search 两级：local `/find` = Workspace Surface（当前可见 transcript）；historical search = Dedicated Search Screen（可读 durable log、可跨 `/clear` 与 resume、结果是索引不进 transcript）。
+9. **AD-9** Search 两级（原始决策）：local `/find` = Workspace Surface（当前可见 transcript）；historical search = Dedicated Search Screen（可读 durable log、可跨 `/clear` 与 resume、结果是索引不进 transcript）。W-5B 仅把 local 载体改为 Dedicated Search Screen，仍只搜 `visibleRows()`，不跨 `/clear`/resume（§6.1a、§6.2）。
 10. **AD-10** Renderer does not decide existence；Representation Policy 是唯一的"该不该存在"决定处。
 11. **AD-11** 同一 semantic event 最多一个 primary transcript representation；表示分 A/B/C/D 四类并带 durability 标签；durable / display / live 必须可分且可预测。
 12. **AD-12** 实时变化默认不进 transcript，进 runtime-live layer 或 footer；live 内容不占用窗口几何、不移动 `start`；settle 时一次性提交为 A 类行。

@@ -964,21 +964,14 @@ export function searchContains(haystack: string, needle: string): boolean {
   return needle !== '' && haystack.toLowerCase().includes(needle.toLowerCase())
 }
 
-/**
- * Wrap every occurrence of `needle` in a painted line with reverse video.
- *
- * The comparison is the search's own — both sides lowercased — so a hit that
- * `/find` reported is always a hit the reader can see marked. The line carries
- * escape sequences, so the scan runs over its visible text and the markers are
- * inserted between them; a long line is highlighted per screen line, which is
- * why the highlight cannot drift the way source offsets would after a wrap.
- *
- * When lowercasing would change the text's length (a handful of exotic code
- * points), the mapping back to the painted line cannot be trusted, so nothing
- * is marked rather than marking the wrong cells.
- */
-export function highlightAnsiNeedle(line: string, needle: string): string {
-  if (needle === '') return line
+/** A UTF-16 range in a line's visible text. */
+export interface TextRange {
+  readonly start: number
+  readonly end: number
+}
+
+/** Visible text of a painted line, with each UTF-16 unit's raw index. */
+function visibleTextMap(line: string): { plain: string; rawAt: number[] } {
   let index = 0
   let plain = ''
   // Raw offsets by UTF-16 index: an emoji before the match is one code point
@@ -996,6 +989,25 @@ export function highlightAnsiNeedle(line: string, needle: string): string {
     plain += char
     index += char.length
   }
+  return { plain, rawAt }
+}
+
+/**
+ * Wrap every occurrence of `needle` in a painted line with reverse video.
+ *
+ * The comparison is the search's own — both sides lowercased — so a hit that
+ * `/find` reported is always a hit the reader can see marked. The line carries
+ * escape sequences, so the scan runs over its visible text and the markers are
+ * inserted between them; a long line is highlighted per screen line, which is
+ * why the highlight cannot drift the way source offsets would after a wrap.
+ *
+ * When lowercasing would change the text's length (a handful of exotic code
+ * points), the mapping back to the painted line cannot be trusted, so nothing
+ * is marked rather than marking the wrong cells.
+ */
+export function highlightAnsiNeedle(line: string, needle: string): string {
+  if (needle === '') return line
+  const { plain, rawAt } = visibleTextMap(line)
   if (plain === '') return line
   const haystack = plain.toLowerCase()
   const lower = needle.toLowerCase()
@@ -1012,6 +1024,36 @@ export function highlightAnsiNeedle(line: string, needle: string): string {
     out += `\x1b[7m${line.slice(fromRaw, afterRaw)}\x1b[27m`
     cursor = afterRaw
     searchFrom = at + lower.length
+  }
+  if (out === '') return line
+  return out + line.slice(cursor)
+}
+
+/**
+ * Reverse-video exact ranges in a painted line.
+ *
+ * Ranges are visible-text UTF-16 offsets, sorted and non-overlapping. This is
+ * what a wrapped match needs: the needle itself may be split across rows, so
+ * searching each row for the whole needle would either miss it or highlight a
+ * whole row without evidence. The ANSI scan keeps the ranges aligned with the
+ * visible text, as `highlightAnsiNeedle` does.
+ */
+export function highlightAnsiRanges(line: string, ranges: readonly TextRange[]): string {
+  if (ranges.length === 0) return line
+  const { plain, rawAt } = visibleTextMap(line)
+  if (plain === '') return line
+  let out = ''
+  let cursor = 0
+  for (const range of ranges) {
+    const start = Math.max(0, Math.min(Math.trunc(range.start), plain.length))
+    const end = Math.max(0, Math.min(Math.trunc(range.end), plain.length))
+    if (end <= start) continue
+    const fromRaw = rawAt[start] ?? line.length
+    const afterRaw = end < rawAt.length ? rawAt[end] ?? line.length : line.length
+    if (fromRaw < cursor) continue
+    out += line.slice(cursor, fromRaw)
+    out += `\x1b[7m${line.slice(fromRaw, afterRaw)}\x1b[27m`
+    cursor = afterRaw
   }
   if (out === '') return line
   return out + line.slice(cursor)
