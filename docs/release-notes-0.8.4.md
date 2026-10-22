@@ -64,7 +64,7 @@ Owner（执行），并修复了合并 read 丢键、Screen 边界、Surface 编
 - `npm run freeze` / `npm run freeze:input`：通过。
 - `npm run bench`：五个动作均为增量绘制，0 次整屏清屏。
 - `npm run bench:report -- --check`：通过。
-- `scripts/artifact-smoke.mjs`：在稳定候选 tarball 上通过（**251 files / 1,537,703 B**）。
+- `scripts/artifact-smoke.mjs`：在稳定候选 tarball 上通过（**251 files，约 1.54 MB**）。
 - `scripts/upgrade-smoke.mjs --from 0.8.3 --pack`：通过（凭据、会话、bundle 入口均保留）。
 - `scripts/upgrade-smoke.mjs --from 0.8.4-rc.1 --pack`：通过（凭据、会话、bundle 入口均保留）。
 - `scripts/verify-batch.mjs --home <probe-home>`：**RESULT: PASS**，typecheck、完整套件、真实 PTY、
