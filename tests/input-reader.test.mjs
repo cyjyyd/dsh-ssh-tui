@@ -118,6 +118,10 @@ test('the fixture set is the one the reference was captured from', () => {
   assert.ok(calls > 150, `the reference must exercise the consumers (${calls} calls)`)
 })
 
+// W-5B moved the framed Alt+f entry from a composer seed to the Search Screen;
+// its trace call is unchanged (`handleInputText`), while the recorded state now
+// names `screen: "search"` instead of `/find `. This is the one intentional
+// fixture-state update in this round.
 test('every fixture frames identically to the pre-Reader build', async () => {
   const differences = []
   for (const fixture of FIXTURES) {

@@ -240,7 +240,39 @@ try {
   child.stdin.write('\u001b')
   await delay(200)
 
-  // 4. Keystrokes typed into the pipe reach the input box.
+  // 4. Search Screen over the pipe: /find opens its own field; typing stays in
+  // that field and Esc returns without touching the composer.
+  mark = output.length
+  child.stdin.write('/find')
+  await waitFor(
+    () => plain(output.slice(mark)).includes('/find'),
+    STEP_TIMEOUT_MS,
+    'the find command draft',
+  )
+  child.stdin.write('\r')
+  const searchOpened = await waitFor(
+    () => /(?:搜索|search)/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the Search Screen',
+  )
+  check(searchOpened, 'a /find on the pipe opens the Search Screen')
+  mark = output.length
+  child.stdin.write('abc')
+  const searchTyped = await waitFor(
+    () => /(?:› abc|> abc)/u.test(plain(output.slice(mark))),
+    STEP_TIMEOUT_MS,
+    'the Search field',
+  )
+  check(searchTyped, 'typing on the pipe lands in the Search field')
+  mark = output.length
+  child.stdin.write('\u001b')
+  await delay(200)
+  check(
+    await waitFor(() => /(?:❯|>)\s/u.test(plain(output.slice(mark))), STEP_TIMEOUT_MS, 'leaving Search'),
+    'Esc closes Search on the pipe',
+  )
+
+  // 5. Keystrokes typed into the pipe reach the input box.
   //
   // The prompt is `❯ ` on a colour terminal and `> ` on a plain one, and this
   // probe declares truecolor (COLORTERM above), so both spellings are accepted:
@@ -256,7 +288,7 @@ try {
   )
   check(echoed, 'a keystroke on the pipe is painted in the input box')
 
-  // 5. A resize: the parent reports the new size the way a terminal does.
+  // 6. A resize: the parent reports the new size the way a terminal does.
   const beforeResize = output.length
   child.stdin.write(`\u001b[8;${HEIGHT + 10};${RESIZED_WIDTH}t`)
   const resized = await waitFor(
@@ -272,7 +304,7 @@ try {
     'the size report is not painted as typing',
   )
 
-  // 6. Quit from the keyboard: the session ends and the child goes. The echo
+  // 7. Quit from the keyboard: the session ends and the child goes. The echo
   // check above left a character in the input box, and `/exit` behind it would
   // be a prompt — a turn, not a command — so clear the line first.
   child.stdin.write('\u007f'.repeat(8))

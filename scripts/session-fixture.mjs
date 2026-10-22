@@ -51,6 +51,19 @@ export function projectKey(cwd) {
   return `--${(readable.replace(/^-+/u, '') || 'root').slice(0, 251)}--`
 }
 
+function writeSessionArtifact(home, id, cwd, lines) {
+  const dir = join(home, 'sessions', projectKey(cwd), id)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, 'session.v4.jsonl.zstd')
+  // The reader wants the header alone in the first frame (that is how it reads
+  // the format version before validating anything), the events after it.
+  writeFileSync(path, Buffer.concat([
+    zstdCompressSync(Buffer.from(`${lines[0]}\n`, 'utf8')),
+    zstdCompressSync(Buffer.from(`${lines.slice(1).join('\n')}\n`, 'utf8')),
+  ]))
+  return path
+}
+
 /**
  * Write a session whose log holds `count` user messages.
  *
@@ -93,14 +106,77 @@ export function writeSessionWithHistory(home, id, options = {}) {
       },
     }))
   }
-  const dir = join(home, 'sessions', projectKey(cwd), id)
-  mkdirSync(dir, { recursive: true })
-  const path = join(dir, 'session.v4.jsonl.zstd')
-  // The reader wants the header alone in the first frame (that is how it reads
-  // the format version before validating anything), the events after it.
-  writeFileSync(path, Buffer.concat([
-    zstdCompressSync(Buffer.from(`${lines[0]}\n`, 'utf8')),
-    zstdCompressSync(Buffer.from(`${lines.slice(1).join('\n')}\n`, 'utf8')),
-  ]))
-  return path
+  return writeSessionArtifact(home, id, cwd, lines)
+}
+
+/**
+ * Write a session with one completed assistant reply and no user row.
+ *
+ * A probe that needs a deterministic Search hit should not need a model turn or
+ * a provider key. The event shape is the same one the harness persists for a
+ * completed turn; the caller only asserts what the real TUI renders from it.
+ *
+ * @param home - `DSH_HOME` the session belongs to.
+ * @param id - the session id to write (the probes own the name they probe).
+ * @param options.cwd - the project directory the session belongs to.
+ * @param options.text - the assistant text to replay.
+ * @returns the artifact path.
+ */
+export function writeSessionWithAssistant(home, id, options = {}) {
+  const cwd = options.cwd ?? process.cwd()
+  const text = options.text ?? 'synthetic assistant reply'
+  const now = Date.now()
+  const lines = [
+    JSON.stringify({
+      type: 'session',
+      version: 4,
+      id,
+      createdAt: now,
+      cwd,
+      isSeeded: false,
+      delegationDepth: 0,
+    }),
+    JSON.stringify({
+      type: 'turn/start',
+      seq: 0,
+      time: now,
+      data: { turn: 1 },
+    }),
+    JSON.stringify({
+      type: 'step/start',
+      seq: 1,
+      time: now,
+      data: { turn: 1, step: 1 },
+    }),
+    JSON.stringify({
+      type: 'assistant/message',
+      seq: 2,
+      time: now,
+      surfaceOp: 'append',
+      data: {
+        turn: 1,
+        step: 1,
+        stream: [],
+        message: {
+          id: 'synthetic-assistant',
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { kind: 'model', provider: 'probe', model: 'probe' },
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'step/end',
+      seq: 3,
+      time: now,
+      data: { turn: 1, step: 1 },
+    }),
+    JSON.stringify({
+      type: 'turn/end',
+      seq: 4,
+      time: now,
+      data: { turn: 1, reason: { kind: 'completed' } },
+    }),
+  ]
+  return writeSessionArtifact(home, id, cwd, lines)
 }

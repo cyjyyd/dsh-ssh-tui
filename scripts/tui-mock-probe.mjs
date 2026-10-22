@@ -12,14 +12,18 @@
  *   1. boot a throwaway home whose `tui` profile mounts this plugin and nothing
  *      else, then start a turn against the mock model;
  *   2. wait for the scripted reply to be painted;
- *   3. `/find` the token inside it and assert the *token* is the thing wrapped
- *      in reverse video — not the whole card;
- *   4. drag across the reply by feeding the terminal's own mouse reports and
+ *   3. `/find` the token inside it. The list's selected-row paint is not the
+ *      search highlight; after Enter, assert that Preview wraps only the token
+ *      in reverse video, never the whole preview row;
+ *   4. leave Preview with one Esc and confirm the result list is back, then
+ *      close Search with a second Esc and confirm the Workspace composer is
+ *      back before touching the mouse;
+ *   5. drag across the reply by feeding the terminal's own mouse reports and
  *      assert the OSC 52 clipboard write carries exactly the dragged text;
- *   5. select the reply (Alt+4) and press the copy key, so the whole reply as
+ *   6. select the reply (Alt+4) and press the copy key, so the whole reply as
  *      written reaches the clipboard — the selection marker the focused row
  *      paints is chrome and must not ride along;
- *   6. resize the window across eight geometries and assert the *status row*
+ *   7. resize the window across eight geometries and assert the *status row*
  *      reflows: it repaints on every change, never exceeds the new width, takes
  *      several distinct shapes, is wider at 160 than at 72, and comes back to
  *      the same row when the size comes back. The reply from step 2 is what
@@ -108,6 +112,13 @@ function clipboardWrites(text) {
     out.push(Buffer.from(payload, 'base64').toString('utf8'))
   }
   return out
+}
+
+/** The visible text of every reverse-video span in a byte slice. */
+function reverseSpans(text) {
+  return [...text.matchAll(/\x1b\[7m([\s\S]*?)\x1b\[27m/gu)]
+    .map(match => plain(match[1] ?? '').trim())
+    .filter(span => span !== '')
 }
 
 /**
@@ -626,26 +637,94 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     await waitFor(text => plain(text).includes(REPLY_TOKEN), 60_000, 'the scripted reply')
     console.log('reply painted')
 
-    // 2. `/find` must mark the token, not the card.
+    // 2. `/find` is a dedicated Screen now. Its selected result is a whole-row
+    //    list marker, not a token highlight; only Preview paints the search needle.
     const beforeFind = output.length
     term.write(`/find ${REPLY_TOKEN}\r`)
     await waitFor(
-      text => /\x1b\[7m[^\x1b]*TOKEN-ALPHA-9/u.test(text.slice(beforeFind)),
+      text => /(?:条结果|results?)/u.test(plain(text.slice(beforeFind))),
       20_000,
-      'the highlighted match',
+      'the Search result list',
     )
-    const findSlice = output.slice(beforeFind)
-    const highlighted = [...findSlice.matchAll(/\x1b\[7m([\s\S]*?)\x1b\[27m/gu)].map(m => plain(m[1] ?? ''))
+    await settledGrid()
+    const searchRows = await gridRows(grid)
     check(
-      highlighted.includes(REPLY_TOKEN),
-      `/find must highlight the token itself, got ${JSON.stringify(highlighted)}`,
+      searchRows.some(row => /^(?:搜索|Search)$/u.test(row.text.trim())),
+      'Search must open as its own Screen',
     )
     check(
-      highlighted.every(span => span.trim() === REPLY_TOKEN || span.includes(REPLY_TOKEN)),
-      `/find must not highlight more than the match: ${JSON.stringify(highlighted)}`,
+      searchRows.some(row => row.text.trimStart().startsWith(`› ${REPLY_TOKEN}`)),
+      'the Search field must show the query the reader entered',
+    )
+    check(
+      searchRows.some(row => /\b1\.\s*\[/u.test(row.text) && row.text.includes(REPLY_TOKEN)),
+      'the Search list must show the matching result',
+    )
+    const listHighlights = reverseSpans(output.slice(beforeFind))
+    check(
+      listHighlights.some(span => span.includes('1. [') && span.includes(REPLY_TOKEN)),
+      `the list row selection must be visible before Preview: ${JSON.stringify(listHighlights)}`,
     )
 
-    // 3. Drag across the reply: press on the token, move right, release.
+    const beforePreview = output.length
+    term.write('\r')
+    await waitFor(
+      text => /(?:返回列表|back to list)/u.test(plain(text.slice(beforePreview))),
+      20_000,
+      'the Search Preview',
+    )
+    await waitFor(
+      text => /\x1b\[7m[^\x1b]*TOKEN-ALPHA-9[^\x1b]*\x1b\[27m/u.test(text.slice(beforePreview)),
+      20_000,
+      'the Preview token highlight',
+    )
+    const previewHighlights = reverseSpans(output.slice(beforePreview))
+    check(
+      previewHighlights.length > 0,
+      `Preview must expose the search highlight: ${JSON.stringify(plain(output.slice(beforePreview)).slice(-400))}`,
+    )
+    check(
+      previewHighlights.every(span => span === REPLY_TOKEN),
+      `Preview must highlight only the token, got ${JSON.stringify(previewHighlights)}`,
+    )
+    console.log(`preview highlight: ${JSON.stringify(previewHighlights)}`)
+
+    // 3. One Esc returns to the list; a second returns to the Workspace. Wait for
+    //    both real screens before the mouse runs, so a held Escape cannot leave the
+    //    drag inside Search (the failure this probe used to produce).
+    const beforeListEscape = output.length
+    term.write('\x1b')
+    await waitFor(
+      text => /(?:↑\/↓ 选择|↑\/↓ select)/u.test(plain(text.slice(beforeListEscape))),
+      20_000,
+      'the Search list after the first Esc',
+    )
+    await settledGrid()
+    check(
+      (await gridRows(grid)).some(row => /\b1\.\s*\[/u.test(row.text) && row.text.includes(REPLY_TOKEN)),
+      'the first Esc must return to the Search result list',
+    )
+
+    const beforeWorkspaceEscape = output.length
+    term.write('\x1b')
+    await waitFor(
+      text => /❯|>/u.test(plain(text.slice(beforeWorkspaceEscape))),
+      20_000,
+      'the Workspace composer after the second Esc',
+    )
+    await settledGrid()
+    const workspaceRows = await gridRows(grid)
+    const composerVisible = workspaceRows.some(row => row.text.includes('❯') || /^\s*>\s/u.test(row.text))
+    const searchStillOpen = workspaceRows.some(row => /^(?:搜索|Search)$/u.test(row.text.trim()))
+    check(composerVisible, 'the second Esc must restore the Workspace composer')
+    check(
+      !searchStillOpen,
+      'the drag must run on the Workspace, not inside Search',
+    )
+
+    // 4. Drag across the reply on the Workspace: press on the token, move right,
+    //    release. This is the owner-sensitive mouse path the Search Screen must not
+    //    intercept.
     await settledGrid()
     const at = await locateOnScreen(grid, REPLY_TOKEN)
     check(at !== undefined, 'the reply must be locatable on the painted screen')
@@ -675,7 +754,7 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
       console.log(`drag copied: ${JSON.stringify(copied.at(-1)?.slice(0, 90))}`)
     }
 
-    // 4. A reply is a card the cursor can land on, and the copy key takes the
+    // 5. A reply is a card the cursor can land on, and the copy key takes the
     //    *selected* row as written: the whole reply rather than a dragged
     //    fragment, and without the `▶` the selection paints — that marker is
     //    chrome, and a copy off its own line must not paste it.
@@ -718,7 +797,7 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     )
     console.log(`selected reply copied: ${JSON.stringify(selected.at(-1)?.slice(0, 90))}`)
 
-    // 5. Resize: the status row has to follow the window, not just repaint.
+    // 6. Resize: the status row has to follow the window, not just repaint.
     //
     // The relay used to re-send the geometry it captured at attach time, so the
     // Host saw no change and the frame stayed at the old width — a user dragging
@@ -788,8 +867,9 @@ async function runProbe({ keep, busy, crash, cols, rows }) {
     return 1
   }
   console.log('OK: a scripted turn was copied by dragging and by the copy key on the selected reply,')
-  console.log('    and the status row reflowed with the window across eight geometries,')
-  console.log('    and /find marked the match itself')
+  console.log('    the Search list and read-only Preview highlighted only the needle,')
+  console.log('    two Escapes restored Workspace ownership before the drag,')
+  console.log('    and the status row reflowed with the window across eight geometries')
   return 0
 }
 

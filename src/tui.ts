@@ -173,6 +173,30 @@ import {
 } from './dialogs.js'
 import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
 import {
+  backspaceSearchText,
+  clampSearchListOffset,
+  cycleSearchSelection,
+  deleteSearchText,
+  ensureSearchSelectionVisible,
+  insertSearchText,
+  moveSearchCursor,
+  searchFieldViewport,
+  searchPreviewDisplayLines,
+  searchPreviewLines,
+  moveSearchSelection,
+  openSearchPreview,
+  pageSearchSelection,
+  reconcileSearchHits,
+  searchCopyText,
+  searchHitLines,
+  searchRequestFor,
+  searchStateFor,
+  setSearchCursor,
+  setSearchPreviewOffset,
+  setSearchQuery,
+  type SearchScreenState,
+} from './search-screen.js'
+import {
   acceptCompletion,
   completionFor,
   dismissCompletion,
@@ -325,6 +349,7 @@ import {
   fmtElapsedCompact,
   foldInputView,
   highlightAnsiNeedle,
+  highlightAnsiRanges,
   hrefAtColumn,
   lastCodePoints,
   osc52Clipboard,
@@ -486,6 +511,7 @@ import {
   todoProgressLabel,
   TODO_STATUS_MARK,
   type CardCategory,
+  type FindRequest,
 } from './plan.js'
 import {
   buildToolHeader,
@@ -1305,6 +1331,8 @@ const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
  */
 const DEFAULT_IDLE_EXIT_MS = 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
+/** The lone Escape byte. */
+const ESCAPE_BYTE = '\x1b'
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 /**
@@ -2403,6 +2431,11 @@ export class SshTui {
     // A frame the Reader emits on its own (a released Escape, a paste tail) is
     // *late*: the reader who was reading may have dismissed the layer that held it.
     onFrame: frame => this.consumeReleasedFrame(frame),
+    // Capture the Screen/Surface that opened the paste at the marker, before the
+    // first payload frame can be routed to whoever is on screen later.
+    onPasteStart: () => {
+      this.pasteOwner ??= { screen: this.layerScreen, dialog: this.layerDialog }
+    },
   })
   /**
    * The layer — not just its name — that was up when a sequence went on hold.
@@ -2421,6 +2454,15 @@ export class SshTui {
     screen: ScreenState | undefined
     dialog: Dialog | undefined
   } | undefined
+  /**
+   * The layer that opened the current bracketed paste.
+   *
+   * A paste payload can span reads and arrive after that layer closed. The Reader's
+   * start marker captures this identity; every paste frame is checked against it,
+   * and the owner is cleared once the Reader leaves the paste. It never changes the
+   * Router/owner vocabulary.
+   */
+  private pasteOwner: { screen: ScreenState | undefined; dialog: Dialog | undefined } | undefined
   /** The layer objects `observe()` last saw — identity, for late-frame provenance. */
   private layerScreen: ScreenState | undefined
   private layerDialog: Dialog | undefined
@@ -2601,6 +2643,12 @@ export class SshTui {
   private searchQuery = ''
   /** The plain text the user searched for, which is what gets highlighted. */
   private searchNeedle = ''
+  /** Monotonic transcript generation for Search Screen reconciliation. */
+  private transcriptRevision = 0
+  /** One-shot coalescing timer while a Search Screen is open. */
+  private searchRefreshTimer: ReturnType<typeof setTimeout> | undefined
+  /** The last query/category/ordinal, used by Alt+n/p after Search closes. */
+  private lastSearch: { query: string; category: CardCategory | undefined; ordinal: number } | undefined
   private planNudgePending = false
   private pendingReveal: Row | CollapsibleBlock | undefined
 
@@ -3368,6 +3416,8 @@ export class SshTui {
     if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
     this.reader.stop()
     this.heldInput = undefined
+    this.pasteOwner = undefined
+    this.clearSearchRefresh()
     process.stdin.removeListener('data', this.handleData)
     process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
@@ -4122,6 +4172,7 @@ export class SshTui {
    * @returns the field after the merge.
    */
   private setToolApproval(callId: string, next: ToolApproval): ToolApproval {
+    this.bumpTranscriptRevision()
     const row = this.findToolRowByCallId(callId)
     if (row === undefined) {
       const merged = mergeApproval(this.pendingApprovalByCall.get(callId), next)
@@ -4228,6 +4279,7 @@ export class SshTui {
     // rows back, so it shows up as `unclassified` there rather than being counted
     // twice or quietly defaulted.
     this.rows.push(row)
+    this.bumpTranscriptRevision()
     if (this.lineMode) {
       // Appended here rather than from the render timer: a timer can coalesce
       // two events into one tick, and an event that is coalesced away is an
@@ -5005,6 +5057,7 @@ export class SshTui {
    * not a second workspace.
    */
   private openScreen(screen: ScreenState): void {
+    this.clearSearchRefresh()
     this.screen = screen
     this.layerScreen = screen
     this.screenSurface = undefined
@@ -5017,6 +5070,7 @@ export class SshTui {
   /** Leave the Screen and hand the pixels back to the workspace, as they were. */
   closeScreen(): void {
     if (this.screen === undefined) return
+    this.clearSearchRefresh()
     this.screen = undefined
     this.layerScreen = undefined
     this.screenDismissals += 1
@@ -5084,18 +5138,19 @@ export class SshTui {
     // whether the agent is running. A Screen has no composer, so the input shape it
     // passes says exactly that.
     const facts = this.footerFacts(SCREEN_INPUT, 1)
-    const body = this.renderScreenBody(screen, width)
-    // `/find` reported a hit inside this body, so put it on screen: the Screen used
-    // to open at the top and leave the reader scrolling for it. Done once, so PgDn
-    // afterwards keeps the reader's own position.
-    if (screen.searchRevealed !== true && this.searchNeedle !== '') {
+    const search = screen.kind === 'search' ? screen.search : undefined
+    const renderedSearch = search === undefined ? undefined : this.renderSearchBody(search, width, layout.bodyRows)
+    const body = renderedSearch?.lines ?? this.renderScreenBody(screen, width)
+    // `/find` reported a hit inside a report body, so put it on screen. Search has
+    // its own list/preview and never mutates the workspace or Screen offset.
+    if (search === undefined && screen.searchRevealed !== true && this.searchNeedle !== '') {
       const at = body.findIndex(row => searchContains(stripAnsi(row), this.searchNeedle))
       if (at >= 0) screen.offset = Math.max(0, at - 1)
       screen.searchRevealed = true
     }
-    const offset = clampScreenOffset(screen.offset, body.length, layout.bodyRows)
-    screen.offset = offset
-    const slice = body.slice(offset, offset + layout.bodyRows)
+    const offset = search === undefined ? clampScreenOffset(screen.offset, body.length, layout.bodyRows) : 0
+    if (search === undefined) screen.offset = offset
+    const slice = search === undefined ? body.slice(offset, offset + layout.bodyRows) : body.slice(0, layout.bodyRows)
     while (slice.length < layout.bodyRows) slice.push('')
 
     const paintRows: string[] = []
@@ -5150,6 +5205,10 @@ export class SshTui {
       || height !== this.lastPaintHeight
     this.screenNeedsFullPaint = false
     this.forceFullPaint = false
+    const cursorBodyRow = renderedSearch?.cursorRow
+    const cursorRow = cursorBodyRow === undefined
+      ? 1
+      : layout.titleRows + layout.dividerRows + cursorBodyRow + 1
     const frame = composePaintFrame({
       width,
       height,
@@ -5162,9 +5221,9 @@ export class SshTui {
       chromeChanged: stripChanged,
       chromeStart: Math.max(0, layout.stripTop),
       previousChromeStart: this.lastChromeStart,
-      cursorRow: 1,
-      cursorColumn: 1,
-      hideCursor: true,
+      cursorRow,
+      cursorColumn: renderedSearch?.cursorColumn ?? 1,
+      hideCursor: renderedSearch === undefined || renderedSearch.cursorRow === undefined,
       // A size change opens with a full clear, so splitting it across frames would
       // show a half-empty screen; everything incremental is budgeted like the
       // workspace frame, and rows that do not fit stay dirty for the next tick.
@@ -5174,13 +5233,13 @@ export class SshTui {
     this.paintResume = frame.resume
     this.lastFrameBytes = Buffer.byteLength(frame.output, 'utf8')
     this.write(frame.output)
-    this.lastPaintCursorRow = 1
-    this.lastPaintCursorColumn = 1
+    this.lastPaintCursorRow = cursorRow
+    this.lastPaintCursorColumn = renderedSearch?.cursorColumn ?? 1
     const snapshot = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     this.lastPaintRows = frame.deferred.length === 0
       ? snapshot
       : advancePaintedRows(this.lastPaintRows, snapshot, frame.painted)
-    this.lastChromeKey = `screen:${screen.kind}:${offset}:${width}x${height}`
+    this.lastChromeKey = `screen:${screen.kind}:${search?.query ?? ''}:${search?.selected ?? -1}:${offset}:${width}x${height}`
     this.lastPaintWidth = width
     this.lastPaintHeight = height
     this.lastChromeStart = Math.max(0, layout.stripTop)
@@ -5203,6 +5262,9 @@ export class SshTui {
     const surface = this.screenSurface
     if (surface !== undefined && surface.kind === 'confirm') return `${surface.prompt}  ${surface.hint}`
     if (screen.notice !== undefined && screen.notice !== '') return screen.notice
+    if (screen.kind === 'search' && screen.search !== undefined) {
+      return screen.search.mode === 'preview' ? t('find.previewHint') : t('find.screenHint')
+    }
     const pos = screenPositionText(screen.offset, lineCount, layout.bodyRows)
     const base = t('screen.footer', { pos })
     const navigation = t('screen.hint')
@@ -5401,6 +5463,100 @@ export class SshTui {
   }
 
   /** A Screen's body, wrapped for the width it will be shown at. */
+  /**
+   * A Search Screen body: field, status and the visible result/preview page.
+   *
+   * This is a pure read of `SearchScreenState`; it never runs the matcher and never
+   * writes the field/list offset. The caller places the returned caret.
+   */
+  private renderSearchBody(
+    search: SearchScreenState,
+    width: number,
+    bodyRows: number,
+  ): { lines: string[]; cursorRow?: number; cursorColumn?: number } {
+    const fit = (text: string): string => truncateToWidth(text, Math.max(1, width))
+    const lines: string[] = []
+    if (bodyRows <= 0) return { lines }
+    const prefix = '  › '
+    const prefixWidth = displayWidth(prefix)
+    const fieldView = searchFieldViewport(search.query, search.cursor, Math.max(1, width - prefixWidth))
+    const field = `${prefix}${fieldView.text}`
+    lines.push(this.styleLine('system', fit(field)))
+    const cursorColumn = 1 + prefixWidth + fieldView.caretCell
+    if (bodyRows === 1) {
+      return { lines, cursorRow: 0, cursorColumn: search.mode === 'preview' ? undefined : cursorColumn }
+    }
+
+    const category = search.category === undefined ? t('find.allCategories') : cardCategoryLabel(search.category)
+    const index = search.selected < 0 ? 0 : search.selected + 1
+    const status = search.hits.length === 0
+      ? (search.query.trim() === '' ? t('find.none') : t('find.noMatch', { query: search.query }))
+      : t('find.status', {
+        count: search.hits.length,
+        index,
+        total: search.hits.length,
+        category,
+      })
+    lines.push(this.styleLine('system', fit(`  ${status}`)))
+    if (search.hits.length === 0) {
+      return { lines, cursorRow: 0, cursorColumn: cursorColumn }
+    }
+
+    const available = Math.max(0, bodyRows - 2)
+    if (search.mode === 'preview') {
+      const hit = search.hits[search.selected]
+      if (hit === undefined) return { lines, cursorRow: undefined }
+      const needle = search.query.trim()
+      const wrapped = searchPreviewLines(hit, Math.max(1, width - 2), needle)
+      const startLine = Math.max(0, Math.min(search.previewOffset, Math.max(0, wrapped.length - 1)))
+      const previewPrefix = '  '
+      for (const row of wrapped.slice(startLine, startLine + available)) {
+        let styled = this.styleLine('system', fit(`${previewPrefix}${row.text}`))
+        if (row.highlights.length > 0) {
+          if (this.color) {
+            styled = highlightAnsiRanges(
+              styled,
+              row.highlights.map(range => ({
+                start: range.start + previewPrefix.length,
+                end: range.end + previewPrefix.length,
+              })),
+            )
+          } else {
+            styled = `» ${styled}`
+          }
+        }
+        lines.push(styled)
+      }
+      return { lines, cursorRow: undefined }
+    }
+
+    // The wheel owns the viewport: painting clamps it to a whole page but never
+    // drags it back to the selection. Selection transitions reveal their row in
+    // `ensureSearchSelectionVisible`; a paint after a wheel must leave it alone.
+    const maxStart = Math.max(0, search.hits.length - Math.max(1, available))
+    const startRow = Math.max(0, Math.min(search.listOffset, maxStart))
+    for (let offset = startRow; offset < search.hits.length && lines.length < bodyRows; offset += 1) {
+      const hit = search.hits[offset]
+      if (hit === undefined) continue
+      const kind = cardCategoryOf(hit.row)
+      const label = kind === undefined ? t('find.allCategories') : cardCategoryLabel(kind)
+      const needle = search.query.trim()
+      const rowLines = lineModeLines(hit.row)
+      const snippet = (rowLines.find(line => needle !== '' && searchContains(line, needle))
+        ?? rowLines.find(line => line.trim() !== '')
+        ?? label)
+        .replace(/\s+/gu, ' ')
+        .trim()
+      const marker = offset === search.selected ? '›' : ' '
+      const hitMarker = this.color ? '' : (searchContains(snippet, needle) ? '» ' : '')
+      const line = `  ${marker} ${hitMarker}${offset + 1}. [${label}] ${snippet}`
+      let styled = this.styleLine('system', fit(line))
+      if (needle !== '' && this.color) styled = highlightAnsiNeedle(styled, needle)
+      lines.push(offset === search.selected ? this.selectLine(styled, true) : styled)
+    }
+    return { lines, cursorRow: 0, cursorColumn: cursorColumn }
+  }
+
   private renderScreenBody(screen: ScreenState, width: number): string[] {
     if (screen.kind === 'setup') return this.renderSetupBody(width)
     const rendered: string[] = []
@@ -5797,6 +5953,284 @@ export class SshTui {
   }
 
   private runFindCommand(arg: string): void {
+    if (this.lineMode) {
+      this.runTextFind(arg)
+      return
+    }
+    this.openSearchScreen(arg)
+  }
+
+  /**
+   * Open the dedicated local Search Screen. The rows are the current visible
+   * workspace only (AD-9 local); no durable log, no reveal, no transcript row.
+   */
+  private openSearchScreen(raw: string | FindRequest, selectedOrdinal?: number): void {
+    const request = typeof raw === 'string' ? searchRequestFor(raw) : raw
+    const rows = [...this.visibleRows()]
+    let state = searchStateFor({
+      rows,
+      query: request.query,
+      cursor: request.query.length,
+      ...(request.category === undefined ? {} : { category: request.category }),
+      revision: this.transcriptRevision,
+      cutoff: this.clearedRows,
+    })
+    if (selectedOrdinal !== undefined && state.hits.length > 0) {
+      const selected = Math.max(0, Math.min(selectedOrdinal, state.hits.length - 1))
+      state = { ...state, selected, mode: 'list', previewOffset: 0 }
+    }
+    // Opening starts from the newest hit, so the first page is the one that
+    // contains it. Later wheel movement is not re-clamped to selection by paint.
+    state = ensureSearchSelectionVisible(state, this.searchPage())
+    this.lastSearch = {
+      query: state.query,
+      category: state.category,
+      ordinal: state.selected,
+    }
+    this.clearSearchRefresh()
+    this.openScreen({
+      kind: 'search',
+      title: t('screen.title.search'),
+      lines: [],
+      offset: 0,
+      search: state,
+      copyText: searchCopyText(state),
+      ...(state.hits.length === 0 && this.clearedRows > 0 ? { notice: t('find.scopeHint') } : {}),
+    })
+    this.markDirty()
+  }
+
+  /** Alt+n/p/Ctrl+G: navigate or reopen the last Search; line mode stays textual. */
+  private navigateSearch(delta: number): void {
+    if (this.lineMode) {
+      this.stepSearch(delta)
+      return
+    }
+    const last = this.lastSearch
+    if (this.layerScreen?.kind === 'search') {
+      const state = this.syncSearchScreen()
+      if (state !== undefined) this.commitSearchState(cycleSearchSelection(state, delta))
+      return
+    }
+    if (last === undefined) {
+      this.openSearchScreen('')
+    } else {
+      this.openSearchScreen(
+        { query: last.query, ...(last.category === undefined ? {} : { category: last.category }) },
+        last.ordinal,
+      )
+    }
+    const state = this.syncSearchScreen()
+    if (state !== undefined) this.commitSearchState(cycleSearchSelection(state, delta))
+  }
+
+  /** Commit a Search state transition and keep the Screen's copy/pointer in sync. */
+  private commitSearchState(next: SearchScreenState): void {
+    const screen = this.layerScreen
+    if (screen === undefined || screen.kind !== 'search') return
+    const previous = screen.search
+    // A changed selection (or a return from Preview) reveals its row. An unchanged
+    // selection keeps the wheel's viewport; only the page boundary is clamped.
+    const committed = next.mode !== 'list'
+      ? next
+      : previous?.mode !== 'list' || previous.selected !== next.selected
+        ? ensureSearchSelectionVisible(next, this.searchPage())
+        : clampSearchListOffset(next, this.searchPage())
+    screen.search = committed
+    screen.copyText = searchCopyText(committed)
+    this.lastSearch = {
+      query: committed.query,
+      category: committed.category,
+      ordinal: committed.selected,
+    }
+    this.markDirty()
+  }
+
+  /** Reconcile stale rows before any selection, preview, copy or edit uses them. */
+  private syncSearchScreen(): SearchScreenState | undefined {
+    const screen = this.layerScreen
+    if (screen === undefined || screen.kind !== 'search' || screen.search === undefined) return undefined
+    const next = reconcileSearchHits(
+      screen.search,
+      [...this.visibleRows()],
+      this.transcriptRevision,
+      this.clearedRows,
+    )
+    if (next !== screen.search) this.commitSearchState(next)
+    return screen.search
+  }
+
+  /** Coalesce transcript changes while Search is open; not a render-loop scan. */
+  private scheduleSearchRefresh(): void {
+    if (this.layerScreen?.kind !== 'search') return
+    if (this.searchRefreshTimer !== undefined) return
+    this.searchRefreshTimer = setTimeout(() => {
+      this.searchRefreshTimer = undefined
+      if (this.disposed) return
+      this.syncSearchScreen()
+    }, 0)
+    this.searchRefreshTimer.unref?.()
+  }
+
+  private clearSearchRefresh(): void {
+    if (this.searchRefreshTimer !== undefined) clearTimeout(this.searchRefreshTimer)
+    this.searchRefreshTimer = undefined
+  }
+
+  /** A transcript mutation that may change a Search hit. */
+  private bumpTranscriptRevision(): void {
+    this.transcriptRevision += 1
+    this.scheduleSearchRefresh()
+  }
+
+  private insertSearchPaste(text: string): void {
+    const state = this.syncSearchScreen()
+    // Preview is read-only. This is the common paste entry for bracketed paste,
+    // non-bracketed bursts and split-read payloads, so the guard covers every
+    // terminal form without reinterpreting payload as keys.
+    if (state === undefined || state.mode === 'preview') return
+    const flat = text.split(/\r?\n/u).map(part => part.trim()).filter(part => part !== '').join(' ')
+    if (flat === '') return
+    this.commitSearchState(insertSearchText(state, flat, [...this.visibleRows()]))
+  }
+
+  private handleSearchScreenKey(combined: string, moved: string | undefined): void {
+    let state = this.syncSearchScreen()
+    if (state === undefined) {
+      this.closeScreen()
+      return
+    }
+    if (moved === 'copy') {
+      this.copyFromScreen(this.screen as ScreenState)
+      return
+    }
+    if (InputReader.looksLikePasteBurst(combined)) {
+      this.insertSearchPaste(combined)
+      return
+    }
+    const rows = [...this.visibleRows()]
+    const apply = (next: SearchScreenState): void => {
+      this.commitSearchState(next)
+    }
+    if (combined === ESCAPE_BYTE) {
+      if (state.mode === 'preview') {
+        apply({ ...state, mode: 'list', previewOffset: 0 })
+        return
+      }
+      this.closeScreen()
+      return
+    }
+    if (combined === '\x03') {
+      this.closeScreen()
+      return
+    }
+    if (combined === '\r' || combined === '\n') {
+      apply(state.mode === 'preview' ? { ...state, mode: 'list', previewOffset: 0 } : openSearchPreview(state))
+      return
+    }
+    if (state.mode === 'preview') {
+      apply(this.handleSearchPreviewKey(state, combined))
+      return
+    }
+    {
+      if (combined === '\x15') {
+        apply(setSearchQuery(state, '', rows, state.revision, state.sourceCutoff, 0))
+        return
+      }
+      if (combined === '\x0b') {
+        apply(setSearchQuery(state, state.query.slice(0, state.cursor), rows, state.revision, state.sourceCutoff, state.cursor))
+        return
+      }
+      if (combined === '\x01') { apply(setSearchCursor(state, 0)); return }
+      if (combined === '\x05') { apply(setSearchCursor(state, state.query.length)); return }
+      if (combined === '\x7f' || combined === '\x08') {
+        apply(backspaceSearchText(state, rows))
+        return
+      }
+    }
+    if (combined === '\x07') {
+      apply(cycleSearchSelection(state, 1))
+      return
+    }
+    if (combined === '\t' || combined === '\x0e' || combined === '\x10') return
+    const arrow = /^\x1b\[([A-D])$/u.exec(combined)
+    if (arrow !== null) {
+      if (arrow[1] === 'A') apply(moveSearchSelection(state, -1))
+      else if (arrow[1] === 'B') apply(moveSearchSelection(state, 1))
+      else if (arrow[1] === 'C') apply(moveSearchCursor(state, 1))
+      else apply(moveSearchCursor(state, -1))
+      return
+    }
+    const nav = /^\x1b\[(H|F|1~|4~|3~|5~|6~)$/u.exec(combined)
+    if (nav !== null) {
+      const key = nav[1]
+      if (key === 'H' || key === '1~') apply(setSearchCursor(state, 0))
+      else if (key === 'F' || key === '4~') apply(setSearchCursor(state, state.query.length))
+      else if (key === '3~') apply(deleteSearchText(state, rows))
+      else if (key === '5~') apply(pageSearchSelection(state, this.searchPage(), -1))
+      else if (key === '6~') apply(pageSearchSelection(state, this.searchPage(), 1))
+      return
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null) {
+      if (sgr[4] !== 'M') return
+      const button = Number(sgr[1])
+      if (button === 64 || button === 65) {
+        const listOffset = state.listOffset + (button === 64 ? -3 : 3)
+        apply(clampSearchListOffset({ ...state, listOffset }, this.searchPage()))
+      }
+      return
+    }
+    if (combined.startsWith('\x1b')) {
+      const alt = /^\x1b([nNpP])$/u.exec(combined)
+      if (alt !== null) apply(cycleSearchSelection(state, alt[1] === 'n' || alt[1] === 'N' ? 1 : -1))
+      // Alt+f/F// at Search is a no-op; other CSI is consumed by the Screen.
+      return
+    }
+    if (combined !== '') apply(insertSearchText(state, combined, rows))
+  }
+
+  /**
+   * Preview navigation. The offset and page height are in wrapped **display**
+   * lines, never in the logical `lineModeLines` entries: one long reply can be
+   * many screens. Arrows scroll one display line; PgUp/PgDn one visible page;
+   * Home/End the first/last page. Hit changes keep Preview and reset the offset.
+   */
+  private handleSearchPreviewKey(state: SearchScreenState, combined: string): SearchScreenState {
+    const hit = state.hits[state.selected]
+    if (hit === undefined) return { ...state, mode: 'list', previewOffset: 0 }
+    const page = Math.max(1, this.searchPage())
+    const total = searchPreviewDisplayLines(hit, Math.max(1, this.screenColumns() - 2)).length
+    const scroll = (delta: number): SearchScreenState =>
+      setSearchPreviewOffset(state, state.previewOffset + delta, total, page)
+    const alt = /^\x1b([nNpP])$/u.exec(combined)
+    if (alt !== null) {
+      return cycleSearchSelection(state, alt[1] === 'n' || alt[1] === 'N' ? 1 : -1, true)
+    }
+    if (combined === '\x07') return cycleSearchSelection(state, 1, true)
+    const arrow = /^\x1b\[([A-D])$/u.exec(combined)
+    if (arrow !== null) {
+      if (arrow[1] === 'A') return scroll(-1)
+      if (arrow[1] === 'B') return scroll(1)
+      return state
+    }
+    const nav = /^\x1b\[(H|F|1~|4~|5~|6~)$/u.exec(combined)
+    if (nav !== null) {
+      if (nav[1] === 'H' || nav[1] === '1~') return { ...state, previewOffset: 0 }
+      if (nav[1] === 'F' || nav[1] === '4~') return setSearchPreviewOffset(state, Number.MAX_SAFE_INTEGER, total, page)
+      if (nav[1] === '5~') return scroll(-page)
+      return scroll(page)
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null && sgr[4] === 'M') {
+      const button = Number(sgr[1])
+      if (button === 64) return scroll(-1)
+      if (button === 65) return scroll(1)
+    }
+    return state
+  }
+
+  private runTextFind(arg: string): void {
     const parsed = parseFindQuery(arg)
     const label = parsed.category === undefined ? '' : `${cardCategoryLabel(parsed.category)} `
     // Local `/find` is a workspace search: it looks at what is in the view, which is
@@ -7886,6 +8320,7 @@ export class SshTui {
   }
 
   private applySessionEvent(session: { id: SessionId }, event: SessionEvent): void {
+    this.bumpTranscriptRevision()
     if (session.id !== this.agent.id) {
       if (this.subagentSessions.has(session.id)) this.handleSubagentSessionEvent(session.id, event)
       return
@@ -10125,6 +10560,7 @@ export class SshTui {
     }
     if (this.dialog === undefined && this.screen === undefined) {
       this.dialog = dialog
+      this.layerDialog = dialog
       this.dialogRole = role
       this.borrowTextFor(dialog)
       this.echoLineModeDialog(dialog)
@@ -10143,6 +10579,7 @@ export class SshTui {
     const next = this.dialogQueue.shift()
     if (next !== undefined) {
       this.dialog = next.dialog
+      this.layerDialog = next.dialog
       this.dialogRole = next.role
       this.borrowTextFor(next.dialog)
       this.echoLineModeDialog(next.dialog)
@@ -10198,6 +10635,7 @@ export class SshTui {
   private settleQuestion(dialog: QuestionDialog, finish: () => void): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.layerDialog = undefined
       this.dialogRole = PICKER_ROLE
       this.releaseBorrowedText()
     } else {
@@ -10224,6 +10662,7 @@ export class SshTui {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'confirm') return
     this.dialog = undefined
+    this.layerDialog = undefined
     this.dialogRole = PICKER_ROLE
     this.releaseBorrowedText()
     dialog.resolve(value)
@@ -10236,6 +10675,7 @@ export class SshTui {
   private abortConfirm(dialog: ConfirmDialog): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.layerDialog = undefined
       this.dialogRole = PICKER_ROLE
       this.releaseBorrowedText()
       dialog.resolve('cancel')
@@ -12482,6 +12922,23 @@ export class SshTui {
       this.markDirty()
       return
     }
+    // Alt+f/F// at a report/inspect replaces it with Search; Alt+n/p navigate a
+    // last Search or open one. Search itself handles these inside its own adapter.
+    const screenAlt = /^\x1b([fF/nNpP])$/u.exec(combined)
+    if (screen.kind !== 'search' && screenAlt !== null) {
+      const key = screenAlt[1]
+      if (key === 'f' || key === 'F' || key === '/') this.openSearchScreen('')
+      else if (key === 'n' || key === 'N') this.navigateSearch(1)
+      else this.navigateSearch(-1)
+      return
+    }
+    // Search has its own field/list/preview before the report adapter sees q,
+    // Enter, arrows or printable text. Its paste handling is below, so this
+    // branch must come before the generic paste-burst path.
+    if (screen.kind === 'search') {
+      this.handleSearchScreenKey(combined, moved)
+      return
+    }
     // A burst of line breaks in one read is a paste from a console that cannot say so
     // (`looksLikePasteBurst`): it belongs in the field as one edit, which is how a
     // pasted key or model list survives a terminal without bracketed paste. The Reader
@@ -12581,6 +13038,11 @@ export class SshTui {
     return Math.max(1, screenLayout(Math.max(6, this.screenRows())).bodyRows - 1)
   }
 
+  /** Rows one Search result page moves: field + status take two body rows. */
+  private searchPage(): number {
+    return Math.max(1, screenLayout(Math.max(6, this.screenRows())).bodyRows - 2)
+  }
+
   /** Scroll a Screen by `up` rows toward the start of its body. */
   private scrollScreen(up: number): void {
     const screen = this.screen
@@ -12634,6 +13096,25 @@ export class SshTui {
     this.heldInput = undefined
     const combined = this.reader.assemble(text)
 
+    // A non-bracketed multi-line paste in Preview is one read with printable text
+    // around a newline. Preview is read-only, and a lone Enter still returns to
+    // the list below; this guard keeps the payload from being interpreted as
+    // Enter-then-text. Bracketed/split paste is handled by the Reader frames and
+    // the common `insertSearchPaste` guard.
+    //
+    // A control byte is a key, not paste text. An unmarked payload containing
+    // Ctrl+C must still close Search (and the Reader then consumes the rest of
+    // that read), so the conservative paste reading is limited to text with no
+    // C0 control bytes other than CR/LF. With no terminal signal saying
+    // "unbracketed paste", a payload that also carries control bytes is
+    // inherently ambiguous; it takes the key path rather than losing a key.
+    if (!this.reader.isPasting()
+      && this.layerScreen?.kind === 'search'
+      && this.layerScreen.search?.mode === 'preview'
+      && /[\r\n]/u.test(combined)
+      && /[^\r\n]/u.test(combined)
+      && !/[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/u.test(combined)) return
+
     // A read is not a key. The Reader decides where one unit ends — complete
     // sequences, Alt chords, control bytes, CR/LF, and runs of typing — and each unit
     // is framed once and routed once, whichever owner it belongs to (AD-20 §3, W-3a).
@@ -12664,6 +13145,7 @@ export class SshTui {
       this.refreshCompletion()
       this.consumeFrame(frame)
     }
+    this.finishPaste()
     this.refreshCompletion()
   }
 
@@ -12754,8 +13236,18 @@ export class SshTui {
       if (alt === '2') { this.jumpToCategory('plan'); return }
       if (alt === '3') { this.jumpToCategory('subagent'); return }
       if (alt === '4') { this.jumpToCategory('reply'); return }
-      if (alt === 'n' || alt === 'N') { this.stepSearch(1); return }
-      if (alt === 'p' || alt === 'P') { this.stepSearch(-1); return }
+      if (alt === 'n' || alt === 'N') {
+        // A Surface owns the keyboard: keep the old workspace search-step behavior
+        // rather than opening a Screen over a live question.
+        if (this.layerDialog !== undefined) this.stepSearch(1)
+        else this.navigateSearch(1)
+        return
+      }
+      if (alt === 'p' || alt === 'P') {
+        if (this.layerDialog !== undefined) this.stepSearch(-1)
+        else this.navigateSearch(-1)
+        return
+      }
       // The `/find` seed is composer *text*, so it may only be typed into a field
       // the composer owns (W-3b.3a). This branch runs before any owner is asked
       // (the Alt chords are workspace-global, AD-20 §1.3 step 13), so with a
@@ -12766,9 +13258,13 @@ export class SshTui {
       // is editable", and a borrowed answer is one — the seed is the *composer's*
       // field, which is exactly `borrowedText === undefined`.
       if (alt === 'f' || alt === 'F' || alt === '/') {
-        if (this.textIsEditable() && this.borrowedText === undefined) {
-          this.setDraft('/find ', 6)
-          this.markDirty()
+        if (this.lineMode) {
+          if (this.textIsEditable() && this.borrowedText === undefined) {
+            this.setDraft('/find ', 6)
+            this.markDirty()
+          }
+        } else if (this.dialog === undefined) {
+          this.openSearchScreen('')
         }
         return
       }
@@ -12904,8 +13400,25 @@ export class SshTui {
    */
   private dispatchPaste(text: string): void {
     this.observe('paste', text)
-    if (this.router.route('paste', text, this.ownershipView) === 'workspace') return
+    const owner = this.pasteOwner
+    if (owner !== undefined && (owner.screen !== this.layerScreen || owner.dialog !== this.layerDialog)) {
+      // The paste started at a layer that is gone. Its remaining payload is not
+      // addressed to whoever happens to be on screen now.
+      this.finishPaste()
+      return
+    }
+    this.pasteOwner ??= { screen: this.layerScreen, dialog: this.layerDialog }
+    if (this.router.route('paste', text, this.ownershipView) === 'workspace') {
+      this.finishPaste()
+      return
+    }
     this.handlePasteText(text)
+    this.finishPaste()
+  }
+
+  /** Drop the paste owner once the Reader has consumed the close marker. */
+  private finishPaste(): void {
+    if (!this.reader.isPasting()) this.pasteOwner = undefined
   }
 
   /**
@@ -13096,7 +13609,7 @@ export class SshTui {
       return
     }
     if (unit === '\x07') {
-      this.stepSearch(1)
+      this.navigateSearch(1)
       return
     }
     if (unit === '\x1f') {
@@ -13160,7 +13673,11 @@ export class SshTui {
   private handlePasteText(text: string): void {
     const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     if (normalized === '') return
-    if (this.screen !== undefined) {
+    if (this.layerScreen?.kind === 'search') {
+      this.insertSearchPaste(normalized)
+      return
+    }
+    if (this.layerScreen !== undefined) {
       this.pasteIntoScreen(normalized)
       return
     }
@@ -13189,7 +13706,7 @@ export class SshTui {
    */
   private pasteIntoScreen(text: string): void {
     const state = this.onboarding
-    if (this.screen?.kind !== 'setup' || state === undefined || state.saving) return
+    if (this.layerScreen?.kind !== 'setup' || state === undefined || state.saving) return
     if (!SETUP_FIELD_STEPS.has(state.step)) return
     // The field is drawn on one row, so it takes the value and not the line breaks
     // around it: a key copied off a web page carries the newline that ended its
@@ -15064,6 +15581,7 @@ export class SshTui {
         this.searchHits = []
         this.searchIndex = -1
         this.searchQuery = ''
+        this.bumpTranscriptRevision()
         this.pendingReveal = undefined
         this.pendingMouseClick = undefined
         this.mouseAnchor = undefined

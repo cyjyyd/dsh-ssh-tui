@@ -246,15 +246,23 @@ test('R-ALT: the /find seed is only written into a field the composer owns', asy
     }
   }
 
-  // With nothing layered over the workspace the seed is the composer's, exactly as
-  // it always was — this is the behaviour the guard must keep, not replace.
+  // With nothing layered over the workspace, Alt+f is the Search Screen entry;
+  // it never rewrites the composer. Ctrl+_ remains the composer's text seed.
   const composer = fixture()
   composer.input = DRAFT
   composer.cursor = 3
   composer.handleData(Buffer.from('\u001bf'))
-  assert.equal(composer.input, '/find ', 'the composer seeds its own /find')
-  assert.equal(composer.cursor, 6, 'with the caret after the seed')
-  assert.equal(composer.historyIndex, -1, 'and nothing else moved')
+  assert.equal(composer.screen?.kind, 'search', 'Alt+f opens Search')
+  assert.equal(composer.input, DRAFT, 'the composer draft is untouched')
+  assert.equal(composer.cursor, 3)
+  composer.handleData(Buffer.from('\u0003'))
+  await tick(0)
+  const seed = fixture()
+  seed.input = DRAFT
+  seed.cursor = 3
+  seed.handleData(Buffer.from('\u001f'))
+  assert.equal(seed.input, '/find ', 'Ctrl+_ still seeds the composer')
+  assert.equal(seed.cursor, 6)
 })
 
 test('R-ALT: the workspace chords keep running while a Surface is up (W-3a’s lock)', async () => {
