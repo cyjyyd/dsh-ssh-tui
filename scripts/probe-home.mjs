@@ -14,8 +14,14 @@
  *
  *   1. `--from-default-profile headless` scaffolds a profile tree;
  *   2. the headless app is dropped from its bundle list (the TUI replaces it);
- *   3. `dsh plugin add link:<repo>` installs this checkout into the profile;
- *   4. the agent-preset roster is mounted (see `profile-rows.mjs`).
+ *   3. `dsh plugin add <package>` installs this checkout into the profile;
+ *   4. a configured probe runs one real TUI boot to let the product repair the
+ *      profile, exits, and starts the actual probe on that restart.
+ *
+ * It deliberately does **not** pre-fill the agent-plane rows. That is the
+ * product's first-run repair's job, and a helper that writes them before the
+ * TUI boots would make the first-install gate green over the exact defect it
+ * exists to catch. Step 4 is a product boot, not a file write.
  *
  * Usage:
  *   node scripts/probe-home.mjs                 # build a home, print its path
@@ -32,8 +38,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-
-import { mountProfileRows } from './profile-rows.mjs'
 
 const require = createRequire(import.meta.url)
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -155,7 +159,9 @@ export function buildProbeHome({
   const spec = tarball === undefined ? `link:${repo}` : `file:${resolve(tarball)}`
   log(`==> installing ${spec} into profile '${profile}'`)
   run(process.execPath, [cli, 'plugin', '--profile', profile, 'add', spec], { env })
-  mountProfileRows({ profile, home: target, cli, log })
+
+  // No `mountProfileRows` here. This is the real first-install shape: the TUI
+  // boots without the agent-plane rows and repairs them for the next launch.
 
   // A profile that composes but cannot boot is worse than no profile: fail here.
   run(process.execPath, [cli, '--profile', profile, '--dump-config'], { env, stdio: 'ignore' })
@@ -236,6 +242,25 @@ async function main(argv) {
   }
 
   const script = valueOf('--script') ?? 'tui-probe.mjs'
+  // The product repairs the profile on its first boot; the probe must start on
+  // the restart, not in the middle of that repair (the same restart a user is
+  // told to make). This is a real TUI boot, not a test-side pre-fill. The
+  // unconfigured path and the wizard probe own their own first run.
+  if (!own.includes('--unconfigured') && script !== 'tui-setup-probe.mjs') {
+    const primeCode = await new Promise(resolve => {
+      const prime = spawn(process.execPath, [join(REPO, 'scripts/tui-prime-probe.mjs')], {
+        stdio: 'inherit',
+        windowsHide: true,
+        env: { ...process.env, PROBE_HOME: home },
+      })
+      prime.on('error', () => resolve(1))
+      prime.on('exit', value => resolve(value ?? 1))
+    })
+    if (primeCode !== 0) {
+      if (!keep) discardHome(home)
+      return primeCode
+    }
+  }
   const code = await new Promise(resolve => {
     const child = spawn(process.execPath, [join(REPO, 'scripts', script), ...probeArgs], {
       stdio: 'inherit',

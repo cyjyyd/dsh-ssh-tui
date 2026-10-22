@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { mountProfileRows, profilePatchPath, resolveDshHome } from '../scripts/profile-rows.mjs'
+import { mountProfileRows, profilePatchPath, resolveDshHome, ROSTER_BLOCK } from '../scripts/profile-rows.mjs'
 
 /**
  * The roster mount is what makes `/mode` work in a profile this repo built for
@@ -71,20 +71,37 @@ test('a profile that already composes the roster is left alone', () => {
   assert.equal(readFileSync(file, 'utf8'), before)
 })
 
-test('a patch that already names the row is not written twice', () => {
+test('a partially mounted roster gains only the rows it lacks', () => {
   const { home, file } = tempProfile(`# header\n- insert:\n    - id: agent-presets\n      name: '@deepseek-ai/dsh-agent-presets'\n`)
+  const result = mountProfileRows({ profile: 'tui', home, log: silent, ...notComposed, generation: 'legacy' })
+  assert.equal(result, 'mounted')
+  const text = readFileSync(file, 'utf8')
+  assert.equal(text.match(/id: agent-presets/gu)?.length, 1, 'the existing row is not mounted twice')
+  assert.match(text, /dsh-code-runtime-worker-thread/u)
+  assert.match(text, /model-selection-settings/u)
+})
+
+test('a complete patch is not written twice', () => {
+  const { home, file } = tempProfile(`# header\n${ROSTER_BLOCK}`)
   const before = readFileSync(file, 'utf8')
   const result = mountProfileRows({ profile: 'tui', home, log: silent, ...notComposed, generation: 'legacy' })
   assert.equal(result, 'already-named')
   assert.equal(readFileSync(file, 'utf8'), before)
 })
 
-test('the forms marker is the agent-plane tool row, not the dead plural one', () => {
+test('a partial forms profile gains only the missing agent-plane tool', () => {
   const { home, file } = tempProfile(`# header\n- insert:\n    - id: present\n      name: '@deepseek-ai/dsh-tool-present'\n`)
   const before = readFileSync(file, 'utf8')
   const result = mountProfileRows({ profile: 'tui', home, log: silent, ...notComposed, generation: 'forms' })
-  assert.equal(result, 'already-named')
-  assert.equal(readFileSync(file, 'utf8'), before)
+  assert.equal(result, 'mounted')
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /id: tool-ask-user/u, 'the missing tool is added')
+  assert.equal(text.match(/id: present/gu)?.length, 1, 'the existing tool is not duplicated')
+  assert.match(text, /@deepseek-ai\/dsh-tool-ask-user/u)
+  assert.notEqual(text, before)
+  const backups = readdirSync(dirname(file)).filter(name => name.startsWith('cordis.patch.yml.bak-'))
+  assert.equal(backups.length, 1, 'the previous profile patch is kept')
+  assert.equal(readFileSync(join(dirname(file), backups[0]), 'utf8'), before)
 })
 
 test('a missing patch file is created from the documented header', () => {

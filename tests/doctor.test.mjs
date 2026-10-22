@@ -84,6 +84,57 @@ test('a 0.1.7 host is judged on its own rows, not the deleted roster', () => {
   assert.equal(/^- id: system-prompt/mu.test(repaired.text), false, 'and never a persona override either')
 })
 
+test('a 0.1.7 profile whose declared tools did not register is not called ready', () => {
+  // The row text is not the runtime. A declared `present` row that failed to
+  // activate (or a load error the composition skipped) must fail the check and
+  // must not be "repaired" by mounting the same row a second time.
+  const active = facts({
+    generation: 'forms',
+    services: { roster: false, codeRuntime: false, askUserTool: true, presentTool: false },
+    patchText: FORMS_PATCH_BLOCK,
+  })
+  const checks = doctorChecks(active)
+  const agentPlane = checkOf(checks, 'agent-plane')
+  assert.equal(agentPlane.status, 'fail')
+  assert.equal(agentPlane.fixable, undefined, 're-adding a declared row cannot fix a failed registration')
+  assert.match(agentPlane.summary, /present/u)
+  assert.deepEqual(agentPlane.details, ['已声明但未注册：present'])
+  assert.deepEqual(rowsToRepair(active), [], 'the declared row is not mounted again')
+
+  // The same facts with a missing row are repairable, and only that row is
+  // planned. A tool the composition already registered is never mounted twice.
+  const partial = facts({
+    generation: 'forms',
+    services: { roster: false, codeRuntime: false, askUserTool: true, presentTool: false },
+    patchText: "- insert:\n    - id: tool-ask-user\n      name: '@deepseek-ai/dsh-tool-ask-user'\n",
+  })
+  assert.deepEqual(rowsToRepair(partial).map(row => row.id), ['present'])
+  assert.equal(checkOf(doctorChecks(partial), 'agent-plane').status, 'warn')
+
+  // A bundle may supply one tool while the patch spells neither. Only the
+  // genuinely absent one is named and planned; the supplied row is not
+  // reported as missing (and would otherwise be warned about forever).
+  const suppliedOne = facts({
+    generation: 'forms',
+    services: { roster: false, codeRuntime: false, askUserTool: true, presentTool: false },
+    patchText: WEB_ROW,
+  })
+  const suppliedOneCheck = checkOf(doctorChecks(suppliedOne), 'agent-plane')
+  assert.equal(suppliedOneCheck.status, 'warn')
+  assert.deepEqual(suppliedOneCheck.details, ['缺少行：present'])
+  assert.deepEqual(rowsToRepair(suppliedOne).map(row => row.id), ['present'])
+
+  // A bundle may supply both tools while the profile patch spells neither. The
+  // check is green, and the fix planner must not add duplicate rows.
+  const supplied = facts({
+    generation: 'forms',
+    services: { roster: false, codeRuntime: false, askUserTool: true, presentTool: true },
+    patchText: WEB_ROW,
+  })
+  assert.equal(checkOf(doctorChecks(supplied), 'agent-plane').status, 'ok')
+  assert.deepEqual(rowsToRepair(supplied), [])
+})
+
 test('a missing roster is named row by row', () => {
   // Bad case 1: the profile composes nothing (0.6.3's regression).
   const snapshot = facts({

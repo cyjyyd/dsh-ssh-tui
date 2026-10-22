@@ -300,11 +300,16 @@ export function duplicatePatchRows(rows: readonly PatchRowRef[]): PatchRowRef[] 
   return duplicates
 }
 
-/** Whether a patch already declares one roster row, by id or by module name. */
+/**
+ * Whether a patch already addresses one roster row, by id or by module name.
+ *
+ * Every kind counts: an override or a disable targets the row just as an insert
+ * does. A repair must leave an intentional `- id: present` / `disabled: true`
+ * alone instead of mounting the same id a second time; the later entry would
+ * either collide with it or silently undo the user's choice.
+ */
 export function patchNamesRow(rows: readonly PatchRowRef[], row: RosterRow): boolean {
-  return rows.some(candidate =>
-    (candidate.kind === 'insert' && candidate.id === row.id)
-    || candidate.name === row.name)
+  return rows.some(candidate => candidate.id === row.id || candidate.name === row.name)
 }
 
 /** The roster rows a patch does not declare yet. */
@@ -348,6 +353,8 @@ function normalizeEnd(text: string): string {
  * @param missing - the roster rows to mount; defaults to the 0.1.5 set.
  * @param generation - which host line the profile boots on.
  * @returns the new text, or `undefined` when nothing has to change.
+ * @throws when `existing` is not valid YAML; appending to a broken patch would
+ * make it longer without making it bootable.
  */
 export function planRosterRepair(
   existing: string,
@@ -355,9 +362,15 @@ export function planRosterRepair(
   generation: HostGeneration = 'legacy',
 ): PatchRepair | undefined {
   const analysis = analyzePatch(existing)
-  const toAdd = analysis.parseable
-    ? missing.filter(row => !patchNamesRow(analysis.rows, row))
-    : [...missing]
+  // A patch the loader cannot parse is the one case where appending a fresh
+  // block is not a repair: `/mode fix` and the first-run repair would turn a
+  // user's malformed override into a file that still cannot boot, while
+  // claiming they had been fixed. Leave it to `/doctor`, which reports the
+  // parser error, and refuse the write rather than making the file longer.
+  if (!analysis.parseable) {
+    throw new Error(`profile patch does not parse; refusing to add rows: ${analysis.error ?? 'unknown YAML error'}`)
+  }
+  const toAdd = missing.filter(row => !patchNamesRow(analysis.rows, row))
   if (toAdd.length === 0) return undefined
   const entry = `${rosterPatchHeader(generation)}${rosterEntriesText(toAdd)}`
   if (/^\s*\[\s*\]\s*$/m.test(existing)) {
@@ -456,15 +469,17 @@ export function planDuplicateRepair(existing: string): PatchRepair | undefined {
 /**
  * Mount the roster in one profile, unless it is already composed.
  *
- * Idempotent: a profile whose patch already names the roster row (one bundling
- * `@deepseek-ai/dsh-web-app`, for example) is left untouched. The write is a
- * plain whole-file replace because the file is small and read once at boot; a
+ * Idempotent: a profile whose patch already addresses the roster row (one
+ * bundling `@deepseek-ai/dsh-web-app`, for example) is left untouched. An
+ * existing file is backed up before the small whole-file replace; a
  * half-written patch would only be seen by the next launch.
  * @param home - the harness home carrying `profiles/`.
  * @param profile - the profile to patch.
  * @param missing - the rows to mount; defaults to the 0.1.5 set.
  * @param generation - which host line the profile boots on.
  * @returns `present` when the row already exists, else `written`.
+ * @throws when the existing patch is not valid YAML; a blocked file is not
+ * appended to.
  */
 export async function ensureRosterRows(
   home: string,
@@ -473,16 +488,23 @@ export async function ensureRosterRows(
   generation: HostGeneration = 'legacy',
 ): Promise<'present' | 'written'> {
   const path = rosterPatchPath(home, profile)
-  let existing = PATCH_TEMPLATE
+  let existing: string | undefined
   try {
     existing = await readFile(path, 'utf8')
   } catch {
     // Missing file: start from the template the launcher would have written.
   }
-  const repair = planRosterRepair(existing, missing, generation)
+  const repair = planRosterRepair(existing ?? PATCH_TEMPLATE, missing, generation)
   if (repair === undefined) return 'present'
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, repair.text, 'utf8')
+  if (existing === undefined) {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, repair.text, 'utf8')
+  } else {
+    // The same rule `/doctor --fix` follows: a file the user owns is backed up
+    // before it is replaced. The backup write is best-effort inside the helper,
+    // but the repair itself is not silently skipped.
+    await writePatchWithBackup(path, repair.text)
+  }
   return 'written'
 }
 

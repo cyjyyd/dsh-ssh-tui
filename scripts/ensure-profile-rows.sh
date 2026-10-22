@@ -2,8 +2,8 @@
 # Mount the agent-preset roster the TUI's /mode needs into a dsh profile.
 #
 # Thin wrapper: the logic lives in scripts/profile-rows.mjs, which is portable
-# (the CI probe bootstrap calls it directly, so Windows gets the same roster
-# without needing bash).
+# (the developer install path calls it directly). The CI first-install probe
+# deliberately does not pre-fill the profile rows; it exercises the TUI repair.
 #
 # Usage:
 #   bash scripts/ensure-profile-rows.sh [profile]   # default: tui (or $DSH_TUI_PROFILE)

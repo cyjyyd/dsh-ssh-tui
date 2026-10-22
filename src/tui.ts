@@ -25,6 +25,7 @@ import { createRequire } from 'node:module'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-tools'
 import { METADATA_FILE, readPresetMetadata, type AgentPreset } from './preset-compat.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -127,7 +128,6 @@ import {
   ensureRosterRows,
   planDuplicateRepair,
   planRosterRepair,
-  formsRowsDeclared,
   rosterPatchPath,
   rosterRows,
   writePatchWithBackup,
@@ -3197,6 +3197,7 @@ export class SshTui {
     const credentials = this.ctx.get('credentials')
     const provider = this.currentProviderId()
     if (providerUsesLocalOAuth(provider)) {
+      await this.repairAgentPlaneAtBoot()
       // Workspace feedback *about* setup — not the wizard's own surface, which is the
       // setup Screen (B2.6 §12). These rows are the command plane's.
       this.pushRow(represent('command-status', {
@@ -3229,6 +3230,7 @@ export class SshTui {
     }
     if (envKey !== undefined && envKey !== '') {
       if (stored || existsSync(DSH_ENV_FILE) || this.resume) {
+        await this.repairAgentPlaneAtBoot()
         this.pushRow(represent('command-status', {
           kind: 'system',
           text: t('onboard.envInUse', { env: envRef }),
@@ -3254,7 +3256,10 @@ export class SshTui {
     // got an empty workspace, a provider that cannot answer, and no hint that
     // `/setup` exists. The launch flag is not evidence of configuration; the
     // credential store is, and that is what `stored` reads.
-    if (stored) return
+    if (stored) {
+      await this.repairAgentPlaneAtBoot()
+      return
+    }
     this.pushRow(represent('command-status', { kind: 'system', text: t('onboard.needSetup') }))
     await this.runOnboarding()
   }
@@ -3475,6 +3480,7 @@ export class SshTui {
   /** One collected `/doctor` snapshot, from this process's own services. */
   private async collectDoctorFacts(profile: string): Promise<DoctorFacts> {
     const routing = this.doctorRouting()
+    const tools = this.agentPlaneTools()
     return collectDoctor({
       profile,
       dshHome: resolveDshHome(),
@@ -3482,6 +3488,8 @@ export class SshTui {
       services: {
         roster: this.ctx.get('agentPresets') !== undefined,
         codeRuntime: this.hasHostService('codeRuntime'),
+        askUserTool: tools.askUser,
+        presentTool: tools.present,
       },
       generation: hostSettingsGeneration(this.ctx),
       anchors: [process.argv[1], (this.ctx as { baseUrl?: string }).baseUrl],
@@ -3564,7 +3572,7 @@ export class SshTui {
       if (facts.patch.readable) {
         backup = await writePatchWithBackup(facts.patchPath, text)
       } else {
-        await ensureRosterRows(facts.dshHome, facts.profile, rows)
+        await ensureRosterRows(facts.dshHome, facts.profile, rows, facts.generation ?? 'legacy')
       }
       const done = [
         t('doctor.fix.applied', {
@@ -11949,18 +11957,94 @@ export class SshTui {
   }
 
   /**
-   * `/mode fix`: write the roster row into this profile's user patch layer.
-   *
-   * The write only takes effect on the next launch — the loader composes the
-   * patch tree once at boot — so the report says so instead of pretending the
-   * running session gained a roster.
+   * The two tools a 0.1.7 terminal profile mounts itself, read from the running
+   * composition. The profile patch is only the instruction; this is the answer
+   * to whether the instruction actually produced a tool.
    */
+  private agentPlaneTools(): { askUser: boolean; present: boolean } {
+    const tools = this.ctx.get('tools')
+    return {
+      askUser: tools?.get('ask_user_question') !== undefined,
+      present: tools?.get('present') !== undefined,
+    }
+  }
+
+  /** Whether this process's agent plane has both tools. */
+  private agentPlaneReady(): boolean {
+    const tools = this.agentPlaneTools()
+    return tools.askUser && tools.present
+  }
+
+  /**
+   * Repair an already-configured profile at boot and say a restart is needed.
+   *
+   * A first run deliberately does not call this: its wizard save is the point
+   * where settings and credentials exist, and `onboardDone` repairs immediately
+   * after that write. This method serves the old/partial profile upgrade path,
+   * where there is no wizard to wait for.
+   */
+  private async repairAgentPlaneAtBoot(): Promise<void> {
+    const profile = profileFromArgv()
+    try {
+      const repaired = await this.ensureProfileAgentPlane(profile)
+      if (repaired === 'written') {
+        this.pushRow(represent('boot', {
+          kind: 'system',
+          text: t('onboard.agentPlaneAdded', {
+            path: rosterPatchPath(resolveDshHome(), profile),
+            profile,
+          }),
+        }))
+        this.refreshRosterHealth()
+        this.markDirty()
+      }
+    } catch (error) {
+      // A broken or unwritable patch must not be swallowed: the workspace can
+      // still boot, but the missing tools stay visible in the footer and
+      // `/doctor` explains how to repair the file.
+      this.pushRow(represent('boot', {
+        kind: 'error',
+        text: t('onboard.agentPlaneFailed', {
+          error: errorChain(error),
+          path: rosterPatchPath(resolveDshHome(), profile),
+        }),
+      }))
+      this.markDirty()
+    }
+  }
+
+  /**
+   * Add only the profile rows whose tools are missing from this composition.
+   *
+   * A row that is already present in the patch is never written again, even if
+   * its service failed to activate: the planner sees overrides and disables by
+   * id or module name, and `ensureRosterRows` creates a backup first. This is
+   * the first-run/upgrade repair, not an install-hook claim: it changes what
+   * the next boot composes, not what this process has already composed.
+   */
+  private async ensureProfileAgentPlane(profile = profileFromArgv()): Promise<'present' | 'written'> {
+    const generation = this.settingsGeneration
+    const tools = this.agentPlaneTools()
+    const missing = generation === 'forms'
+      ? rosterRows(generation).filter(row => row.id === 'tool-ask-user' ? !tools.askUser : !tools.present)
+      : rosterRows(generation).filter(row =>
+          row.id === 'agent-presets'
+            ? this.ctx.get('agentPresets') === undefined
+            : row.id === 'code-runtime'
+              ? !this.hasHostService('codeRuntime')
+              : true)
+    if (missing.length === 0) return 'present'
+    return ensureRosterRows(resolveDshHome(), profile, missing, generation)
+  }
+
   /** Re-read the roster fact this process was composed with (cheap, no IO). */
   private refreshRosterHealth(): void {
     // 0.1.7 has no roster to be missing: what a terminal profile owns there is
-    // the agent-plane rows, so the chip reports those instead.
+    // the agent-plane tools, so the chip follows the tools the composition
+    // actually registered. Reading the patch alone would call a broken load
+    // healthy as soon as the row text was written.
     this.rosterMissing = this.settingsGeneration === 'forms'
-      ? !formsRowsDeclared(resolveDshHome(), profileFromArgv())
+      ? !this.agentPlaneReady()
       : this.ctx.get('agentPresets') === undefined
   }
 
@@ -11984,6 +12068,14 @@ export class SshTui {
       : [first, t('mode.missingServiceHint', { profile, patch })].join('\n')
   }
 
+  /**
+   * `/mode fix`: write the missing profile rows into the user patch layer.
+   *
+   * The write only takes effect on the next launch — the loader composes the
+   * patch tree once at boot — so the report says so instead of pretending the
+   * running session gained a roster. The helper consults the actual tools, so
+   * a row a bundle already supplies is not mounted a second time.
+   */
   private async repairRoster(): Promise<void> {
     const profile = profileFromArgv()
     const patch = rosterPatchPath(resolveDshHome(), profile)
@@ -11992,8 +12084,7 @@ export class SshTui {
       // process-wide and owns the agent-plane rows instead of the roster. Both
       // the list and the header come from the same generation `/doctor` uses,
       // or this writes rows the running host cannot resolve.
-      const generation = this.settingsGeneration
-      const result = await ensureRosterRows(resolveDshHome(), profile, rosterRows(generation), generation)
+      const result = await this.ensureProfileAgentPlane(profile)
       this.refreshRosterHealth()
       this.pushRow(represent('repair-result', {
         kind: 'system',
@@ -13857,7 +13948,7 @@ export class SshTui {
           this.setupMessage(state, 'system', t('onboard.baseSaved', { path: displayDshPath('settings.yaml') }))
         }
         if (saved) {
-          this.onboardDone(t('onboard.officialDone', { model }))
+          await this.onboardDone(t('onboard.officialDone', { model }))
         }
       } else {
         const envRef = envRefForId(state.providerId)
@@ -14027,7 +14118,7 @@ export class SshTui {
           this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
-          this.onboardDone(t('onboard.customDone', { id: ownerId, model }))
+          await this.onboardDone(t('onboard.customDone', { id: ownerId, model }))
         }
       }
     } catch (error) {
@@ -14069,8 +14160,38 @@ export class SshTui {
    * answer: `command-status` routes to the transcript, exactly like the boot line
    * that asked for the setup in the first place.
    */
-  private onboardDone(text: string): void {
+  private async onboardDone(text: string): Promise<void> {
+    const profile = profileFromArgv()
+    let repairNote: string | undefined
+    try {
+      // The wizard wrote settings and the model selection through the profile
+      // patch. Only after those writes are complete does the agent-plane repair
+      // run, so it cannot be undone by the wizard's own patch update.
+      const repaired = await this.ensureProfileAgentPlane(profile)
+      if (repaired === 'written') {
+        repairNote = t('onboard.agentPlaneAdded', {
+          path: rosterPatchPath(resolveDshHome(), profile),
+          profile,
+        })
+      } else if (this.settingsGeneration === 'forms' && !this.agentPlaneReady()) {
+        // The rows are there but this process was composed before them (or a
+        // row failed to activate). Saying "saved" alone would hide that the
+        // tools are still absent from this session.
+        repairNote = t('onboard.agentPlaneRestart', {
+          path: rosterPatchPath(resolveDshHome(), profile),
+          profile,
+        })
+      }
+    } catch (error) {
+      repairNote = t('onboard.agentPlaneFailed', {
+        error: errorChain(error),
+        path: rosterPatchPath(resolveDshHome(), profile),
+      })
+    }
     this.pushRow(represent('command-status', { kind: 'system', text }))
+    if (repairNote !== undefined) {
+      this.pushRow(represent('runtime-warning', { kind: 'system', text: repairNote }))
+    }
     this.markDirty()
   }
 
