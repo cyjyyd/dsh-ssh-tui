@@ -334,7 +334,7 @@ async function runProbe(argv) {
     // failure is roughly one run in four and one run is one chance. A round that
     // does not return to the workspace is recorded as a problem, and the Host and
     // launcher traces below are printed with it.
-    const stress = Number(process.env.PROBE_PICKER_STRESS ?? 8)
+    const stress = Number(process.env.PROBE_PICKER_STRESS ?? 20)
     for (let round = 1; round <= stress; round += 1) {
       term.write('/view\r')
       const opened = await waitFor(onGrid(/工作区视图|Workspace view/u), 20_000, `the /view picker (stress ${round})`)
@@ -423,4 +423,5 @@ process.exitCode = code
 // The belt to `term.kill()`'s braces: if any pty bookkeeping stays referenced, the
 // loop would never drain and the process would sit there after printing its verdict.
 setTimeout(() => process.exit(code), 100).unref()
+
 
