@@ -35,6 +35,12 @@ const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
  * sniffed from the UI: the probe's preset assertions differ by host line.
  */
 const FORMS_HOST = isFormsVersion(require('@deepseek-ai/dsh/package.json').version)
+/**
+ * When set by the artifact gate, the home must have completed the first-run
+ * agent-plane repair and been restarted. A missing row then is a failure, not a
+ * normal first boot: the gate is asserting the post-repair composition.
+ */
+const REQUIRE_AGENT_PLANE = process.env.PROBE_REQUIRE_AGENT_PLANE === '1'
 // `import()` needs a URL, not a path: on Windows `D:\…` is rejected with
 // ERR_UNSUPPORTED_ESM_URL_SCHEME, which is what the first Windows CI run hit.
 const { sessionLockLookupPaths } = await import(
@@ -284,6 +290,21 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
   try {
     // 1. The TUI boots and paints its chrome.
     await waitFor(text => text.includes('DeepSeek Harness'), 60_000, 'the boot banner')
+    if (FORMS_HOST && REQUIRE_AGENT_PLANE) {
+      // The status row is the durable signal: the boot transcript row can be
+      // overwritten by the wizard, but the chip remains while the composition
+      // lacks a tool. Give the first frame time to reach the terminal.
+      const footerDeadline = Date.now() + 5_000
+      while (Date.now() < footerDeadline && statusRowOf(output) === '') {
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      const footer = statusRowOf(output)
+      check(!/代理平面行缺失|agent-plane rows missing/u.test(footer),
+        `a repaired first install must not paint the missing agent-plane footer chip: ${JSON.stringify(footer)}`)
+      const bootText = plain(output)
+      check(!/persona、ask_user_question、present 缺失|persona, ask_user_question or present is missing/u.test(bootText),
+        `a repaired first install must not paint the missing agent-plane warning: ${JSON.stringify(bootText.slice(0, 1200))}`)
+    }
 
     /**
      * A `/diag` wait that recognises a first-run home instead of failing on it.
@@ -445,6 +466,13 @@ async function runProbe({ sessionId, keep, home, lineMode }) {
     }
     check(/[●⚠✖]/u.test(doctor), '/doctor must print a status mark for its checks')
     check(/cordis\.patch\.yml/u.test(doctor), '/doctor must name the profile patch it read')
+    if (FORMS_HOST && REQUIRE_AGENT_PLANE) {
+      check(/代理平面已就绪|agent plane is ready/u.test(doctor),
+        `/doctor must report the composed agent plane after the restart: ${JSON.stringify(doctor.slice(0, 800))}`)
+      check(!/代理平面.*(缺失|未就绪)|agent plane.*(missing|not ready)/iu.test(doctor),
+        '/doctor must not still report an agent-plane gap')
+      console.log(`agent-plane: ${/代理平面已就绪|agent plane is ready/u.test(doctor) ? 'ready' : 'not ready'}`)
+    }
 
     // 4b. The copy key reaches the clipboard *from inside the Screen*: it carries
     //     what the Screen shows, which is the report. (Before B2.1 this step typed

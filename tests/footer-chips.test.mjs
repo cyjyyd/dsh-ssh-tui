@@ -136,12 +136,18 @@ async function missingRowsHome(t) {
 }
 
 /** A TUI whose roster service is missing (the default) or present. */
-async function footerTui({ presets, color = false, provider = '', model = '', settings, home } = {}) {
+async function footerTui({ presets, color = false, provider = '', model = '', settings, home, tools } = {}) {
   const previous = home === undefined ? undefined : process.env.DSH_HOME
   if (home !== undefined) process.env.DSH_HOME = home
   const { SshTui } = await import('../lib/tui.js')
   const ctx = {
-    get: name => (name === 'agentPresets' ? presets : name === 'settings' ? settings : undefined),
+    get: name => (name === 'agentPresets'
+      ? presets
+      : name === 'settings'
+        ? settings
+        : name === 'tools'
+          ? tools
+          : undefined),
     on() { return () => {} },
   }
   const agent = {
@@ -196,8 +202,8 @@ test('a missing roster puts the health chip on the strip, and clicking it opens 
 
 /**
  * Both lines have a way for "the profile already mounts its rows" to be true:
- * 0.1.5 injects the `agentPresets` service, 0.1.7 declares the three
- * agent-plane rows in the profile patch. Pin each generation through the
+ * 0.1.5 injects the `agentPresets` service, 0.1.7 registers the two
+ * agent-plane tools in the tool registry. Pin each generation through the
  * settings service the TUI feature-detects, instead of letting the installed
  * host decide which warning the strip is expected to show.
  */
@@ -226,9 +232,12 @@ test('a mounted agent plane leaves the strip clean', async t => {
   const dir = join(home, 'profiles', profileFromArgv())
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, 'cordis.patch.yml'), FORMS_PATCH_BLOCK)
-  // A settings service with no `get` is the 0.1.7 generation; the profile patch
-  // above is where that line reads whether its rows are mounted.
-  const tui = await footerTui({ settings: { describe: () => [] } })
+  // A settings service with no `get` is the 0.1.7 generation; the tool registry
+  // is what says whether the declared rows actually produced the two tools.
+  const tui = await footerTui({
+    settings: { describe: () => [] },
+    tools: { get: name => (name === 'ask_user_question' || name === 'present' ? { name } : undefined) },
+  })
   const frame = tui.captureFrame(40, 24).map(stripAnsi)
   assert.equal(
     frame.some(line => line.includes('⚠')),

@@ -54,8 +54,15 @@ const plain = line => line.replace(/\u001b\[[0-9;?]*[a-zA-Z]/gu, '').trimEnd()
 
 /** A TUI with `history` rows of mixed transcript, wired to a no-op display. */
 function fixture({ history = 200, status = 'idle' } = {}) {
+  const tools = {
+    get: name => (name === 'ask_user_question' || name === 'present' ? { name } : undefined),
+  }
   const ctx = {
-    get: name => (name === 'sessionProjections' ? { stateOf: () => ({ questions: { active: [], settled: [] } }) } : undefined),
+    get: name => (name === 'sessionProjections'
+      ? { stateOf: () => ({ questions: { active: [], settled: [] } }) }
+      : name === 'tools'
+        ? tools
+        : undefined),
     on() { return () => {} },
   }
   const agent = {

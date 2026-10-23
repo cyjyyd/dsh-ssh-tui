@@ -300,11 +300,16 @@ export function duplicatePatchRows(rows: readonly PatchRowRef[]): PatchRowRef[] 
   return duplicates
 }
 
-/** Whether a patch already declares one roster row, by id or by module name. */
+/**
+ * Whether a patch already addresses one roster row, by id or by module name.
+ *
+ * Every kind counts: an override or a disable targets the row just as an insert
+ * does. A repair must leave an intentional `- id: present` / `disabled: true`
+ * alone instead of mounting the same id a second time; the later entry would
+ * either collide with it or silently undo the user's choice.
+ */
 export function patchNamesRow(rows: readonly PatchRowRef[], row: RosterRow): boolean {
-  return rows.some(candidate =>
-    (candidate.kind === 'insert' && candidate.id === row.id)
-    || candidate.name === row.name)
+  return rows.some(candidate => candidate.id === row.id || candidate.name === row.name)
 }
 
 /** The roster rows a patch does not declare yet. */
@@ -348,6 +353,8 @@ function normalizeEnd(text: string): string {
  * @param missing - the roster rows to mount; defaults to the 0.1.5 set.
  * @param generation - which host line the profile boots on.
  * @returns the new text, or `undefined` when nothing has to change.
+ * @throws when `existing` is not valid YAML; appending to a broken patch would
+ * make it longer without making it bootable.
  */
 export function planRosterRepair(
   existing: string,
@@ -355,9 +362,15 @@ export function planRosterRepair(
   generation: HostGeneration = 'legacy',
 ): PatchRepair | undefined {
   const analysis = analyzePatch(existing)
-  const toAdd = analysis.parseable
-    ? missing.filter(row => !patchNamesRow(analysis.rows, row))
-    : [...missing]
+  // A patch the loader cannot parse is the one case where appending a fresh
+  // block is not a repair: `/mode fix` and the first-run repair would turn a
+  // user's malformed override into a file that still cannot boot, while
+  // claiming they had been fixed. Leave it to `/doctor`, which reports the
+  // parser error, and refuse the write rather than making the file longer.
+  if (!analysis.parseable) {
+    throw new Error(`profile patch does not parse; refusing to add rows: ${analysis.error ?? 'unknown YAML error'}`)
+  }
+  const toAdd = missing.filter(row => !patchNamesRow(analysis.rows, row))
   if (toAdd.length === 0) return undefined
   const entry = `${rosterPatchHeader(generation)}${rosterEntriesText(toAdd)}`
   if (/^\s*\[\s*\]\s*$/m.test(existing)) {
@@ -456,45 +469,80 @@ export function planDuplicateRepair(existing: string): PatchRepair | undefined {
 /**
  * Mount the roster in one profile, unless it is already composed.
  *
- * Idempotent: a profile whose patch already names the roster row (one bundling
- * `@deepseek-ai/dsh-web-app`, for example) is left untouched. The write is a
- * plain whole-file replace because the file is small and read once at boot; a
+ * Idempotent: a profile whose patch already addresses the roster row (one
+ * bundling `@deepseek-ai/dsh-web-app`, for example) is left untouched. An
+ * existing file is backed up before the small whole-file replace; a
  * half-written patch would only be seen by the next launch.
  * @param home - the harness home carrying `profiles/`.
  * @param profile - the profile to patch.
  * @param missing - the rows to mount; defaults to the 0.1.5 set.
  * @param generation - which host line the profile boots on.
+ * @param stamp - filename-safe backups stamp, injectable for tests.
  * @returns `present` when the row already exists, else `written`.
+ * @throws when the existing patch cannot be read, is not valid YAML, or cannot
+ * be backed up; a file that cannot be preserved is not overwritten.
  */
 export async function ensureRosterRows(
   home: string,
   profile: string,
   missing: readonly RosterRow[] = ROSTER_ROWS,
   generation: HostGeneration = 'legacy',
+  stamp?: string,
 ): Promise<'present' | 'written'> {
   const path = rosterPatchPath(home, profile)
-  let existing = PATCH_TEMPLATE
+  let existing: string | undefined
   try {
     existing = await readFile(path, 'utf8')
-  } catch {
-    // Missing file: start from the template the launcher would have written.
+  } catch (error) {
+    // Only a missing file means "start from the template". EACCES, EISDIR,
+    // EIO and every other read failure must abort the repair: treating them as
+    // absence would overwrite a profile the process could not read.
+    if (!isEnoent(error)) {
+      throw new Error(`cannot read profile patch ${path}; refusing to repair: ${errorMessage(error)}`, { cause: error })
+    }
   }
-  const repair = planRosterRepair(existing, missing, generation)
+  const repair = planRosterRepair(existing ?? PATCH_TEMPLATE, missing, generation)
   if (repair === undefined) return 'present'
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, repair.text, 'utf8')
+  if (existing === undefined) {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, repair.text, 'utf8')
+  } else {
+    // The same rule `/doctor --fix` follows: a file the user owns is backed up
+    // before it is replaced, and a failed backup aborts the write.
+    await writePatchWithBackup(path, repair.text, stamp)
+  }
   return 'written'
+}
+
+/** A filesystem error's code, when it has one. */
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined
+}
+
+/** A human-readable message for a caught filesystem error. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Whether a read failure means the file is absent, and nothing else. */
+function isEnoent(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT'
 }
 
 /**
  * Write a repaired patch next to a copy of the previous content.
  *
- * `/doctor` changes a file the user owns, so the old text is kept beside it
- * before anything is replaced. A file that does not exist yet needs no backup.
+ * `/doctor` and the automatic repair change a file the user owns, so the old
+ * text is kept beside it before anything is replaced. A source that vanished
+ * between the read and the copy needs no backup; any other backup failure
+ * aborts before the write, leaving the original untouched.
  * @param path - the patch file to replace.
  * @param text - the new content.
  * @param stamp - filename-safe timestamp for the backup, injectable for tests.
  * @returns the backup path, or `undefined` when there was nothing to back up.
+ * @throws when the backup cannot be written; the destination is not touched.
  */
 export async function writePatchWithBackup(
   path: string,
@@ -505,7 +553,12 @@ export async function writePatchWithBackup(
   try {
     backup = `${path}.bak-${stamp}`
     await copyFile(path, backup)
-  } catch {
+  } catch (error) {
+    if (!isEnoent(error)) {
+      throw new Error(`cannot back up profile patch ${path}; refusing to write: ${errorMessage(error)}`, { cause: error })
+    }
+    // The source disappeared after the caller read it. There is no user content
+    // left to preserve, so the repair may create the file fresh.
     backup = undefined
   }
   await mkdir(dirname(path), { recursive: true })

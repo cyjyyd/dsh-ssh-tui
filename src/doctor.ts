@@ -74,6 +74,14 @@ export interface DoctorFacts {
     roster: boolean
     /** `codeRuntime` — what the PTC preset mounts. */
     codeRuntime: boolean
+    /**
+     * `tools.get('ask_user_question')` — the actual registration, not the row
+     * text. Absent on snapshots taken before this field existed, where the
+     * textual check remains the fallback.
+     */
+    askUserTool?: boolean
+    /** `tools.get('present')` — the other half of the 0.1.7 agent plane. */
+    presentTool?: boolean
   }
   /** The profile patch. `readable` is false when it does not exist yet. */
   patch: { readable: boolean; text: string; analysis: PatchAnalysis }
@@ -143,18 +151,44 @@ export function doctorChecks(facts: DoctorFacts): DoctorCheck[] {
   const generation = facts.generation ?? 'legacy'
   if (generation === 'forms') {
     const missing = analysis.parseable ? missingRosterRows(analysis.rows, rosterRows(generation)) : []
+    const toolsKnown = facts.services.askUserTool !== undefined || facts.services.presentTool !== undefined
+    const toolsMissing = [
+      ...(facts.services.askUserTool === false ? ['ask_user_question'] : []),
+      ...(facts.services.presentTool === false ? ['present'] : []),
+    ]
+    // A tool a bundle already registered does not need a profile row. Only the
+    // rows whose tools are genuinely absent are reported or repaired.
+    const missingTools = toolsKnown
+      ? missing.filter(row => row.id === 'tool-ask-user'
+          ? facts.services.askUserTool === false
+          : facts.services.presentTool === false)
+      : missing
     if (!analysis.parseable) {
       checks.push({ id: 'agent-plane', status: 'warn', summary: t('doctor.forms.unknown'), details: [] })
-    } else if (missing.length === 0) {
+    } else if (toolsKnown && toolsMissing.length === 0) {
+      // Both tools are registered, whether the profile patch spells them or a
+      // bundle supplied them. There is nothing to repair.
       checks.push({ id: 'agent-plane', status: 'ok', summary: t('doctor.forms.ok'), details: [] })
-    } else {
+    } else if (missingTools.length > 0) {
       checks.push({
         id: 'agent-plane',
         status: 'warn',
         summary: t('doctor.forms.warn'),
-        details: missing.map(row => t('doctor.detail.missingRow', { id: row.id })),
+        details: missingTools.map(row => t('doctor.detail.missingRow', { id: row.id })),
         fixable: true,
       })
+    } else if (toolsKnown && toolsMissing.length > 0) {
+      // The row is in the patch but the running composition never registered
+      // the tool. Adding the row again would only mount a duplicate; report the
+      // gap instead of turning a write into a claim of readiness.
+      checks.push({
+        id: 'agent-plane',
+        status: 'fail',
+        summary: t('doctor.forms.notActive', { missing: toolsMissing.join(', ') }),
+        details: toolsMissing.map(id => t('doctor.detail.unregisteredTool', { id })),
+      })
+    } else {
+      checks.push({ id: 'agent-plane', status: 'ok', summary: t('doctor.forms.ok'), details: [] })
     }
   } else if (facts.services.roster) {
     checks.push({ id: 'roster', status: 'ok', summary: t('doctor.roster.ok'), details: [] })
@@ -465,7 +499,16 @@ export function rowsToRepair(facts: DoctorFacts): RosterRow[] {
   // base composes the agent process-wide, and the three rows a terminal profile
   // owns are the ones the patch text either declares or does not.
   if (generation === 'forms') {
-    return missingRosterRows(facts.patch.analysis.rows, rosterRows(generation))
+    const missing = missingRosterRows(facts.patch.analysis.rows, rosterRows(generation))
+    // A tool the running composition already registered must not be mounted
+    // again: another copy would fail the loader ("service ... has been
+    // registered") or shadow the row the bundle supplied. Old snapshots do not
+    // carry these facts, so their textual behaviour is preserved.
+    const toolsKnown = facts.services.askUserTool !== undefined || facts.services.presentTool !== undefined
+    if (!toolsKnown) return missing
+    return missing.filter(row =>
+      (row.id === 'tool-ask-user' && facts.services.askUserTool === false)
+      || (row.id === 'present' && facts.services.presentTool === false))
   }
   const missing = missingRosterRows(facts.patch.analysis.rows)
   return missing.filter(row => (row.id === ROSTER_ROWS[0]?.id && !facts.services.roster)
