@@ -459,3 +459,62 @@ test('a paste tail whose other half never comes is released as payload', async (
   assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }],
     'and the paste it belonged to is abandoned, so the keyboard comes back')
 })
+
+/**
+ * The Escape that arrived while a paste marker was pending.
+ *
+ * This is the CI failure (`Paste probe (ConPTY, composer + layers)`: the `/view`
+ * picker stayed up after Esc, and the probe timed out waiting for the workspace).
+ * The paste the probe wrote is complete, but a terminal may deliver it cut or with
+ * its close marker lost; the reader then holds a tail, and the Escape that arrives
+ * one second later used to be resolved as paste text **two seconds later** — by
+ * which time the key was gone and the dialog it was meant to close was still up.
+ *
+ * The window is injected so the test waits 60 ms rather than the release value.
+ */
+test('an Escape after a paste whose close marker was lost is still the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  // The close marker never arrives: the terminal swallowed it.
+  assert.deepEqual(reader.read('\x1b[200~PASTED-IN-PICKER'), [{ kind: 'paste', text: 'PASTED-IN-PICKER' }],
+    'the payload still lands')
+  assert.deepEqual(reader.read('\x1b'), [],
+    'the Escape is held while its other half could still be a marker')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }],
+    'and it is released as the Escape key, not as paste text')
+  assert.deepEqual(reader.read('x'), [{ kind: 'burst', text: 'x' }],
+    'the paste is over, so the next key is typed again')
+})
+
+test('an Escape after a close marker the terminal cut in half is still the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~PASTED-IN-PICKER\x1b[20'), [{ kind: 'paste', text: 'PASTED-IN-PICKER' }],
+    'the payload lands; the cut marker is held')
+  assert.deepEqual(reader.read('\x1b'), [{ kind: 'paste', text: '\x1b[20' }],
+    'the held half cannot become a marker once Escape follows it, so it is payload')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the Escape itself is the key the reader pressed')
+})
+
+test('an Escape arriving in the same read as a complete close marker is a key, not text', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[201~\x1b'), [{ kind: 'paste', text: 'pasted' }],
+    'the payload is the paste; the Escape behind the marker is not payload')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the Escape behind a closed paste is the Escape key')
+})
+
+test('a complete marker still closes the paste, and a lone Escape keeps its own timing', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame) })
+  const started = Date.now()
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[201~'), [{ kind: 'paste', text: 'pasted' }])
+  assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }])
+  assert.equal(reader.hold('\x1b'), true, 'the routing still holds a lone Escape, as it always did')
+  await new Promise(resolve => setTimeout(resolve, ESCAPE_HOLD_MS + 60))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.ok(Date.now() - started < 400, 'the Escape window is the keystroke window, not the marker watchdog')
+})

@@ -14,6 +14,11 @@
  *   - **paste framing** — `ESC[200~ … ESC[201~` markers, the payload between them,
  *     and the console-without-bracketed-paste fallback (a burst carrying more than
  *     one line break in one read is a paste, not repeated Enter presses)
+ *   - **paste-tail release** — a marker cut in half is held, and what it turns out
+ *     to be decides the frame: a longer tail (`ESC[20`) may still be a marker, so it
+ *     keeps the marker window and is released as payload; a tail that is only `ESC`
+ *     cannot be paste text, so it is released as the **Escape key** after the Escape
+ *     window (the rule `armPasteTail` implements)
  *   - **unit classification** — whether a read is one complete terminal unit, a
  *     burst of typing, paste traffic, or a device reply (shape only: this module
  *     does not know which key does what)
@@ -212,8 +217,22 @@ export class InputReader {
     return { frames: this.frames(body), tail: combined.slice(combined.length - keep) }
   }
 
+  /**
+   * Release a held paste tail, on the window its content deserves.
+   *
+   * A tail that is **only** `ESC` is not paste text: it is either the start of a
+   * marker whose other half never came, or the Escape key the reader pressed while
+   * the paste was still open. Holding it for the marker window turned it into a
+   * `paste` frame (or a `literal`) two seconds later — the key was gone either way,
+   * which is how a picker whose paste lost its close marker stayed open and a CI
+   * probe timed out waiting for the workspace. So a bare `ESC` gets the *Escape*
+   * disambiguation window, and it is released as the key. A longer tail (`ESC[20`)
+   * keeps the marker window: only it can still become a marker.
+   */
   private armPasteTail(): void {
     this.cancelPasteTail()
+    const configured = this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS
+    const onlyEscape = this.pasteTail === '\x1b'
     this.pasteTailTimer = setTimeout(() => {
       this.pasteTailTimer = undefined
       const pending = this.pasteTail
@@ -221,9 +240,14 @@ export class InputReader {
       // Its other half never came. Those bytes are what the reader pasted, and the
       // paste they belonged to is over: leaving `inPaste` set here is what turned a
       // slow (or swallowed) marker into a session that ignored every key.
+      if (pending === '\x1b') {
+        this.inPaste = false
+        this.options.onFrame({ kind: 'escape' })
+        return
+      }
       if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
       this.inPaste = false
-    }, this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS)
+    }, onlyEscape ? Math.min(configured, ESCAPE_HOLD_MS) : configured)
   }
 
   private cancelPasteTail(): void {
