@@ -27,6 +27,8 @@
  *     an estimate of the link rather than of the current queue.
  */
 import { StringDecoder } from 'node:string_decoder'
+// WIN-CI1.H2 diagnostic: a no-op unless DSH_TUI_DIAG_DIR is set.
+import { diag } from './diag-trace.js'
 
 /** True when this process is talking to a terminal through SSH. */
 export function detectSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -139,6 +141,7 @@ export class TerminalInputFilter {
     const tail = cursorReplyTail(cleaned)
     if (tail === '') return { forward: cleaned, replies }
     this.held = tail
+    diag('filter-held', { inLen: combined.length, forwardLen: cleaned.length - tail.length, heldLen: tail.length })
     return { forward: cleaned.slice(0, cleaned.length - tail.length), replies }
   }
 
@@ -147,6 +150,11 @@ export class TerminalInputFilter {
     const held = this.held
     this.held = ''
     return held
+  }
+
+  /** WIN-CI1.H2: how many bytes are held as a possible reply tail. */
+  heldLength(): number {
+    return this.held.length
   }
 
   /** Forget a held partial — used when the caller knows it must be stale. */
@@ -501,6 +509,8 @@ export class TerminalInputPump {
     }
     // A half-arrived sequence sitting here now predates the request we are
     // about to send, so it cannot be its answer.
+    // WIN-CI1.H2: this is the line that can swallow a key the filter is holding.
+    diag('pump-drain-reset', { heldLen: this.filter.heldLength() })
     this.filter.reset()
   }
 
@@ -544,6 +554,8 @@ export class TerminalInputPump {
     const text = typeof chunk === 'string' ? chunk : this.decoder.write(chunk)
     if (text === '') return
     const { forward, replies } = this.filter.push(text)
+    // WIN-CI1.H2: what the TTY delivered, and what the filter let through.
+    diag('pump-feed', { len: text.length, forwardLen: forward.length, replies, held: this.filter.heldLength() })
     for (let index = 0; index < replies; index += 1) this.answer()
     if (forward !== '') this.options.onInput(forward)
     this.scheduleHold()
