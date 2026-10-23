@@ -1772,6 +1772,10 @@ export async function runDisplayRelay(
       if (text === '') return
       const bytes = Buffer.from(text, 'utf8')
       if (!live) {
+        // WIN-CI1.H2: bytes typed before HELLO are queued, not sent. If a key is
+        // lost here the trace says so instead of looking like a terminal that never
+        // delivered it.
+        diag('relay-stdin-pending', { len: bytes.length, queued: pending.length + 1 })
         pending.push(bytes)
         pendingBytes += bytes.length
         while (pendingBytes > MAX_PENDING_INPUT && pending.length > 1) {
