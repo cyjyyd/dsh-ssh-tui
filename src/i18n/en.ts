@@ -352,7 +352,7 @@ export const en: Record<string, string> = {
   'doctor.scope.fail': '{count} copies of @deepseek-ai/dsh-scope found: preset composition refuses an unscoped context',
   'doctor.routing.ok': 'the default route and the subagent model are self-consistent',
   'doctor.routing.warn': '{count} routing self-consistency problems',
-  'doctor.routing.providerMissing': 'the default provider {provider} is not a configured route (configured: {routes})',
+  'doctor.routing.providerMissing': 'the default provider {provider} is neither registered nor configured (registered or configured: {routes})',
   'doctor.routing.modelMissing': 'the model {model} is not in the {provider} route model list',
   'doctor.routing.subMismatch': 'the subagent model {model} is not the same family as its parent route {provider}',
   'doctor.fixHint': 'fix: /doctor --fix (backs up before writing)',

@@ -53,7 +53,11 @@ export interface DoctorCheck {
 export interface DoctorRouting {
   provider?: string
   model?: string
-  /** Every provider id the llm-pi-ai section configures. */
+  /**
+   * Every route exposed by the live adapter directory or configured under
+   * `llm-pi-ai.providers`. Presence is registration/configuration evidence,
+   * not a network probe.
+   */
   routes: readonly string[]
   /** Model ids the selected provider's route lists. */
   routeModels: readonly string[]
