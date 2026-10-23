@@ -21,6 +21,8 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+// WIN-CI1.H2 diagnostic: a no-op unless DSH_TUI_DIAG_DIR is set.
+import { diag } from './diag-trace.js'
 import { createRequire } from 'node:module'
 import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -3666,6 +3668,12 @@ export class SshTui {
    * or closing a socket after we already detached, is not an SSH hangup.
    */
   handleDisplayDetach(info?: { replaced?: boolean }): void {
+    diag('handle-display-detach', {
+      replaced: info?.replaced === true,
+      disposed: this.disposed,
+      hangingUp: this.hangingUp,
+      detached: this.displayDetached,
+    })
     if (this.disposed || this.hangingUp) return
     if (info?.replaced === true) return
     if (this.displayDetached) return
@@ -3856,12 +3864,22 @@ export class SshTui {
 
   private async ensureDisplayHost(): Promise<void> {
     if (this.displayHost !== undefined || this.disposed) return
+    diag('host-construct')
     const host = new DisplayHost(sessionSockPath(String(this.agent.id)), {
       onStdin: (bytes) => {
+        diag('host-onstdin', { len: bytes.length })
         if (this.disposed) return
         this.handleData(bytes)
       },
       onResize: (columns, rows) => {
+        diag('on-resize', {
+          hasHost: this.displayHost !== undefined,
+          attached: this.displayHost?.attached ?? false,
+          detached: this.displayDetached,
+          knownCols: this.relayColumns ?? -1,
+          cols: columns,
+          rows,
+        })
         const changed = this.relayColumns !== columns || this.relayRows !== rows
         this.relayColumns = columns
         this.relayRows = rows
@@ -3884,9 +3902,16 @@ export class SshTui {
         this.markDirty()
       },
       onDetach: (info) => {
+        diag('on-detach', { replaced: info?.replaced === true })
         this.handleDisplayDetach(info)
       },
       onAttach: () => {
+        diag('on-attach', {
+          hasHost: this.displayHost !== undefined,
+          attached: this.displayHost?.attached ?? false,
+          detached: this.displayDetached,
+          knownCols: this.relayColumns ?? -1,
+        })
         if (this.disposed) return
         if (this.relayColumns !== undefined && this.relayRows !== undefined) {
           this.attachRelayDisplay()
@@ -3894,11 +3919,13 @@ export class SshTui {
       },
     })
     await host.listen()
+    diag('host-listening', { pid: process.pid })
     if (this.disposed) {
       await host.close()
       return
     }
     this.displayHost = host
+    diag('host-assigned', { attached: host.attached === true })
   }
 
   /**
@@ -3947,6 +3974,11 @@ export class SshTui {
 
   /** Re-open DECSET and start painting to an attached Display relay. */
   attachRelayDisplay(): void {
+    diag('attach-relay', {
+      wasDetached: this.displayDetached,
+      attached: this.displayHost?.attached ?? false,
+      knownCols: this.relayColumns ?? -1,
+    })
     // A relay that HELLOs while a hangup is still unwinding must be honored by
     // that hangup: the snapshot taken at the drop would otherwise dispose (or
     // exit) the Host under the display the user just got back, and the
@@ -7154,7 +7186,17 @@ export class SshTui {
 
   private render = (): void => {
     if (!this.dirty || this.exiting) return
-    if ((this.displayDetached || this.headlessDisplay) && this.displayHost?.attached !== true) return
+    if ((this.displayDetached || this.headlessDisplay) && this.displayHost?.attached !== true) {
+      // WIN-CI1.H2: the only skip that leaves the screen frozen while input still
+      // works — logged every time, because a run that ends here has no new frames.
+      diag('render-skip-detached', {
+        detached: this.displayDetached,
+        headless: this.headlessDisplay,
+        attached: this.displayHost?.attached ?? false,
+        hasHost: this.displayHost !== undefined,
+      })
+      return
+    }
     // Burst merging on a slow link: the previous frames have not drained yet,
     // so another one would only queue behind them and delay the newest state.
     // The paint is skipped, not lost — `dirty` stays set and the next tick
@@ -7174,6 +7216,7 @@ export class SshTui {
       return
     }
     this.dirty = false
+    diag('paint')
     this.paint()
   }
 
@@ -12414,6 +12457,8 @@ export class SshTui {
   // ── keyboard ────────────────────────────────────────────────────────────
 
   private readonly handleData = (chunk: Buffer): void => {
+    // WIN-CI1.H2: length and shape only — never the bytes (a paste carries text).
+    diag('input-bytes', { len: chunk.length, escFirst: chunk.length > 0 && chunk[0] === 0x1b })
     this.reader.push(chunk)
   }
 
@@ -12610,6 +12655,13 @@ export class SshTui {
 
   /** One framed unit, at the owner that takes it. */
   private consumeFrame(frame: InputFrame): void {
+    // WIN-CI1.H2: the frame kind and its length, never its content.
+    diag('frame', {
+      kind: frame.kind,
+      len: frame.kind === 'paste' || frame.kind === 'burst' || frame.kind === 'literal'
+        ? frame.text.length
+        : frame.kind === 'escape' ? 1 : frame.sequence.length,
+    })
     switch (frame.kind) {
       case 'paste': this.dispatchPaste(frame.text); return
       // A sequence tail, an Alt remainder or a released hold: typed as it is, with
@@ -12647,6 +12699,14 @@ export class SshTui {
     const kind = this.readKind(combined)
     this.observe(kind, combined)
     const owner = this.router.route(kind, combined, this.ownershipView)
+    // WIN-CI1.H2: who took this unit, and whether a Surface was up at the time.
+    diag('route', {
+      kind,
+      owner,
+      surface: this.ownershipView.surfaceKind === undefined ? 'none' : 'yes',
+      screen: this.ownershipView.screenKind === undefined ? 'none' : 'yes',
+      unitLen: combined.length,
+    })
     // A Screen owns the read outright (AD-20 §4.3 priority 3): nothing below this
     // line runs for it — no keymap action, no Alt chord, no bare ESC for the composer.
     if (owner === 'screen') {

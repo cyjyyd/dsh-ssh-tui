@@ -37,9 +37,16 @@
  * Exit code 0 means every assertion passed; on failure the captured grid is printed.
  */
 import { createRequire } from 'node:module'
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
+
+// WIN-CI1.H2: one directory per probe process, outside the throwaway home, holding
+// the launcher's and the Host's separate traces.
+const diagDir = process.env.DSH_DIAG_DIR ?? join(tmpdir(), `dsh-diag-${process.pid}`)
+try { mkdirSync(diagDir, { recursive: true, mode: 0o700 }) } catch { /* the probe still runs */ }
 
 // The pty in front may rewrite the frame shape these checks read (see the export).
 import { PTY_IS_CONPTY } from './pty-window.mjs'
@@ -153,6 +160,10 @@ async function runProbe(argv) {
       DSH_HOME: home,
       TERM: 'xterm-256color',
       DSH_TUI_NO_UPDATE_CHECK: '1',
+      // WIN-CI1.H2 diagnostic: the launcher and the Host each append their own file
+      // here (role-pid.log). The directory is outside the throwaway home, so the
+      // probe's cleanup cannot take the evidence with it.
+      DSH_TUI_DIAG_DIR: diagDir,
       SSH_CONNECTION: '10.0.0.2 55555 10.0.0.1 22',
       SSH_TTY: '/dev/pts/9',
     },
@@ -319,6 +330,27 @@ async function runProbe(argv) {
     await waitFor(onGrid(/输入 \/help/u), 20_000, 'the workspace back after the picker')
     check(draftOf(await rowsOf(output), prompt) === '', 'the picker paste never reached the composer')
 
+    // WIN-CI1.H2: the same shape again, `PROBE_PICKER_STRESS` times, because the
+    // failure is roughly one run in four and one run is one chance. A round that
+    // does not return to the workspace is recorded as a problem, and the Host and
+    // launcher traces below are printed with it.
+    const stress = Number(process.env.PROBE_PICKER_STRESS ?? 20)
+    for (let round = 1; round <= stress; round += 1) {
+      term.write('/view\r')
+      const opened = await waitFor(onGrid(/工作区视图|Workspace view/u), 20_000, `the /view picker (stress ${round})`)
+        .then(() => true).catch(() => false)
+      if (!opened) { check(false, `stress round ${round}: the /view picker never opened`); break }
+      term.write('\x1b[200~PASTED-IN-PICKER\x1b[201~')
+      await delay(1000)
+      term.write('\x1b')
+      const closed = await waitFor(onGrid(/输入 \/help/u), 8_000, `the workspace back (stress ${round})`)
+        .then(() => true).catch(() => false)
+      console.log(`stress ${round}: ${closed ? 'closed' : 'STUCK'}`)
+      if (!closed) { check(false, `stress round ${round}: Esc did not close the picker`); break }
+      term.write('\x15')
+      await delay(300)
+    }
+
     // 8. `/exit` hands the terminal back instead of leaving a shell with no prompt.
     term.write('/exit\r')
     await waitFor(async () => exited !== undefined, 20_000, 'the process to exit after /exit')
@@ -345,6 +377,23 @@ async function runProbe(argv) {
     for (const [index, row] of rows.entries()) console.log(`${String(index + 1).padStart(2)} ${row}`)
     console.log('--- captured stream (plain, tail) ---')
     console.log(output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/gu, '').slice(-1500))
+    // WIN-CI1.H2: the two sides of the socket, printed from the diagnostic directory
+    // (never from the throwaway home, which the probe is about to remove). The receipt
+    // line names a real Host pid or says the Host evidence is missing.
+    const files = (() => {
+      try { return readdirSync(diagDir).filter(name => name.endsWith('.log')).sort() } catch { return [] }
+    })()
+    const hosts = files.filter(name => name.startsWith('host-'))
+    const launchers = files.filter(name => name.startsWith('launcher-'))
+    console.log(`--- diag receipt: dir=${diagDir} files=${files.length} launcher=${launchers.length} host=${hosts.length} ---`)
+    if (hosts.length === 0) console.log('--- HOST EVIDENCE MISSING: only the launcher wrote a trace ---')
+    for (const name of files) {
+      const lines = (() => {
+        try { return readFileSync(join(diagDir, name), 'utf8').trimEnd().split('\n') } catch { return [`unreadable ${name}`] }
+      })()
+      console.log(`--- trace ${name} (${lines.length} lines, tail 120) ---`)
+      for (const line of lines.slice(-120)) console.log(line)
+    }
     for (const problem of problems) console.log(`FAIL: ${problem}`)
     return 1
   }
@@ -374,3 +423,5 @@ process.exitCode = code
 // The belt to `term.kill()`'s braces: if any pty bookkeeping stays referenced, the
 // loop would never drain and the process would sit there after printing its verdict.
 setTimeout(() => process.exit(code), 100).unref()
+
+
