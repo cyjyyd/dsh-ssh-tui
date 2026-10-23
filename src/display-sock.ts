@@ -30,6 +30,8 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { mkdir, readFile, unlink } from 'node:fs/promises'
 import { closeSync, constants as fsConstants, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
+// WIN-CI1.H2 diagnostic: a no-op unless DSH_TUI_DIAG_DIR is set.
+import { diag } from './diag-trace.js'
 import {
   INPUT_HOLD_MS,
   RTT_SLOW_SAMPLE_TIMEOUT_MS,
@@ -667,6 +669,7 @@ export class DisplayHost {
   private accept(socket: Socket): void {
     const reader = new FrameReader()
     let claimed = false
+    diag('accept')
     const dropProbe = (): void => {
       if (claimed) return
       socket.destroy()
@@ -674,6 +677,7 @@ export class DisplayHost {
     const claim = (): void => {
       if (claimed) return
       claimed = true
+      diag('claim', { replaced: this.socket !== undefined && this.socket !== socket })
       if (this.socket !== undefined && this.socket !== socket) {
         const previous = this.socket
         this.socket = undefined
@@ -731,6 +735,7 @@ export class DisplayHost {
     const drop = (): void => {
       if (!claimed) return
       if (this.socket !== socket) return
+      diag('drop')
       this.socket = undefined
       this.attached = false
       this.handlers.onDetach()
@@ -740,10 +745,15 @@ export class DisplayHost {
       try {
         frames = reader.push(chunk)
       } catch {
+        diag('socket-data-error', { len: chunk.length })
         socket.destroy()
         return
       }
+      diag('socket-data', { len: chunk.length, frames: frames.length, claimed })
       for (const frame of frames) {
+        if (frame.type === FRAME_STDIN) diag('frame-stdin', { len: frame.payload.length, claimed })
+        else if (frame.type === FRAME_RESIZE) diag('frame-resize', { len: frame.payload.length, claimed })
+        else diag('frame-other', { type: frame.type, claimed })
         if (frame.type === FRAME_HELLO) claim()
         else if (frame.type === FRAME_QUERY) {
           // A prober asking whether a window is really on this session. It is
@@ -766,9 +776,11 @@ export class DisplayHost {
       }
     })
     socket.on('close', () => {
+      diag('socket-close', { claimed })
       if (claimed) drop()
     })
     socket.on('error', () => {
+      diag('socket-error', { claimed })
       if (claimed) drop()
       else dropProbe()
     })
@@ -1769,7 +1781,9 @@ export async function runDisplayRelay(
       }
       try {
         socket.write(encodeFrame(FRAME_STDIN, bytes))
+        diag('relay-stdin', { len: bytes.length })
       } catch {
+        diag('relay-stdin-failed', { len: bytes.length })
         finish('host-closed')
       }
     }
@@ -2029,6 +2043,7 @@ export async function runDisplayRelay(
             encodeResize(columns, rows),
             encodeRtt(rtt),
           ]))
+          diag('relay-hello', { cols: columns, rows, rttKnown: rtt !== undefined })
           live = true
           // Measure what this terminal does with `①` and friends, now that the
           // pump is running and the reply will be swallowed rather than echoed.
