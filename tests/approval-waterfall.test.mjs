@@ -6,22 +6,22 @@ import { feedbackText, lastFeedback } from './wait.mjs'
 
 setLocale('zh')
 
-function fakeAgent() {
+function fakeAgent(id = 'main-session') {
   return {
-    id: 'main-session',
+    id,
     options: {},
     status: 'idle',
-    session: { id: 'main-session', events: [] },
+    session: { id, events: [] },
     cancel() {},
     steer() {},
     followup() {},
   }
 }
 
-function approvalTui(extraCtx = {}) {
+function approvalTui(extraCtx = {}, agentId = 'main-session') {
   const ctx = { get: () => undefined, on() { return () => {} }, ...extraCtx }
-  const agent = fakeAgent()
-  const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
+  const agent = fakeAgent(agentId)
+  const tui = new SshTui(ctx, agent, { sessionId: agentId, color: false })
   tui.runCommand('/approval auto')
   return { tui, agent }
 }
@@ -373,6 +373,93 @@ function reviewerTui(verdictJson, counters = { reviews: 0 }) {
 }
 
 const APPROVE_LOW = '{"risk":"low","authorization":"yes","decision":"approved","reason":"工作区内只读检查"}'
+
+function reviewerWithOptions({ verdictJson = APPROVE_LOW, agentId = 'main-session' } = {}) {
+  const calls = []
+  const ctx = {
+    get(name) {
+      if (name === 'llm') {
+        return {
+          stream: async function* (options) {
+            calls.push(options)
+            yield { type: 'text-delta', text: verdictJson }
+          },
+        }
+      }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const { tui, agent } = approvalTui(ctx, agentId)
+  return { tui, agent, calls }
+}
+
+test('reviewer requests carry the authorizing Agent Session id', async () => {
+  const { tui, agent, calls } = reviewerWithOptions()
+  tui.subagentSelection.current = { provider: 'opencode-go', model: 'deepseek-v4-flash' }
+  const before = agent.session.events.length
+
+  const first = await decide(tui, bashCall(tui, agent, 'c-session-1', 'python deploy.py'))
+  const second = await decide(tui, bashCall(tui, agent, 'c-session-2', 'python deploy2.py'))
+  assert.equal(first, 'allowed-once')
+  assert.equal(second, 'allowed-once')
+  assert.equal(calls.length, 2, 'two distinct approvals each get one reviewer call')
+  assert.deepEqual(
+    calls.map(options => String(options.sessionId)),
+    [agent.session.id, agent.session.id],
+    'the reviewer carries the same real Session id both times',
+  )
+  assert.ok(calls.every(options => options.signal instanceof AbortSignal), 'request/timeout signals survive')
+  assert.equal(agent.session.events.length, before, 'the review never writes a user transcript event')
+})
+
+test('different Agent Sessions cannot share reviewer identity', async () => {
+  const { tui, agent, calls } = reviewerWithOptions()
+  const child = fakeAgent('child-session')
+  await decide(tui, bashCall(tui, child, 'c-child', 'python child.py'))
+  await decide(tui, bashCall(tui, agent, 'c-parent', 'python parent.py'))
+  assert.deepEqual(
+    calls.map(options => String(options.sessionId)),
+    ['child-session', 'main-session'],
+    'a child approval uses the child Agent Session, not the UI parent',
+  )
+})
+
+test('non-OpenCode provider keeps its route and reviewer options', async () => {
+  const { tui, agent, calls } = reviewerWithOptions()
+  tui.subagentSelection.current = { provider: 'deepseek', model: 'deepseek-chat' }
+  const outcome = await decide(tui, bashCall(tui, agent, 'c-other-provider', 'python deploy.py'))
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(calls[0].provider, 'deepseek')
+  assert.equal(calls[0].model, 'deepseek-chat')
+  assert.equal(calls[0].maxTokens, 400)
+  assert.equal(calls[0].reasoningEffort, 'off')
+  assert.equal(String(calls[0].sessionId), agent.session.id, 'the generic session hint is still the real one')
+})
+
+test('a failed reviewer with a Session id still fails closed', async () => {
+  const calls = []
+  const ctx = {
+    get(name) {
+      if (name === 'llm') {
+        return {
+          stream: async function* (options) {
+            calls.push(options)
+            throw new Error('review transport failed')
+          },
+        }
+      }
+      return undefined
+    },
+    on() { return () => {} },
+  }
+  const { tui, agent } = approvalTui(ctx)
+  tui.headlessDisplay = true
+  const outcome = await decide(tui, bashCall(tui, agent, 'c-failed-review', 'python deploy.py'))
+  assert.equal(outcome, 'rejected')
+  assert.equal(String(calls[0].sessionId), agent.session.id)
+  assert.ok(calls[0].signal instanceof AbortSignal)
+})
 
 test('an identical unrecognized shape is answered from the cache the second time', async () => {
   const counters = { reviews: 0 }
