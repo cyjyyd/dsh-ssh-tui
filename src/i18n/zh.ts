@@ -354,7 +354,7 @@ export const zh: Record<string, string> = {
   'doctor.scope.fail': '发现 {count} 份 @deepseek-ai/dsh-scope：preset 名单会以 unscoped 拒绝组合',
   'doctor.routing.ok': '默认路由与子代理模型自洽',
   'doctor.routing.warn': '路由自洽性有 {count} 处问题',
-  'doctor.routing.providerMissing': '默认提供商 {provider} 不在已配置路由里（现有：{routes}）',
+  'doctor.routing.providerMissing': '默认提供商 {provider} 既未注册也未配置（已注册或已配置：{routes}）',
   'doctor.routing.modelMissing': '模型 {model} 不在 {provider} 的模型列表里',
   'doctor.routing.subMismatch': '子代理模型 {model} 与父路由 {provider} 不同族',
   'doctor.fixHint': '修复：/doctor --fix（写前备份）',

@@ -3467,10 +3467,28 @@ export class SshTui {
     const models = Array.isArray(providers[provider]?.models) ? providers[provider]?.models ?? [] : []
     const model = this.agent.options.model ?? this.selectionRef?.current?.model
     const sub = this.subagentSelection.current
+    // The official DeepSeek adapter is registered through `ctx.llm`, not through
+    // `llm-pi-ai`; the adapter directory is the same source `src/index.ts` uses
+    // for route availability. Keep the configured list too: a pi-ai gateway may
+    // be configured before its adapter has finished registering. Doctor is
+    // best-effort, so an unavailable directory falls back to that list rather
+    // than failing the report.
+    let adapterRoutes: string[] = []
+    const llm = this.ctx.get('llm')
+    if (llm !== undefined) {
+      try {
+        adapterRoutes = llm.listProviders()
+          .map(entry => entry.id.trim())
+          .filter(id => id !== '')
+      } catch {
+        // Keep the configured set; `/doctor` must still render what it knows.
+      }
+    }
+    const routes = [...new Set([...Object.keys(providers), ...adapterRoutes])]
     return {
       provider,
       ...(model === undefined ? {} : { model }),
-      routes: Object.keys(providers),
+      routes,
       routeModels: models.map(modelEntryId).filter((id): id is string => id !== undefined),
       ...(sub.provider === undefined ? {} : { subProvider: this.displayProviderId(sub.provider) }),
       ...(sub.model === undefined ? {} : { subModel: sub.model }),
