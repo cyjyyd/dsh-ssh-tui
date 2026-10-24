@@ -10,16 +10,41 @@
 
 ---
 
-## 0.8.4 — 2026-10-22（稳定版）
+## 0.8.4 — 未发布（稳定候选）
 
-发版说明：[`docs/release-notes-0.8.4.md`](release-notes-0.8.4.md)。
-**`0.8.4-rc.1` 的稳定版转正。** runtime、协议、配置存储、凭据格式与会话格式均与候选版相同；
-没有新增功能或兼容声明。稳定版只更新版本元数据、发版材料和 CI 的 release 分支触发条件。
-候选版的完整变更记录保留在下一节。
+发版说明：[`docs/release-notes-0.8.4.md`](docs/release-notes-0.8.4.md)。
+
+**当前包版本仍是 `0.8.4`，尚未 tag、GitHub Release 或 npm publish。** `0.8.4-rc.1` 是已发布候选；
+RC.1 之后，`release/0.8.4` 维护分支又合入了 FI1、WIN-CI1.H3、APPR.BP1 和 DOC.R1 四项修复，
+因此 Stable runtime 与 RC.1 **不相同**，`lib/` 也不能再声称与 RC.1 逐字节一致。兼容范围未变；
+本线不包含 `main` 上的 W-4 Completion 或 W-5 Search Screen。下一份可发布材料必须是为获授权的
+`0.8.4-rc.2` 重新生成的版本、tarball、哈希、CI 与升级收据。
+
+### Fixed
+
+- **FI1 — 首次安装的 Agent Plane 自动补齐**：首次向导保存后、以及旧/不完整 profile 启动时，
+  只补缺失的工具行；写入前保留备份，不覆盖已存在的行，重复执行保持幂等。若行已写入但当前进程
+  尚未组合它们，会明确提示重启，而不是把“已保存”误报成“已生效”。
+- **WIN-CI1.H3 — RTT 探针的 drain 不再吞掉按住的 Esc**：liveness/RTT 探针在输入过滤器仍扣着
+  可能是光标应答开头的单字节时，不再 `reset()` 丢弃它，而是重新安排释放；若后续应答到达则合并为
+  应答，若没有到达则按原本的 hold 规则交还为键入。切开的应答仍不会被当成 Esc。
+- **APPR.BP1 — AI Reviewer 传递真实授权 Session**：Reviewer 的 `GenerateOptions` 增加授权 Agent 的
+  `sessionId`；同一 Session 的复核共享身份，不同 Session / 子 Agent 不共享。Reviewer prompt、
+  400-token budget、15 秒 deadline、reasoning effort、授权策略、缓存与 fail-closed 均未变。
+- **DOC.R1 — `/doctor` 路由清单纳入已注册 Adapter**：`doctorRouting()` 合并
+  `llm-pi-ai.providers` 与 `ctx.llm.listProviders()`，已注册的 `deepseek-official` 不再被误报为
+  “不在已配置路由里”；第三方 Provider 缺失、非法模型和子代理不同族仍会告警。注册/配置只表示
+  路由存在，不表示网络或 API 调用成功；官方模型目录的实时校验仍为 **OPEN**。
+
+### Docs
+
+- 修正稳定候选说明：不再把 0.8.4 写成 RC.1 的无变化转正，也不再复用 RC.1 的测试数、tarball
+  文件数、哈希或升级冒烟收据。RC.2 必须生成并绑定自己的收据。
+
 
 ## 0.8.4-rc.1 — 2026-10-17（候选版，只上 `next`）
 
-发版说明：[`docs/release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)。
+发版说明：[`docs/release-notes-0.8.4-rc.1.md`](docs/release-notes-0.8.4-rc.1.md)。
 **输入归属 + 发布安全门的候选版。** 与 0.8.3 相比**有 runtime 行为变化**（下列 Fixed / Changed）；
 发布准备这一轮只为兼容加了一处垫片（见 Changed 的第三条），没有别的 runtime 改动。`latest` 仍为 `0.8.3`。
 
@@ -87,7 +112,7 @@
 
 ## 0.8.3 — 2026-10-13（`latest` + `next`）
 
-发版说明：[`docs/release-notes-0.8.3.md`](release-notes-0.8.3.md)。
+发版说明：[`docs/release-notes-0.8.3.md`](docs/release-notes-0.8.3.md)。
 **紧急修复**：三个缺陷都是 0.8.2 把首启向导改成 Screen 时引入的，全部在"首次安装 / `/setup`"这条路上。
 
 ### Fixed
@@ -111,8 +136,8 @@
 
 ## 0.8.2 — 2026-10-05（`latest` + `next`）
 
-发版说明：[`docs/release-notes-0.8.2.md`](release-notes-0.8.2.md)；候选版说明保留在
-[`docs/release-notes-0.8.2-rc.1.md`](release-notes-0.8.2-rc.1.md)。
+发版说明：[`docs/release-notes-0.8.2.md`](docs/release-notes-0.8.2.md)；候选版说明保留在
+[`docs/release-notes-0.8.2-rc.1.md`](docs/release-notes-0.8.2-rc.1.md)。
 本版由 **0.8.2-rc.1**（2026-10-04，只上 `next`）沉淀一周后转正，**内容与候选版相同**，
 下列变更即候选版以来累积的全部变更。
 
@@ -120,8 +145,8 @@
 > have not changed. —— `dsh-ssh-tui` 现在以 DSH Relay 为产品名展示；包名与安装命令没有变化。
 
 B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过最终审计，本节汇总用户能看到的
-部分。详细证据与冻结记录见 [`docs/checkpoints.md`](checkpoints.md) 与
-[`docs/decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20。
+部分。详细证据与冻结记录见 [`docs/checkpoints.md`](docs/checkpoints.md) 与
+[`docs/decisions/b2-architecture-decisions.md`](docs/decisions/b2-architecture-decisions.md) §20。
 
 ### Added
 
@@ -141,7 +166,7 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 ### Changed
 
 - **反馈分流**：控制面的确认去页脚（echo，最低优先级，直到下一次输入），警告/失败去身份行（notice），
-  只有会改变历史的事实才进转写（[`docs/checkpoints.md`](checkpoints.md) B2.3b）。
+  只有会改变历史的事实才进转写（[`docs/checkpoints.md`](docs/checkpoints.md) B2.3b）。
 - **`/copy` 语法**：`/copy` 或 `/copy reply` 复制模型最后一条回复（默认）；`/copy highlight` 复制焦点卡片；
   `/copy error` 复制最新的错误/诊断行。复制键保留"取不到焦点就退回回复"的语义。
 - **工作区在方向键后的停留**：resume 进来不再从窗口中间开始滚动，直接停在最新内容。
@@ -185,9 +210,9 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ### Docs
 
-- [`docs/release.md`](release.md) 新增"发布前人工门槛"：Windows 实机清单、fresh-home 首启探针命令、
+- [`docs/release.md`](docs/release.md) 新增"发布前人工门槛"：Windows 实机清单、fresh-home 首启探针命令、
   以及 `npm run freeze` / `npm run bench` 两条发版自检。
-- [`docs/decisions/b2-architecture-decisions.md`](decisions/b2-architecture-decisions.md) §20 记录 B2 冻结：
+- [`docs/decisions/b2-architecture-decisions.md`](docs/decisions/b2-architecture-decisions.md) §20 记录 B2 冻结：
   八条不变量、七条退役路径、以及"表示的分类必须与它包裹的行一致"这条规则。
 
 ### Internal
@@ -221,13 +246,13 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 - **0.8.2-rc.1 → 0.8.2 无代码变更**：转正只改版本号与发版材料，包内 `lib/` 与候选版逐字节相同
   （候选版沉淀期间未收到新的回归报告）。
 - Windows / ConPTY **实机人工验收已完成**（2026-10-03，维护者逐条走过 12 项清单，结论见
-  [`docs/checkpoints.md`](checkpoints.md)「Windows 实机轮」）：可自动化的部分由 `verify-batch --home
+  [`docs/checkpoints.md`](docs/checkpoints.md)「Windows 实机轮」）：可自动化的部分由 `verify-batch --home
   <dir>` 覆盖（12 PASS · 2 SKIP · 0 FAIL），**没有自动化、只能人眼的两目（输入法组合、多行中文粘贴）
   已确认通过**。两处 `SKIP` 是覆盖边界、不是通过：ConPTY 自己回 `CSI 6n`，"慢链路"与"静默但没断连"
   这两个形状它扮演不了（这两个形状在 Linux 腿上真跑）。
 - fresh-home 首启有两条探针覆盖（`scripts/tui-setup-probe.mjs` 断言向导自动出现 + 第二次启动不再出现；
   `scripts/probe-onboarding.mjs` 供工作区探针识别"这是首启"并 `SKIP:` 而不是误报），命令在
-  [`docs/release.md`](release.md)。只读 pnpm store 的沙箱建不出 home，那是环境限制，不是覆盖缺口。
+  [`docs/release.md`](docs/release.md)。只读 pnpm store 的沙箱建不出 home，那是环境限制，不是覆盖缺口。
 - ~~`scripts/tui-drop-probe.mjs` 约 1/7 概率因自身的 `/status` 重试竞态误报~~ —— **本版已修**：
   改为一次请求在飞、按每次请求的输出判定、并按"当前是否真有 Screen"决定关闭，连跑 20 次无失败。
 - 打包：`npm pack --dry-run` 实测 **243 个文件 / 1.4 MB（tarball）/ 解包 4.2 MB**，CHANGELOG 随包发布；
@@ -237,7 +262,7 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ## 0.8.1 — 2026-09-30（`latest` + `next`）
 
-发版说明：[`docs/release-notes-0.8.1.md`](release-notes-0.8.1.md)。
+发版说明：[`docs/release-notes-0.8.1.md`](docs/release-notes-0.8.1.md)。
 
 ### Fixed
 
@@ -253,5 +278,5 @@ B2（"what deserves to exist"）的六个阶段 B2.1 – B2.6 已完成并通过
 
 ## 0.8.0 — 2026-09-29（`next`，随后提升为 `latest`）
 
-发版说明：[`docs/release-notes-0.8.0.md`](release-notes-0.8.0.md)。基线切到上游 `0.2.0-rc` 线
+发版说明：[`docs/release-notes-0.8.0.md`](docs/release-notes-0.8.0.md)。基线切到上游 `0.2.0-rc` 线
 （桌面版 Harness 的基线），兼容窗口与 CI 腿随之上移。
