@@ -14,11 +14,10 @@
 
 发版说明：[`docs/release-notes-0.8.4.md`](docs/release-notes-0.8.4.md)。
 
-**当前包版本仍是 `0.8.4`，尚未 tag、GitHub Release 或 npm publish。** `0.8.4-rc.1` 是已发布候选；
+**正式 `0.8.4` 尚未 tag、GitHub Release 或 npm publish。** RC.2 由维护线单独准备，不能将准备提交视作已发布。 `0.8.4-rc.1` 是已发布候选；
 RC.1 之后，`release/0.8.4` 维护分支又合入了 FI1、WIN-CI1.H3、APPR.BP1 和 DOC.R1 四项修复，
 因此 Stable runtime 与 RC.1 **不相同**，`lib/` 也不能再声称与 RC.1 逐字节一致。兼容范围未变；
-本线不包含 `main` 上的 W-4 Completion 或 W-5 Search Screen。下一份可发布材料必须是为获授权的
-`0.8.4-rc.2` 重新生成的版本、tarball、哈希、CI 与升级收据。
+本线不包含 `main` 上的 W-4 Completion 或 W-5 Search Screen。`0.8.4-rc.2` 必须有独立的版本、tarball、哈希、CI、升级和人工验收收据；不得复用 RC.1 或此前 Stable 的发布证据。
 
 ### Fixed
 
@@ -41,6 +40,27 @@ RC.1 之后，`release/0.8.4` 维护分支又合入了 FI1、WIN-CI1.H3、APPR.B
 - 修正稳定候选说明：不再把 0.8.4 写成 RC.1 的无变化转正，也不再复用 RC.1 的测试数、tarball
   文件数、哈希或升级冒烟收据。RC.2 必须生成并绑定自己的收据。
 
+
+## 0.8.4-rc.2 — Input, First-install & Diagnostics Fix Candidate
+
+发版说明：[`docs/release-notes-0.8.4-rc.2.md`](docs/release-notes-0.8.4-rc.2.md)。
+
+**相对于已发布的 0.8.4-rc.1，本候选包含 FI1、WIN-CI1.H3、APPR.BP1、DOC.R1 四项维护修复。**
+候选使用与 `release/0.8.4` 相同的产品源代码，仅在隔离分支更新版本号、锁文件和材料。
+没有合入 W-4/W-5，也没有纳入 PR #8 的 InputReader 调整或 PR #9 的诊断插桩。
+
+### Fixed
+
+- **首次安装代理平面**：只补齐缺失的 `tool-ask-user` / `present` 组合行，先备份、提示重启，冷启动与重复运行幂等。
+- **RTT/存活探测丢 Esc**：`TerminalInputPump.drain()` 不再通过 `filter.reset()` 静默丢弃已暂存的输入。
+- **审批 Reviewer Session**：直接模型调用携带请求授权的 Agent Session ID，保留 400-token、15 秒、fail-closed 等现行限制。
+- **官方 Provider 诊断误报**：`/doctor` 将已注册 Adapter 与 `llm-pi-ai.providers` 配置合并去重；网络可用性与官方模型目录校验不在本轮承诺内。
+
+### Release Gate
+
+- `0.8.4-rc.2` 只允许在独立发布授权后使用 npm `next`，不得改动 `latest`。
+- 必须在候选精确 SHA 上通过四条 CI；真实 npm tarball、从 `0.8.4-rc.1` 和 `0.8.3` 的升级冒烟、Windows Terminal/conhost 人工 H-1～H-11 均须重新取证。
+- 本 CHANGELOG 条目不是 tag、GitHub Release 或 npm 发布回执；最终 Gate 未通过前不得发布。
 
 ## 0.8.4-rc.1 — 2026-10-17（候选版，只上 `next`）
 
