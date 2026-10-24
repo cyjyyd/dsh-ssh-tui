@@ -1,13 +1,14 @@
 # 0.8.4 — Input Ownership & Release Hardening (Stable Candidate, Unpublished)
 
-> **状态：`0.8.4` 尚未发布。** 当前包版本是 `0.8.4`，但还没有 `v0.8.4` tag、GitHub Release
-> 或 npm publish。`0.8.4-rc.1` 是 2026-10-17 已发布的候选版，其历史记录保留在
+> **状态：正式 `0.8.4` 尚未发布。** 本文件记录其 Stable 候选准备（当时包版本是 `0.8.4`）；独立
+> `0.8.4-rc.2` 候选的说明见 [`release-notes-0.8.4-rc.2.md`](release-notes-0.8.4-rc.2.md)。正式版仍没有
+> `v0.8.4` tag、GitHub Release 或 npm publish。`0.8.4-rc.1` 是 2026-10-17 已发布的候选版，其历史记录保留在
 > [`release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)，不因本轮材料修正而改写。
 >
 > 自 RC.1 之后，`release/0.8.4` 维护分支合入了四项修复（FI1、WIN-CI1.H3、APPR.BP1、DOC.R1）。
 > 因此 Stable runtime 与 RC.1 **不相同**，也不能再声称 `lib/` 与 RC.1 tarball 逐字节一致。
-> 后续必须由获授权的 `0.8.4-rc.2` 重新生成版本、tarball、哈希、CI 和升级收据；RC.1 的旧收据
-> 不能转用为本候选的发布证据。
+> `0.8.4-rc.2` 必须拥有独立的版本、tarball、哈希、CI、升级冒烟及人工验收收据；RC.1 的旧收据
+> 不能转用为新候选的发布证据。
 >
 > `dsh-ssh-tui` 现在以 **DSH Relay** 为产品名展示；npm 包名与安装命令没有变化。
 
@@ -22,7 +23,7 @@
   发布记录为准，不能把本候选写成已经发布。
 - Stable 维护线的发版来源是 `release/0.8.4`，不是 `main`。`main` 上的 W-4 Completion 或
   W-5 Search Screen 不属于本线，不得混入本候选。
-- `0.8.4-rc.2` 是待授权的后续候选，不是已发布版本。新 RC 必须使用自己的版本号、候选 SHA、
+- `0.8.4-rc.2` 已进入独立候选准备，不等于已发布版本。新 RC 必须使用自己的版本号、候选 SHA、
   CI 四条腿和升级冒烟收据；正式 tag 必须指向经过测试的精确候选 SHA。
 
 ## 本版包含（RC.1 之后）

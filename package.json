@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.8.4",
+  "version": "0.8.4-rc.2",
   "description": "Remote-first terminal UI for DeepSeek Harness with SSH reconnect, Windows/ConPTY and incremental ANSI rendering.",
   "keywords": [
     "deepseek-harness",
