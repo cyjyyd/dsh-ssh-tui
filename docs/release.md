@@ -2,12 +2,19 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **0.8.4 稳定候选准备中（2026-10-22，尚未 tag / GitHub Release / npm publish）**：稳定分支
-> `release/0.8.4` 从 `83a8c7e`（RC 发布回执完成、W-4 尚未开始）切出，版本改为 `0.8.4`。该分支只包含
-> RC → Stable 转正所需的版本元数据、发版材料与**仅扩展 `push.branches` 的 CI 例外**（使
-> `release/0.8.4` 的 push 也能运行现有完整 workflow）；不包含 W-4 Completion 或 W-5 Search Screen
-> 的产品代码。清理构建的 `lib/` 与已发布 `0.8.4-rc.1` registry tarball 逐字节一致。正式发布动作
-> （tag / Release / npm）必须等独立 Final Release Gate 通过后执行。
+> **0.8.4 尚未发布（2026-10-24 状态）**：本轮材料核对时的代码基线是 `release/0.8.4` 的
+> `e1eccf42495d31a5212acafc8589bd8758f63f3c`；本材料修正只改文档，不改变代码或版本。包版本仍是 `0.8.4`，但还没有 `v0.8.4` tag、
+> GitHub Release 或 npm publish。该维护分支在 `0.8.4-rc.1` 发布提交之后合入了四项修复：
+> **FI1**（首次安装 Agent Plane 自动补齐、幂等、重启提示）、**WIN-CI1.H3**（RTT 探针 drain
+> 不再丢弃按住的 Esc）、**APPR.BP1**（Reviewer 传递授权 Session ID）、**DOC.R1**（`/doctor`
+> 纳入已注册 Adapter）。因此 Stable runtime 与 RC.1 **不相同**；`lib/` 也不能再声称与 RC.1
+> tarball 逐字节一致。
+>
+> 本线不包含 W-4 Completion 或 W-5 Search Screen，兼容范围没有改变。下一份可发布材料必须是
+> 获授权的 `0.8.4-rc.2`：从 `release/0.8.4` 的精确候选 SHA 重新生成版本、tarball、哈希、四条
+> CI 腿和升级收据；RC.1 的旧收据不能复用。Stable 正式发布源是 `release/0.8.4`，不是 `main`；
+> 正式 tag 必须指向经过测试的精确候选 SHA。所有 tag / Release / npm 动作仍须独立 Final
+> Release Gate 授权后执行。
 
 > **0.8.4-rc.1 已发布（2026-10-17，只上 `next`，候选版）**：版本提交 `0e1342a` → CI 四条腿全 success
 > （run [39046019169](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39046019169)，`head_branch: main`）。
@@ -105,7 +112,9 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    修完 bug、跑完验收、推送到 GitHub 分支——到此为止，然后等指令。
 
 2. **顺序固定：先 GitHub，后 npm。**
-   发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag → GitHub Release。
+   发版请求先落到 GitHub：版本号提交 → 推送**发版来源分支** → 打 `vX.Y.Z` tag → 推 tag →
+   GitHub Release。`0.8.4` 线的来源是 `release/0.8.4`，不是 `main`；`main` 上的 W-4 / W-5
+   不进入本线，也不得为了凑一个 tag 而混入。tag 必须指向该来源分支上经过测试的**精确候选 SHA**。
    **候选版（`-rc.N`）只上 `next`**：`npm publish --tag next`（`latest` 留给正式版；把 rc 提成
    `latest` 会让所有默认安装的用户拿到候选）。正式版才 `npm publish --tag latest`，并按需
    `npm dist-tag add dsh-ssh-tui@X.Y.Z next`。
@@ -126,9 +135,10 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    **这三门红了就不是"CI 绿"**：安装失败必须按 `classifyInstallFailure` 分类后报告，不得用 workaround
    把本插件的包改绿（宿主 / pnpm / 环境的失败尤其如此）。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
-   **tag 不触发 CI**：workflow 只监听 `main` 的 push 与 PR（`.github/workflows/ci.yml` 的 `on:`），
-   所以打 tag 前后要做的是**核对 tag 所指的那个 SHA 的 run 是否 success**（`main` 上的推送已经跑过
-   一次同一个 SHA），而不是指望推 tag 自己长出一轮。查法：
+   **tag 不触发 CI**：workflow 监听 `main` 与 `release/0.8.4` 的 push，以及 PR
+   （`.github/workflows/ci.yml` 的 `on:`），所以打 tag 前后要做的是**核对 tag 所指的那个 SHA
+   的已有 run 是否 success**（对应来源分支的推送已经跑过同一个 SHA），而不是指望推 tag 自己
+   长出一轮。查法：
    `curl -s "https://api.github.com/repos/cyjyyd/dsh-ssh-tui/actions/runs?head_sha=$(git rev-parse vX.Y.Z)"`。
 
 ## 允许 / 不允许
@@ -136,7 +146,7 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
 | 动作 | 未要求发版时 | 已要求发版时 |
 |---|---|---|
 | 改 `package.json` 版本号 | ✗ | ✓ |
-| 推 `main`（提交修复/文档） | ✓ | ✓ |
+| 推发版来源分支（`0.8.4` 为 `release/0.8.4`） | ✓ | ✓ |
 | 打 `vX.Y.Z` tag | ✗ | ✓（CI 绿之前只是 tag，不发 npm） |
 | 建 GitHub Release | ✗ | ✓ |
 | `npm publish` / 改 dist-tag | ✗ | 仅 CI 全绿后 |
