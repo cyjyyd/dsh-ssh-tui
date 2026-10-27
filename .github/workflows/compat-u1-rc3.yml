@@ -1,0 +1,116 @@
+name: rel085-u1-rc3-probe
+
+# An explicitly experimental compatibility gate, separate from the protected
+# v0.8.4 release matrix. Never publish or change compatibility claims here.
+on:
+  pull_request:
+    paths:
+      - scripts/ci-pin-line.mjs
+      - tests/ci-pin-line.test.mjs
+      - .github/workflows/compat-u1-rc3.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rc3-linux:
+    name: U1 DSH 0.2.1-rc.3 Linux experimental
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Re-pin only this temporary checkout
+        run: |
+          node scripts/ci-pin-line.mjs 0.2.1-rc.3
+          rm -f package-lock.json
+      - name: Install with full peer resolution
+        run: npm install --no-audit --no-fund
+      - name: Verify actual installed host
+        run: node -e "const p=require('./node_modules/@deepseek-ai/dsh/package.json'); if(p.version!=='0.2.1-rc.3') process.exit(1); console.log('host='+p.version)"
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+      - name: Full unit and regression suite
+        run: node --test "tests/*.test.mjs"
+      - name: Architecture freeze
+        run: npm run freeze
+      - name: Input ownership freeze
+        run: npm run freeze:input
+      - name: Incremental renderer bench
+        run: npm run bench
+      - name: Bench baseline
+        run: npm run bench:report -- --check
+      - name: Install profile manager
+        run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: Real PTY in throwaway profile
+        run: node scripts/probe-home.mjs --probe
+      - name: Fresh home wizard and agent plane
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      - name: Packed tarball install smoke
+        run: node scripts/artifact-smoke.mjs
+      - name: Bracketed paste and owner isolation
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
+      - name: Link drop and reattach
+        run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
+      - name: Busy drop
+        run: node scripts/tui-mock-probe.mjs --busy
+      - name: No PTY / stdio compatibility
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
+      - name: Terminal capabilities
+        run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      - name: Unmeasured link state
+        run: node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs
+
+  rc3-windows:
+    name: U1 DSH 0.2.1-rc.3 Windows ConPTY experimental
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Re-pin only this temporary checkout
+        shell: pwsh
+        run: |
+          node scripts/ci-pin-line.mjs 0.2.1-rc.3
+          Remove-Item package-lock.json -ErrorAction SilentlyContinue
+      - name: Install with full peer resolution
+        run: npm install --no-audit --no-fund
+      - name: Verify actual installed host
+        run: node -e "const p=require('./node_modules/@deepseek-ai/dsh/package.json'); if(p.version!=='0.2.1-rc.3') process.exit(1); console.log('host='+p.version)"
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json --noEmit
+      - name: Full unit and regression suite
+        run: node --test "tests/*.test.mjs"
+      - name: Architecture freeze
+        run: npm run freeze
+      - name: Input ownership freeze
+        run: npm run freeze:input
+      - name: Incremental renderer bench
+        run: npm run bench
+      - name: Bench baseline
+        run: npm run bench:report -- --check
+      - name: Install profile manager
+        run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: Real ConPTY in throwaway profile
+        run: node scripts/probe-home.mjs --probe
+      - name: Fresh-home setup wizard (ConPTY)
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      - name: Packed tarball install (ConPTY)
+        run: node scripts/artifact-smoke.mjs
+      - name: Bracketed paste and owner isolation (ConPTY)
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
+      - name: Link drop and reattach (ConPTY)
+        run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
+      - name: Busy drop (ConPTY)
+        run: node scripts/tui-mock-probe.mjs --busy
+      - name: Terminal capabilities (Windows profiles)
+        run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
+      - name: No PTY / stdio compatibility
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
+      - name: Unmeasured link state
+        run: node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs
