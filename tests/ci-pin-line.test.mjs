@@ -81,6 +81,15 @@ test('the family root pins follow the line, including the launcher-only one', ()
   // set (0.2.0-rc.1 kept what 0.1.7 pinned); 0.2.1-rc.2 moved all five one patch,
   // and the values come from its published peers rather than from a guess.
   const roots = {
+    // Experimental rc.3 U1 line: same root pins as rc.2 until installed peers
+    // and full Linux/Windows compatibility probes confirm or refute them.
+    '0.2.1-rc.3': {
+      '@deepseek-ai/cordis': '4.0.5',
+      '@deepseek-ai/cordis-plugin-include': '1.0.10',
+      '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      '@deepseek-ai/cordis-plugin-group': '1.0.5',
+    },
     '0.2.1-rc.2': {
       '@deepseek-ai/cordis': '4.0.5',
       '@deepseek-ai/cordis-plugin-include': '1.0.10',
