@@ -70,6 +70,15 @@ export const LINES = {
   // declared and no longer has a leg — its `dshReleases` entries say
   // `incompatible` rather than disappearing, so a user still on it sees a
   // refusal instead of silence.
+  // REL.085-U1 EXPERIMENT ONLY: probe the published rc.3 family without
+  // moving DEFAULT_LINE, production lockfiles or dshReleases compatible claims.
+  // Root peers are hypothesized unchanged from rc.2; install+CI must verify.
+  '0.2.1-rc.3': {
+    roots: NEXT_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
+  },
   '0.2.1-rc.2': {
     roots: NEXT_LINE_ROOTS,
     presets: NEW_LINE_PRESETS,
