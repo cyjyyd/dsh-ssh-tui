@@ -1,14 +1,13 @@
-# 0.8.4 — Input Ownership & Release Hardening (Stable Candidate, Unpublished)
+# 0.8.4 — Input Ownership & Release Hardening (Stable)
 
-> **状态：正式 `0.8.4` 尚未发布。** 本文件记录其 Stable 候选准备（当时包版本是 `0.8.4`）；独立
-> `0.8.4-rc.2` 候选的说明见 [`release-notes-0.8.4-rc.2.md`](release-notes-0.8.4-rc.2.md)。正式版仍没有
-> `v0.8.4` tag、GitHub Release 或 npm publish。`0.8.4-rc.1` 是 2026-10-17 已发布的候选版，其历史记录保留在
-> [`release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)，不因本轮材料修正而改写。
+> **稳定版：`0.8.4-rc.2` 观察期结束后的正式转正。** 包版本为 `0.8.4`；产品代码与最终 RC.2
+> 相同，只有版本元数据和发布材料变化，没有新增功能、兼容范围变化或存储迁移。
+> 正式 tag、GitHub Release 与 npm `latest` 在最终四腿 CI 和规范 tarball 验证通过后创建；
+> `next` 同步到 `0.8.4`，不再停留在旧候选。
 >
-> 自 RC.1 之后，`release/0.8.4` 维护分支合入了四项修复（FI1、WIN-CI1.H3、APPR.BP1、DOC.R1）。
-> 因此 Stable runtime 与 RC.1 **不相同**，也不能再声称 `lib/` 与 RC.1 tarball 逐字节一致。
-> `0.8.4-rc.2` 必须拥有独立的版本、tarball、哈希、CI、升级冒烟及人工验收收据；RC.1 的旧收据
-> 不能转用为新候选的发布证据。
+> `0.8.4-rc.2` 的候选说明与收据保留在
+> [`release-notes-0.8.4-rc.2.md`](release-notes-0.8.4-rc.2.md)；`0.8.4-rc.1` 的历史记录保留在
+> [`release-notes-0.8.4-rc.1.md`](release-notes-0.8.4-rc.1.md)，不追溯改写。
 >
 > `dsh-ssh-tui` 现在以 **DSH Relay** 为产品名展示；npm 包名与安装命令没有变化。
 
@@ -16,15 +15,13 @@
 
 - `0.8.4-rc.1` 的 annotated tag 是 `a2645c9134646f83d8a5db758743476285f9840b`，其指向的提交是
   `0e1342a9f4a7cbb922971891e9b26a311a7c7026`（2026-10-17）。
-- 本轮材料核对时的候选代码基线为 `release/0.8.4` 的
-  `e1eccf42495d31a5212acafc8589bd8758f63f3c`（2026-10-24）；本材料修正只改文档，不改变代码或版本。
-  该基线从 RC.1 发布提交之后继续维护，包含下列四项修复。
-- 当前没有 `v0.8.4` tag、GitHub Release 或 `0.8.4` npm 包；`latest` / `next` 仍以上一次 RC.1
-  发布记录为准，不能把本候选写成已经发布。
-- Stable 维护线的发版来源是 `release/0.8.4`，不是 `main`。`main` 上的 W-4 Completion 或
-  W-5 Search Screen 不属于本线，不得混入本候选。
-- `0.8.4-rc.2` 已进入独立候选准备，不等于已发布版本。新 RC 必须使用自己的版本号、候选 SHA、
-  CI 四条腿和升级冒烟收据；正式 tag 必须指向经过测试的精确候选 SHA。
+- `0.8.4-rc.2` 的 annotated tag 是 `aa1688264c9ae246eb20651caced38bfd69d68d1`，其指向的提交是
+  `5795f6052cdaba565b0db9bf1982aa622f40ac05`（2026-10-24），已作为候选发布到 npm `next`。
+- `0.8.4` 从该 RC.2 转正；稳定版只把包版本改为 `0.8.4` 并更新发布材料，没有产品代码变化。
+  Stable 维护来源是 `release/0.8.4`，不是 `main`；`main` 上的 W-4 Completion 或 W-5 Search Screen
+  不属于本线。
+- 正式发布后 npm `latest` 和 `next` 都指向 `0.8.4`。RC.2 的 tarball 哈希和测试收据保留为历史，
+  不作为 `0.8.4` 稳定 tarball 的哈希。
 
 ## 本版包含（RC.1 之后）
 
@@ -73,7 +70,7 @@ Adapter ID，去重后用于路由自洽性检查。已注册的 `deepseek-offic
 
 ## 验证记录
 
-以下是当前 `release/0.8.4@e1eccf4` 候选代码的本地/CI 收据，不是未来 RC.2 的收据：
+0.8.4 与最终 RC.2 的产品代码相同；以下测试收据来自 RC.2 的最终验证，稳定版只改版本和发布材料：
 
 - `npm run build`：通过。
 - `npm run typecheck`：通过。
@@ -81,18 +78,16 @@ Adapter ID，去重后用于路由自洽性检查。已注册的 `deepseek-offic
 - `npm run freeze` / `npm run freeze:input`：通过。
 - `npm run bench`：五个动作均为增量绘制，0 次整屏清屏。
 - `npm run bench:report -- --check`：通过。
-- `scripts/artifact-smoke.mjs`：当前候选 tarball 通过；包清单 **251 files**。精确 tarball
-  bytes、shasum 和 integrity 必须由获授权的 RC.2 重新生成后记录，本文件不沿用旧值。
-- 当前 `release/0.8.4` 的 Push CI **40057666773**：四条腿全部 success。
-- `scripts/upgrade-smoke.mjs --from 0.8.4-rc.1 --to <current-candidate.tgz>`：通过
-  （manifest、bundle 入口、凭据与会话存储均保留）。这是当前候选 tarball 的验证，不是 RC.2 的
-  升级收据；RC.2 必须重新执行并绑定自己的 tarball。
-- 清理构建的 `lib/` 与 RC.1 tarball **不再是**逐字节相同；本候选明确不引用旧版的
-  `228 个文件逐字节一致` 收据。
+- `scripts/artifact-smoke.mjs`：RC.2 候选 tarball 通过，包清单 **252 files**。
+- `scripts/upgrade-smoke.mjs --from 0.8.4-rc.1 --pack` 与 `--from 0.8.3 --pack`：通过
+  （manifest、bundle 入口、凭据与会话存储均保留）。
+- 最终 `0.8.4` 的四腿 CI、规范 tarball 的 bytes / SHA1 / SHA256 / integrity 与 Registry
+  回读结果记录在独立发布回执中；本文件不把 RC.2 的哈希写成稳定 tarball 的哈希。
 
 Windows Terminal、conhost、IME 中文输入、多行中文粘贴、鼠标复制与 SSH 恢复仍按
-[`release.md`](release.md) 的人工验收清单执行；本轮未实际人工执行的项目保持 **PENDING**，
-不引用旧版本结果冒充本版验收。自动化 PASS 不是人工 Gate PASS。
+[`release.md`](release.md) 的人工验收清单执行；H-2 的 conhost / ASCII 边框确认已由维护者完成，
+其余未实际人工执行的项目仍保持 **PENDING**，不引用旧版本结果冒充本版验收。自动化 PASS 不是
+人工 Gate PASS。
 
 ## 已知限制
 
@@ -112,34 +107,23 @@ Windows Terminal、conhost、IME 中文输入、多行中文粘贴、鼠标复�
 
 ## 安装
 
-### 当前 registry 事实（2026-10-24 核对）
-
-- `@latest` **存在**，当前指向 **`0.8.3`**。
-- `@next` **存在**，当前指向 **`0.8.4-rc.1`**。
-- `0.8.4-rc.1` 已发布。
-- `0.8.4` **尚未发布**，不在 registry 的 versions 中。
-
-因此 `@latest` 本身是可用的稳定通道；只是它还**没有**指向 `0.8.4`。不能把“`0.8.4` 尚未发布”
-写成“`@latest` 不可用”。
-
-已发布版本可按通道安装：
+稳定版走 `latest`，当前正式版本为 `0.8.4`：
 
 ```bash
-# 当前稳定版（0.8.3）
 dsh plugin --profile tui add dsh-ssh-tui@latest
+dsh --profile tui
+```
 
-# 已发布的候选版（0.8.4-rc.1）
+`@next` 也已同步到 `0.8.4`；需要固定版本时可显式使用 `dsh-ssh-tui@0.8.4`。
+
+历史候选仍可按精确版本安装：
+
+```bash
+# 历史 RC.2
+dsh plugin --profile tui add dsh-ssh-tui@0.8.4-rc.2
+
+# 历史 RC.1
 dsh plugin --profile tui add dsh-ssh-tui@0.8.4-rc.1
 ```
 
-### 候选版与正式版的发布通道
-
-- **`0.8.4-rc.2` 获授权发布后，只能使用 `next`**：`npm publish --tag next`。测试者使用
-  `dsh-ssh-tui@next` 或精确的 `dsh-ssh-tui@0.8.4-rc.2`；`latest` 继续留给正式稳定版。
-- **正式 `0.8.4` 获授权发布后，使用 `latest`**：`npm publish --tag latest`，安装命令为
-  `dsh-ssh-tui@latest`。
-- 正式版发布时是否把 `next` 同步到 `0.8.4`，要按当时的候选占用情况另行决定（例如是否已有更新的
-  RC 占用 `next`）；本文不预先把 `next` 指向未来的正式版。
-
-`0.8.4` 当前不能通过 `@latest` 安装，是因为它还没有发布，不是因为 `@latest` 通道不存在。
-配置、凭据和会话记录不需要迁移；但不要从本文件推断尚未发生的发布。
+已安装 `0.8.3`、`0.8.4-rc.1` 或 `0.8.4-rc.2` 的用户可以升级；配置、凭据和会话记录不需要迁移。

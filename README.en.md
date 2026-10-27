@@ -82,7 +82,7 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** `0.8.4` is an **unpublished stable candidate** on `release/0.8.4`; `0.8.4-rc.1` was its published `next` candidate. The candidate supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.2.1-rc.2` (upstream `next`). The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** `0.8.4` is the stable release promoted from the observed `0.8.4-rc.2` candidate; `0.8.4-rc.1` was the earlier candidate. It supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.2.1-rc.2` (upstream `next`). The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 **Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version

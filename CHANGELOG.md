@@ -10,14 +10,14 @@
 
 ---
 
-## 0.8.4 — 未发布（稳定候选）
+## 0.8.4 — 2026-10-24（稳定版）
 
 发版说明：[`docs/release-notes-0.8.4.md`](docs/release-notes-0.8.4.md)。
 
-**正式 `0.8.4` 尚未 tag、GitHub Release 或 npm publish。** RC.2 由维护线单独准备，不能将准备提交视作已发布。 `0.8.4-rc.1` 是已发布候选；
-RC.1 之后，`release/0.8.4` 维护分支又合入了 FI1、WIN-CI1.H3、APPR.BP1 和 DOC.R1 四项修复，
-因此 Stable runtime 与 RC.1 **不相同**，`lib/` 也不能再声称与 RC.1 逐字节一致。兼容范围未变；
-本线不包含 `main` 上的 W-4 Completion 或 W-5 Search Screen。`0.8.4-rc.2` 必须有独立的版本、tarball、哈希、CI、升级和人工验收收据；不得复用 RC.1 或此前 Stable 的发布证据。
+**`0.8.4-rc.2` 观察期结束后的稳定转正。** 产品代码与 RC.2 相同；稳定版只把包版本改为
+`0.8.4` 并更新发布材料。RC.2 已作为候选发布到 npm `next`，正式版发布后 `latest` 与 `next`
+都指向 `0.8.4`。兼容范围未变；本线不包含 `main` 上的 W-4 Completion 或 W-5 Search Screen。
+RC.2 的 tarball 哈希、测试和人工验收收据保留为历史，不作为 `0.8.4` 稳定 tarball 的哈希。
 
 ### Fixed
 

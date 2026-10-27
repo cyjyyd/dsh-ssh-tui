@@ -2,24 +2,11 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
-> **RC.2 候选准备（2026-10-24）**：从已合入 REL.B2 的 `release/0.8.4` 代码基线
-> `127617b99101820ff548f6fa8b61f319b5084d24` 新建独立候选分支，准备
-> `0.8.4-rc.2` 版本、说明与 CI。该准备工作不构成 tag、GitHub Release 或 npm publish 授权。
-> 该候选的四腿 CI、真实 tarball、升级冒烟、H-1～H-11 人工 Gate 均需独立验收。
-
-> **0.8.4 尚未发布（2026-10-24 状态）**：本轮材料核对时的代码基线是 `release/0.8.4` 的
-> `e1eccf42495d31a5212acafc8589bd8758f63f3c`；本材料修正只改文档，不改变代码或版本。包版本仍是 `0.8.4`，但还没有 `v0.8.4` tag、
-> GitHub Release 或 npm publish。该维护分支在 `0.8.4-rc.1` 发布提交之后合入了四项修复：
-> **FI1**（首次安装 Agent Plane 自动补齐、幂等、重启提示）、**WIN-CI1.H3**（RTT 探针 drain
-> 不再丢弃按住的 Esc）、**APPR.BP1**（Reviewer 传递授权 Session ID）、**DOC.R1**（`/doctor`
-> 纳入已注册 Adapter）。因此 Stable runtime 与 RC.1 **不相同**；`lib/` 也不能再声称与 RC.1
-> tarball 逐字节一致。
->
-> 本线不包含 W-4 Completion 或 W-5 Search Screen，兼容范围没有改变。下一份可发布材料必须是
-> 获授权的 `0.8.4-rc.2`：从 `release/0.8.4` 的精确候选 SHA 重新生成版本、tarball、哈希、四条
-> CI 腿和升级收据；RC.1 的旧收据不能复用。Stable 正式发布源是 `release/0.8.4`，不是 `main`；
-> 正式 tag 必须指向经过测试的精确候选 SHA。所有 tag / Release / npm 动作仍须独立 Final
-> Release Gate 授权后执行。
+> **0.8.4 稳定版发布（2026-10-24）**：从已观察的 `0.8.4-rc.2` 转正。包版本改为 `0.8.4`，
+> 产品代码不变；正式 tag、GitHub Release 与 npm `latest` 在最终四腿 CI 和规范 tarball 验证
+> 通过后创建。Stable 来源是 `release/0.8.4`，不是 `main`；W-4 Completion / W-5 Search Screen
+> 不进入本线。发布后 `latest` 与 `next` 都指向 `0.8.4`；RC.2 的 tarball 哈希和测试收据只作为
+> 历史，不作为稳定 tarball 的哈希。
 
 > **0.8.4-rc.1 已发布（2026-10-17，只上 `next`，候选版）**：版本提交 `0e1342a` → CI 四条腿全 success
 > （run [39046019169](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39046019169)，`head_branch: main`）。
@@ -221,7 +208,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 ### 兼容表态（版式留自 2026-10-03 快照 · 表态列已更新到 `0.8.4-rc.1`）
 
 > 版式留自 2026-10-03 的快照（当时 `0.8.1` = `latest` + `next`）。当前发布记录看本文件开头：
-> **`latest` = `0.8.3`、`next` = `0.8.4-rc.1`**（2026-10-17 起；候选版只上 `next`）。下表"我们的表态"
+> **`latest` = `0.8.4`、`next` = `0.8.4`**（2026-10-24 稳定转正）。下表"我们的表态"
 > 一列是**今天**的表态（2026-10-17 随 `0.8.4-rc.1` 更新：新增 `0.2.1-rc.2`，`0.1.7` 改判
 > `incompatible` 并摘腿）；"通道版本"一列里的 `0.1.7` 行已是历史，其余仍是当前值。窗口与腿列表以
 > 本节的正文为准。
