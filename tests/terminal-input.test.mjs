@@ -947,3 +947,126 @@ test('a steady link keeps being re-reported, so the Host median can settle', { t
   host.socket.write(encodeFrame(FRAME_GOODBYE))
   assert.equal((await relay).reason, 'goodbye')
 })
+
+/**
+ * WIN-CI1.H3 — the drain/hold race.
+ *
+ * `TerminalInputPump.drain()` runs at the start of every probe (`measure()` and
+ * `measureOnce()`) and used to clear the hold timer and `filter.reset()`, i.e. throw
+ * away a byte the filter was holding as a possible reply head. A user's Escape key is
+ * exactly that byte: the filter holds it for `holdMs` before handing it over as
+ * typing, and a probe that starts inside that window lost the key. On the Windows CI
+ * leg that was a `/view` picker which never closed (CI 39973716350): the launcher
+ * logged `filter-held heldLen=1` and then `pump-drain-reset heldLen=1`, and the Host
+ * never saw a `FRAME_STDIN` for it.
+ *
+ * These tests drive the real Pump API and the real probe path; the window is injected
+ * so none of them depends on how loaded the machine is.
+ */
+function drainPump(overrides = {}) {
+  const stdin = fakeStdin()
+  const stdout = fakeStdout()
+  const typed = []
+  const pump = new TerminalInputPump({
+    stdin,
+    stdout,
+    ssh: true,
+    holdMs: 150,
+    sampleTimeoutMs: 40,
+    budgetMs: 300,
+    onInput: text => typed.push(text),
+    ...overrides,
+  })
+  return { pump, stdin, stdout, typed }
+}
+
+const settle = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+test('a probe drain inside the hold window still delivers the Escape exactly once', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b')
+  await settle(5)
+  assert.equal(await pump.measureOnce(40), false, 'a fake terminal answers nothing')
+  await settle(220)
+  pump.stop()
+  assert.deepEqual(typed, ['\x1b'], 'the Escape reaches the input path, and only once')
+})
+
+test('two drains in a row still deliver one Escape', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b')
+  await settle(5)
+  await pump.measureOnce(30)
+  await pump.measureOnce(30)
+  await settle(220)
+  pump.stop()
+  assert.deepEqual(typed, ['\x1b'], 'no probe may swallow it twice, and none may duplicate it')
+})
+
+test('a drain after the Escape was already released does not deliver it twice', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b')
+  await settle(200)                       // the hold window has passed: released already
+  await pump.measureOnce(30)
+  await settle(100)
+  pump.stop()
+  assert.deepEqual(typed, ['\x1b'], 'released once, never again')
+})
+
+test('a reply split around a drain is still a reply, not a keystroke', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b')                     // the head of `ESC [ 17 ; 1 R`
+  await settle(5)
+  await pump.measureOnce(30)              // the drain happens inside the window
+  stdin.write('[17;1R')                   // the rest arrives, still inside the window
+  await settle(220)
+  pump.stop()
+  assert.deepEqual(typed, [], 'a half-arrived answer must not become an Escape key')
+})
+
+test('a fragment that never completes is typing, as the filter always said', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b[1')
+  await settle(5)
+  await pump.measureOnce(30)
+  await settle(220)
+  pump.stop()
+  assert.deepEqual(typed, ['\x1b[1'], 'the hold window is the contract: unmatched bytes are typing')
+})
+
+test('the probe still measures while a key is held, and the key survives', async () => {
+  const terminal = scriptedTerminal({ replyDelayMs: 20 })
+  const typed = []
+  const pump = new TerminalInputPump({
+    stdin: terminal.stdin,
+    stdout: terminal.stdout,
+    ssh: true,
+    holdMs: 150,
+    sampleTimeoutMs: 60,
+    budgetMs: 600,
+    onInput: text => typed.push(text),
+  })
+  pump.start()
+  terminal.stdin.write('\x1b')            // the user's Escape, inside the probe's window
+  const rtt = await pump.measure()
+  await settle(200)
+  pump.stop()
+  assert.ok(rtt !== undefined && rtt >= 10, `the probe still measured the link, got ${String(rtt)}`)
+  assert.deepEqual(typed, ['\x1b'], 'the Escape is delivered once, and the answer is not typing')
+})
+
+test('stop() after a drained hold delivers the key once, not twice', async () => {
+  const { pump, stdin, typed } = drainPump()
+  pump.start()
+  stdin.write('\x1b')
+  await settle(5)
+  await pump.measureOnce(30)
+  pump.stop()
+  await settle(220)
+  assert.deepEqual(typed, ['\x1b'], 'the flush on stop and the hold timer must not both fire')
+})

@@ -14,8 +14,14 @@
  *
  *   1. `--from-default-profile headless` scaffolds a profile tree;
  *   2. the headless app is dropped from its bundle list (the TUI replaces it);
- *   3. `dsh plugin add link:<repo>` installs this checkout into the profile;
- *   4. the agent-preset roster is mounted (see `profile-rows.mjs`).
+ *   3. `dsh plugin add <package>` installs this checkout into the profile;
+ *   4. a configured probe runs one real TUI boot to let the product repair the
+ *      profile, exits, and starts the actual probe on that restart.
+ *
+ * It deliberately does **not** pre-fill the agent-plane rows. That is the
+ * product's first-run repair's job, and a helper that writes them before the
+ * TUI boots would make the first-install gate green over the exact defect it
+ * exists to catch. Step 4 is a product boot, not a file write.
  *
  * Usage:
  *   node scripts/probe-home.mjs                 # build a home, print its path
@@ -33,11 +39,88 @@ import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { mountProfileRows } from './profile-rows.mjs'
-
 const require = createRequire(import.meta.url)
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+
+/**
+ * The last machine-readable verdict the prime boot printed.
+ *
+ * The prime's exit code alone is not enough: a normal developer machine may
+ * intentionally `SKIP` when node-pty is absent, and that still exits 0. The
+ * outer bootstrap must see the verdict so it cannot run the actual probe over
+ * an uncompleted restart.
+ * @param output - the captured stdout/stderr of the prime process.
+ * @returns the final `OK` / `SKIP` / `FAIL` marker, or `NONE`.
+ */
+export function parsePrimeVerdict(output) {
+  const matches = [...String(output).matchAll(/^PRIME: (OK|SKIP|FAIL)\b(.*)$/gmu)]
+  const last = matches.at(-1)
+  return last === undefined
+    ? { kind: 'NONE', detail: '' }
+    : { kind: last[1], detail: String(last[2] ?? '').trim() }
+}
+
+/**
+ * Decide whether the actual probe may start after the prime boot.
+ *
+ * `OK` requires both the marker and exit 0. `SKIP` is still a skip on a normal
+ * developer machine (a distinct exit code, never a pass), but a forced CI run
+ * turns it into a failure. `FAIL` and a missing marker always fail. In every
+ * non-OK case the caller must not start the actual probe.
+ * @param options - prime exit code, captured output, and CI enforcement flag.
+ * @returns whether to continue, the process code, and the reason.
+ */
+export function primeGate({ exitCode, output, required = false }) {
+  const verdict = parsePrimeVerdict(output)
+  if (verdict.kind === 'OK' && exitCode === 0) {
+    return { ok: true, continue: true, code: 0, kind: 'OK', reason: verdict.detail }
+  }
+  const reason = verdict.kind === 'NONE'
+    ? `the prime printed no PRIME: verdict (exit ${exitCode})`
+    : `the prime reported ${verdict.kind}${verdict.detail === '' ? '' : `: ${verdict.detail}`} (exit ${exitCode})`
+  if (verdict.kind === 'SKIP' && !required) {
+    return { ok: false, continue: false, code: 2, kind: 'SKIP', reason }
+  }
+  return {
+    ok: false,
+    continue: false,
+    code: 1,
+    kind: required && verdict.kind === 'SKIP' ? 'FAIL' : verdict.kind,
+    reason,
+  }
+}
+
+/**
+ * Run the prime boot and return its parsed verdict.
+ *
+ * Exported with an injectable spawn so the negative test can prove a skipped
+ * prime is gated out without building a profile or starting a real TUI.
+ * @param options - configured home, CI enforcement, and an optional spawn seam.
+ * @returns the same gate the caller uses to decide whether the probe may start.
+ */
+export async function runPrimeProbe({ home, required = false, spawnPrime = spawn }) {
+  let output = ''
+  const result = await new Promise(resolve => {
+    const prime = spawnPrime(process.execPath, [join(REPO, 'scripts/tui-prime-probe.mjs')], {
+      // Capture as well as show: the marker is the verdict, not the exit code.
+      stdio: ['inherit', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: { ...process.env, PROBE_HOME: home, PROBE_REQUIRE_PRIME: required ? '1' : '0' },
+    })
+    prime.stdout?.on('data', chunk => {
+      process.stdout.write(chunk)
+      output += chunk
+    })
+    prime.stderr?.on('data', chunk => {
+      process.stderr.write(chunk)
+      output += chunk
+    })
+    prime.on('error', () => resolve({ code: 1, output }))
+    prime.on('exit', value => resolve({ code: value ?? 1, output }))
+  })
+  return primeGate({ exitCode: result.code, output: result.output, required })
+}
 
 const USAGE = `usage: node scripts/probe-home.mjs [--probe] [--keep] [--home <dir>] [--profile <name>]
                                     [--pack | --tarball <tgz>] [-- <probe args>]
@@ -45,6 +128,9 @@ const USAGE = `usage: node scripts/probe-home.mjs [--probe] [--keep] [--home <di
   --probe          run a PTY probe against the built home, then clean up
   --script <name>  which probe to run (default: tui-probe.mjs)
   --keep           keep the throwaway home (prints the path either way)
+                   A configured probe first runs the real TUI once (the prime
+                   restart). A prime SKIP reports untested and exits 2; with
+                   CI/PROBE_REQUIRE_PRIME=1 it is a failure and exits 1.
   --unconfigured   leave the home without a credential, so the boot is a first run
                    (the setup wizard is what boots; use it with tui-setup-probe.mjs).
                    A probe run this way is told the wizard is *required*: a home this
@@ -155,7 +241,9 @@ export function buildProbeHome({
   const spec = tarball === undefined ? `link:${repo}` : `file:${resolve(tarball)}`
   log(`==> installing ${spec} into profile '${profile}'`)
   run(process.execPath, [cli, 'plugin', '--profile', profile, 'add', spec], { env })
-  mountProfileRows({ profile, home: target, cli, log })
+
+  // No `mountProfileRows` here. This is the real first-install shape: the TUI
+  // boots without the agent-plane rows and repairs them for the next launch.
 
   // A profile that composes but cannot boot is worse than no profile: fail here.
   run(process.execPath, [cli, '--profile', profile, '--dump-config'], { env, stdio: 'ignore' })
@@ -236,6 +324,26 @@ async function main(argv) {
   }
 
   const script = valueOf('--script') ?? 'tui-probe.mjs'
+  // The product repairs the profile on its first boot; the probe must start on
+  // the restart, not in the middle of that repair (the same restart a user is
+  // told to make). This is a real TUI boot, not a test-side pre-fill. The
+  // unconfigured path and the wizard probe own their own first run.
+  if (!own.includes('--unconfigured') && script !== 'tui-setup-probe.mjs') {
+    const requirePrime = process.env.PROBE_REQUIRE_PRIME === '1'
+      || process.env.CI === 'true'
+      || process.env.CI === '1'
+    const gate = await runPrimeProbe({ home, required: requirePrime })
+    if (!gate.ok) {
+      if (gate.code === 2) {
+        console.log(`SKIP: ${gate.reason}; the actual probe was not run (untested)`)
+      } else {
+        console.error(`FAIL: prime boot did not complete: ${gate.reason}; the actual probe was not run`)
+      }
+      if (!keep) discardHome(home)
+      else console.log(`==> kept ${home}`)
+      return gate.code
+    }
+  }
   const code = await new Promise(resolve => {
     const child = spawn(process.execPath, [join(REPO, 'scripts', script), ...probeArgs], {
       stdio: 'inherit',

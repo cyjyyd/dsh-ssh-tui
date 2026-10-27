@@ -308,7 +308,11 @@ async function runProbe(argv) {
   //    again — the decision under test is "configured ⇒ no first run", and it does
   //    not care how the key got there. (`--unconfigured` in `probe-home.mjs` is the
   //    other direction: the same home with no credential, which is phase 1 above.)
-  if (problems.length === 0 && pty !== undefined) {
+  //
+  //    The first-install gate sets `PROBE_FI1_FIRST_SAVE`: it must run phase 7
+  //    while the home is still unconfigured, or this configured boot would repair
+  //    the agent plane first and hide whether the wizard save itself did it.
+  if (problems.length === 0 && pty !== undefined && process.env.PROBE_FI1_FIRST_SAVE !== '1') {
     // The home is restored afterwards: this probe writes the credential a completed
     // wizard would have left, which would make the *next* run of this very probe skip
     // with "already configured". A probe that silently stops covering what it exists

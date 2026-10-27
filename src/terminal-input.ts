@@ -499,9 +499,19 @@ export class TerminalInputPump {
       clearTimeout(this.holdTimer)
       this.holdTimer = undefined
     }
-    // A half-arrived sequence sitting here now predates the request we are
-    // about to send, so it cannot be its answer.
-    this.filter.reset()
+    // A half-arrived sequence sitting here now predates the request we are about to
+    // send, so it cannot be its answer — but "not the answer" is not "discardable":
+    // the filter holds a bare `ESC` for exactly this window before handing it over as
+    // typing, and the user's Escape key is that byte. Dropping it here lost the key
+    // whenever a probe started inside the window (Windows CI 39973716350: launcher
+    // `filter-held heldLen=1` → `pump-drain-reset heldLen=1` → no `FRAME_STDIN`, the
+    // `/view` picker stayed up).
+    //
+    // The filter's own two rules already cover both readings, so the drain leaves the
+    // bytes where they are and simply re-arms the release: if the rest of the answer
+    // arrives inside the window the two merge and the filter strips the reply; if it
+    // never does, the window hands the bytes over as typing.
+    this.scheduleHold()
   }
 
   private ask(timeoutMs: number): Promise<number | undefined> {

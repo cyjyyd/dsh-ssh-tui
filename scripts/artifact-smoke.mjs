@@ -12,8 +12,9 @@
  *
  * So this packs the tree, inspects the tarball, installs **that file** into a throwaway
  * home outside the repository, proves the installed package is the packed one rather
- * than the checkout, and then runs the two probes that matter on it: the first-run
- * wizard (unconfigured home) and the workspace (`/diag`, `/status`, the layers).
+ * than the checkout, and then runs the probes that matter on it: the first-run wizard
+ * (unconfigured home), the agent-plane repair it must leave for the next boot, a
+ * partial-profile second boot, and the workspace (`/diag`, `/status`, the layers).
  *
  *   node scripts/artifact-smoke.mjs                 # pack, install, probe, clean up
  *   node scripts/artifact-smoke.mjs --keep          # leave the home for inspection
@@ -28,7 +29,7 @@
  * @module dsh-ssh-tui/scripts/artifact-smoke
  */
 import { spawnSync } from 'node:child_process'
-import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { gunzipSync } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -173,6 +174,33 @@ function profileState(home, profile) {
   return { dir, manifest, entry, present, symlink, realPath }
 }
 
+/**
+ * The profile's user patch, plus the backups a repair leaves beside it.
+ *
+ * This is the install-path evidence, not a test helper: nothing here writes the
+ * agent-plane rows. `dsh plugin add` and the first boot are the only writers.
+ */
+function patchState(home, profile) {
+  const dir = join(home, 'profiles', profile)
+  const path = join(dir, 'cordis.patch.yml')
+  let text = ''
+  let backups = []
+  try {
+    text = readFileSync(path, 'utf8')
+    backups = readdirSync(dir)
+      .filter(name => name.startsWith('cordis.patch.yml.bak-'))
+      .map(name => join(dir, name))
+  } catch {
+    // Missing patch: the checks below fail with the path they expected.
+  }
+  return { dir, path, text, backups }
+}
+
+/** How many inserts a patch declares for one row id. */
+function insertCount(text, id) {
+  return [...text.matchAll(new RegExp(`^\\s*-\\s*id:\\s*['"]?${id}['"]?\\s*$`, 'gmu'))].length
+}
+
 const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))
 
 async function main(argv) {
@@ -293,6 +321,16 @@ async function main(argv) {
   const config = runHost(['--profile', 'tui', '--dump-config'], { stdio: 'ignore' })
   check(config.status === 0, `the installed profile composes (--dump-config exited ${config.status})`)
 
+  // 4b. The install itself must not pre-fill the rows this gate is about. The
+  //     test helper does not call `profile-rows.mjs`; it records what the host
+  //     left after `dsh plugin add`, before any TUI boot. This is the RED state
+  //     the first-run repair has to close.
+  const patchBefore = patchState(home, 'tui')
+  check(!patchBefore.text.includes("name: '@deepseek-ai/dsh-tool-ask-user'"),
+    'the tarball install alone must not pre-fill tool-ask-user (this would hide the first-run path)')
+  check(!patchBefore.text.includes("name: '@deepseek-ai/dsh-tool-present'"),
+    'the tarball install alone must not pre-fill present')
+
   // 5. The probes, on the installed artifact. The wizard first: the home has no
   //    credential, which is exactly the first-run a user meets.
   // A probe that hangs must fail this step, not hold the job open: a pty write the
@@ -306,23 +344,91 @@ async function main(argv) {
     killSignal: 'SIGKILL',
     env: { ...process.env, PROBE_HOME: home, PROBE_REQUIRE_PTY: '1', ...extra },
   })
-  const wizard = probe('tui-setup-probe.mjs', { PROBE_REQUIRE_WIZARD: '1' })
+  const wizard = probe('tui-setup-probe.mjs', { PROBE_REQUIRE_WIZARD: '1', PROBE_FI1_FIRST_SAVE: '1' })
   check(wizard.status === 0, `the first-run wizard probe exited ${wizard.status}`)
   if (json && wizard.status !== 0) say(String(wizard.stdout ?? '') + String(wizard.stderr ?? ''))
+
+  // 5b. The wizard's first boot is the repair point. The patch must now carry
+  //     both official rows exactly once, keep the wizard's own entries, and
+  //     leave the previous file in a backup. `--dump-config` proves the next
+  //     composition sees them; the workspace probe below is the actual restart
+  //     and checks the registered tools through `/doctor`.
+  const patchAfterWizard = patchState(home, 'tui')
+  check(patchAfterWizard.text.includes("name: '@deepseek-ai/dsh-tool-ask-user'"),
+    'the first-run path writes the missing tool-ask-user row')
+  check(patchAfterWizard.text.includes("name: '@deepseek-ai/dsh-tool-present'"),
+    'the first-run path writes the missing present row')
+  check(insertCount(patchAfterWizard.text, 'tool-ask-user') === 1,
+    `tool-ask-user is mounted exactly once (${insertCount(patchAfterWizard.text, 'tool-ask-user')})`)
+  check(insertCount(patchAfterWizard.text, 'present') === 1,
+    `present is mounted exactly once (${insertCount(patchAfterWizard.text, 'present')})`)
+  check(patchAfterWizard.text.includes('- id: agent-default-model'),
+    'the wizard-owned model row survives the agent-plane repair (existing content is preserved)')
+  check(patchAfterWizard.backups.length > 0,
+    'the repair backs up the profile patch before replacing it')
+  check(patchAfterWizard.backups.some(path => {
+    const backup = readFileSync(path, 'utf8')
+    return !backup.includes("name: '@deepseek-ai/dsh-tool-ask-user'")
+      && !backup.includes("name: '@deepseek-ai/dsh-tool-present'")
+  }), 'the backup is the pre-repair file, not a copy of the repaired one')
+
+  const composed = runHost(['--profile', 'tui', '--dump-config'])
+  check(composed.status === 0, `the repaired profile composes (--dump-config exited ${composed.status})`)
+  check(String(composed.stdout).includes("name: '@deepseek-ai/dsh-tool-ask-user'")
+    && String(composed.stdout).includes("name: '@deepseek-ai/dsh-tool-present'"),
+  'the next composition contains both agent-plane rows')
 
   // …then the workspace, on the same install, with the credential a finished wizard
   // would have left. Paste is the other half of the same user path: 0.8.2's incident
   // was a pasted key, and a user pastes *after* setup too — into the composer, in
   // front of a Screen. Both run against this install rather than the checkout.
   const { provisionProbeCredential } = await import(pathToFileURL(join(REPO, 'scripts', 'probe-home.mjs')).href)
+  let patchBeforeWorkspace
   if (wizard.status === 0) {
     provisionProbeCredential({ home, profile: 'tui', cli: CLI, log: () => {} })
-    const workspace = probe('tui-probe.mjs')
+    patchBeforeWorkspace = patchState(home, 'tui').text
+    const workspace = probe('tui-probe.mjs', { PROBE_REQUIRE_AGENT_PLANE: '1' })
     check(workspace.status === 0, `the workspace probe exited ${workspace.status}`)
     if (json && workspace.status !== 0) say(String(workspace.stdout ?? '') + String(workspace.stderr ?? ''))
     const paste = probe('tui-paste-probe.mjs')
     check(paste.status === 0, `the paste probe exited ${paste.status}`)
     if (json && paste.status !== 0) say(String(paste.stdout ?? '') + String(paste.stderr ?? ''))
+    const patchAfterWorkspace = patchState(home, 'tui')
+    check(patchAfterWorkspace.text === patchBeforeWorkspace,
+      'a completed profile is not rewritten on the next boot (idempotent)')
+    check(patchAfterWorkspace.backups.length === patchAfterWizard.backups.length,
+      'and no second backup is created')
+
+    // 5c. Partial + old-configured upgrade shape: the home already has a
+    // credential, settings and sessions, but one tool row is gone and a user
+    // override sits next to it. The first boot must add only `present`; the
+    // second must find the composition ready. The user's row and the existing
+    // tool row stay exactly as they were. On the RED shape the first-run
+    // assertions above already failed, so there is no partial profile to make.
+    if (insertCount(patchAfterWizard.text, 'present') === 1
+      && insertCount(patchAfterWizard.text, 'tool-ask-user') === 1) {
+      const presentBlock = /\r?\n    - id: present\r?\n      name: '@deepseek-ai\/dsh-tool-present'\r?\n/u
+      const partialText = patchAfterWorkspace.text.replace(presentBlock, '')
+      check(partialText !== patchAfterWorkspace.text, 'the partial fixture removes the present insert')
+      writeFileSync(patchAfterWorkspace.path, `${partialText.trimEnd()}\n- id: user-owned-row\n  disabled: true\n`)
+      const partialBefore = patchState(home, 'tui')
+      const repairBoot = probe('tui-probe.mjs')
+      check(repairBoot.status === 0, `the partial-profile repair boot exited ${repairBoot.status}`)
+      if (json && repairBoot.status !== 0) say(String(repairBoot.stdout ?? '') + String(repairBoot.stderr ?? ''))
+      const partialAfter = patchState(home, 'tui')
+      check(insertCount(partialAfter.text, 'present') === 1, 'the partial profile gains the missing present row exactly once')
+      check(insertCount(partialAfter.text, 'tool-ask-user') === 1, 'the tool that was already present is not duplicated')
+      check(partialAfter.text.includes('- id: user-owned-row'), 'the user override survives the repair')
+      check(partialAfter.text.includes("name: '@deepseek-ai/dsh-tool-present'"), 'the missing row is actually written')
+      check(partialAfter.backups.length === partialBefore.backups.length + 1,
+        'the partial repair backs up the file once')
+      const restart = probe('tui-probe.mjs', { PROBE_REQUIRE_AGENT_PLANE: '1' })
+      check(restart.status === 0, `the restarted partial profile exited ${restart.status}`)
+      if (json && restart.status !== 0) say(String(restart.stdout ?? '') + String(restart.stderr ?? ''))
+      const partialEnd = patchState(home, 'tui')
+      check(partialEnd.text === partialAfter.text, 'the restarted partial profile is not rewritten again')
+      check(partialEnd.backups.length === partialAfter.backups.length, 'and creates no extra backup')
+    }
   }
 
   if (!keep) {
@@ -350,8 +456,8 @@ async function main(argv) {
     return 1
   }
   console.log('OK: the packed artifact installs, resolves to the profile rather than the checkout,'
-    + ' composes, walks the first-run wizard (pasted key included), runs the workspace probes'
-    + ' and keeps a paste out of the layers and in the composer')
+    + ' composes, repairs the first-install agent plane for the next boot, survives a partial-profile'
+    + ' restart idempotently, runs the workspace probes and keeps a paste out of the layers and in the composer')
   return 0
 }
 

@@ -82,11 +82,12 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** `0.8.3` is `latest` (0.8.4-rc.1 is the `next` candidate) and supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.2.1-rc.2` (upstream `next`); the `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** `0.8.4` is the stable release promoted from the observed `0.8.4-rc.2` candidate; `0.8.4-rc.1` was the earlier candidate. It supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.2.1-rc.2` (upstream `next`). The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
-**Updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
+**Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
-already pinned in `pnpm-lock.yaml` (often 0.3.7). Do not put `--profile`
+already pinned in `pnpm-lock.yaml` (often 0.3.7). RC testers should use `@next`
+or an exact `-rc.N` version instead; `@latest` stays on the stable channel. Do not put `--profile`
 after `add`: `dsh plugin add --profile tui add dsh-ssh-tui` is not valid.
 Remove with `dsh plugin --profile tui remove dsh-ssh-tui`.
 

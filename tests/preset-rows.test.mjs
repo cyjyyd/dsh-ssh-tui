@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -107,6 +107,97 @@ test('a partially mounted roster gains only the rows it lacks', () => {
   assert.ok(repaired.includes("name: '@deepseek-ai/dsh-code-runtime-worker-thread'"))
   assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'"))
   assert.equal(rosterPatchText(repaired), undefined, 'the repair is idempotent')
+})
+
+test('a partial 0.1.7 profile gains only the tool it lacks', () => {
+  const partial = "- insert:\n    - id: tool-ask-user\n      name: '@deepseek-ai/dsh-tool-ask-user'\n"
+  const repaired = rosterPatchText(partial, 'forms')
+  assert.ok(repaired !== undefined)
+  assert.equal(repaired.match(/id: tool-ask-user/gu)?.length, 1, 'the existing tool row stays single')
+  assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-present'"))
+  assert.equal(repaired.match(/id: present/gu)?.length, 1, 'only the missing tool is mounted')
+  assert.equal(rosterPatchText(repaired, 'forms'), undefined, 'the repair is idempotent')
+})
+
+test('a user disable is addressed, not mounted a second time', () => {
+  // A disabled row is the user's decision. The planner must see the id and
+  // leave it alone; appending an insert would either collide at load time or
+  // undo the disable by mounting a second copy.
+  const disabled = '- id: present\n  disabled: true\n'
+  const repaired = rosterPatchText(disabled, 'forms')
+  assert.ok(repaired !== undefined)
+  assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-ask-user'"), 'the other missing tool is added')
+  assert.equal(repaired.match(/id: present/gu)?.length, 1, 'the disabled row is not duplicated')
+  assert.equal(repaired.includes("name: '@deepseek-ai/dsh-tool-present'"), false, 'and no second present insert is added')
+})
+
+test('a broken patch is refused instead of being made longer', () => {
+  assert.throws(
+    () => rosterPatchText('- insert: [\n', 'forms'),
+    /does not parse.*refusing to add rows/u,
+    'a YAML error is reported, not appended to',
+  )
+})
+
+test('a repair backs up the profile patch before replacing it', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-backup-'))
+  try {
+    const path = rosterPatchPath(home, 'tui')
+    const original = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-host-webserver'\n"
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, original)
+    assert.equal(await ensureRosterRows(home, 'tui', rosterRows('forms'), 'forms'), 'written')
+    const files = await readdir(dirname(path))
+    const backups = files.filter(name => name.startsWith('cordis.patch.yml.bak-'))
+    assert.equal(backups.length, 1, `one backup should exist, got ${JSON.stringify(files)}`)
+    assert.equal(await readFile(join(dirname(path), backups[0]), 'utf8'), original)
+    const repaired = await readFile(path, 'utf8')
+    assert.ok(repaired.includes('webserver'), 'the user row survives')
+    assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-ask-user'"))
+    assert.ok(repaired.includes("name: '@deepseek-ai/dsh-tool-present'"))
+    assert.equal(await ensureRosterRows(home, 'tui', rosterRows('forms'), 'forms'), 'present')
+    assert.equal((await readdir(dirname(path))).filter(name => name.startsWith('cordis.patch.yml.bak-')).length, 1,
+      'an already repaired profile is not backed up or written again')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a failed backup refuses to overwrite the user profile', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-backup-fail-'))
+  try {
+    const path = rosterPatchPath(home, 'tui')
+    const original = "- insert:\n    - id: webserver\n      name: '@deepseek-ai/dsh-host-webserver'\n"
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, original)
+    // A directory at the exact backup name makes copyFile fail without relying
+    // on POSIX permissions, which root and Windows runners do not honour the
+    // same way. The original must remain byte-for-byte untouched.
+    await mkdir(`${path}.bak-blocked`, { recursive: true })
+    await assert.rejects(
+      () => ensureRosterRows(home, 'tui', rosterRows('forms'), 'forms', 'blocked'),
+      /cannot back up profile patch.*refusing to write/u,
+    )
+    assert.equal(await readFile(path, 'utf8'), original)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a non-ENOENT read failure aborts instead of treating the patch as absent', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-preset-rows-read-fail-'))
+  try {
+    const path = rosterPatchPath(home, 'tui')
+    // A directory at the patch path is a read failure, not an absent file.
+    await mkdir(path, { recursive: true })
+    await assert.rejects(
+      () => ensureRosterRows(home, 'tui'),
+      /cannot read profile patch.*refusing to repair/u,
+    )
+    assert.deepEqual(await readdir(path), [], 'the directory was not replaced by a file')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 })
 
 test('ensureRosterRows creates, then leaves the profile patch alone', async () => {

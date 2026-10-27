@@ -2,6 +2,12 @@
 
 > 本文件是**规则**，不是建议。任何自动化助手、脚本或维护者在发版前都必须先读它。
 
+> **0.8.4 稳定版发布（2026-10-24）**：从已观察的 `0.8.4-rc.2` 转正。包版本改为 `0.8.4`，
+> 产品代码不变；正式 tag、GitHub Release 与 npm `latest` 在最终四腿 CI 和规范 tarball 验证
+> 通过后创建。Stable 来源是 `release/0.8.4`，不是 `main`；W-4 Completion / W-5 Search Screen
+> 不进入本线。发布后 `latest` 与 `next` 都指向 `0.8.4`；RC.2 的 tarball 哈希和测试收据只作为
+> 历史，不作为稳定 tarball 的哈希。
+
 > **0.8.4-rc.1 已发布（2026-10-17，只上 `next`，候选版）**：版本提交 `0e1342a` → CI 四条腿全 success
 > （run [39046019169](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/39046019169)，`head_branch: main`）。
 > 默认腿（`test (0.2.1-rc.2)`）与 `test-windows` 上的**三道阻塞门全部实际执行并 success**：首启向导（含粘贴
@@ -98,13 +104,15 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    修完 bug、跑完验收、推送到 GitHub 分支——到此为止，然后等指令。
 
 2. **顺序固定：先 GitHub，后 npm。**
-   发版请求先落到 GitHub：版本号提交 → 推送 `main` → 打 `vX.Y.Z` tag → 推 tag → GitHub Release。
+   发版请求先落到 GitHub：版本号提交 → 推送**发版来源分支** → 打 `vX.Y.Z` tag → 推 tag →
+   GitHub Release。`0.8.4` 线的来源是 `release/0.8.4`，不是 `main`；`main` 上的 W-4 / W-5
+   不进入本线，也不得为了凑一个 tag 而混入。tag 必须指向该来源分支上经过测试的**精确候选 SHA**。
    **候选版（`-rc.N`）只上 `next`**：`npm publish --tag next`（`latest` 留给正式版；把 rc 提成
    `latest` 会让所有默认安装的用户拿到候选）。正式版才 `npm publish --tag latest`，并按需
    `npm dist-tag add dsh-ssh-tui@X.Y.Z next`。
 
 3. **CI 全部腿全绿，才允许碰 npm。**
-   当前四条腿（0.8.4-rc.1 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
+   当前四条腿（0.8.4 起）：`test (0.2.1-rc.2)`、`test (0.2.0-rc.2)`、`test (0.2.0-rc.1)`、
    `test-windows` —— **全部 success** 才 `npm publish`。（`0.1.7-rc.2` / `0.1.7-rc.1` 两条腿在
    0.8.4-rc.1 随该线一起摘除；更早的 0.1.5 两条腿在 0.8.0 摘除。）
    其中**默认腿（`0.2.1-rc.2`）与 `test-windows`** 另外跑三条发布前阻塞门（0.8.4 起）：
@@ -119,9 +127,10 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
    **这三门红了就不是"CI 绿"**：安装失败必须按 `classifyInstallFailure` 分类后报告，不得用 workaround
    把本插件的包改绿（宿主 / pnpm / 环境的失败尤其如此）。
    CI 红着就把包发出去，等于把一个未验证的版本交给所有 `@next` / `@latest` 用户。
-   **tag 不触发 CI**：workflow 只监听 `main` 的 push 与 PR（`.github/workflows/ci.yml` 的 `on:`），
-   所以打 tag 前后要做的是**核对 tag 所指的那个 SHA 的 run 是否 success**（`main` 上的推送已经跑过
-   一次同一个 SHA），而不是指望推 tag 自己长出一轮。查法：
+   **tag 不触发 CI**：workflow 监听 `main` 与 `release/0.8.4` 的 push，以及 PR
+   （`.github/workflows/ci.yml` 的 `on:`），所以打 tag 前后要做的是**核对 tag 所指的那个 SHA
+   的已有 run 是否 success**（对应来源分支的推送已经跑过同一个 SHA），而不是指望推 tag 自己
+   长出一轮。查法：
    `curl -s "https://api.github.com/repos/cyjyyd/dsh-ssh-tui/actions/runs?head_sha=$(git rev-parse vX.Y.Z)"`。
 
 ## 允许 / 不允许
@@ -129,7 +138,7 @@ npm dist-tag add dsh-ssh-tui@0.8.0 latest    # 实测生效：latest=0.8.0、nex
 | 动作 | 未要求发版时 | 已要求发版时 |
 |---|---|---|
 | 改 `package.json` 版本号 | ✗ | ✓ |
-| 推 `main`（提交修复/文档） | ✓ | ✓ |
+| 推发版来源分支（`0.8.4` 为 `release/0.8.4`） | ✓ | ✓ |
 | 打 `vX.Y.Z` tag | ✗ | ✓（CI 绿之前只是 tag，不发 npm） |
 | 建 GitHub Release | ✗ | ✓ |
 | `npm publish` / 改 dist-tag | ✗ | 仅 CI 全绿后 |
@@ -199,7 +208,7 @@ alpha 也在发。**声明兼容是一个承诺，不是一个猜测**，所以�
 ### 兼容表态（版式留自 2026-10-03 快照 · 表态列已更新到 `0.8.4-rc.1`）
 
 > 版式留自 2026-10-03 的快照（当时 `0.8.1` = `latest` + `next`）。当前发布记录看本文件开头：
-> **`latest` = `0.8.3`、`next` = `0.8.4-rc.1`**（2026-10-17 起；候选版只上 `next`）。下表"我们的表态"
+> **`latest` = `0.8.4`、`next` = `0.8.4`**（2026-10-24 稳定转正）。下表"我们的表态"
 > 一列是**今天**的表态（2026-10-17 随 `0.8.4-rc.1` 更新：新增 `0.2.1-rc.2`，`0.1.7` 改判
 > `incompatible` 并摘腿）；"通道版本"一列里的 `0.1.7` 行已是历史，其余仍是当前值。窗口与腿列表以
 > 本节的正文为准。
