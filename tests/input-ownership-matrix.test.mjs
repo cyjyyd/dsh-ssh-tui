@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { SshTui } from '../lib/tui.js'
-import { pushRow, waitForDialog } from './wait.mjs'
+import { pushRow, tick, waitForDialog } from './wait.mjs'
 
 setLocale('zh')
 
@@ -557,29 +557,39 @@ test('G2: the two field-less Surface shapes keep every owner state they do not o
   assert.deepEqual(failures, [], `\n  ${failures.join('\n  ')}`)
 })
 
-test('G3: the /find seed is written by the composer, on both of its paths, and never behind a Surface', async () => {
-  // Two independent paths write the same seed, and W-3b.3a had to guard one of them:
-  // `\x1f` is the shared body's tail (already behind the `dialog` early return) and
-  // `Alt+f`/`Alt+/` are the Router's chord branch (which runs *before* any owner).
-  for (const [unit, label] of [['\x1f', 'Ctrl+_'], ['\x1bf', 'Alt+f'], ['\x1b/', 'Alt+/']]) {
+test('G3: the composer seed and the Search-screen entries are distinct, and neither runs behind a Surface', async () => {
+  // Ctrl+_ remains the composer's text seed. Alt+f/F// is now a Search Screen
+  // entry in framed mode; it must not rewrite the hidden draft.
+  const seed = fixture()
+  draft(seed.tui)
+  seed.tui.handleData(Buffer.from('\x1f'))
+  assert.equal(seed.tui.input, '/find ', 'Ctrl+_ seeds the composer')
+  assert.equal(seed.tui.cursor, 6)
+  assert.equal(seed.tui.screen, undefined)
+
+  for (const [unit, label] of [['\x1bf', 'Alt+f'], ['\x1b/', 'Alt+/']]) {
     const { tui } = fixture()
     draft(tui)
     tui.handleData(Buffer.from(unit))
-    assert.equal(tui.input, '/find ', `${label}: the composer seeds its own /find`)
-    assert.equal(tui.cursor, 6, `${label}: with the caret after the seed`)
-    assert.equal(tui.dialog, undefined, `${label}: and nothing was opened`)
+    assert.equal(tui.screen?.kind, 'search', `${label}: opens the Search Screen`)
+    assert.equal(tui.input, '我打了一半的消息', `${label}: the composer draft is not the search seed`)
+    assert.equal(tui.cursor, 3)
+    tui.handleData(Buffer.from('\x03'))
+    await tick(0)
   }
 
-  // Ctrl+G is the search *step*, not a seed: it writes no text at all.
+  // Ctrl+G navigates/opens Search; it types nothing.
   const step = fixture()
   draft(step.tui)
   step.tui.handleData(Buffer.from('\x07'))
-  assert.equal(step.tui.input, '我打了一半的消息', 'Ctrl+G types nothing')
-  assert.equal(step.tui.cursor, 3, 'and moves no caret')
-  assert.match(String(step.tui.currentFooterEcho() ?? ''), /还没有搜索结果/u, 'it reports the search it stepped through')
+  assert.equal(step.tui.input, '我打了一半的消息')
+  assert.equal(step.tui.cursor, 3)
+  assert.equal(step.tui.screen?.kind, 'search')
+  step.tui.handleData(Buffer.from('\x03'))
+  await tick(0)
 
-  // At a Surface the seed has no field to land in — the answer is not the draft, and
-  // the draft is not the Surface's — so both paths are consumed with no write.
+  // At a Surface the seed/search entries have no field to land in and must be
+  // consumed by the Surface adapter, never written behind it.
   for (const [name, open] of SURFACE_FORMS) {
     for (const [unit, label] of [['\x1f', 'Ctrl+_'], ['\x07', 'Ctrl+G'], ['\x1bf', 'Alt+f'], ['\x1b/', 'Alt+/']]) {
       const { tui, seen } = fixture()
@@ -592,12 +602,7 @@ test('G3: the /find seed is written by the composer, on both of its paths, and n
       assert.equal(tui.input, '我打了一半的消息', `${where}: the hidden draft is not a search seed`)
       assert.equal(tui.cursor, 3, `${where}: and its caret did not move`)
       assert.deepEqual(ownerState(tui), before, `${where}: nothing else moved either`)
-      // Who consumed it says which fix is holding: `\x1f` and `\x07` are the shared
-      // body's tail, so the Surface adapter takes them and drops them, while the Alt
-      // chords are read by `route()` *before* any owner is asked (W-3b.3a) — no adapter
-      // sees them at all, which is what makes "consumed, not forwarded" checkable.
-      const expectedOwner = unit.startsWith('\x1b') ? '' : 'ownerSurface'
-      assert.equal(seen.join(','), expectedOwner, `${where}: ${expectedOwner === '' ? 'the chord branch consumed it' : 'the Surface took it'}`)
+      assert.equal(seen.join(','), unit.startsWith('\x1b') ? '' : 'ownerSurface', `${where}: the Surface/chord boundary consumes it`)
     }
   }
 })

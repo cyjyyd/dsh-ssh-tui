@@ -1,34 +1,21 @@
+/**
+ * `/find` highlights the match in its Search results/preview, not on the whole
+ * workspace card. The matcher and highlighter are the old ones; only the paint
+ * surface moved (W-5B).
+ */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { setLocale } from '../lib/i18n/index.js'
 import { displayWidth, stripAnsi } from '../lib/term-text.js'
 import { SshTui } from '../lib/tui.js'
-import { allText, feedbackText } from './wait.mjs'
 
-/**
- * `/find` highlights the match, not the card.
- *
- * The old highlight wrapped every line of the hit's card in reverse video, which
- * on a narrow screen looked like the card had been selected and never showed
- * *which* word matched. It also used the label-prefixed query ("回复 deploy") as
- * the needle, so a category search highlighted nothing at all.
- */
 setLocale('zh')
 
-/**
- * Color decides which highlight path runs, and this suite must test both. The
- * environment is not neutral — a test runner here has `NO_COLOR=1` and
- * `TERM=dumb`, which turns color off no matter what the config says — so each
- * case states the terminal it means to be.
- */
 function terminal(t, { color }) {
   const previousNoColor = process.env.NO_COLOR
   const previousTerm = process.env.TERM
   const previousDepth = process.env.DSH_TUI_COLOR_DEPTH
-  // The palette override wins over TERM/NO_COLOR, so a test that means "colour
-  // terminal" has to state the palette too or a forced `none` in the
-  // environment silently turns the assertion into a no-op.
   process.env.DSH_TUI_COLOR_DEPTH = color ? 'truecolor' : 'none'
   if (color) {
     delete process.env.NO_COLOR
@@ -53,79 +40,73 @@ function fixture({ color = true } = {}) {
   return new SshTui(ctx, agent, { sessionId: 's', color, headlessDisplay: true })
 }
 
-/** Every reverse-video span in a painted line, as plain text. */
+const frameOf = (tui, width = 100, height = 30) => tui.captureFrame(width, height)
+const plain = line => stripAnsi(line)
 function highlightedSpans(line) {
   const spans = []
   const pattern = /\x1b\[7m([\s\S]*?)\x1b\[27m/gu
   for (const match of line.matchAll(pattern)) spans.push(stripAnsi(match[1] ?? ''))
   return spans
 }
+function find(tui, query) {
+  tui.runCommand(`/find ${query}`)
+}
+function preview(tui) {
+  tui.handleData(Buffer.from('\r'))
+}
 
 test('every occurrence on a line is highlighted, and nothing else is', t => {
   terminal(t, { color: true })
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: 'run npm test, then npm test again' })
-  tui.runCommand('/find npm test')
-  const frame = tui.captureFrame(120, 30)
-  const spans = frame.flatMap(highlightedSpans)
+  find(tui, 'npm test')
+  preview(tui)
+  const spans = frameOf(tui).flatMap(highlightedSpans)
   assert.deepEqual(spans, ['npm test', 'npm test'], 'both occurrences, exactly the needle')
-  assert.ok(frame.some(line => stripAnsi(line).includes('run npm test')), 'the text is still readable')
+  assert.ok(plain(frameOf(tui).join('\n')).includes('run npm test'), 'the text is still readable')
 })
 
-test('a wrapped long line is highlighted per screen line, without drifting', t => {
+test('a wrapped long line is highlighted per preview line, without drifting', t => {
   terminal(t, { color: true })
   const tui = fixture()
-  // 200 cells of filler, then the needle — on a 40-column screen this only fits
-  // after two wraps, which is where an offset-based highlight would slip.
-  const filler = `${'x'.repeat(200)} deploy deploy`
-  tui.rows.push({ kind: 'assistant', text: filler })
-  tui.runCommand('/find deploy')
-
+  tui.rows.push({ kind: 'assistant', text: `${'x'.repeat(200)} deploy deploy` })
+  find(tui, 'deploy')
+  preview(tui)
   const width = 40
-  const frame = tui.captureFrame(width, 30)
+  const frame = frameOf(tui, width, 30)
   const spans = frame.flatMap(highlightedSpans)
-  assert.ok(spans.length >= 1, `the needle is highlighted after the wrap: ${JSON.stringify(frame)}`)
-  for (const span of spans) assert.equal(span, 'deploy')
-  // Every highlighted line must still fit the screen: a span cannot be painted
-  // past the right edge.
-  for (const line of frame) {
-    assert.ok(displayWidth(stripAnsi(line)) <= width, `no line overflows: ${JSON.stringify(stripAnsi(line))}`)
-  }
+  assert.deepEqual(spans, ['deploy', 'deploy'], 'both wrapped matches, exactly the word')
+  for (const line of frame) assert.ok(displayWidth(plain(line)) <= width, `no line overflows: ${JSON.stringify(plain(line))}`)
 })
 
 test('a category search highlights the query, not the label', t => {
   terminal(t, { color: true })
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: 'the deploy step is next' })
-  tui.runCommand('/find 回复 deploy')
-  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
-  assert.deepEqual(spans, ['deploy'], 'the label 回复 is not part of the needle')
+  find(tui, '回复 deploy')
+  preview(tui)
+  assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), ['deploy'], 'the label 回复 is not part of the needle')
 })
 
 test('without color the match is marked with a prefix, and only there', t => {
   terminal(t, { color: false })
   const tui = fixture({ color: false })
-  // Two lines in the hit's own card: marking the card and marking the match look
-  // identical on a one-line row, so the row has to wrap or break.
   tui.rows.push({ kind: 'assistant', text: 'alpha deploy here\nsecond line of the same reply' })
   tui.rows.push({ kind: 'system', text: 'unrelated notice' })
-  tui.runCommand('/find deploy')
-  const frame = tui.captureFrame(100, 30).map(stripAnsi)
-  const marked = frame.filter(line => line.startsWith('» '))
-  // The hit's own row is also the selected row (`▶`): a search that lands on a
-  // reply leaves it ready for `/copy`, exactly as landing on a tool card does.
-  // The two prefixes say different things, so both are expected here.
-  assert.deepEqual(marked, ['» ▶ alpha deploy here'], 'only the line with the match carries the hit marker')
+  find(tui, 'deploy')
+  preview(tui)
+  const marked = frameOf(tui).map(plain).filter(line => line.startsWith('» '))
+  assert.equal(marked.length, 1, 'only the preview line with the match carries the marker')
+  assert.ok(marked[0]?.includes('alpha deploy here'))
 })
 
 test('a search with no hits highlights nothing and says so', t => {
   terminal(t, { color: true })
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: 'nothing to see' })
-  tui.runCommand('/find zzzz')
-  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
-  assert.deepEqual(spans, [])
-  assert.match(feedbackText(tui), /没有匹配|未找到|no match/iu)
+  find(tui, 'zzzz')
+  assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), [])
+  assert.match(plain(frameOf(tui).join('\n')), /没有匹配|未找到|no match/iu)
 })
 
 test('stepping still reports the position and moves the highlight', t => {
@@ -133,47 +114,93 @@ test('stepping still reports the position and moves the highlight', t => {
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: 'first deploy' })
   tui.rows.push({ kind: 'assistant', text: 'second deploy' })
-  tui.runCommand('/find deploy')
-  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
-  assert.equal(spans.length, 1, 'only the current hit is highlighted')
-
-  tui.runCommand('/find deploy')
-  assert.match(feedbackText(tui), /1\s*\/\s*2|2\s*\/\s*2/u, 'the step line reports index and total')
+  find(tui, 'deploy')
+  assert.equal(tui.screen?.search?.hits.length, 2)
+  assert.equal(tui.screen?.search?.selected, 1)
+  tui.handleData(Buffer.from('\x1b[A'))
+  assert.equal(tui.screen?.search?.selected, 0)
+  assert.match(plain(frameOf(tui).join('\n')), /1\/2/u)
 })
 
 test('the highlight follows the search, which is case-insensitive', t => {
   terminal(t, { color: true })
   const tui = fixture()
   tui.rows.push({ kind: 'assistant', text: 'Deploy the thing after lunch' })
-  tui.runCommand('/find deploy')
-  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
-  // The search lowercases both sides, so it hits; the highlight must find the
-  // needle in the text as painted, not only in the case that was typed.
-  assert.deepEqual(spans, ['Deploy'], 'the matched word is highlighted in its own casing')
+  find(tui, 'deploy')
+  preview(tui)
+  assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), ['Deploy'], 'the matched word is highlighted in its own casing')
 })
 
-test('a needle the wrap split is still pointed at', t => {
+test('a needle the wrap split marks only its two real fragments', t => {
   terminal(t, { color: true })
   const tui = fixture()
-  const width = 40
-  // The wrap lands between the two words, so no single painted line contains
-  // the whole phrase the user searched for. The row still matched, so the user
-  // has to be shown where the hit is.
   tui.rows.push({ kind: 'assistant', text: `${'x'.repeat(30)} deploy --dry-run here` })
-  tui.runCommand('/find deploy --dry')
-  const frame = tui.captureFrame(width, 30)
-  const marked = frame.filter(line => line.includes('\x1b[7m'))
-  assert.ok(marked.length >= 1, `the hit row is pointed at even when the wrap splits it:\n${frame.join('\n')}`)
-  assert.match(feedbackText(tui), /1\/1/u, 'and the search did report the hit')
+  find(tui, 'deploy --dry')
+  preview(tui)
+  const frame = frameOf(tui, 40, 30)
+  assert.deepEqual(
+    frame.flatMap(highlightedSpans),
+    ['deploy ', '--dry'],
+    'the split match is two fragments, never the whole first row',
+  )
+  assert.match(plain(frame.join('\n')).replace(/\s+/gu, ' '), /deploy --dry-run here/u)
 })
 
 test('an emoji before the match does not shift the highlight', t => {
   terminal(t, { color: true })
   const tui = fixture()
-  // The emoji is one code point but two UTF-16 units, and the search counts
-  // units: an offset mapping that forgets this marks the wrong cells.
   tui.rows.push({ kind: 'assistant', text: '🚀 deploy 🚀 deploy done' })
-  tui.runCommand('/find deploy')
-  const spans = tui.captureFrame(100, 30).flatMap(highlightedSpans)
-  assert.deepEqual(spans, ['deploy', 'deploy'], 'both matches, exactly the word')
+  find(tui, 'deploy')
+  preview(tui)
+  assert.deepEqual(frameOf(tui).flatMap(highlightedSpans), ['deploy', 'deploy'], 'both matches, exactly the word')
+})
+
+test('CJK and emoji keep multiple match positions exact', t => {
+  terminal(t, { color: true })
+  const tui = fixture()
+  tui.rows.push({ kind: 'assistant', text: '前 中文🚀 Deploy 中 deploy 后' })
+  find(tui, 'deploy')
+  preview(tui)
+  const frame = frameOf(tui)
+  assert.deepEqual(frame.flatMap(highlightedSpans), ['Deploy', 'deploy'], 'both real occurrences, in their own casing')
+  assert.match(plain(frame.join('\n')), /中文🚀 Deploy 中 deploy 后/u)
+})
+
+function pagedPreview({ color }) {
+  const tui = fixture({ color })
+  tui.relayColumns = 24
+  tui.relayRows = 20
+  const text = ['deploy first page', ...Array.from({ length: 60 }, (_, i) => `filler line ${i}`)].join('\n')
+  tui.rows.push({ kind: 'assistant', text })
+  find(tui, 'deploy')
+  preview(tui)
+  return tui
+}
+
+test('a Preview page without the needle has no forged highlight', t => {
+  terminal(t, { color: true })
+  const tui = pagedPreview({ color: true })
+  const page = tui.searchPage()
+  assert.deepEqual(frameOf(tui, 24, 20).flatMap(highlightedSpans), ['deploy'], 'the first page has the real match')
+
+  tui.handleData(Buffer.from('\x1b[6~'))
+  assert.equal(tui.screen?.search?.previewOffset, page, 'PgDn moved one Preview page')
+  const later = frameOf(tui, 24, 20)
+  assert.deepEqual(later.flatMap(highlightedSpans), [], 'a page with no needle must not reverse the first row')
+  assert.equal(tui.screen?.search?.previewOffset, page, 'painting did not move the Preview offset')
+  for (const line of later) assert.ok(displayWidth(plain(line)) <= 24, `no overflow: ${JSON.stringify(plain(line))}`)
+})
+
+test('without color a Preview page without the needle has no forged marker', t => {
+  terminal(t, { color: false })
+  const tui = pagedPreview({ color: false })
+  const page = tui.searchPage()
+  const first = frameOf(tui, 24, 20).map(plain).filter(line => line.startsWith('» '))
+  assert.equal(first.length, 1, 'only the first page’s real match is marked')
+
+  tui.handleData(Buffer.from('\x1b[6~'))
+  assert.equal(tui.screen?.search?.previewOffset, page)
+  const later = frameOf(tui, 24, 20).map(plain).filter(line => line.startsWith('» '))
+  assert.deepEqual(later, [], 'a page with no needle must not invent a » marker')
+  assert.equal(tui.screen?.search?.previewOffset, page, 'painting did not move the Preview offset')
 })

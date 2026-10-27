@@ -156,8 +156,7 @@ test('slash suggestions and help output include localized dsh commands', () => {
   const ctx = { get: (name) => (name === 'commands' ? commandsMock : undefined), on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.input = '/per'
-  tui.cursor = 4
+  tui.handleData(Buffer.from('/per'))
   const frame = tui.captureFrame(120, 24).join('\n')
   assert.ok(frame.includes('/permission'))
   assert.ok(frame.includes('权限预设'))
@@ -267,8 +266,7 @@ test('effort command adjusts current model reasoning effort with manual override
   assert.ok(feedbackText(tui).includes('默认（不显式传参）'))
 
   // 3. Check /effort in suggestions
-  tui.input = '/eff'
-  tui.cursor = 4
+  tui.handleData(Buffer.from('/eff'))
   const frame = tui.captureFrame(120, 24).join('\n')
   assert.ok(frame.includes('/effort'))
   assert.ok(frame.includes('思考强度'))

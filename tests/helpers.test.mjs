@@ -640,8 +640,7 @@ test('slash suggestions on a bare slash include /disconnect', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.input = '/'
-  tui.cursor = 1
+  tui.handleData(Buffer.from('/'))
   const text = tui.captureFrame(88, 28).join('\n')
   assert.ok(text.includes('/disconnect'))
   assert.ok(text.includes('断线策略'))
@@ -656,10 +655,9 @@ test('slash suggestions slide a 12-row window with the selected command', () => 
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
-  tui.input = '/'
-  tui.cursor = 1
+  tui.handleData(Buffer.from('/'))
   tui.captureFrame(88, 32)
-  tui.suggestionIndex = Math.max(0, tui.commandSuggestions.length - 1)
+  for (let step = 0; step < tui.commandSuggestions.length; step += 1) tui.handleData(Buffer.from('\x1b[B'))
   const frame = tui.captureFrame(88, 32)
   const text = frame.join('\n')
   if (tui.commandSuggestions.length > 12) assert.ok(text.includes('↑ 还有'))
@@ -3481,12 +3479,11 @@ test('resume still settles a spawn that did reach its result', async () => {
   assert.equal(card.logs.some(entry => entry.text.includes('结束事件')), false)
 })
 
-test('a /find hit inside a child log is scrolled to and marked', () => {
+test('a /find hit inside a child log is shown by the Search Screen', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: true, headlessDisplay: true })
   tui.handleSubagentStart({ runId: 'run-a', id: 'child-a', provider: 'spawn', local: true })
-  // Enough child log to push the hit below the overlay's first screen.
   for (let at = 0; at < 30; at += 1) {
     tui.handleSubagentSessionEvent('child-a', {
       type: 'tool/call',
@@ -3498,24 +3495,13 @@ test('a /find hit inside a child log is scrolled to and marked', () => {
     data: { message: { content: [{ type: 'text', text: 'needle-token: the answer' }] } },
   })
   tui.runCommand('/find needle-token')
-  assert.equal(tui.screen?.kind, 'inspect')
-  const frame = tui.captureFrame(90, 24).join('\n')
-  // The overlay used to open at the top, so the reported hit was off screen.
-  assert.ok(frame.includes('needle-token'), frame)
-  assert.ok(tui.screen.offset > 0, `scrolled to the hit, not the top: ${tui.screen.offset}`)
-  // Monochrome marks it with the same `»` the transcript uses; a coloured
-  // terminal paints the hit in reverse video. The suite runs under whatever
-  // palette the environment asks for, so accept either marker here.
-  const marked = frame.includes('»   needle-token') || /\x1b\[7m[^\x1b]*needle-token/u.test(frame)
-  assert.ok(marked, frame)
-  // The coloured path itself, forced so the assertion does not depend on TERM.
   tui.color = true
-  const colored = tui.captureFrame(90, 24).join('\n')
-  assert.ok(/\x1b\[7m[^\x1b]*needle-token/u.test(colored), colored)
-  // A repaint keeps the reader's own scroll position.
-  tui.screen.offset = 0
-  tui.captureFrame(90, 24)
-  assert.equal(tui.screen.offset, 0)
+  assert.equal(tui.screen?.kind, 'search', 'the result is a Search Screen, not a nested inspect')
+  const frame = tui.captureFrame(90, 24).join('\n')
+  assert.ok(frame.includes('needle-token'), frame)
+  assert.ok(/\x1b\[7m[^\x1b]*needle-token/u.test(frame), 'the query is marked in the result snippet')
+  assert.ok(tui.screen.copyText.includes('needle-token'))
+  tui.handleData(Buffer.from('\x03'))
 })
 
 /**
@@ -4495,7 +4481,7 @@ test('parseFindQuery and matchTranscriptRows filter thinking vs reply', () => {
   assert.equal(replies[0]?.kind, 'assistant')
 })
 
-test('/find jumps to the matching reply and keeps it in the painted frame', () => {
+test('/find jumps to the matching reply in the Search list', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
@@ -4518,9 +4504,11 @@ test('/find jumps to the matching reply and keeps it in the painted frame', () =
     data: { message: { content: [{ type: 'reasoning', text: 'unique-needle lives only in this thought' }, { type: 'text', text: 'later answer' }] } },
   })
   tui.runCommand('/find unique-needle')
-  const frame = tui.captureFrame(80, 16)
-  assert.ok(frame.some(line => line.includes('unique-needle')))
-  assert.ok(frame.some(line => line.includes('»') || line.includes('已思考')))
+  const frame = tui.captureFrame(80, 16).join('\n')
+  assert.ok(frame.includes('unique-needle'))
+  assert.ok(frame.includes('›'))
+  assert.equal(tui.screen?.kind, 'search')
+  tui.handleData(Buffer.from('\x03'))
 })
 
 test('plan mode and ask-user questions get their own collapsed cards', () => {

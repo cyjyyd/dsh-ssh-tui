@@ -173,6 +173,39 @@ import {
 } from './dialogs.js'
 import { commandSuggestions, localizedCommands, type CommandSuggestion } from './commands.js'
 import {
+  backspaceSearchText,
+  clampSearchListOffset,
+  cycleSearchSelection,
+  deleteSearchText,
+  ensureSearchSelectionVisible,
+  insertSearchText,
+  moveSearchCursor,
+  searchFieldViewport,
+  searchPreviewDisplayLines,
+  searchPreviewLines,
+  moveSearchSelection,
+  openSearchPreview,
+  pageSearchSelection,
+  reconcileSearchHits,
+  searchCopyText,
+  searchHitLines,
+  searchRequestFor,
+  searchStateFor,
+  setSearchCursor,
+  setSearchPreviewOffset,
+  setSearchQuery,
+  type SearchScreenState,
+} from './search-screen.js'
+import {
+  acceptCompletion,
+  completionFor,
+  dismissCompletion,
+  EMPTY_COMPLETION,
+  moveCompletion,
+  resetCompletion,
+  type CompletionState,
+} from './completion.js'
+import {
   archiveStalePlans,
   boundTranscriptRows,
   findLivePlanRow,
@@ -220,6 +253,7 @@ import {
   getLocale,
   localeDisplayName,
   localeFromTag,
+  onLocaleChange,
   setLocale,
   t,
   UI_LOCALE_NAMESPACE,
@@ -315,6 +349,7 @@ import {
   fmtElapsedCompact,
   foldInputView,
   highlightAnsiNeedle,
+  highlightAnsiRanges,
   hrefAtColumn,
   lastCodePoints,
   osc52Clipboard,
@@ -476,6 +511,7 @@ import {
   todoProgressLabel,
   TODO_STATUS_MARK,
   type CardCategory,
+  type FindRequest,
 } from './plan.js'
 import {
   buildToolHeader,
@@ -1295,6 +1331,8 @@ const DEFAULT_DETACHED_IDLE_MS = 6 * 60 * 60 * 1000
  */
 const DEFAULT_IDLE_EXIT_MS = 60 * 1000
 const CTRL_C_EXIT_WINDOW_MS = 2000
+/** The lone Escape byte. */
+const ESCAPE_BYTE = '\x1b'
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SUBAGENT_DEFAULT_EFFORT_LABEL = (): string => t('footer.effortDefault')
 /**
@@ -2014,8 +2052,16 @@ export class SshTui {
   private osc52HintShown = false
   private agentGone = false
   private onboarding: OnboardingState | undefined
-  private commandSuggestions: { name: string; description: string; local: boolean }[] = []
-  private suggestionIndex = 0
+  /** The single authoritative completion state; paint only reads it. */
+  private completionState: CompletionState = EMPTY_COMPLETION
+  /** Host/local materialization key (draft, locale, agent, revision, host presence). */
+  private completionKey: string | undefined
+  /** Bumped by the real `commands/change` observer, never by a timer. */
+  private completionRevision = 0
+  /** The locale listener is installed on the first completion materialization. */
+  private localeSubscribed = false
+  /** Host suggestions for the current key; replaced, never mutated. */
+  private completionForeign: readonly CommandSuggestion[] = []
   private focusedRow: FocusTarget | null = null
   /**
    * The active palette. Roles resolve through `theme.ts`, so switching themes is
@@ -2382,8 +2428,44 @@ export class SshTui {
    */
   private readonly reader = new InputReader({
     onRead: text => this.handleInputText(text),
-    onFrame: frame => this.consumeFrame(frame),
+    // A frame the Reader emits on its own (a released Escape, a paste tail) is
+    // *late*: the reader who was reading may have dismissed the layer that held it.
+    onFrame: frame => this.consumeReleasedFrame(frame),
+    // Capture the Screen/Surface that opened the paste at the marker, before the
+    // first payload frame can be routed to whoever is on screen later.
+    onPasteStart: () => {
+      this.pasteOwner ??= { screen: this.layerScreen, dialog: this.layerDialog }
+    },
   })
+  /**
+   * The layer — not just its name — that was up when a sequence went on hold.
+   *
+   * `hold()` waits 60 ms for the rest of a sequence, and the layer can change inside
+   * that window. An owner *name* is not a lifecycle: `'surface'` is true of any
+   * Surface and `'screen'` of any Screen, so a held `ESC O` released after its Surface
+   * closed typed `O` into the composer, a late Escape closed a Screen that had opened
+   * in the meantime, and one wizard's held report landed in the next wizard's field.
+   * The pair below is captured from the same locals `observe()` already reads (so the
+   * input-freeze audit's `ownerReads` count is untouched), and a release whose layer
+   * object is gone is consumed instead of delivered.
+   */
+  private heldInput: {
+    owner: Owner
+    screen: ScreenState | undefined
+    dialog: Dialog | undefined
+  } | undefined
+  /**
+   * The layer that opened the current bracketed paste.
+   *
+   * A paste payload can span reads and arrive after that layer closed. The Reader's
+   * start marker captures this identity; every paste frame is checked against it,
+   * and the owner is cleared once the Reader leaves the paste. It never changes the
+   * Router/owner vocabulary.
+   */
+  private pasteOwner: { screen: ScreenState | undefined; dialog: Dialog | undefined } | undefined
+  /** The layer objects `observe()` last saw — identity, for late-frame provenance. */
+  private layerScreen: ScreenState | undefined
+  private layerDialog: Dialog | undefined
   /**
    * The Router (AD-22, W-2): the one place a unit's owner is decided.
    *
@@ -2561,6 +2643,12 @@ export class SshTui {
   private searchQuery = ''
   /** The plain text the user searched for, which is what gets highlighted. */
   private searchNeedle = ''
+  /** Monotonic transcript generation for Search Screen reconciliation. */
+  private transcriptRevision = 0
+  /** One-shot coalescing timer while a Search Screen is open. */
+  private searchRefreshTimer: ReturnType<typeof setTimeout> | undefined
+  /** The last query/category/ordinal, used by Alt+n/p after Search closes. */
+  private lastSearch: { query: string; category: CardCategory | undefined; ordinal: number } | undefined
   private planNudgePending = false
   private pendingReveal: Row | CollapsibleBlock | undefined
 
@@ -2720,6 +2808,7 @@ export class SshTui {
   private bindAgentEvents(): void {
     this.disposers.push(
       this.ctx.on('session/event', this.handleSessionEvent),
+      this.ctx.on('commands/change', this.handleCommandsChange),
       listenHostEvent(this.ctx, 'agent/assistant-stream', this.handleAssistantStream),
       this.ctx.on('agent/status', this.handleStatus),
       this.ctx.on('agent/error', this.handleError),
@@ -3331,6 +3420,9 @@ export class SshTui {
     this.renderTimer = undefined
     if (this.feedbackTimer !== undefined) clearTimeout(this.feedbackTimer)
     this.reader.stop()
+    this.heldInput = undefined
+    this.pasteOwner = undefined
+    this.clearSearchRefresh()
     process.stdin.removeListener('data', this.handleData)
     process.stdout.removeListener('resize', this.onDirectResize)
     process.stdout.removeListener('error', this.handleIoError)
@@ -4106,6 +4198,7 @@ export class SshTui {
    * @returns the field after the merge.
    */
   private setToolApproval(callId: string, next: ToolApproval): ToolApproval {
+    this.bumpTranscriptRevision()
     const row = this.findToolRowByCallId(callId)
     if (row === undefined) {
       const merged = mergeApproval(this.pendingApprovalByCall.get(callId), next)
@@ -4212,6 +4305,7 @@ export class SshTui {
     // rows back, so it shows up as `unclassified` there rather than being counted
     // twice or quietly defaulted.
     this.rows.push(row)
+    this.bumpTranscriptRevision()
     if (this.lineMode) {
       // Appended here rather than from the render timer: a timer can coalesce
       // two events into one tick, and an event that is coalesced away is an
@@ -4989,20 +5083,26 @@ export class SshTui {
    * not a second workspace.
    */
   private openScreen(screen: ScreenState): void {
+    this.clearSearchRefresh()
     this.screen = screen
+    this.layerScreen = screen
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
     this.screenNeedsFullPaint = true
+    this.refreshCompletion()
     this.markDirty()
   }
 
   /** Leave the Screen and hand the pixels back to the workspace, as they were. */
   closeScreen(): void {
     if (this.screen === undefined) return
+    this.clearSearchRefresh()
     this.screen = undefined
+    this.layerScreen = undefined
     this.screenDismissals += 1
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
+    this.refreshCompletion()
     // One full repaint when a Screen closes, and it is deliberate: the transcript
     // may have grown (or been compacted) while the reader was away, so the frame
     // that returns has to be rebuilt anyway. It is measured in the Screen contract
@@ -5064,18 +5164,19 @@ export class SshTui {
     // whether the agent is running. A Screen has no composer, so the input shape it
     // passes says exactly that.
     const facts = this.footerFacts(SCREEN_INPUT, 1)
-    const body = this.renderScreenBody(screen, width)
-    // `/find` reported a hit inside this body, so put it on screen: the Screen used
-    // to open at the top and leave the reader scrolling for it. Done once, so PgDn
-    // afterwards keeps the reader's own position.
-    if (screen.searchRevealed !== true && this.searchNeedle !== '') {
+    const search = screen.kind === 'search' ? screen.search : undefined
+    const renderedSearch = search === undefined ? undefined : this.renderSearchBody(search, width, layout.bodyRows)
+    const body = renderedSearch?.lines ?? this.renderScreenBody(screen, width)
+    // `/find` reported a hit inside a report body, so put it on screen. Search has
+    // its own list/preview and never mutates the workspace or Screen offset.
+    if (search === undefined && screen.searchRevealed !== true && this.searchNeedle !== '') {
       const at = body.findIndex(row => searchContains(stripAnsi(row), this.searchNeedle))
       if (at >= 0) screen.offset = Math.max(0, at - 1)
       screen.searchRevealed = true
     }
-    const offset = clampScreenOffset(screen.offset, body.length, layout.bodyRows)
-    screen.offset = offset
-    const slice = body.slice(offset, offset + layout.bodyRows)
+    const offset = search === undefined ? clampScreenOffset(screen.offset, body.length, layout.bodyRows) : 0
+    if (search === undefined) screen.offset = offset
+    const slice = search === undefined ? body.slice(offset, offset + layout.bodyRows) : body.slice(0, layout.bodyRows)
     while (slice.length < layout.bodyRows) slice.push('')
 
     const paintRows: string[] = []
@@ -5130,6 +5231,10 @@ export class SshTui {
       || height !== this.lastPaintHeight
     this.screenNeedsFullPaint = false
     this.forceFullPaint = false
+    const cursorBodyRow = renderedSearch?.cursorRow
+    const cursorRow = cursorBodyRow === undefined
+      ? 1
+      : layout.titleRows + layout.dividerRows + cursorBodyRow + 1
     const frame = composePaintFrame({
       width,
       height,
@@ -5142,9 +5247,9 @@ export class SshTui {
       chromeChanged: stripChanged,
       chromeStart: Math.max(0, layout.stripTop),
       previousChromeStart: this.lastChromeStart,
-      cursorRow: 1,
-      cursorColumn: 1,
-      hideCursor: true,
+      cursorRow,
+      cursorColumn: renderedSearch?.cursorColumn ?? 1,
+      hideCursor: renderedSearch === undefined || renderedSearch.cursorRow === undefined,
       // A size change opens with a full clear, so splitting it across frames would
       // show a half-empty screen; everything incremental is budgeted like the
       // workspace frame, and rows that do not fit stay dirty for the next tick.
@@ -5154,13 +5259,13 @@ export class SshTui {
     this.paintResume = frame.resume
     this.lastFrameBytes = Buffer.byteLength(frame.output, 'utf8')
     this.write(frame.output)
-    this.lastPaintCursorRow = 1
-    this.lastPaintCursorColumn = 1
+    this.lastPaintCursorRow = cursorRow
+    this.lastPaintCursorColumn = renderedSearch?.cursorColumn ?? 1
     const snapshot = paintRows.length > height ? paintRows.slice(0, height) : paintRows
     this.lastPaintRows = frame.deferred.length === 0
       ? snapshot
       : advancePaintedRows(this.lastPaintRows, snapshot, frame.painted)
-    this.lastChromeKey = `screen:${screen.kind}:${offset}:${width}x${height}`
+    this.lastChromeKey = `screen:${screen.kind}:${search?.query ?? ''}:${search?.selected ?? -1}:${offset}:${width}x${height}`
     this.lastPaintWidth = width
     this.lastPaintHeight = height
     this.lastChromeStart = Math.max(0, layout.stripTop)
@@ -5183,6 +5288,9 @@ export class SshTui {
     const surface = this.screenSurface
     if (surface !== undefined && surface.kind === 'confirm') return `${surface.prompt}  ${surface.hint}`
     if (screen.notice !== undefined && screen.notice !== '') return screen.notice
+    if (screen.kind === 'search' && screen.search !== undefined) {
+      return screen.search.mode === 'preview' ? t('find.previewHint') : t('find.screenHint')
+    }
     const pos = screenPositionText(screen.offset, lineCount, layout.bodyRows)
     const base = t('screen.footer', { pos })
     const navigation = t('screen.hint')
@@ -5381,6 +5489,100 @@ export class SshTui {
   }
 
   /** A Screen's body, wrapped for the width it will be shown at. */
+  /**
+   * A Search Screen body: field, status and the visible result/preview page.
+   *
+   * This is a pure read of `SearchScreenState`; it never runs the matcher and never
+   * writes the field/list offset. The caller places the returned caret.
+   */
+  private renderSearchBody(
+    search: SearchScreenState,
+    width: number,
+    bodyRows: number,
+  ): { lines: string[]; cursorRow?: number; cursorColumn?: number } {
+    const fit = (text: string): string => truncateToWidth(text, Math.max(1, width))
+    const lines: string[] = []
+    if (bodyRows <= 0) return { lines }
+    const prefix = '  › '
+    const prefixWidth = displayWidth(prefix)
+    const fieldView = searchFieldViewport(search.query, search.cursor, Math.max(1, width - prefixWidth))
+    const field = `${prefix}${fieldView.text}`
+    lines.push(this.styleLine('system', fit(field)))
+    const cursorColumn = 1 + prefixWidth + fieldView.caretCell
+    if (bodyRows === 1) {
+      return { lines, cursorRow: 0, cursorColumn: search.mode === 'preview' ? undefined : cursorColumn }
+    }
+
+    const category = search.category === undefined ? t('find.allCategories') : cardCategoryLabel(search.category)
+    const index = search.selected < 0 ? 0 : search.selected + 1
+    const status = search.hits.length === 0
+      ? (search.query.trim() === '' ? t('find.none') : t('find.noMatch', { query: search.query }))
+      : t('find.status', {
+        count: search.hits.length,
+        index,
+        total: search.hits.length,
+        category,
+      })
+    lines.push(this.styleLine('system', fit(`  ${status}`)))
+    if (search.hits.length === 0) {
+      return { lines, cursorRow: 0, cursorColumn: cursorColumn }
+    }
+
+    const available = Math.max(0, bodyRows - 2)
+    if (search.mode === 'preview') {
+      const hit = search.hits[search.selected]
+      if (hit === undefined) return { lines, cursorRow: undefined }
+      const needle = search.query.trim()
+      const wrapped = searchPreviewLines(hit, Math.max(1, width - 2), needle)
+      const startLine = Math.max(0, Math.min(search.previewOffset, Math.max(0, wrapped.length - 1)))
+      const previewPrefix = '  '
+      for (const row of wrapped.slice(startLine, startLine + available)) {
+        let styled = this.styleLine('system', fit(`${previewPrefix}${row.text}`))
+        if (row.highlights.length > 0) {
+          if (this.color) {
+            styled = highlightAnsiRanges(
+              styled,
+              row.highlights.map(range => ({
+                start: range.start + previewPrefix.length,
+                end: range.end + previewPrefix.length,
+              })),
+            )
+          } else {
+            styled = `» ${styled}`
+          }
+        }
+        lines.push(styled)
+      }
+      return { lines, cursorRow: undefined }
+    }
+
+    // The wheel owns the viewport: painting clamps it to a whole page but never
+    // drags it back to the selection. Selection transitions reveal their row in
+    // `ensureSearchSelectionVisible`; a paint after a wheel must leave it alone.
+    const maxStart = Math.max(0, search.hits.length - Math.max(1, available))
+    const startRow = Math.max(0, Math.min(search.listOffset, maxStart))
+    for (let offset = startRow; offset < search.hits.length && lines.length < bodyRows; offset += 1) {
+      const hit = search.hits[offset]
+      if (hit === undefined) continue
+      const kind = cardCategoryOf(hit.row)
+      const label = kind === undefined ? t('find.allCategories') : cardCategoryLabel(kind)
+      const needle = search.query.trim()
+      const rowLines = lineModeLines(hit.row)
+      const snippet = (rowLines.find(line => needle !== '' && searchContains(line, needle))
+        ?? rowLines.find(line => line.trim() !== '')
+        ?? label)
+        .replace(/\s+/gu, ' ')
+        .trim()
+      const marker = offset === search.selected ? '›' : ' '
+      const hitMarker = this.color ? '' : (searchContains(snippet, needle) ? '» ' : '')
+      const line = `  ${marker} ${hitMarker}${offset + 1}. [${label}] ${snippet}`
+      let styled = this.styleLine('system', fit(line))
+      if (needle !== '' && this.color) styled = highlightAnsiNeedle(styled, needle)
+      lines.push(offset === search.selected ? this.selectLine(styled, true) : styled)
+    }
+    return { lines, cursorRow: 0, cursorColumn: cursorColumn }
+  }
+
   private renderScreenBody(screen: ScreenState, width: number): string[] {
     if (screen.kind === 'setup') return this.renderSetupBody(width)
     const rendered: string[] = []
@@ -5777,6 +5979,284 @@ export class SshTui {
   }
 
   private runFindCommand(arg: string): void {
+    if (this.lineMode) {
+      this.runTextFind(arg)
+      return
+    }
+    this.openSearchScreen(arg)
+  }
+
+  /**
+   * Open the dedicated local Search Screen. The rows are the current visible
+   * workspace only (AD-9 local); no durable log, no reveal, no transcript row.
+   */
+  private openSearchScreen(raw: string | FindRequest, selectedOrdinal?: number): void {
+    const request = typeof raw === 'string' ? searchRequestFor(raw) : raw
+    const rows = [...this.visibleRows()]
+    let state = searchStateFor({
+      rows,
+      query: request.query,
+      cursor: request.query.length,
+      ...(request.category === undefined ? {} : { category: request.category }),
+      revision: this.transcriptRevision,
+      cutoff: this.clearedRows,
+    })
+    if (selectedOrdinal !== undefined && state.hits.length > 0) {
+      const selected = Math.max(0, Math.min(selectedOrdinal, state.hits.length - 1))
+      state = { ...state, selected, mode: 'list', previewOffset: 0 }
+    }
+    // Opening starts from the newest hit, so the first page is the one that
+    // contains it. Later wheel movement is not re-clamped to selection by paint.
+    state = ensureSearchSelectionVisible(state, this.searchPage())
+    this.lastSearch = {
+      query: state.query,
+      category: state.category,
+      ordinal: state.selected,
+    }
+    this.clearSearchRefresh()
+    this.openScreen({
+      kind: 'search',
+      title: t('screen.title.search'),
+      lines: [],
+      offset: 0,
+      search: state,
+      copyText: searchCopyText(state),
+      ...(state.hits.length === 0 && this.clearedRows > 0 ? { notice: t('find.scopeHint') } : {}),
+    })
+    this.markDirty()
+  }
+
+  /** Alt+n/p/Ctrl+G: navigate or reopen the last Search; line mode stays textual. */
+  private navigateSearch(delta: number): void {
+    if (this.lineMode) {
+      this.stepSearch(delta)
+      return
+    }
+    const last = this.lastSearch
+    if (this.layerScreen?.kind === 'search') {
+      const state = this.syncSearchScreen()
+      if (state !== undefined) this.commitSearchState(cycleSearchSelection(state, delta))
+      return
+    }
+    if (last === undefined) {
+      this.openSearchScreen('')
+    } else {
+      this.openSearchScreen(
+        { query: last.query, ...(last.category === undefined ? {} : { category: last.category }) },
+        last.ordinal,
+      )
+    }
+    const state = this.syncSearchScreen()
+    if (state !== undefined) this.commitSearchState(cycleSearchSelection(state, delta))
+  }
+
+  /** Commit a Search state transition and keep the Screen's copy/pointer in sync. */
+  private commitSearchState(next: SearchScreenState): void {
+    const screen = this.layerScreen
+    if (screen === undefined || screen.kind !== 'search') return
+    const previous = screen.search
+    // A changed selection (or a return from Preview) reveals its row. An unchanged
+    // selection keeps the wheel's viewport; only the page boundary is clamped.
+    const committed = next.mode !== 'list'
+      ? next
+      : previous?.mode !== 'list' || previous.selected !== next.selected
+        ? ensureSearchSelectionVisible(next, this.searchPage())
+        : clampSearchListOffset(next, this.searchPage())
+    screen.search = committed
+    screen.copyText = searchCopyText(committed)
+    this.lastSearch = {
+      query: committed.query,
+      category: committed.category,
+      ordinal: committed.selected,
+    }
+    this.markDirty()
+  }
+
+  /** Reconcile stale rows before any selection, preview, copy or edit uses them. */
+  private syncSearchScreen(): SearchScreenState | undefined {
+    const screen = this.layerScreen
+    if (screen === undefined || screen.kind !== 'search' || screen.search === undefined) return undefined
+    const next = reconcileSearchHits(
+      screen.search,
+      [...this.visibleRows()],
+      this.transcriptRevision,
+      this.clearedRows,
+    )
+    if (next !== screen.search) this.commitSearchState(next)
+    return screen.search
+  }
+
+  /** Coalesce transcript changes while Search is open; not a render-loop scan. */
+  private scheduleSearchRefresh(): void {
+    if (this.layerScreen?.kind !== 'search') return
+    if (this.searchRefreshTimer !== undefined) return
+    this.searchRefreshTimer = setTimeout(() => {
+      this.searchRefreshTimer = undefined
+      if (this.disposed) return
+      this.syncSearchScreen()
+    }, 0)
+    this.searchRefreshTimer.unref?.()
+  }
+
+  private clearSearchRefresh(): void {
+    if (this.searchRefreshTimer !== undefined) clearTimeout(this.searchRefreshTimer)
+    this.searchRefreshTimer = undefined
+  }
+
+  /** A transcript mutation that may change a Search hit. */
+  private bumpTranscriptRevision(): void {
+    this.transcriptRevision += 1
+    this.scheduleSearchRefresh()
+  }
+
+  private insertSearchPaste(text: string): void {
+    const state = this.syncSearchScreen()
+    // Preview is read-only. This is the common paste entry for bracketed paste,
+    // non-bracketed bursts and split-read payloads, so the guard covers every
+    // terminal form without reinterpreting payload as keys.
+    if (state === undefined || state.mode === 'preview') return
+    const flat = text.split(/\r?\n/u).map(part => part.trim()).filter(part => part !== '').join(' ')
+    if (flat === '') return
+    this.commitSearchState(insertSearchText(state, flat, [...this.visibleRows()]))
+  }
+
+  private handleSearchScreenKey(combined: string, moved: string | undefined): void {
+    let state = this.syncSearchScreen()
+    if (state === undefined) {
+      this.closeScreen()
+      return
+    }
+    if (moved === 'copy') {
+      this.copyFromScreen(this.screen as ScreenState)
+      return
+    }
+    if (InputReader.looksLikePasteBurst(combined)) {
+      this.insertSearchPaste(combined)
+      return
+    }
+    const rows = [...this.visibleRows()]
+    const apply = (next: SearchScreenState): void => {
+      this.commitSearchState(next)
+    }
+    if (combined === ESCAPE_BYTE) {
+      if (state.mode === 'preview') {
+        apply({ ...state, mode: 'list', previewOffset: 0 })
+        return
+      }
+      this.closeScreen()
+      return
+    }
+    if (combined === '\x03') {
+      this.closeScreen()
+      return
+    }
+    if (combined === '\r' || combined === '\n') {
+      apply(state.mode === 'preview' ? { ...state, mode: 'list', previewOffset: 0 } : openSearchPreview(state))
+      return
+    }
+    if (state.mode === 'preview') {
+      apply(this.handleSearchPreviewKey(state, combined))
+      return
+    }
+    {
+      if (combined === '\x15') {
+        apply(setSearchQuery(state, '', rows, state.revision, state.sourceCutoff, 0))
+        return
+      }
+      if (combined === '\x0b') {
+        apply(setSearchQuery(state, state.query.slice(0, state.cursor), rows, state.revision, state.sourceCutoff, state.cursor))
+        return
+      }
+      if (combined === '\x01') { apply(setSearchCursor(state, 0)); return }
+      if (combined === '\x05') { apply(setSearchCursor(state, state.query.length)); return }
+      if (combined === '\x7f' || combined === '\x08') {
+        apply(backspaceSearchText(state, rows))
+        return
+      }
+    }
+    if (combined === '\x07') {
+      apply(cycleSearchSelection(state, 1))
+      return
+    }
+    if (combined === '\t' || combined === '\x0e' || combined === '\x10') return
+    const arrow = /^\x1b\[([A-D])$/u.exec(combined)
+    if (arrow !== null) {
+      if (arrow[1] === 'A') apply(moveSearchSelection(state, -1))
+      else if (arrow[1] === 'B') apply(moveSearchSelection(state, 1))
+      else if (arrow[1] === 'C') apply(moveSearchCursor(state, 1))
+      else apply(moveSearchCursor(state, -1))
+      return
+    }
+    const nav = /^\x1b\[(H|F|1~|4~|3~|5~|6~)$/u.exec(combined)
+    if (nav !== null) {
+      const key = nav[1]
+      if (key === 'H' || key === '1~') apply(setSearchCursor(state, 0))
+      else if (key === 'F' || key === '4~') apply(setSearchCursor(state, state.query.length))
+      else if (key === '3~') apply(deleteSearchText(state, rows))
+      else if (key === '5~') apply(pageSearchSelection(state, this.searchPage(), -1))
+      else if (key === '6~') apply(pageSearchSelection(state, this.searchPage(), 1))
+      return
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null) {
+      if (sgr[4] !== 'M') return
+      const button = Number(sgr[1])
+      if (button === 64 || button === 65) {
+        const listOffset = state.listOffset + (button === 64 ? -3 : 3)
+        apply(clampSearchListOffset({ ...state, listOffset }, this.searchPage()))
+      }
+      return
+    }
+    if (combined.startsWith('\x1b')) {
+      const alt = /^\x1b([nNpP])$/u.exec(combined)
+      if (alt !== null) apply(cycleSearchSelection(state, alt[1] === 'n' || alt[1] === 'N' ? 1 : -1))
+      // Alt+f/F// at Search is a no-op; other CSI is consumed by the Screen.
+      return
+    }
+    if (combined !== '') apply(insertSearchText(state, combined, rows))
+  }
+
+  /**
+   * Preview navigation. The offset and page height are in wrapped **display**
+   * lines, never in the logical `lineModeLines` entries: one long reply can be
+   * many screens. Arrows scroll one display line; PgUp/PgDn one visible page;
+   * Home/End the first/last page. Hit changes keep Preview and reset the offset.
+   */
+  private handleSearchPreviewKey(state: SearchScreenState, combined: string): SearchScreenState {
+    const hit = state.hits[state.selected]
+    if (hit === undefined) return { ...state, mode: 'list', previewOffset: 0 }
+    const page = Math.max(1, this.searchPage())
+    const total = searchPreviewDisplayLines(hit, Math.max(1, this.screenColumns() - 2)).length
+    const scroll = (delta: number): SearchScreenState =>
+      setSearchPreviewOffset(state, state.previewOffset + delta, total, page)
+    const alt = /^\x1b([nNpP])$/u.exec(combined)
+    if (alt !== null) {
+      return cycleSearchSelection(state, alt[1] === 'n' || alt[1] === 'N' ? 1 : -1, true)
+    }
+    if (combined === '\x07') return cycleSearchSelection(state, 1, true)
+    const arrow = /^\x1b\[([A-D])$/u.exec(combined)
+    if (arrow !== null) {
+      if (arrow[1] === 'A') return scroll(-1)
+      if (arrow[1] === 'B') return scroll(1)
+      return state
+    }
+    const nav = /^\x1b\[(H|F|1~|4~|5~|6~)$/u.exec(combined)
+    if (nav !== null) {
+      if (nav[1] === 'H' || nav[1] === '1~') return { ...state, previewOffset: 0 }
+      if (nav[1] === 'F' || nav[1] === '4~') return setSearchPreviewOffset(state, Number.MAX_SAFE_INTEGER, total, page)
+      if (nav[1] === '5~') return scroll(-page)
+      return scroll(page)
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null && sgr[4] === 'M') {
+      const button = Number(sgr[1])
+      if (button === 64) return scroll(-1)
+      if (button === 65) return scroll(1)
+    }
+    return state
+  }
+
+  private runTextFind(arg: string): void {
     const parsed = parseFindQuery(arg)
     const label = parsed.category === undefined ? '' : `${cardCategoryLabel(parsed.category)} `
     // Local `/find` is a workspace search: it looks at what is in the view, which is
@@ -6505,29 +6985,30 @@ export class SshTui {
     if (this.scrollOffset > 0) {
       headerLines.push(this.styleLine('system', fitLine(t('dialog.scrolled', { count: this.scrollOffset }))))
     }
-    this.commandSuggestions = this.dialog === undefined ? this.buildSuggestions() : []
-    if (this.suggestionIndex >= this.commandSuggestions.length) {
-      this.suggestionIndex = Math.max(0, this.commandSuggestions.length - 1)
-    }
+    // Paint reads the one materialized state. It must not query commands, clamp
+    // the index, or build a list: a frame is never the first writer of completion.
+    const completion = this.completionState
+    const suggestionItems = completion.visible ? completion.items : []
+    const suggestionIndex = completion.index
     const suggestionLines: string[] = []
-    const suggestionStart = pickerWindowStart(this.suggestionIndex, this.commandSuggestions.length)
-    const suggestionEnd = Math.min(this.commandSuggestions.length, suggestionStart + PICKER_WINDOW)
+    const suggestionStart = pickerWindowStart(suggestionIndex, suggestionItems.length)
+    const suggestionEnd = Math.min(suggestionItems.length, suggestionStart + PICKER_WINDOW)
     if (suggestionStart > 0) {
       suggestionLines.push(this.styleLine('system', fitLine(`  ${t('suggest.moreAbove', { count: suggestionStart })}`)))
     }
     for (let index = suggestionStart; index < suggestionEnd; index += 1) {
-      const command = this.commandSuggestions[index]
+      const command = suggestionItems[index]
       if (command === undefined) continue
-      const marker = index === this.suggestionIndex ? '›' : ' '
+      const marker = index === suggestionIndex ? '›' : ' '
       const line = `  ${marker} /${command.name.padEnd(14)} ${command.description}${command.local ? '' : '  (dsh)'}`
-      suggestionLines.push(index === this.suggestionIndex
+      suggestionLines.push(index === suggestionIndex
         ? this.selectLine(fitLine(line), true)
         : this.styleLine('system', fitLine(line)))
     }
-    if (suggestionEnd < this.commandSuggestions.length) {
+    if (suggestionEnd < suggestionItems.length) {
       suggestionLines.push(this.styleLine(
         'system',
-        fitLine(`  ${t('suggest.moreBelow', { count: this.commandSuggestions.length - suggestionEnd })}`),
+        fitLine(`  ${t('suggest.moreBelow', { count: suggestionItems.length - suggestionEnd })}`),
       ))
     }
 
@@ -7004,14 +7485,60 @@ export class SshTui {
     this.markDirty()
   }
 
-  private buildSuggestions(): CommandSuggestion[] {
-    // Called on every paint: leave the host command service alone unless the
-    // line is actually a slash command.
-    if (!this.input.startsWith('/')) return []
-    // The host's commands arrive last (a local name wins the duplicate) and are
-    // localized here, where the i18n catalog is already loaded.
-    const foreign: CommandSuggestion[] = (this.ctx.get('commands')?.list(this.agent) ?? [])
-      .map(command => {
+  /**
+   * Materialize the completion state for the current draft.
+   *
+   * This is the only place that may query the Host command service and write the
+   * state. `commands/change` and the read boundary call it; `paint()` never does.
+   * The Host list is queried only when the key (draft/locale/agent/revision/host
+   * presence) changes, so a repaint or an arrow cannot rebuild the catalog.
+   */
+  private refreshCompletion(): void {
+    if (!this.localeSubscribed && !this.disposed) {
+      this.localeSubscribed = true
+      this.disposers.push(onLocaleChange(this.handleLocaleChange))
+    }
+    if (this.disposed || this.lineMode) {
+      this.completionState = resetCompletion()
+      this.completionKey = undefined
+      return
+    }
+    const draft = this.input
+    if (!draft.startsWith('/')) {
+      this.completionState = resetCompletion()
+      this.completionKey = undefined
+      return
+    }
+    const host = this.ctx.get('commands')
+    const key = [
+      draft,
+      getLocale(),
+      String(this.agent.id),
+      String(this.completionRevision),
+      host === undefined ? '0' : '1',
+    ].join('\u0000')
+    if (key !== this.completionKey) {
+      this.completionForeign = this.buildForeignSuggestions()
+      this.completionKey = key
+    }
+    this.completionState = completionFor({
+      query: draft,
+      items: commandSuggestions(draft, this.completionForeign),
+      previous: this.completionState,
+      layerOpen: this.dialog !== undefined || this.layerScreen !== undefined,
+      lineMode: this.lineMode,
+    })
+  }
+
+  /**
+   * The Host's commands, localized. A failing service degrades to the local
+   * catalog; a previous Host list is never reused as if it were current.
+   */
+  private buildForeignSuggestions(): CommandSuggestion[] {
+    const commands = this.ctx.get('commands')
+    if (commands === undefined) return []
+    try {
+      return (commands.list(this.agent) ?? []).map(command => {
         const desc = t(`cmd.${command.name}`, undefined, command.description)
         return {
           name: command.name,
@@ -7021,11 +7548,24 @@ export class SshTui {
           local: false,
         }
       })
-    return commandSuggestions(this.input, foreign)
+    } catch {
+      return []
+    }
   }
 
-  private suggestionsVisible(): boolean {
-    return this.commandSuggestions.length > 0 && this.dialog === undefined
+  /** The Host's registry changed: bump the revision, refresh, repaint if relevant. */
+  private readonly handleCommandsChange = (): void => {
+    this.completionRevision += 1
+    if (this.disposed) return
+    this.refreshCompletion()
+    if (this.input.startsWith('/')) this.markDirty()
+  }
+
+  /** Live locale change: re-derive descriptions and repaint, without a keystroke. */
+  private readonly handleLocaleChange = (): void => {
+    if (this.disposed) return
+    this.refreshCompletion()
+    this.markDirty()
   }
 
   private currentProviderId(): string {
@@ -7806,6 +8346,7 @@ export class SshTui {
   }
 
   private applySessionEvent(session: { id: SessionId }, event: SessionEvent): void {
+    this.bumpTranscriptRevision()
     if (session.id !== this.agent.id) {
       if (this.subagentSessions.has(session.id)) this.handleSubagentSessionEvent(session.id, event)
       return
@@ -9764,15 +10305,36 @@ export class SshTui {
     return this.borrowedText?.cursor ?? this.cursor
   }
 
+  /** Write the composer draft and materialize its completion state now. */
+  private setDraft(text: string, cursor: number): void {
+    this.input = text
+    this.cursor = cursor
+    this.refreshCompletion()
+  }
+
   /** Write the field the keyboard is editing, wherever it lives. */
   private setField(text: string, cursor: number): void {
     if (this.borrowedText === undefined) {
-      this.input = text
-      this.cursor = cursor
+      this.setDraft(text, cursor)
       return
     }
     this.borrowedText.text = text
     this.borrowedText.cursor = cursor
+  }
+
+  /** Read-only test/adaptor view of the one completion state. */
+  private get completion(): CompletionState {
+    return this.completionState
+  }
+
+  /** Backwards-compatible read of the materialized list (tests and paint helpers). */
+  private get commandSuggestions(): readonly CommandSuggestion[] {
+    return this.completionState.items
+  }
+
+  /** Backwards-compatible read of the materialized highlight. */
+  private get suggestionIndex(): number {
+    return this.completionState.index
   }
 
   /** Insert at the caret of whichever field owns the keyboard. */
@@ -10031,9 +10593,11 @@ export class SshTui {
     }
     if (this.dialog === undefined && this.screen === undefined) {
       this.dialog = dialog
+      this.layerDialog = dialog
       this.dialogRole = role
       this.borrowTextFor(dialog)
       this.echoLineModeDialog(dialog)
+      this.refreshCompletion()
     } else {
       const rank = surfacePriority(role)
       const at = this.dialogQueue.findIndex(entry => surfacePriority(entry.role) < rank)
@@ -10048,9 +10612,11 @@ export class SshTui {
     const next = this.dialogQueue.shift()
     if (next !== undefined) {
       this.dialog = next.dialog
+      this.layerDialog = next.dialog
       this.dialogRole = next.role
       this.borrowTextFor(next.dialog)
       this.echoLineModeDialog(next.dialog)
+      this.refreshCompletion()
       this.markDirty()
     }
   }
@@ -10102,6 +10668,7 @@ export class SshTui {
   private settleQuestion(dialog: QuestionDialog, finish: () => void): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.layerDialog = undefined
       this.dialogRole = PICKER_ROLE
       this.releaseBorrowedText()
     } else {
@@ -10109,6 +10676,7 @@ export class SshTui {
     }
     finish()
     this.showNextDialog()
+    this.refreshCompletion()
     this.markDirty()
   }
 
@@ -10127,10 +10695,12 @@ export class SshTui {
     const dialog = this.dialog
     if (dialog === undefined || dialog.kind !== 'confirm') return
     this.dialog = undefined
+    this.layerDialog = undefined
     this.dialogRole = PICKER_ROLE
     this.releaseBorrowedText()
     dialog.resolve(value)
     this.showNextDialog()
+    this.refreshCompletion()
     this.markDirty()
   }
 
@@ -10138,10 +10708,12 @@ export class SshTui {
   private abortConfirm(dialog: ConfirmDialog): void {
     if (this.dialog === dialog) {
       this.dialog = undefined
+      this.layerDialog = undefined
       this.dialogRole = PICKER_ROLE
       this.releaseBorrowedText()
       dialog.resolve('cancel')
       this.showNextDialog()
+      this.refreshCompletion()
       this.markDirty()
       return
     }
@@ -11553,6 +12125,9 @@ export class SshTui {
       next = picked === t('lang.en') ? 'en' : 'zh'
     }
     setLocale(next)
+    // Locale is part of the materialization key: descriptions must change even
+    // when the draft does not.
+    this.refreshCompletion()
     const settings = this.ctx.get('settings')
     if (settings === undefined) {
       this.pushRow(represent('command-error', { kind: 'error', text: t('lang.settingsMissing') }))
@@ -12463,6 +13038,23 @@ export class SshTui {
       this.markDirty()
       return
     }
+    // Alt+f/F// at a report/inspect replaces it with Search; Alt+n/p navigate a
+    // last Search or open one. Search itself handles these inside its own adapter.
+    const screenAlt = /^\x1b([fF/nNpP])$/u.exec(combined)
+    if (screen.kind !== 'search' && screenAlt !== null) {
+      const key = screenAlt[1]
+      if (key === 'f' || key === 'F' || key === '/') this.openSearchScreen('')
+      else if (key === 'n' || key === 'N') this.navigateSearch(1)
+      else this.navigateSearch(-1)
+      return
+    }
+    // Search has its own field/list/preview before the report adapter sees q,
+    // Enter, arrows or printable text. Its paste handling is below, so this
+    // branch must come before the generic paste-burst path.
+    if (screen.kind === 'search') {
+      this.handleSearchScreenKey(combined, moved)
+      return
+    }
     // A burst of line breaks in one read is a paste from a console that cannot say so
     // (`looksLikePasteBurst`): it belongs in the field as one edit, which is how a
     // pasted key or model list survives a terminal without bracketed paste. The Reader
@@ -12497,7 +13089,7 @@ export class SshTui {
     // Mouse reports arrive through this same path. A wheel scrolls the Screen (the
     // transcript behind it is not the reader's target and must not move); a click
     // does nothing at all, because nothing behind a Screen is a target either.
-    const sgr = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
+    const sgr = SGR_MOUSE_RE.exec(combined)
     if (sgr !== null) {
       if (sgr[4] !== 'M') return
       const button = Number(sgr[1])
@@ -12562,6 +13154,11 @@ export class SshTui {
     return Math.max(1, screenLayout(Math.max(6, this.screenRows())).bodyRows - 1)
   }
 
+  /** Rows one Search result page moves: field + status take two body rows. */
+  private searchPage(): number {
+    return Math.max(1, screenLayout(Math.max(6, this.screenRows())).bodyRows - 2)
+  }
+
   /** Scroll a Screen by `up` rows toward the start of its body. */
   private scrollScreen(up: number): void {
     const screen = this.screen
@@ -12609,7 +13206,30 @@ export class SshTui {
    * everything else is routed (W-2 lifts the routing itself into a Router).
    */
   private handleInputText(text: string): void {
+    // A new read either completes the held sequence (`assemble` prepends it) or
+    // arrives after its window; either way the hold is no longer pending, and its
+    // provenance must not be attributed to a later frame (a paste tail).
+    this.heldInput = undefined
     const combined = this.reader.assemble(text)
+
+    // A non-bracketed multi-line paste in Preview is one read with printable text
+    // around a newline. Preview is read-only, and a lone Enter still returns to
+    // the list below; this guard keeps the payload from being interpreted as
+    // Enter-then-text. Bracketed/split paste is handled by the Reader frames and
+    // the common `insertSearchPaste` guard.
+    //
+    // A control byte is a key, not paste text. An unmarked payload containing
+    // Ctrl+C must still close Search (and the Reader then consumes the rest of
+    // that read), so the conservative paste reading is limited to text with no
+    // C0 control bytes other than CR/LF. With no terminal signal saying
+    // "unbracketed paste", a payload that also carries control bytes is
+    // inherently ambiguous; it takes the key path rather than losing a key.
+    if (!this.reader.isPasting()
+      && this.layerScreen?.kind === 'search'
+      && this.layerScreen.search?.mode === 'preview'
+      && /[\r\n]/u.test(combined)
+      && /[^\r\n]/u.test(combined)
+      && !/[\x00-\x09\x0b\x0c\x0e-\x1f\x7f]/u.test(combined)) return
 
     // A read is not a key. The Reader decides where one unit ends — complete
     // sequences, Alt chords, control bytes, CR/LF, and runs of typing — and each unit
@@ -12627,10 +13247,22 @@ export class SshTui {
     // of the read is routed on (`yes` typed at a confirm is refused by the Surface and
     // leaves the draft alone — pinned by `yes-typed-at-dialog`).
     const dismissals = this.screenDismissals
+    // The state before unit N must include unit N−1's draft write, even when both
+    // arrive in one raw read; `setDraft()` refreshes as well, but this boundary is
+    // what makes programmatic and Reader-borne changes meet the same contract.
+    this.refreshCompletion()
     for (const frame of this.reader.read(combined)) {
-      if (this.screenDismissals !== dismissals) return
+      if (this.screenDismissals !== dismissals) {
+        // A Screen closed inside this read: the tail belongs to it, and no stale
+        // completion state may be left describing the unit before the close.
+        this.refreshCompletion()
+        return
+      }
+      this.refreshCompletion()
       this.consumeFrame(frame)
     }
+    this.finishPaste()
+    this.refreshCompletion()
   }
 
   /** One framed unit, at the owner that takes it. */
@@ -12675,6 +13307,12 @@ export class SshTui {
     // A Screen owns the read outright (AD-20 §4.3 priority 3): nothing below this
     // line runs for it — no keymap action, no Alt chord, no bare ESC for the composer.
     if (owner === 'screen') {
+      // A Screen owns the read it was sent — but a sequence cut in half is not a key
+      // yet. Hold it the way the ladder below holds one, so the report/key it belongs
+      // to arrives whole: a split `ESC[<2;20` + `;10M` used to reach the wizard as
+      // text (`[<2;20`) and edit the field. Complete shapes dispatch unchanged, and
+      // a lone Esc is an `escape` unit, not a sequence, so it is never delayed.
+      if (kind === 'sequence' && !this.isSequenceShape(combined) && this.holdInput(combined, 'screen')) return
       this.ownerScreen(combined, moved)
       return
     }
@@ -12702,7 +13340,7 @@ export class SshTui {
     }
     // A read that could still grow into a sequence is the Reader's to hold, and the
     // window is the same 60 ms it always was (AD-21: moved, not changed).
-    if (this.reader.hold(combined)) return
+    if (this.holdInput(combined, owner)) return
     if (combined.startsWith('\x1b[') || combined.startsWith('\x1bO')) {
       // Unknown escape sequence (including SS3 function keys) — consume
       // without side effects.
@@ -12714,8 +13352,18 @@ export class SshTui {
       if (alt === '2') { this.jumpToCategory('plan'); return }
       if (alt === '3') { this.jumpToCategory('subagent'); return }
       if (alt === '4') { this.jumpToCategory('reply'); return }
-      if (alt === 'n' || alt === 'N') { this.stepSearch(1); return }
-      if (alt === 'p' || alt === 'P') { this.stepSearch(-1); return }
+      if (alt === 'n' || alt === 'N') {
+        // A Surface owns the keyboard: keep the old workspace search-step behavior
+        // rather than opening a Screen over a live question.
+        if (this.layerDialog !== undefined) this.stepSearch(1)
+        else this.navigateSearch(1)
+        return
+      }
+      if (alt === 'p' || alt === 'P') {
+        if (this.layerDialog !== undefined) this.stepSearch(-1)
+        else this.navigateSearch(-1)
+        return
+      }
       // The `/find` seed is composer *text*, so it may only be typed into a field
       // the composer owns (W-3b.3a). This branch runs before any owner is asked
       // (the Alt chords are workspace-global, AD-20 §1.3 step 13), so with a
@@ -12726,10 +13374,13 @@ export class SshTui {
       // is editable", and a borrowed answer is one — the seed is the *composer's*
       // field, which is exactly `borrowedText === undefined`.
       if (alt === 'f' || alt === 'F' || alt === '/') {
-        if (this.textIsEditable() && this.borrowedText === undefined) {
-          this.input = '/find '
-          this.cursor = this.input.length
-          this.markDirty()
+        if (this.lineMode) {
+          if (this.textIsEditable() && this.borrowedText === undefined) {
+            this.setDraft('/find ', 6)
+            this.markDirty()
+          }
+        } else if (this.dialog === undefined) {
+          this.openSearchScreen('')
         }
         return
       }
@@ -12751,6 +13402,8 @@ export class SshTui {
     const view = this.ownershipView
     const screen = this.screen
     const surface = this.dialog
+    this.layerScreen = screen
+    this.layerDialog = surface
     view.screenKind = screen?.kind
     view.surfaceKind = surface?.kind
     view.surfaceHasField = this.borrowedText !== undefined
@@ -12760,6 +13413,54 @@ export class SshTui {
       && (unit === '\x1b[A' || unit === '\x1b[B')
       && view.composerEmpty
       && this.collapsibleRows().length > 0
+  }
+
+  /**
+   * Hold a sequence that could still grow, remembering which owner was reading.
+   * @param unit - the read being held.
+   * @param owner - the owner the Router named for it.
+   * @returns true when it was held (the caller stops there).
+   */
+  private holdInput(unit: string, owner: Owner): boolean {
+    if (!this.reader.hold(unit)) return false
+    this.heldInput = { owner, screen: this.layerScreen, dialog: this.layerDialog }
+    return true
+  }
+
+  /**
+   * A frame the Reader produced on its own, delivered back to the owner that held it.
+   *
+   * The Reader's holds release a `literal` or an `escape`; a paste tail releases a
+   * `paste` and never passes through `hold()`, so it keeps the ordinary path. The
+   * owner is the one from the read that started the hold: if its layer is gone, its
+   * adapter refuses the unit (a Screen's `handleScreenInput` returns on no Screen),
+   * which is "consume, do not reinterpret as whoever is on screen now".
+   */
+  private consumeReleasedFrame(frame: InputFrame): void {
+    const held = this.heldInput
+    this.heldInput = undefined
+    // A late Escape or paste tail is a draft mutation boundary too. Refresh before
+    // deciding, so the released unit sees the current draft, and not a paint-time list.
+    this.refreshCompletion()
+    // A paste tail is a `paste` frame and never passes through `hold()`, so the kind
+    // is the source discriminator: no hold, no provenance to check.
+    if (held === undefined || (frame.kind !== 'literal' && frame.kind !== 'escape')) {
+      this.consumeFrame(frame)
+      this.refreshCompletion()
+      return
+    }
+    const unit = frame.kind === 'escape' ? '\x1b' : frame.text
+    // Refresh the identities from the current screen/dialog (this is the same read
+    // `dispatch()` does before routing, not a second Router) …
+    this.observe(frame.kind === 'escape' ? 'escape' : 'text', unit)
+    // … and drop the unit when the layer it was pressed in is gone. Same name is not
+    // the same layer: a new Surface, a new Screen, or no layer at all.
+    if (held.screen !== this.layerScreen || held.dialog !== this.layerDialog) {
+      this.refreshCompletion()
+      return
+    }
+    this.dispatchWith(held.owner, unit)
+    this.refreshCompletion()
   }
 
   /**
@@ -12815,8 +13516,25 @@ export class SshTui {
    */
   private dispatchPaste(text: string): void {
     this.observe('paste', text)
-    if (this.router.route('paste', text, this.ownershipView) === 'workspace') return
+    const owner = this.pasteOwner
+    if (owner !== undefined && (owner.screen !== this.layerScreen || owner.dialog !== this.layerDialog)) {
+      // The paste started at a layer that is gone. Its remaining payload is not
+      // addressed to whoever happens to be on screen now.
+      this.finishPaste()
+      return
+    }
+    this.pasteOwner ??= { screen: this.layerScreen, dialog: this.layerDialog }
+    if (this.router.route('paste', text, this.ownershipView) === 'workspace') {
+      this.finishPaste()
+      return
+    }
     this.handlePasteText(text)
+    this.finishPaste()
+  }
+
+  /** Drop the paste owner once the Reader has consumed the close marker. */
+  private finishPaste(): void {
+    if (!this.reader.isPasting()) this.pasteOwner = undefined
   }
 
   /**
@@ -12916,10 +13634,8 @@ export class SshTui {
 
   /** An arrow the composer keeps: the suggestion list while it is up, else history. */
   private arrowHistory(direction: -1 | 1): void {
-    if (this.suggestionsVisible()) {
-      this.suggestionIndex = direction < 0
-        ? Math.max(0, this.suggestionIndex - 1)
-        : Math.min(this.commandSuggestions.length - 1, this.suggestionIndex + 1)
+    if (this.completionState.visible) {
+      this.completionState = moveCompletion(this.completionState, direction)
       this.markDirty()
       return
     }
@@ -13009,29 +13725,23 @@ export class SshTui {
       return
     }
     if (unit === '\x07') {
-      this.stepSearch(1)
+      this.navigateSearch(1)
       return
     }
     if (unit === '\x1f') {
-      this.input = '/find '
-      this.cursor = this.input.length
+      this.setDraft('/find ', 6)
       this.markDirty()
       return
     }
     if (unit === '\t') {
-      if (this.suggestionsVisible()) {
-        const selected = this.commandSuggestions[this.suggestionIndex]
-        if (selected !== undefined) {
-          this.input = `/${selected.name} `
-          this.cursor = this.input.length
-          this.commandSuggestions = []
-          this.suggestionIndex = 0
-          this.markDirty()
-          return
-        }
+      const accepted = acceptCompletion(this.completionState, this.input, 'tab')
+      if (accepted !== undefined) {
+        this.completionState = accepted.state
+        this.setDraft(accepted.text, accepted.cursor)
+        this.markDirty()
+        return
       }
-      this.input = `${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`
-      this.cursor += 2
+      this.setField(`${this.input.slice(0, this.cursor)}  ${this.input.slice(this.cursor)}`, this.cursor + 2)
       this.markDirty()
       return
     }
@@ -13079,7 +13789,11 @@ export class SshTui {
   private handlePasteText(text: string): void {
     const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
     if (normalized === '') return
-    if (this.screen !== undefined) {
+    if (this.layerScreen?.kind === 'search') {
+      this.insertSearchPaste(normalized)
+      return
+    }
+    if (this.layerScreen !== undefined) {
       this.pasteIntoScreen(normalized)
       return
     }
@@ -13108,7 +13822,7 @@ export class SshTui {
    */
   private pasteIntoScreen(text: string): void {
     const state = this.onboarding
-    if (this.screen?.kind !== 'setup' || state === undefined || state.saving) return
+    if (this.layerScreen?.kind !== 'setup' || state === undefined || state.saving) return
     if (!SETUP_FIELD_STEPS.has(state.step)) return
     // The field is drawn on one row, so it takes the value and not the line breaks
     // around it: a key copied off a web page carries the newline that ended its
@@ -13537,8 +14251,12 @@ export class SshTui {
       this.markDirty()
       return
     }
-    const sgr = /^\x1b\[(\d+);(\d+);(\d+)([Mm])$/u.exec(combined)
-    if (sgr !== null) return
+    // A mouse report is protocol, not text: the wizard has no click target, so every
+    // button (press, release, wheel) is consumed here. The pattern used to be missing
+    // the `<` of the SGR protocol (`ESC[<b;x;yM`), so a real right-click missed this
+    // branch and its payload was typed into the field — an API key with `[<2;20;10M`
+    // in it. One pattern for every mouse-aware surface: `SGR_MOUSE_RE`.
+    if (SGR_MOUSE_RE.test(combined)) return
     const escaped = /^\x1b\[([A-D])$/u.exec(combined)
     if (escaped !== null) {
       if (state.step === 'provider') {
@@ -13556,6 +14274,13 @@ export class SshTui {
       }
       return
     }
+    // Anything left that starts with Esc is protocol, not text: `ESC[Z` (Shift+Tab),
+    // a modified arrow (`ESC[1;5A`), a function key, an Alt chord. The wizard has no
+    // meaning for them, and falling through typed their payload into the field
+    // (`[Z`, `[1;5A`). A paste never takes this path — the Reader frames it as a
+    // paste and `pasteIntoScreen` handles it — so consuming here cannot swallow
+    // pasted data.
+    if (combined.startsWith('\x1b')) return
     this.handleOnboardingChar(combined)
   }
 
@@ -14380,9 +15105,8 @@ export class SshTui {
       this.markDirty()
       return
     }
-    if (this.suggestionsVisible()) {
-      this.commandSuggestions = []
-      this.suggestionIndex = 0
+    if (this.completionState.visible) {
+      this.completionState = dismissCompletion(this.completionState, this.input)
       this.markDirty()
       return
     }
@@ -14790,12 +15514,10 @@ export class SshTui {
       this.toggleCollapsible()
       return
     }
-    if (this.suggestionsVisible()) {
-      const selected = this.commandSuggestions[this.suggestionIndex]
-      if (selected !== undefined && selected.name.startsWith(this.input.slice(1))) {
-        this.input = `/${selected.name}`
-        this.cursor = this.input.length
-      }
+    const accepted = acceptCompletion(this.completionState, this.input, 'enter')
+    if (accepted !== undefined) {
+      this.completionState = accepted.state
+      this.setDraft(accepted.text, accepted.cursor)
     }
     const text = this.input.trim()
     if (text === '') return
@@ -14814,8 +15536,7 @@ export class SshTui {
     this.historyDraft = ''
     this.sawUserInput = true
     this.lastUserText = text
-    this.input = ''
-    this.cursor = 0
+    this.setDraft('', 0)
     this.inputFolded = false
     const message = createUserMessage({
       content: [{ type: 'text', text }],
@@ -15006,6 +15727,7 @@ export class SshTui {
         this.searchHits = []
         this.searchIndex = -1
         this.searchQuery = ''
+        this.bumpTranscriptRevision()
         this.pendingReveal = undefined
         this.pendingMouseClick = undefined
         this.mouseAnchor = undefined
@@ -15273,8 +15995,7 @@ export class SshTui {
         }
         break
     }
-    this.input = ''
-    this.cursor = 0
+    this.setDraft('', 0)
     this.inputFolded = false
     this.markDirty()
   }
@@ -15369,18 +16090,18 @@ export class SshTui {
     if (this.historyIndex === this.history.length) this.historyDraft = this.input
     if (this.historyIndex <= 0) return
     this.historyIndex -= 1
-    this.input = this.history[this.historyIndex] ?? ''
-    this.cursor = this.input.length
+    const recalled = this.history[this.historyIndex] ?? ''
+    this.setDraft(recalled, recalled.length)
     this.markDirty()
   }
 
   private historyForward(): void {
     if (this.historyIndex < 0 || this.historyIndex >= this.history.length) return
     this.historyIndex += 1
-    this.input = this.historyIndex >= this.history.length
+    const recalled = this.historyIndex >= this.history.length
       ? this.historyDraft
       : (this.history[this.historyIndex] ?? '')
-    this.cursor = this.input.length
+    this.setDraft(recalled, recalled.length)
     this.markDirty()
   }
 

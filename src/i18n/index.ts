@@ -75,8 +75,30 @@ export function getLocale(): Locale {
   return current
 }
 
-export function setLocale(locale: Locale): void {
+/**
+ * The live locale listeners.
+ *
+ * `installUiLocale()` applies the settings document through `applySavedLocale()`,
+ * which reaches `refreshLocale()`; both that and the explicit `/language` setter
+ * notify here. A UI subscribes once and disposes the returned function with its
+ * other listeners, so a settings change cannot leave a stale completion list.
+ */
+const localeListeners = new Set<(locale: Locale) => void>()
+
+function setCurrentLocale(locale: Locale): void {
+  if (locale === current) return
   current = locale
+  for (const listener of localeListeners) listener(locale)
+}
+
+/** Subscribe to live locale changes; the return value releases the listener. */
+export function onLocaleChange(listener: (locale: Locale) => void): () => void {
+  localeListeners.add(listener)
+  return () => { localeListeners.delete(listener) }
+}
+
+export function setLocale(locale: Locale): void {
+  setCurrentLocale(locale)
 }
 
 export function t(key: string, vars?: MessageVars, fallback?: string): string {
@@ -90,7 +112,8 @@ export function t(key: string, vars?: MessageVars, fallback?: string): string {
 }
 
 export function refreshLocale(env: NodeJS.ProcessEnv = process.env, saved?: string): Locale {
-  current = resolveLocale(env, saved)
+  const next = resolveLocale(env, saved)
+  setCurrentLocale(next)
   return current
 }
 
