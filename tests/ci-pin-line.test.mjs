@@ -20,7 +20,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { DEFAULT_LINE, isFamilyPackage, LINES, pinManifest } from '../scripts/ci-pin-line.mjs'
@@ -174,4 +176,27 @@ test('the declared peer window is the same on every line', () => {
 test('an unknown line is refused instead of silently leaving the default in place', () => {
   assert.throws(() => pinManifest(copy(), '0.1.6-alpha.1'), /unknown dsh line/u)
   assert.throws(() => pinManifest(copy(), undefined), /unknown dsh line/u)
+})
+
+test('the command-line pin step actually executes on this platform', () => {
+  // Import-only unit tests would miss a Windows CLI guard that exits zero
+  // without entering pinFile(). Start from the *default* rc.2 manifest, not
+  // TREE_LINE (which is already rc.3 in the experimental CI checkout).
+  const temp = mkdtempSync(join(tmpdir(), 'relay-pin-'))
+  try {
+    const manifest = pinManifest(copy(), DEFAULT_LINE)
+    assert.equal(manifest.devDependencies['@deepseek-ai/dsh'], DEFAULT_LINE)
+    writeFileSync(join(temp, 'package.json'), JSON.stringify(manifest))
+    const child = spawnSync(process.execPath, [join(REPO, 'scripts', 'ci-pin-line.mjs'), '0.2.1-rc.3'], {
+      cwd: temp, encoding: 'utf8', timeout: 30_000,
+    })
+    assert.equal(child.error, undefined, String(child.error))
+    assert.equal(child.status, 0, `stdout: ${child.stdout}; stderr: ${child.stderr}`)
+    const result = JSON.parse(readFileSync(join(temp, 'package.json'), 'utf8'))
+    assert.equal(result.devDependencies['@deepseek-ai/dsh'], '0.2.1-rc.3')
+    assert.equal(result.overrides['@deepseek-ai/dsh'], '0.2.1-rc.3')
+    assert.match(child.stdout, /package.json pinned to the dsh 0\.2\.1-rc\.3 line/u)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
 })

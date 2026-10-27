@@ -33,7 +33,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -178,7 +178,7 @@ export function pinFile(line, cwd = process.cwd()) {
   return next
 }
 
-if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const line = process.argv[2]
   if (line === undefined) {
     process.stderr.write(`usage: node scripts/ci-pin-line.mjs <${Object.keys(LINES).join('|')}>\n`)
