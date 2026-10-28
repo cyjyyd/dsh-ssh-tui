@@ -60,6 +60,12 @@ const NEXT_LINE_ROOTS = {
   '@deepseek-ai/cordis-plugin-timer': '1.1.6',
   '@deepseek-ai/cordis-plugin-group': '1.0.5',
 }
+/** rc.3 advanced timer to 1.1.7; rc.2 retains 1.1.6. Root peers are not interchangeable. */
+const RC3_LINE_ROOTS = { ...NEXT_LINE_ROOTS, '@deepseek-ai/cordis-plugin-timer': '1.1.7' }
+
+/** The default/0.2.0 lines retain the stable schemastery window. */
+export const DEFAULT_SCHEMA_SPEC = '3.18.2 || ~3.18.4'
+
 /** The presets split: the plural has no release on this line at all. */
 const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
 
@@ -72,9 +78,10 @@ export const LINES = {
   // refusal instead of silence.
   // REL.085-U1 EXPERIMENT ONLY: probe the published rc.3 family without
   // moving DEFAULT_LINE, production lockfiles or dshReleases compatible claims.
-  // Root peers are hypothesized unchanged from rc.2; install+CI must verify.
+  // Published rc.3 root peers require timer 1.1.7 and schemastery 3.18.5.
   '0.2.1-rc.3': {
-    roots: NEXT_LINE_ROOTS,
+    roots: RC3_LINE_ROOTS,
+    schemastery: '3.18.5',
     presets: NEW_LINE_PRESETS,
     overrides: true,
     devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
@@ -151,6 +158,11 @@ export function pinManifest(manifest, line) {
     if (isFamilyPackage(name) && target.devPins?.[name] === undefined) dev[name] = line
   }
   next.devDependencies = sorted(dev)
+
+  // This dependency is shipped by Relay, unlike most host-supplied peers.
+  // Change it only in the ephemeral CI-pinned manifest, restoring the normal
+  // default-line range when switching out of the rc.3 experiment.
+  next.dependencies = { ...(next.dependencies ?? {}), '@deepseek-ai/schemastery': target.schemastery ?? DEFAULT_SCHEMA_SPEC }
 
   if (target.overrides) {
     const overrides = {}

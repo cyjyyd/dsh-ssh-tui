@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { FORMS_HOST, HOST_VERSION } from './host-line.mjs'
-import { LINES } from '../scripts/ci-pin-line.mjs'
+import { DEFAULT_SCHEMA_SPEC, LINES } from '../scripts/ci-pin-line.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PROTECTED_ENTRY_IDS = new Set(['ui-settings-plugin-inventory', 'dsh-safe-plugin-manager'])
@@ -109,12 +109,10 @@ test('root specs for the family-pinned packages are exact, not floating', async 
     )
   }
   // schemastery is the one root the plugin also *ships* (`dependencies`), so its
-  // spec has to admit the copy the host resolved instead of nesting a second
-  // one — a schema built by another copy is a different class. It admits exactly
-  // the two versions the family lines pin (0.1.5 → 3.18.2, 0.1.7 → ~3.18.4) and
-  // nothing else; a floating range would let a fresh tree pick a version no host
-  // ever resolved.
-  assert.equal(manifest.dependencies?.['@deepseek-ai/schemastery'], '3.18.2 || ~3.18.4')
+  // spec must match the current host's root; rc.3 requires 3.18.5 while the
+  // declared default rc.2 still keeps its existing range. The temporary CI
+  // manifest re-pin does not change the published default dependency.
+  assert.equal(manifest.dependencies?.['@deepseek-ai/schemastery'], LINES[HOST_VERSION]?.schemastery ?? DEFAULT_SCHEMA_SPEC)
   // The four cordis plugins are here for the same reason and are not imported:
   // cordis peers them optionally, so without a root pin npm takes the newest
   // (`include@1.0.9` once resolved on the oldest leg) and that one demands
