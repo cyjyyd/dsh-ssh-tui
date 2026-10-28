@@ -252,7 +252,7 @@ Use the **existing Report Screen** header, scroll, copy and runtime strip.
 The following text is illustrative, **not measured telemetry** or a request to
 create a new Screen layout implementation:
 
-\`\`\`text
+```text
 Terminal Doctor · Snapshot only
 Host policy: startup environment · may differ after reattach
 Attached Relay: current / unknown (only when actually known)
@@ -269,7 +269,7 @@ Overrides         none         CONFIGURED · validated tokens only
 
 Snapshot only. Fresh recheck is not available in W6B.
 Esc close · PgUp/PgDn scroll · existing copy shortcut
-\`\`\`
+```
 
 When the current Relay sends a correlated numeric RTT/metrics receipt **in
 this attach generation**, replace only its corresponding UNMEASURED row with
@@ -280,12 +280,12 @@ without guessing which device is at the other end.
 In a tiny 8-row terminal, preserve the current Report Screen's title/hint/
 runtime-strip priority and scroll the facts; never inject a second header,
 modal layer, tooltip, terminal query, or shortcut-claim into Composer. With
-\`DSH_TUI_ASCII=1\`, evidence labels must be text (no reliance on checkmarks
-or emoji). No credentials, raw \`WT_SESSION\` IDs or environment variable values
+`DSH_TUI_ASCII=1`, evidence labels must be text (no reliance on checkmarks
+or emoji). No credentials, raw `WT_SESSION` IDs or environment variable values
 other than sanitized, allowlisted capability override names appear in copy.
 
-**Gate-specific falsification checks**: a mocked current-attach \`FRAME_RTT\`
+**Gate-specific falsification checks**: a mocked current-attach `FRAME_RTT`
 must not mark OSC52 as measured; attaching a different relay must not keep
-its predecessor's measured glyph width; \`DSH_TUI_NO_GLYPH_PROBE=1\` without
-an explicit Relay reason frame must show \`UNMEASURED (reason unknown)\`.
+its predecessor's measured glyph width; `DSH_TUI_NO_GLYPH_PROBE=1` without
+an explicit Relay reason frame must show `UNMEASURED (reason unknown)`.
 W6B cannot show an active or clickable "reprobe" affordance before W6C.
