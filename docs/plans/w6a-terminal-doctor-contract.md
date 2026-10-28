@@ -69,6 +69,32 @@ carry a full fresh capability map. Therefore **the Host's terminal family or
 clipboard policy must never be displayed as "measured current terminal" after
 reattach** unless a new, versioned Relay-sourced fact actually proves it.
 
+### Additional current-relay frame ownership risk (source audit; not a field incident)
+
+In `src/display-sock.ts:DisplayHost.accept()`, `claim()` changes
+`this.socket` when a new Relay takes over, and the previous socket is ended
+asynchronously. The old socket's `data` callback still has local
+`claimed === true`. Its frame dispatch currently checks only `!claimed`,
+**not** `this.socket === socket`, before forwarding `FRAME_STDIN`,
+`FRAME_RESIZE`, `FRAME_RTT`, `FRAME_METRICS` and `FRAME_PROBE_REPLY`.
+
+Consequently, a *late frame from a formerly claimed socket* could potentially
+reach current Host callbacks during replacement. This has **not** been
+reproduced as a user incident; it is an identifiable race in the read path.
+Simply stamping `onMetrics` with the newest Host attach epoch would be
+insufficient if the source socket is not validated first. W6B **must not**
+claim current-relay MEASURED facts until a small, independently reviewed
+**current-socket frame isolation Gate** enforces and tests that only the
+currently attached Relay may deliver input/resize/RTT/metrics/probe replies.
+`FRAME_QUERY` must retain its non-claiming liveness behavior.
+
+Required RED→GREEN: after second Relay HELLO, inject a late first-Relay
+`FRAME_STDIN`, `FRAME_RTT`, `FRAME_METRICS` and probe answer through a
+deterministic test seam; all must be ignored while a current second-Relay
+frame still reaches the expected callback. Assert the prior replacement
+notification is preserved. Prefer a one-path authorization check rather
+than independent filters on every callback.
+
 The current `FRAME_PROBE` asks a relay for liveness; it is **not** an API to
 rerun the glyph measurement and does **not** validate OSC52, mouse or paste.
 The glyph probe is currently done during attach behind an output hold, avoiding
@@ -198,7 +224,7 @@ must be part of its negative matrix.
 | W6-N1 | Inject split/late `CSI row;col R` | No compositor/Screen/hidden draft corruption, no printable `^[` leak |
 | W6-N2 | Hold bare Escape while starting probe | Esc delivered exactly once; WIN-CI1.H3 unchanged |
 | W6-N3 | two r presses, detach, late reply | One in-flight per epoch, stale reply ignored, no Screen resurrection |
-| W6-N4 | report on stale Host environment after relay replacement | Cannot label old capability flags as MEASURED |
+| W6-N4 | report on stale Host environment after relay replacement | Cannot label old capability flags as MEASURED; old Relay frames after replacement are rejected at DisplayHost frame ownership boundary |
 | W6-N5 | disabled/no terminal plus forced r | No probe bytes; report remains truthful |
 | W6-N6 | `/doctor`, `/diag`, W-4 completion, W-5 Search | Existing behavior unchanged, owner isolation and input fixture pass |
 | W6-N7 | OSC52 write not verifiable | No "clipboard successfully written" claim |
@@ -235,8 +261,9 @@ The recommended W6A defaults needing owner acceptance before product code:
    existing `/doctor` and `/diag` meaning.
 2. Use the five evidence labels above; classify policy/override separately
    from actual Relay measurement and report Host-vs-Relay provenance.
-3. Permit independently testable W6B snapshot-only delivery. W6C recheck is
-   **not** auto-approved by W6B.
+3. Permit independently testable W6B snapshot-only delivery **only after a
+   deterministic old-Relay frame rejection Gate**. W6C recheck is **not**
+   auto-approved by W6B.
 4. Treat `r` as an explicit, opt-in fresh recheck only after a safe
    correlated Relay protocol exists; otherwise it must not pretend success.
 5. Never call Provider/network APIs or change terminal modes to "test" them.
