@@ -6,7 +6,11 @@ on:
   pull_request:
     paths:
       - scripts/ci-pin-line.mjs
+      - scripts/verify-installed-host.mjs
+      - scripts/resolve-installed-package.mjs
       - tests/ci-pin-line.test.mjs
+      - tests/bundle-patch.test.mjs
+      - tests/host-contract.test.mjs
       - .github/workflows/compat-u1-rc3.yml
   workflow_dispatch:
 
