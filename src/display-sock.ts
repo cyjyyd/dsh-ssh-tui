@@ -750,8 +750,13 @@ export class DisplayHost {
           // deliberately not a claim: answering must never steal the display
           // from the window the question is about.
           void this.answerQuery(socket)
-        } else if (!claimed) continue
-        else if (frame.type === FRAME_STDIN) this.handlers.onStdin(frame.payload)
+        } else if (!claimed || this.socket !== socket) {
+          // A replaced relay remains locally 'claimed' until its async farewell
+          // drains. Once another socket owns the session, old input, resize,
+          // RTT, glyph metrics and probe replies must never reach this Host.
+          // Read-only FRAME_QUERY is handled above and does not claim display.
+          continue
+        } else if (frame.type === FRAME_STDIN) this.handlers.onStdin(frame.payload)
         else if (frame.type === FRAME_RESIZE) {
           const size = decodeResize(frame.payload)
           if (size !== undefined) this.handlers.onResize(size.columns, size.rows)
