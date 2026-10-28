@@ -18,13 +18,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import { streamFrameOwner, streamChunkOf } from '../lib/tui.js'
 import { installSettingsSection, settingsNamespace } from '../lib/dsh-compat.js'
+import { resolveInstalledManifest } from '../scripts/resolve-installed-package.mjs'
 
 const require = createRequire(import.meta.url)
 const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
@@ -142,8 +143,7 @@ async function makeHome(t) {
  * complete tree, so a skip here only ever means "this leg cannot run a host".
  * @returns the missing package and who wanted it, or `undefined` when complete.
  */
-function incompleteTree() {
-  const root = join(import.meta.dirname, '..')
+function incompleteTree(root = join(import.meta.dirname, '..')) {
   const dir = join(root, 'node_modules', '@deepseek-ai')
   for (const name of readdirSync(dir)) {
     const manifest = join(dir, name, 'package.json')
@@ -151,11 +151,36 @@ function incompleteTree() {
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'))
     for (const dep of Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies })) {
       if (!dep.startsWith('@deepseek-ai/')) continue
-      if (!existsSync(join(root, 'node_modules', dep))) return `${dep} (wanted by ${name})`
+      // A package may legally live in this parent's nested node_modules. Use
+      // the parent's Node resolution search paths; checking only repository
+      // top-level node_modules silently skipped valid rc.3 host contract tests.
+      if (resolveInstalledManifest(manifest, dep) === undefined) {
+        return `${dep} (wanted by ${name})`
+      }
     }
   }
   return undefined
 }
+
+test('host completeness resolves nested dsh-hmr relative to the declaring host package', t => {
+  const fixture = mkdtempSync(join(tmpdir(), 'relay-host-contract-'))
+  t.after(() => rmSync(fixture, { recursive: true, force: true }))
+  const hostDir = join(fixture, 'node_modules', '@deepseek-ai', 'dsh')
+  const nestedDir = join(hostDir, 'node_modules', '@deepseek-ai', 'dsh-hmr')
+  mkdirSync(nestedDir, { recursive: true })
+  writeFileSync(join(hostDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh',
+    version: '0.2.1-rc.3',
+    dependencies: { '@deepseek-ai/dsh-hmr': '0.2.1-rc.3' },
+  }))
+  writeFileSync(join(nestedDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-hmr',
+    version: '0.2.1-rc.3',
+  }))
+  assert.equal(incompleteTree(fixture), undefined, 'a nested dependency must not trigger the host false-SKIP')
+  rmSync(nestedDir, { recursive: true, force: true })
+  assert.match(incompleteTree(fixture) ?? '', /@deepseek-ai\/dsh-hmr/u, 'a genuinely missing dependency must still be detected')
+})
 
 test('the host streams a reply with the durable shapes this plugin renders', { timeout: 120_000 }, async t => {
   const missing = incompleteTree()
