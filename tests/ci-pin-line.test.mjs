@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { DEFAULT_LINE, isFamilyPackage, LINES, pinManifest } from '../scripts/ci-pin-line.mjs'
+import { DEFAULT_LINE, DEFAULT_SCHEMA_SPEC, isFamilyPackage, LINES, pinManifest } from '../scripts/ci-pin-line.mjs'
 
 const REPO = join(import.meta.dirname, '..')
 /** This tree's manifest: the committed one on the default leg, the rewrite on others. */
@@ -68,6 +68,7 @@ test('every line moves the whole family at once, and nothing else', () => {
     // prerelease range that resolved through the `latest` tag to another line.
     assert.equal(pinned.devDependencies['@deepseek-ai/dsh'], line)
     // Non-family devDeps are none of this script's business.
+    assert.equal(pinned.dependencies['@deepseek-ai/schemastery'], LINES[line].schemastery ?? DEFAULT_SCHEMA_SPEC, `${line}: schemastery must match its published root specification`)
     for (const name of ['typescript', 'semver', '@types/node', '@xterm/headless']) {
       assert.equal(pinned.devDependencies[name], tree.devDependencies[name], name)
     }
@@ -83,13 +84,12 @@ test('the family root pins follow the line, including the launcher-only one', ()
   // set (0.2.0-rc.1 kept what 0.1.7 pinned); 0.2.1-rc.2 moved all five one patch,
   // and the values come from its published peers rather than from a guess.
   const roots = {
-    // Experimental rc.3 U1 line: same root pins as rc.2 until installed peers
-    // and full Linux/Windows compatibility probes confirm or refute them.
+    // rc.3 has a distinct published timer root requirement (not the rc.2 one).
     '0.2.1-rc.3': {
       '@deepseek-ai/cordis': '4.0.5',
       '@deepseek-ai/cordis-plugin-include': '1.0.10',
       '@deepseek-ai/cordis-plugin-loader': '1.0.6',
-      '@deepseek-ai/cordis-plugin-timer': '1.1.6',
+      '@deepseek-ai/cordis-plugin-timer': '1.1.7',
       '@deepseek-ai/cordis-plugin-group': '1.0.5',
     },
     '0.2.1-rc.2': {
@@ -199,4 +199,13 @@ test('the command-line pin step actually executes on this platform', () => {
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
+})
+
+// rc.3 root pins must not leak into a default release manifest.
+test('switching rc.3 back to the default line restores timer and schemastery', () => {
+  const stable = pinManifest(copy(), DEFAULT_LINE)
+  const experimental = pinManifest(stable, '0.2.1-rc.3')
+  assert.equal(experimental.devDependencies['@deepseek-ai/cordis-plugin-timer'], '1.1.7')
+  assert.equal(experimental.dependencies['@deepseek-ai/schemastery'], '3.18.5')
+  assert.deepEqual(pinManifest(experimental, DEFAULT_LINE), stable)
 })
