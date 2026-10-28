@@ -38,8 +38,7 @@ describe channel and session facts. Neither is silently redirected.
 
 - In framed mode: scrollable, copyable, depth-one report; Esc, Ctrl+C or q/Q
   closes; PgUp/PgDn, Ctrl+L and existing report copy keys keep their meanings.
-- In line mode: a textual, copyable `diag` report row, never a Screen; this
-  is the existing report fallback, not an artificial frame.
+- In line mode: a textual, copyable **`diag`** report row, never a Screen. **Implementation must update `reportRowKind('terminal')` to return `diag`**, because the current fallback returns `system` for new report kinds. This is an explicit testable compatibility change, not automatic from adding `ReportKind`.
 - `r` is reserved **only within Terminal Doctor** for W6C fresh recheck.
   W6B must show "fresh recheck unavailable in this version", never pretend a
   cached snapshot was just remeasured.
@@ -109,7 +108,7 @@ Do not display "supported" when only a policy Boolean was inferred.
 | OSC 52, OSC 8, title | Host policy and known terminal family | **Inferred or configured**; clipboard write success is **not observable** here |
 | color depth, ASCII/fallback, terminal family | Host environment and effective renderer policy | Host-origin **inferred/configured**; warn it may differ from current relay |
 | RTT and terminal responsiveness | Current attachment's `FRAME_RTT`/`FRAME_PROBE_REPLY` if captured | **Measured**, **silent** or **unmeasured**; no numerical RTT if no reply |
-| ambiguous glyph width/reserve | Current attachment's `FRAME_METRICS` if captured | **Measured** only when this frame was actually received; otherwise locale fallback is **inferred** |
+| ambiguous glyph width/reserve | Current attachment's `FRAME_METRICS` if captured | **Measured** only when this frame was received **in this attachment generation**; otherwise locale fallback is **inferred**, and the missing live probe is **unmeasured** with unknown reason unless the Relay explicitly reports why |
 | ignored overrides | `parseCapsOverrideReport` | Config validation fact, not a terminal observation |
 
 A report must identify **snapshot scope** ("Host startup" or "Relay attach
@@ -122,14 +121,25 @@ using existing copy behavior. No network telemetry.
 1. Add a pure `terminal-doctor.ts` formatter that accepts *already collected*
    narrow facts. No globals, filesystem/network access or probe bytes in the
    formatter. Bound line count and sanitize any labels or override tokens.
-2. Add the proposed local command and its zh/en descriptions, ReportKind and
-   title. Preserve Screen depth ≤1; no new input owner, Surface or hidden
-   composer mutation. The report may be replaced by Search via existing
-   Alt+f semantics.
+   Provide a source-labelled minimal report (Host-start policy vs Relay current
+   attach) that fits 8/12/20-row Screens, with copyText taken from the same
+   canonical formatted facts. Unknown/disabled/stale must be visibly distinct.
+2. Add the proposed local command and its zh/en descriptions, `ReportKind`,
+   `reportRowKind('terminal') === 'diag'` and title. Preserve Screen depth ≤1;
+   no new input owner, Surface or hidden composer mutation. The report may be
+   replaced by Search via existing Alt+f semantics. No new `ScreenKind`.
 3. Gather Host policy facts from the existing classifier; combine with **only
-   the last actually observed current-attach** RTT/metrics facts. If the Host
-   cannot prove the observation's attachment epoch, mark it unmeasured/stale,
-   not measured. An empty/currently detached display is explicitly UNMEASURED.
+   the last actually observed current-attach** RTT/metrics facts. Use a monotonic
+   **attachment generation** maintained at the Host's current display callbacks:
+   invalidate the previous generation on detach/replacement; stamp only an
+   `onRtt` numeric reply or `onMetrics` payload actually observed since
+   `onAttach`. Do not infer width measurement merely because the module's
+   current fallback happens to be wide. If the Host cannot prove the observation's
+   attachment epoch, mark it UNMEASURED/STALE, not MEASURED. An empty/currently
+   detached display is explicitly UNMEASURED/STALE. The Host cannot know that
+   `DSH_TUI_NO_GLYPH_PROBE=1` was set in a different Relay process unless that
+   fact is transmitted; missing `FRAME_METRICS` means only `UNMEASURED (reason unknown)`,
+   **not** `disabled by environment`.
 4. Store no new durable history or user settings. `/terminal` never triggers
    a model call, rewrites profile rows, changes keymaps, or silently enables
    terminal modes.
@@ -181,7 +191,7 @@ must be part of its negative matrix.
 | W6-P1 | `/terminal` in framed mode | Dedicated report, zero transcript writes, one Screen, exact workspace/Composer restore on close |
 | W6-P2 | `/terminal` in line mode | Textual `diag` row, no Screen, readable output |
 | W6-P3 | Linux PTY + Windows ConPTY startup | Policy fields visibly INFERRED/CONFIGURED; measured RTT/glyph only with real reply |
-| W6-P4 | fallback: no CPR / `DSH_TUI_NO_GLYPH_PROBE=1` | UNMEASURED with cause; never a false success |
+| W6-P4 | fallback: no CPR / `DSH_TUI_NO_GLYPH_PROBE=1` | UNMEASURED, never false success; exact 'disabled' reason only if the current Relay actually reports that fact, otherwise 'reason unknown' |
 | W6-P5 | 8/12/20-row resize, 40/100 columns, truecolor/8/none/ASCII | Correct report layout, clipping, copy text, no field leaks |
 | W6-P6 | same-process reattach to changed terminal | New epoch/source identified; old Host classifier not relabeled as current relay measurement |
 | W6-P7 | W6C `r` | Exactly one fresh Relay probe; report updates in same Screen with new receipt |
