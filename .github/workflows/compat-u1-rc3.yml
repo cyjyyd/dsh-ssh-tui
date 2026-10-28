@@ -11,6 +11,7 @@ on:
       - tests/ci-pin-line.test.mjs
       - tests/bundle-patch.test.mjs
       - tests/host-contract.test.mjs
+      - tests/rc3/**
       - .github/workflows/compat-u1-rc3.yml
   workflow_dispatch:
 
@@ -37,6 +38,8 @@ jobs:
         run: node scripts/verify-installed-host.mjs 0.2.1-rc.3
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
+      - name: Official model listing mock matrix
+        run: node --test "tests/rc3/*.test.mjs"
       - name: Full unit and regression suite
         run: node --test "tests/*.test.mjs"
       - name: Architecture freeze
@@ -91,6 +94,8 @@ jobs:
         run: node scripts/verify-installed-host.mjs 0.2.1-rc.3
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
+      - name: Official model listing mock matrix
+        run: node --test "tests/rc3/*.test.mjs"
       - name: Full unit and regression suite
         run: node --test "tests/*.test.mjs"
       - name: Architecture freeze
