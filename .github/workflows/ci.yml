@@ -67,6 +67,11 @@ jobs:
       # signature, so "it is gone" needs a check the suite cannot be.
       - name: B2 freeze audit (representation invariants + retired paths)
         run: npm run freeze
+      # Performance evidence is synthetic and side-effect free. Real cold-resume
+      # timing on the owner's long session is a separate private Gate.
+      - name: Synthetic long-session plan-recorder scale (5k / 20k / 55k)
+        if: matrix.dsh == '0.2.1-rc.2'
+        run: node scripts/bench-long-plan.mjs
       # End to end on a real PTY, against a profile this repo builds for itself:
       # a headless runner has no ~/.dsh, which is why this never ran here before.
       - name: End-to-end PTY probe (throwaway profile)
@@ -180,6 +185,8 @@ jobs:
         run: node scripts/ci-annotate-failures.mjs test-output.txt
       - name: B2 freeze audit (representation invariants + retired paths)
         run: npm run freeze
+      - name: Synthetic long-session plan-recorder scale (Windows)
+        run: node scripts/bench-long-plan.mjs
 
       # Windows is where "it worked on Linux" stopped being evidence: this drives
       # the real TUI in a ConPTY on a real Windows host, so a lifecycle that only
