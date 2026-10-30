@@ -463,3 +463,87 @@ test('a paste tail whose other half never comes is released as payload', async (
   assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }],
     'and the paste it belonged to is abandoned, so the keyboard comes back')
 })
+
+/**
+ * REL.085-PREP — the Escape that arrives while a paste tail is pending.
+ *
+ * The reader holds a cut close marker for the marker window (2 s) and releases it
+ * as payload. When the held tail is a *bare* `ESC`, that release turns the reader's
+ * Escape key into paste text (inside a paste) or literal text (after a closed one),
+ * two seconds after it was pressed — a dialog it was meant to close stays up.
+ *
+ * The three reads below are the shapes a terminal actually produces: the close
+ * marker is lost, cut in half, or complete with the Escape behind it in one read.
+ */
+test('an Escape after a lost paste close marker is the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~PASTED'), [{ kind: 'paste', text: 'PASTED' }],
+    'the payload lands while the paste is still open')
+  assert.deepEqual(reader.read('\x1b'), [], 'the Escape is held while it could still be a marker')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }],
+    'a tail that is only ESC cannot be paste text; it is the Escape the reader pressed')
+  assert.equal(reader.isPasting(), false, 'and the paste it belonged to is abandoned')
+})
+
+test('an Escape after a close marker the terminal cut in half is the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~PASTED\x1b[20'), [{ kind: 'paste', text: 'PASTED' }])
+  assert.deepEqual(reader.read('\x1b'), [{ kind: 'paste', text: '\x1b[20' }],
+    'the held half cannot become a marker once Escape follows it, so it is payload')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the Escape itself is the key the reader pressed')
+})
+
+test('an Escape in the same read as a complete close marker is the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[201~\x1b'), [{ kind: 'paste', text: 'pasted' }],
+    'the payload is the paste; the Escape behind the marker is not payload')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the Escape behind a closed paste is the Escape key')
+})
+
+test('a longer cut marker keeps the marker window and is still released as payload', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[20'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'paste', text: '\x1b[20' }],
+    'only a tail of exactly ESC gets the Escape window; ESC[20 can still be a marker')
+  assert.equal(reader.isPasting(), false)
+})
+
+/**
+ * The ambiguity this fix accepts, pinned rather than hidden.
+ *
+ * Inside a bracketed paste, a read that ends in a bare `ESC` is byte-identical
+ * whether the reader pressed Escape or the pasted text's last byte was a literal
+ * ESC. The reader chooses the key: a lost Escape freezes a dialog, while a paste
+ * whose final byte is a raw ESC is vanishingly rare and its payload is abandoned
+ * rather than typed. A longer payload ending in ESC is unaffected.
+ */
+test('a paste payload whose last byte is a raw ESC is resolved as the Escape key', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 40 })
+  assert.deepEqual(reader.read('\x1b[200~body\x1b'), [{ kind: 'paste', text: 'body' }],
+    'the visible payload is delivered; the trailing ESC is held')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the trailing ESC is the key, not paste text')
+  assert.equal(reader.isPasting(), false)
+})
+
+test('a fragmented marker still completes, and a later Escape keeps its own window', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame) })
+  const started = Date.now()
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b[20'), [{ kind: 'paste', text: 'pasted' }])
+  assert.deepEqual(reader.read('1~'), [], 'the other half closes the paste instead of being typed')
+  assert.deepEqual(reader.read('\x1b'), [{ kind: 'key', sequence: '\x1b' }], 'the next Escape routes normally')
+  assert.equal(reader.hold('\x1b'), true, 'and the routing still holds a lone Escape')
+  await new Promise(resolve => setTimeout(resolve, ESCAPE_HOLD_MS + 80))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.ok(Date.now() - started < 500, 'the Escape window is the keystroke window, not the marker watchdog')
+})
