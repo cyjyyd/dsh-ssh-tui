@@ -305,6 +305,18 @@ async function runProbe(argv) {
     term.write('\x1b')
     await waitFor(onGrid(/输入 \/help/u), 20_000, 'the workspace back after the tail case')
 
+    // 6b. A paste whose close marker never comes must not eat the next Escape.
+    //     The held tail is a bare ESC, so it is the key the reader pressed, not
+    //     paste text: the Screen has to close on the keystroke window, not after
+    //     the two-second marker watchdog (which would leave it up).
+    term.write('/diag\r')
+    await waitFor(onGrid(/判定链|verdict chain/u), 60_000, 'the /diag Screen (lost close marker)')
+    term.write('\x1b[200~lost-marker')
+    await delay(120)
+    term.write('\x1b')
+    await waitFor(onGrid(/输入 \/help/u), 8_000, 'Escape to close the Screen after a paste lost its close marker')
+    check(draftOf(await rowsOf(output), prompt) === '', 'the paste with a lost marker never leaked into the draft')
+
     // 7. The picker is the other layer that borrows the keyboard.
     term.write('/view\r')
     await waitFor(onGrid(/工作区视图|Workspace view/u), 20_000, 'the /view picker')
