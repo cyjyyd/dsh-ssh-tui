@@ -10400,7 +10400,11 @@ export class SshTui {
       return QUESTION_TOOL_NAMES.has(event.data.name)
     }
     if (event.type === 'tool/result') {
-      return this.askedByCall.has(String(event.data.message.source.callId))
+      // The durable projection settles by `message.toolCallId`; `source.callId`
+      // is only the legacy fallback for rows written before that field was the
+      // canonical identity. A mismatched source must not bind another call.
+      const callId = String(event.data.message.toolCallId ?? event.data.message.source?.callId ?? '')
+      return callId !== '' && this.askedByCall.has(callId)
     }
     return true
   }

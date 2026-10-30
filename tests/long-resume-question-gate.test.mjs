@@ -51,7 +51,7 @@ function ordinaryCall(seq, callId) {
 }
 function ordinaryResult(seq, callId) {
   return { type: 'tool/result', seq, data: {
-    message: { role: 'tool', source: { callId }, content: [{ type: 'text', text: 'ok' }] },
+    message: { role: 'tool', toolCallId: callId, source: { callId }, content: [{ type: 'text', text: 'ok' }] },
   } }
 }
 function askCall(seq) {
@@ -64,7 +64,7 @@ function askCall(seq) {
 }
 function askResult(seq) {
   return { type: 'tool/result', seq, data: {
-    message: { role: 'tool', source: { callId: 'ask-q' },
+    message: { role: 'tool', toolCallId: 'ask-q', source: { callId: 'ask-q' },
       content: [{ type: 'text', text: JSON.stringify({ answers: [{ id: 'q1', selected: ['staging'] }] }) }] },
   } }
 }

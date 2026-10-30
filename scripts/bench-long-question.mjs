@@ -62,6 +62,7 @@ function run(totalEvents) {
       data: {
         message: {
           role: 'tool',
+          toolCallId: callId,
           source: { callId },
           content: [{ type: 'text', text: 'synthetic output' }],
         },
