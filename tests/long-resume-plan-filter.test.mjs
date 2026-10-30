@@ -77,3 +77,32 @@ test('PERF-LONG RED: reviewed plan approval/dismissal must not depend on unrelat
     assert.deepEqual(tui.planEvents.map(event => event.seq), [10, 12], 'only matched exit review call/result can be stored')
   }
 })
+
+test('a 55k-event synthetic log keeps only matched review events and stays bounded', () => {
+  // Approximate the field report's tool-call density: 1 call+result per five
+  // events and one exit_plan_mode call per 300 tools. This test asserts work
+  // *shape*, not timing on a noisy shared CI runner.
+  for (const events of [5000, 20000, 55000]) {
+    const tui = fixture()
+    let planCalls = 0
+    for (let seq = 0; seq < events; seq += 1) {
+      const slot = seq % 5
+      const call = Math.floor(seq / 5)
+      if (slot === 0) {
+        const name = call % 300 === 0 ? 'exit_plan_mode' : 'shell'
+        if (name === 'exit_plan_mode') planCalls += 1
+        tui.recordPlanEvent(CALL(seq, 'call-' + call, name))
+      } else if (slot === 1) {
+        tui.recordPlanEvent(RESULT(seq, 'call-' + call))
+      } else {
+        tui.recordPlanEvent({ type: 'assistant/message', seq, data: {} })
+      }
+    }
+    assert.equal(tui.planEvents.length, planCalls * 2,
+      `${events} total events should retain only plan call+matching result pairs`)
+    assert.equal(tui.planArtifacts.length, 1,
+      'the synthetic plan review must still produce a durable artifact')
+    assert.equal(tui.planArtifacts[0]?.review?.outcome, 'approved')
+    assert.equal(tui.planReviewCallIds.size, planCalls)
+  }
+})
