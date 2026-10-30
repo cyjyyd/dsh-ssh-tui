@@ -8567,8 +8567,18 @@ export class SshTui {
         // denied, provider refused, turn cancelled) must not leave its
         // description queued: the next child would inherit that name.
         this.pendingSubagentTasks = this.pendingSubagentTasks.filter(entry => entry.callId !== callId)
-        const spawnCard = this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
-          candidate.kind === 'subagent' && (candidate.runId === callId || candidate.spawnCallId === callId))
+        // Only a spawn tool's own result can own a subagent card, and the call
+        // log already recorded which calls were spawns. A cold replay paid the
+        // 5,000-row search for every ordinary result (R4.A); the card is keyed
+        // by the spawn call's own id, so a call logged as another tool cannot
+        // have one. An unknown name — the call is outside the replayed window,
+        // or the turn reset already dropped it — stays uncertain and keeps the
+        // full lookup.
+        const callName = this.toolCallNames.get(callId)
+        const spawnCard = callName === undefined || SUBAGENT_TOOL_NAMES.has(callName)
+          ? this.rows.findLast((candidate): candidate is Extract<Row, { kind: 'subagent' }> =>
+            candidate.kind === 'subagent' && (candidate.runId === callId || candidate.spawnCallId === callId))
+          : undefined
         const output = collectText(event.data.message.content)
         if (spawnCard !== undefined) {
           // A live child already owns this spawn: the parent tool/result is
