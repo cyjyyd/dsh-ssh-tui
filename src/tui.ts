@@ -8813,10 +8813,15 @@ export class SshTui {
         this.handleExtensionEvent(event)
         break
     }
-    // Question state is derived from the Session, not from the request that opened
-    // a dialog, so both a lived and a replayed session draw the same cards. The
-    // set is small on purpose: these are the events the projection folds.
-    if (QUESTION_FOLD_EVENTS.has(String(event.type))) this.syncQuestionRows()
+    // Question state belongs to the Session projection, not a live dialog.
+    // During history replay, unrelated tool events cannot change any durable
+    // question card, yet stateOf() rematerializes the whole question view for
+    // each one. Only skip proven no-op tool events; keep request headers, user
+    // messages and ask_user_question at their original transcript positions.
+    // The live path retains its existing per-event synchronization semantics.
+    if (QUESTION_FOLD_EVENTS.has(String(event.type)) && this.questionEventNeedsSync(event)) {
+      this.syncQuestionRows()
+    }
   }
 
   private readonly handleStatus = ({ agent, status }: { agent: Agent; status: string }): void => {
@@ -10375,6 +10380,33 @@ export class SshTui {
     if (!this.textIsEditable()) return
     this.setField(this.fieldText(), target === 'start' ? 0 : this.fieldText().length)
     this.markDirty()
+  }
+
+  /**
+   * Avoid O(n²) projection materialization on replay's ordinary tool traffic.
+   *
+   * The full Session is already restored before SshTui replays its transcript,
+   * but only ask_user_question calls/results can create or settle a durable
+   * question card. The tool/call branch recorded its questions in askedByCall
+   * before this check executes. Header and user-message events remain eligible
+   * (the projection also understands late replies), so card order is not
+   * shifted to a chunk boundary or to replay's end.
+   */
+  private questionEventNeedsSync(event: SessionEvent): boolean {
+    if (!this.replaying) return true
+    if (event.type === 'tool/call') {
+      // Reuse the frozen question-tool classification, rather than introducing
+      // a new tool-card decision point that would evade B2's representation Gate.
+      return QUESTION_TOOL_NAMES.has(event.data.name)
+    }
+    if (event.type === 'tool/result') {
+      // The durable projection settles by `message.toolCallId`; `source.callId`
+      // is only the legacy fallback for rows written before that field was the
+      // canonical identity. A mismatched source must not bind another call.
+      const callId = String(event.data.message.toolCallId ?? event.data.message.source?.callId ?? '')
+      return callId !== '' && this.askedByCall.has(callId)
+    }
+    return true
   }
 
   /** One card's key: a call's batch can repeat a question id across calls. */
