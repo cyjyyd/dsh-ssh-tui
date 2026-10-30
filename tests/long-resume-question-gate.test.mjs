@@ -159,3 +159,24 @@ test('PERF-R3 live mode keeps existing full question projection synchronization'
   }
   assert.equal(target.count(), 6, 'the live path remains unchanged in this targeted replay-only optimization')
 })
+
+test('PERF-R3 late user-message reply remains synchronous during replay', () => {
+  const target = fixture(ACTIVE)
+  send(target, askCall(1))
+  assert.equal(target.tui.rows.find(row => row.kind === 'question')?.status, 'waiting')
+  const continued = {
+    questions: {
+      active: [{ callId: 'ask-q', questions: [{ id: 'q1', question: 'Which environment?' }], state: 'continued' }],
+      settled: [],
+    },
+  }
+  target.setView(continued)
+  send(target, { type: 'user/message', seq: 2, data: { content: [{ type: 'text', text: 'I will follow up' }] } })
+  const card = target.tui.rows.find(row => row.kind === 'question')
+  assert.equal(card?.continued, true, 'a late message must still update the question state')
+  target.setView(SETTLED)
+  send(target, { type: 'user/message', seq: 3, data: { content: [{ type: 'text', text: 'staging' }] } })
+  assert.equal(card?.status, 'answered')
+  assert.equal(card?.summary, 'staging')
+  assert.equal(target.count(), 3, 'ask call and two late messages remain synchronized')
+})
