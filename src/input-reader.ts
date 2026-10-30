@@ -231,8 +231,26 @@ export class InputReader {
     return { frames: this.frames(body), tail: combined.slice(combined.length - keep) }
   }
 
+  /**
+   * Release a held paste tail on the window its content deserves.
+   *
+   * A tail that is **only** `ESC` cannot be paste text: it is either the start of
+   * a marker whose other half never came, or the Escape key the reader pressed
+   * while the paste was open. Holding it for the marker window turned it into a
+   * `paste` frame (or a `literal`) two seconds later — the key was gone either
+   * way, and a dialog it was meant to close stayed up. A bare `ESC` therefore gets
+   * the Escape window and is released as the key; a longer tail (`ESC[20`) keeps
+   * the marker window, because only a longer tail can still become a marker.
+   *
+   * The one ambiguity this accepts: a paste whose payload ends in a raw ESC byte
+   * is byte-identical to that Escape key. The key wins — a lost Escape freezes a
+   * dialog, while a trailing raw ESC in pasted text is vanishingly rare and the
+   * payload is abandoned rather than typed.
+   */
   private armPasteTail(): void {
     this.cancelPasteTail()
+    const configured = this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS
+    const onlyEscape = this.pasteTail === '\x1b'
     this.pasteTailTimer = setTimeout(() => {
       this.pasteTailTimer = undefined
       const pending = this.pasteTail
@@ -240,9 +258,14 @@ export class InputReader {
       // Its other half never came. Those bytes are what the reader pasted, and the
       // paste they belonged to is over: leaving `inPaste` set here is what turned a
       // slow (or swallowed) marker into a session that ignored every key.
+      if (pending === '\x1b') {
+        this.inPaste = false
+        this.options.onFrame({ kind: 'escape' })
+        return
+      }
       if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
       this.inPaste = false
-    }, this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS)
+    }, onlyEscape ? Math.min(configured, ESCAPE_HOLD_MS) : configured)
   }
 
   private cancelPasteTail(): void {
