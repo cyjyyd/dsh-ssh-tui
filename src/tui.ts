@@ -10395,7 +10395,9 @@ export class SshTui {
   private questionEventNeedsSync(event: SessionEvent): boolean {
     if (!this.replaying) return true
     if (event.type === 'tool/call') {
-      return event.data.name === 'ask_user_question'
+      // Reuse the frozen question-tool classification, rather than introducing
+      // a new tool-card decision point that would evade B2's representation Gate.
+      return QUESTION_TOOL_NAMES.has(event.data.name)
     }
     if (event.type === 'tool/result') {
       return this.askedByCall.has(String(event.data.message.source.callId))
