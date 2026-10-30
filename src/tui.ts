@@ -1384,7 +1384,7 @@ const SETUP_FIELD_STEPS: ReadonlySet<string> = new Set(['provider', 'id', 'base-
  * The durable event types the plan projection reads (B2.5).
  *
  * `tool/call`/`tool/result` are here for the `exit_plan_mode` review; the recorder
- * filters those to the one tool, so an ordinary tool call never enters the plan log.
+ * filters both calls and their matched results, so ordinary tools never enter the plan log.
  */
 const PLAN_EVENT_TYPES: ReadonlySet<string> = new Set([
   'plan/mode',
@@ -2578,6 +2578,13 @@ export class SshTui {
    * only they can carry an unanswered review (a resumed process never finishes one).
    */
   private planEvents: PlanEvent[] = []
+  /**
+   * Only results from an exit_plan_mode call can settle a plan review.
+   * Record call identities once, rather than searching every prior plan event
+   * for each tool/result during a long session replay. This is an index into
+   * the durable log's identities, not a second source of plan state.
+   */
+  private readonly planReviewCallIds = new Set<string>()
   /** The folded artifacts. Recomputed whenever `planEvents` grows. */
   private planArtifacts: PlanArtifact[] = []
   /** The state last *said* in the transcript per artifact, so a transition is one row. */
@@ -4487,12 +4494,23 @@ export class SshTui {
    * running tally that could drift from one.
    */
   private recordPlanEvent(event: SessionEvent): void {
-    if (!PLAN_EVENT_TYPES.has(String(event.type))) return
+    const type = String(event.type)
+    if (!PLAN_EVENT_TYPES.has(type)) return
     const seq = typeof event.seq === 'number' ? event.seq : undefined
     const data = event.data as PlanEvent['data']
-    if (String(event.type) === 'tool/call' && String(data?.name ?? '') !== 'exit_plan_mode') return
+    if (type === 'tool/call') {
+      if (String(data?.name ?? '') !== 'exit_plan_mode') return
+      const callId = String(data?.callId ?? '')
+      if (callId !== '') this.planReviewCallIds.add(callId)
+    } else if (type === 'tool/result') {
+      // Unlike tool/call, a result has no tool name. Its only plan semantics
+      // come from settling a prior exit_plan_mode review by exact callId.
+      // Ordinary results are fold no-ops; retaining them caused O(n²) replay.
+      const callId = String(data?.message?.source?.callId ?? '')
+      if (callId === '' || !this.planReviewCallIds.has(callId)) return
+    }
     this.planEvents.push({
-      type: String(event.type),
+      type,
       ...(seq === undefined ? {} : { seq }),
       ...(data === undefined ? {} : { data }),
       live: !this.replaying,
