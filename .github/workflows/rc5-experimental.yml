@@ -47,6 +47,9 @@ jobs:
       - run: npx tsc -p tsconfig.json --noEmit
       - run: node --test "tests/*.test.mjs"
       - run: npm run freeze
+      # probe-home installs the checkout into a throwaway profile through the
+      # product's own plugin command, which uses pnpm on Windows too.
+      - run: npm install -g pnpm@10 --no-audit --no-fund
       - name: Paste probe (ConPTY)
         run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
       - name: Drop/reattach probe (ConPTY, historical reconnect gate)
