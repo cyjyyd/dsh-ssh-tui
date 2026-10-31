@@ -159,6 +159,8 @@ export class InputReader {
   private markerCompletion = ''
   private markerCompletionTimer: ReturnType<typeof setTimeout> | undefined
   private awaitingMarkerCompletion = false
+  /** `stop()` owns every timer: nothing may arm or deliver after it ran. */
+  private stopped = false
 
   constructor(private readonly options: InputReaderOptions) {
     this.guard = new TerminalInputGuard(
@@ -206,6 +208,7 @@ export class InputReader {
    * bytes (AD-20 §4.4, §6).
    */
   read(text: string): InputFrame[] {
+    if (this.stopped) return []
     if (this.awaitingMarkerCompletion) return this.completeMarker(text)
     const combined = this.pasteTail === '' ? text : `${this.pasteTail}${text}`
     if (this.pasteTail !== '') {
@@ -272,6 +275,9 @@ export class InputReader {
         const wasPasting = this.inPaste
         this.inPaste = false
         this.options.onFrame({ kind: 'escape' })
+        // A synchronous `onFrame` may have stopped the reader (detach, dispose):
+        // that stop owns the cleanup, and arming here would outlive it.
+        if (this.stopped) return
         // `ESC` also begins `ESC[201~`: a terminal that sends the marker head and
         // then the rest beyond the keystroke window must not have those bytes
         // typed. Watch for the completion for the rest of the marker window.
@@ -285,6 +291,7 @@ export class InputReader {
 
   /** Watch for the rest of a close marker whose head was released as Escape. */
   private armMarkerCompletion(): void {
+    if (this.stopped) return
     if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
     this.awaitingMarkerCompletion = true
     this.markerCompletionTimer = setTimeout(() => {
@@ -292,6 +299,7 @@ export class InputReader {
       this.awaitingMarkerCompletion = false
       const pending = this.markerCompletion
       this.markerCompletion = ''
+      if (this.stopped) return
       // The marker never completed: these are bytes the reader typed (or a
       // second partial marker), and dropping them would lose keystrokes.
       if (pending !== '') this.options.onFrame({ kind: 'literal', text: pending })
@@ -525,6 +533,8 @@ export class InputReader {
 
   /** Drop the holds and the reply filter (display detached, teardown). */
   stop(): void {
+    this.stopped = true
+    this.clearMarkerCompletion()
     this.cancelHold()
     this.cancelPasteTail()
     this.pasteTail = ''

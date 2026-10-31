@@ -606,3 +606,53 @@ test('a held marker piece is typed if the marker window expires without the rest
   assert.equal(released.length, 2)
   assert.equal(released[1].text, '[20', 'a dangling piece is finally typed so no keystroke is lost')
 })
+
+/**
+ * The marker watch is reader state: `stop()` owns every timer it starts.
+ *
+ * A detach calls `stop()` while a terminal may still be mid-marker. A timer that
+ * survives the stop would deliver input to a closed owner, which is exactly what
+ * the Reader's stop contract exists to prevent.
+ */
+test('stop() cancels the marker watch and never releases a held piece afterwards', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 300 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[20'), [], 'a possible marker piece is held')
+  reader.stop()
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'nothing is released after stop, even at the marker deadline')
+  assert.equal(reader.isPasting(), false)
+})
+
+test('a stop() triggered synchronously by the Escape frame cannot re-arm the watch', async () => {
+  const released = []
+  let reader
+  reader = new InputReader({
+    onRead() {},
+    onFrame(frame) {
+      released.push(frame)
+      if (frame.kind === 'escape') reader.stop()
+    },
+    pasteMarkerHoldMs: 300,
+  })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[20'), [], 'a stopped reader accepts no new marker state')
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'and no timer started before or after the stop delivers input')
+})
+
+test('the marker watch has a bounded deadline even with no bytes to release', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 120 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 90))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'an empty watch paints nothing when it expires')
+  assert.deepEqual(reader.read('x'), [{ kind: 'burst', text: 'x' }], 'and the keyboard is free again')
+})
