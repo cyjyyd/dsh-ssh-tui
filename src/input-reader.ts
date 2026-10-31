@@ -150,6 +150,21 @@ export class InputReader {
    */
   private pasteTail = ''
   private pasteTailTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Bytes that arrived after a bare ESC was released as the key and could still
+   * complete the close marker it began (`[201~`). Held for the marker window so a
+   * slow terminal cannot have its marker typed into the composer; released as text
+   * if it diverges or the window expires.
+   */
+  private markerCompletion = ''
+  private markerCompletionTimer: ReturnType<typeof setTimeout> | undefined
+  private awaitingMarkerCompletion = false
+  /**
+   * `stop()` is a reset, not a burial: the TUI detaches a display and reattaches
+   * to the same reader. Timers capture this number and abort if it moved, so a
+   * stop cancels what was pending without disabling later input.
+   */
+  private generation = 0
 
   constructor(private readonly options: InputReaderOptions) {
     this.guard = new TerminalInputGuard(
@@ -197,6 +212,7 @@ export class InputReader {
    * bytes (AD-20 §4.4, §6).
    */
   read(text: string): InputFrame[] {
+    if (this.awaitingMarkerCompletion) return this.completeMarker(text)
     const combined = this.pasteTail === '' ? text : `${this.pasteTail}${text}`
     if (this.pasteTail !== '') {
       this.pasteTail = ''
@@ -231,18 +247,98 @@ export class InputReader {
     return { frames: this.frames(body), tail: combined.slice(combined.length - keep) }
   }
 
+  /**
+   * Release a held paste tail on the window its content deserves.
+   *
+   * A tail that is **only** `ESC` cannot be paste text: it is either the start of
+   * a marker whose other half never came, or the Escape key the reader pressed
+   * while the paste was open. Holding it for the marker window turned it into a
+   * `paste` frame (or a `literal`) two seconds later — the key was gone either
+   * way, and a dialog it was meant to close stayed up. A bare `ESC` therefore gets
+   * the Escape window and is released as the key; a longer tail (`ESC[20`) keeps
+   * the marker window, because only a longer tail can still become a marker.
+   *
+   * The one ambiguity this accepts: a paste whose payload ends in a raw ESC byte
+   * is byte-identical to that Escape key. The key wins — a lost Escape freezes a
+   * dialog, while a trailing raw ESC in pasted text is vanishingly rare and the
+   * payload is abandoned rather than typed.
+   */
   private armPasteTail(): void {
     this.cancelPasteTail()
+    const configured = this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS
+    const onlyEscape = this.pasteTail === '\x1b'
+    const generation = this.generation
     this.pasteTailTimer = setTimeout(() => {
       this.pasteTailTimer = undefined
       const pending = this.pasteTail
       this.pasteTail = ''
+      if (generation !== this.generation) return
       // Its other half never came. Those bytes are what the reader pasted, and the
       // paste they belonged to is over: leaving `inPaste` set here is what turned a
       // slow (or swallowed) marker into a session that ignored every key.
+      if (pending === '\x1b') {
+        const wasPasting = this.inPaste
+        this.inPaste = false
+        this.options.onFrame({ kind: 'escape' })
+        // A synchronous `onFrame` may have stopped the reader (detach, dispose):
+        // that stop owns the cleanup, and arming here would outlive it.
+        if (generation !== this.generation) return
+        // `ESC` also begins `ESC[201~`: a terminal that sends the marker head and
+        // then the rest beyond the keystroke window must not have those bytes
+        // typed. Watch for the completion for the rest of the marker window.
+        if (wasPasting) this.armMarkerCompletion()
+        return
+      }
       if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
       this.inPaste = false
+    }, onlyEscape ? Math.min(configured, ESCAPE_HOLD_MS) : configured)
+  }
+
+  /** Watch for the rest of a close marker whose head was released as Escape. */
+  private armMarkerCompletion(): void {
+    if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
+    this.awaitingMarkerCompletion = true
+    const generation = this.generation
+    this.markerCompletionTimer = setTimeout(() => {
+      this.markerCompletionTimer = undefined
+      this.awaitingMarkerCompletion = false
+      const pending = this.markerCompletion
+      this.markerCompletion = ''
+      if (generation !== this.generation) return
+      // The marker never completed: these are bytes the reader typed (or a
+      // second partial marker), and dropping them would lose keystrokes.
+      if (pending !== '') this.options.onFrame({ kind: 'literal', text: pending })
     }, this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS)
+  }
+
+  /**
+   * The read that follows a released bare ESC.
+   *
+   * If it is the rest of `[201~` it is the marker and paints nothing; a piece that
+   * could still become the marker is held for the same window; anything else is
+   * ordinary input and goes through the normal framing.
+   */
+  private completeMarker(text: string): InputFrame[] {
+    const combined = this.markerCompletion + text
+    if ('[201~'.startsWith(combined) && combined.length < 5) {
+      this.markerCompletion = combined
+      this.armMarkerCompletion()
+      return []
+    }
+    if (combined.startsWith('[201~')) {
+      this.clearMarkerCompletion()
+      const after = combined.slice(5)
+      return after === '' ? [] : this.read(after)
+    }
+    this.clearMarkerCompletion()
+    return this.read(combined)
+  }
+
+  private clearMarkerCompletion(): void {
+    if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
+    this.markerCompletionTimer = undefined
+    this.awaitingMarkerCompletion = false
+    this.markerCompletion = ''
   }
 
   private cancelPasteTail(): void {
@@ -442,6 +538,8 @@ export class InputReader {
 
   /** Drop the holds and the reply filter (display detached, teardown). */
   stop(): void {
+    this.generation += 1
+    this.clearMarkerCompletion()
     this.cancelHold()
     this.cancelPasteTail()
     this.pasteTail = ''
