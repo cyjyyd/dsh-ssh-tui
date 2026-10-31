@@ -159,8 +159,12 @@ export class InputReader {
   private markerCompletion = ''
   private markerCompletionTimer: ReturnType<typeof setTimeout> | undefined
   private awaitingMarkerCompletion = false
-  /** `stop()` owns every timer: nothing may arm or deliver after it ran. */
-  private stopped = false
+  /**
+   * `stop()` is a reset, not a burial: the TUI detaches a display and reattaches
+   * to the same reader. Timers capture this number and abort if it moved, so a
+   * stop cancels what was pending without disabling later input.
+   */
+  private generation = 0
 
   constructor(private readonly options: InputReaderOptions) {
     this.guard = new TerminalInputGuard(
@@ -208,7 +212,6 @@ export class InputReader {
    * bytes (AD-20 §4.4, §6).
    */
   read(text: string): InputFrame[] {
-    if (this.stopped) return []
     if (this.awaitingMarkerCompletion) return this.completeMarker(text)
     const combined = this.pasteTail === '' ? text : `${this.pasteTail}${text}`
     if (this.pasteTail !== '') {
@@ -264,10 +267,12 @@ export class InputReader {
     this.cancelPasteTail()
     const configured = this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS
     const onlyEscape = this.pasteTail === '\x1b'
+    const generation = this.generation
     this.pasteTailTimer = setTimeout(() => {
       this.pasteTailTimer = undefined
       const pending = this.pasteTail
       this.pasteTail = ''
+      if (generation !== this.generation) return
       // Its other half never came. Those bytes are what the reader pasted, and the
       // paste they belonged to is over: leaving `inPaste` set here is what turned a
       // slow (or swallowed) marker into a session that ignored every key.
@@ -277,7 +282,7 @@ export class InputReader {
         this.options.onFrame({ kind: 'escape' })
         // A synchronous `onFrame` may have stopped the reader (detach, dispose):
         // that stop owns the cleanup, and arming here would outlive it.
-        if (this.stopped) return
+        if (generation !== this.generation) return
         // `ESC` also begins `ESC[201~`: a terminal that sends the marker head and
         // then the rest beyond the keystroke window must not have those bytes
         // typed. Watch for the completion for the rest of the marker window.
@@ -291,15 +296,15 @@ export class InputReader {
 
   /** Watch for the rest of a close marker whose head was released as Escape. */
   private armMarkerCompletion(): void {
-    if (this.stopped) return
     if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
     this.awaitingMarkerCompletion = true
+    const generation = this.generation
     this.markerCompletionTimer = setTimeout(() => {
       this.markerCompletionTimer = undefined
       this.awaitingMarkerCompletion = false
       const pending = this.markerCompletion
       this.markerCompletion = ''
-      if (this.stopped) return
+      if (generation !== this.generation) return
       // The marker never completed: these are bytes the reader typed (or a
       // second partial marker), and dropping them would lose keystrokes.
       if (pending !== '') this.options.onFrame({ kind: 'literal', text: pending })
@@ -533,7 +538,7 @@ export class InputReader {
 
   /** Drop the holds and the reply filter (display detached, teardown). */
   stop(): void {
-    this.stopped = true
+    this.generation += 1
     this.clearMarkerCompletion()
     this.cancelHold()
     this.cancelPasteTail()

@@ -641,9 +641,23 @@ test('a stop() triggered synchronously by the Escape frame cannot re-arm the wat
   assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
   await new Promise(resolve => setTimeout(resolve, 120))
   assert.deepEqual(released, [{ kind: 'escape' }])
-  assert.deepEqual(reader.read('[20'), [], 'a stopped reader accepts no new marker state')
+  const after = reader.read('[20')
+  assert.equal(JSON.stringify(after).includes('[20'), true, 'after a stop the reader is usable again, not disabled')
   await new Promise(resolve => setTimeout(resolve, 350))
   assert.deepEqual(released, [{ kind: 'escape' }], 'and no timer started before or after the stop delivers input')
+})
+
+test('stop() clears pending state but leaves the reader usable for a reattach', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 120 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 90))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[20'), [], 'a marker piece is pending')
+  reader.stop()
+  assert.deepEqual(reader.read('x'), [{ kind: 'burst', text: 'x' }], 'the next display can type again')
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'and the pre-stop timer stays dead')
 })
 
 test('the marker watch has a bounded deadline even with no bytes to release', async () => {
