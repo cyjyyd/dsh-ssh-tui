@@ -547,3 +547,62 @@ test('a fragmented marker still completes, and a later Escape keeps its own wind
   assert.deepEqual(released, [{ kind: 'escape' }])
   assert.ok(Date.now() - started < 500, 'the Escape window is the keystroke window, not the marker watchdog')
 })
+
+/**
+ * The reverse risk of the Escape release: a close marker split **after** its ESC.
+ *
+ * `ESC` is also the first byte of `ESC[201~`. Shortening a lone-ESC tail to the
+ * keystroke window means a terminal that sends `ESC` and then, more than that
+ * window later, the rest of the marker must still have those bytes recognised as
+ * the marker — not typed into the composer as `[201~`.
+ *
+ * The marker delay is deliberately longer than the Escape window and shorter than
+ * the marker window, the shape Windows CI has produced in past reads.
+ */
+test('a close marker completed after the escape window is still a marker, not text', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 300 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }],
+    'the payload lands and the marker head is held')
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }], 'the Escape resolves inside the keystroke window')
+  assert.deepEqual(reader.read('[201~'), [], 'the late half of the marker is consumed, not typed')
+  assert.deepEqual(released, [{ kind: 'escape' }], 'and it paints nothing')
+  assert.equal(reader.isPasting(), false)
+  assert.deepEqual(reader.read('x'), [{ kind: 'burst', text: 'x' }], 'the keyboard is back')
+})
+
+test('a marker completed in several slow pieces is recognised, not typed', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 300 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[20'), [], 'a piece that could still complete the marker is held')
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.deepEqual(reader.read('1~'), [], 'the rest completes it and is consumed')
+  assert.deepEqual(released, [{ kind: 'escape' }], 'no marker bytes reach the composer')
+})
+
+test('bytes that diverge from the marker are typed, not swallowed', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 300 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  const frames = reader.read('[20x')
+  assert.equal(JSON.stringify(frames).includes('[20x'), true, 'a read that cannot be the marker is typed after the Escape')
+  assert.deepEqual(released, [{ kind: 'escape' }])
+})
+
+test('a held marker piece is typed if the marker window expires without the rest', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 120 })
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  await new Promise(resolve => setTimeout(resolve, 90))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[20'), [])
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(released.length, 2)
+  assert.equal(released[1].text, '[20', 'a dangling piece is finally typed so no keystroke is lost')
+})

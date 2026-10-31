@@ -150,6 +150,15 @@ export class InputReader {
    */
   private pasteTail = ''
   private pasteTailTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Bytes that arrived after a bare ESC was released as the key and could still
+   * complete the close marker it began (`[201~`). Held for the marker window so a
+   * slow terminal cannot have its marker typed into the composer; released as text
+   * if it diverges or the window expires.
+   */
+  private markerCompletion = ''
+  private markerCompletionTimer: ReturnType<typeof setTimeout> | undefined
+  private awaitingMarkerCompletion = false
 
   constructor(private readonly options: InputReaderOptions) {
     this.guard = new TerminalInputGuard(
@@ -197,6 +206,7 @@ export class InputReader {
    * bytes (AD-20 §4.4, §6).
    */
   read(text: string): InputFrame[] {
+    if (this.awaitingMarkerCompletion) return this.completeMarker(text)
     const combined = this.pasteTail === '' ? text : `${this.pasteTail}${text}`
     if (this.pasteTail !== '') {
       this.pasteTail = ''
@@ -259,13 +269,63 @@ export class InputReader {
       // paste they belonged to is over: leaving `inPaste` set here is what turned a
       // slow (or swallowed) marker into a session that ignored every key.
       if (pending === '\x1b') {
+        const wasPasting = this.inPaste
         this.inPaste = false
         this.options.onFrame({ kind: 'escape' })
+        // `ESC` also begins `ESC[201~`: a terminal that sends the marker head and
+        // then the rest beyond the keystroke window must not have those bytes
+        // typed. Watch for the completion for the rest of the marker window.
+        if (wasPasting) this.armMarkerCompletion()
         return
       }
       if (pending !== '') this.options.onFrame({ kind: this.inPaste ? 'paste' : 'literal', text: pending })
       this.inPaste = false
     }, onlyEscape ? Math.min(configured, ESCAPE_HOLD_MS) : configured)
+  }
+
+  /** Watch for the rest of a close marker whose head was released as Escape. */
+  private armMarkerCompletion(): void {
+    if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
+    this.awaitingMarkerCompletion = true
+    this.markerCompletionTimer = setTimeout(() => {
+      this.markerCompletionTimer = undefined
+      this.awaitingMarkerCompletion = false
+      const pending = this.markerCompletion
+      this.markerCompletion = ''
+      // The marker never completed: these are bytes the reader typed (or a
+      // second partial marker), and dropping them would lose keystrokes.
+      if (pending !== '') this.options.onFrame({ kind: 'literal', text: pending })
+    }, this.options.pasteMarkerHoldMs ?? PASTE_MARKER_HOLD_MS)
+  }
+
+  /**
+   * The read that follows a released bare ESC.
+   *
+   * If it is the rest of `[201~` it is the marker and paints nothing; a piece that
+   * could still become the marker is held for the same window; anything else is
+   * ordinary input and goes through the normal framing.
+   */
+  private completeMarker(text: string): InputFrame[] {
+    const combined = this.markerCompletion + text
+    if ('[201~'.startsWith(combined) && combined.length < 5) {
+      this.markerCompletion = combined
+      this.armMarkerCompletion()
+      return []
+    }
+    if (combined.startsWith('[201~')) {
+      this.clearMarkerCompletion()
+      const after = combined.slice(5)
+      return after === '' ? [] : this.read(after)
+    }
+    this.clearMarkerCompletion()
+    return this.read(combined)
+  }
+
+  private clearMarkerCompletion(): void {
+    if (this.markerCompletionTimer !== undefined) clearTimeout(this.markerCompletionTimer)
+    this.markerCompletionTimer = undefined
+    this.awaitingMarkerCompletion = false
+    this.markerCompletion = ''
   }
 
   private cancelPasteTail(): void {

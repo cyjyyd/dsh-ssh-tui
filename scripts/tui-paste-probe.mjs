@@ -317,6 +317,20 @@ async function runProbe(argv) {
     await waitFor(onGrid(/输入 \/help/u), 8_000, 'Escape to close the Screen after a paste lost its close marker')
     check(draftOf(await rowsOf(output), prompt) === '', 'the paste with a lost marker never leaked into the draft')
 
+    // 6c. The reverse of 6b: the head of a close marker may already have been
+    //     released as Escape, but its tail must not be typed into the composer.
+    term.write('/diag\r')
+    await waitFor(onGrid(/判定链|verdict chain/u), 60_000, 'the /diag Screen (slow close marker)')
+    term.write('\x1b[200~slow-marker')
+    await delay(120)
+    term.write('\x1b')
+    await waitFor(onGrid(/输入 \/help/u), 8_000, 'the workspace back after the Escape')
+    await delay(180)
+    term.write('[201~')
+    await delay(600)
+    check(!(await rowsOf(output)).some(row => row.includes('[201~')), 'the late half of a slow close marker paints nothing')
+    check(draftOf(await rowsOf(output), prompt) === '', 'the late half of a slow close marker is not typed')
+
     // 7. The picker is the other layer that borrows the keyboard.
     term.write('/view\r')
     await waitFor(onGrid(/工作区视图|Workspace view/u), 20_000, 'the /view picker')
