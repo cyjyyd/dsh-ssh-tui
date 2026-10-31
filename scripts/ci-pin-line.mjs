@@ -80,6 +80,15 @@ export const LINES = {
     // — the same exception shape the 0.1.7 line needed for the mock LLM server.
     devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
   },
+  // Experimental line: verified by .github/workflows/rc5-experimental.yml only.
+  // Not the default and not declared compatible; timer moved 1.1.6 -> 1.1.7,
+  // read from dsh-app-boot@0.2.1-rc.5's peers.
+  '0.2.1-rc.5': {
+    roots: { ...NEXT_LINE_ROOTS, '@deepseek-ai/cordis-plugin-timer': '1.1.7' },
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
+  },
   '0.2.0-rc.2': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
 }
