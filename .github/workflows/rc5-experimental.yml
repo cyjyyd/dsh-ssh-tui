@@ -1,0 +1,53 @@
+name: rc5-experimental
+# Experimental host line only: 0.2.1-rc.5.
+# This workflow does NOT change the default line, package.json pins or
+# dsh.compatibility.dshReleases, and a green run here is not a compatibility
+# declaration. It exists to keep evidence for the newest upstream RC while the
+# declared support matrix stays on 0.2.1-rc.2.
+on:
+  workflow_dispatch:
+  push:
+    branches: [agent/rel085-rc5-experimental]
+jobs:
+  linux-rc5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pin the tree to the 0.2.1-rc.5 line (strict peers)
+        run: |
+          node scripts/ci-pin-line.mjs 0.2.1-rc.5
+          rm -f package-lock.json
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -p tsconfig.json --noEmit
+      - run: node --test "tests/*.test.mjs"
+      - run: npm run freeze
+      - run: npm run freeze:input
+      - run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: Paste probe (real PTY)
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
+      - name: Drop/reattach probe (historical reconnect gate)
+        run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
+  windows-rc5:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pin the tree to the 0.2.1-rc.5 line (strict peers)
+        run: |
+          node scripts/ci-pin-line.mjs 0.2.1-rc.5
+          Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -p tsconfig.json --noEmit
+      - run: node --test "tests/*.test.mjs"
+      - run: npm run freeze
+      - name: Paste probe (ConPTY)
+        run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
+      - name: Drop/reattach probe (ConPTY, historical reconnect gate)
+        run: node scripts/probe-home.mjs --probe --script tui-drop-probe.mjs
