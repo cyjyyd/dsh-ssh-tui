@@ -10,6 +10,31 @@
 
 ---
 
+## 0.8.5-rc.1 — DRAFT / UNRELEASED
+
+候选说明草稿：[docs/release-notes-0.8.5-rc.1.md](docs/release-notes-0.8.5-rc.1.md)。
+
+**本条是发布准备材料，不代表版本号已经修改、CI 已通过最终候选、Tag/GitHub Release/npm `next` 已发布。** 最终候选 SHA、产物哈希、升级测试、Windows 人工验收和兼容范围裁决均为 PENDING。
+
+### Added
+
+- **W-4 Composer-owned Completion**：统一命令补全状态、更新与输入归属，绘制不再查询命令列表。
+- **W-5 本地 Search Screen**：框模式 `/find` 使用搜索字段、命中列表和只读预览；仅搜索当前可见工作区，不是历史全文搜索。
+
+### Fixed
+
+- **Relay 当前连接归属**：被替换的旧 Relay 不能继续向 Host 注入输入、尺寸、RTT、metrics 或 probe 回答（W6B.F0）。
+- **Esc / 粘贴尾部**：丢失结束标记后 Esc 不再被等待 2 秒并当作文本吞掉；迟到的 `[201~` 被消费、固定期限释放不完整片段；detach 时清理计时器，允许重连复用 Reader（PR #34）。
+- **长会话回放**：R2 限制无关 plan 投影、R3 优化 canonical 问题投影、R4.A 避免普通工具结果反复扫描子代理卡；保留原会话与卡片语义。
+
+### Known limitations / Deferred
+
+- 极慢分片的粘贴结束标记与 Esc 字节不可完全消歧：已触发的 Esc 不能撤回。
+- 超长会话冷恢复仍约 11 秒；本地 Host/`agents.resume` C1 因风险与收益不成比例而 NO-GO。
+- W6B Terminal Doctor 快照、W6C 主动探测和 W-7 picker 重构均未纳入。
+- 默认正式支持仍是 DSH `0.2.1-rc.2` 与两条 `0.2.0` RC；`0.2.1-rc.5` 仅 EXPERIMENTAL。当前 peer semver 范围可能匹配 rc.5，发布前必须裁决并验证实际支持策略。
+- 本候选需在最终版本提交上重新运行四腿 CI、真实 tarball / 0.8.4 升级冒烟和 Windows 人工验收；旧收据不得充当候选 PASS。
+
 ## 0.8.4 — 2026-10-24（稳定版）
 
 发版说明：[`docs/release-notes-0.8.4.md`](docs/release-notes-0.8.4.md)。
