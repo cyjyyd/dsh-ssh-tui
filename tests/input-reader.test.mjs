@@ -670,3 +670,25 @@ test('the marker watch has a bounded deadline even with no bytes to release', as
   assert.deepEqual(released, [{ kind: 'escape' }], 'an empty watch paints nothing when it expires')
   assert.deepEqual(reader.read('x'), [{ kind: 'burst', text: 'x' }], 'and the keyboard is free again')
 })
+
+/**
+ * The marker watch has one deadline, set when the Escape was released.
+ *
+ * Each still-completable fragment used to restart the full window, so `[`, `[2`,
+ * `[20`, `[201` arriving one after another could hold the watch far past the
+ * declared marker window. The fragment may only update what is held.
+ */
+test('a late fragment does not restart the marker deadline', async () => {
+  const released = []
+  const reader = new InputReader({ onRead: () => {}, onFrame: frame => released.push(frame), pasteMarkerHoldMs: 200 })
+  const started = Date.now()
+  assert.deepEqual(reader.read('\x1b[200~pasted\x1b'), [{ kind: 'paste', text: 'pasted' }])
+  // Escape resolves after its 60 ms window; the marker watch then has 200 ms.
+  await new Promise(resolve => setTimeout(resolve, 190))
+  assert.deepEqual(released, [{ kind: 'escape' }])
+  assert.deepEqual(reader.read('[2'), [], 'a fragment that could still complete the marker is held')
+  await new Promise(resolve => setTimeout(resolve, 140))
+  assert.deepEqual(released, [{ kind: 'escape' }, { kind: 'literal', text: '[2' }],
+    'the piece is released at the original deadline, not 200 ms after the fragment')
+  assert.ok(Date.now() - started < 430, `the watch ends near its first deadline (${Date.now() - started} ms)`)
+})

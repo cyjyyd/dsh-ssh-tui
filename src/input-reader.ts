@@ -321,8 +321,9 @@ export class InputReader {
   private completeMarker(text: string): InputFrame[] {
     const combined = this.markerCompletion + text
     if ('[201~'.startsWith(combined) && combined.length < 5) {
+      // Only what is held moves: the deadline was set when the Escape was
+      // released, and a fragment arriving late must not buy another full window.
       this.markerCompletion = combined
-      this.armMarkerCompletion()
       return []
     }
     if (combined.startsWith('[201~')) {
