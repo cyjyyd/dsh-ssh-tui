@@ -60,6 +60,10 @@ jobs:
       # probe-home installs the checkout into a throwaway profile through the
       # product's own plugin command, which uses pnpm on Windows too.
       - run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: First-install wizard (unconfigured home, pasted key)
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      - name: Packed-artifact smoke (npm pack -> install -> probes)
+        run: node scripts/artifact-smoke.mjs
       - name: Busy-drop probe (ConPTY window close)
         run: node scripts/tui-mock-probe.mjs --busy
       - name: Stdio pipe probe (no PTY)
