@@ -1,8 +1,9 @@
 # 0.8.5-rc.1 — Completion, Local Search, Input Reliability & Long-session Replay
 
-> **DRAFT / UNRELEASED — 0.8.5-rc.1 候选材料，尚未通过最终发布 Gate。**
+> **CANDIDATE / UNRELEASED — 0.8.5-rc.1 候选已通过工程验收，尚未发布。**
 > 此文件位于隔离准备分支，不表示候选包、Tag、GitHub Prerelease、npm `next` 已创建或发布。
-> 基线：`main@35e62ebc564970ee8f9a20d966bc4f9c1b4de116`（合并 PR #34 之后）；最终版本提交与 tarball SHA 待核实。
+> 基线：`main@35e62ebc564970ee8f9a20d966bc4f9c1b4de116`（合并 PR #34 之后）；版本 `0.8.5-rc.1`。
+> 最终提交 SHA 与 tarball 哈希记录在 PR #35 的候选收据中：本文档随包发布，不能自引用包自身的哈希。
 > 本候选来自新的 `main`，**不是** `release/0.8.4` 稳定维护分支。
 >
 > DSH Relay 继续使用 npm 包名 `dsh-ssh-tui`；本候选未计划改变会话持久化格式、已有 Host 生命周期合同或正式支持的默认上游版本。
@@ -70,20 +71,26 @@ W6B.F0 的 current-socket 防护阻止被后续连接替换的旧 Relay 继续�
 - rc.5 正式兼容晋升、默认宿主升级、Provider 实时模型目录完整校验；
 - 任何会话持久化格式迁移承诺。
 
-## 候选发布 Gate（全部待最终候选验证）
+## 候选发布 Gate（在最终候选提交上执行）
 
 | Gate | 当前记录 |
 |---|---|
-| 版本身份 | **PENDING** — `package.json` 与 `package-lock.json` 同为 `0.8.5-rc.1`；精确 Git SHA |
-| 四腿 CI | **PENDING** — 精确候选 SHA 的 0.2.0-rc.1、rc.2、0.2.1-rc.2 和 Windows |
-| 输入与首装 | **PENDING** — 真 PTY/ConPTY、粘贴/Screen/Picker、首装向导、重连、stdio |
-| 真正的 tarball | **PENDING** — 干净构建，`npm pack` 文件清单、bytes、SHA1/SHA256/integrity，包外安装与回归 |
-| 升级冒烟 | **PENDING** — 已发布 `0.8.4` → 候选 tarball，配置、凭据与会话数据保持 |
-| Windows 人工验收 | **PENDING** — Windows Terminal/conhost、输入法、中文粘贴、复制和断线恢复；不能以 ConPTY 自动 CI 替代 |
-| 宿主兼容策略 | **PENDING** — rc.5 的 peer 范围与实际支持表态一致性决策 |
+| 版本身份 | **PASS** — `package.json` 与 `package-lock.json` 同为 `0.8.5-rc.1`；锁文件根 peer 元数据与 manifest 同步 |
+| 四腿 CI | **PASS** — 最终候选 SHA 的 `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-rc.2` 与 Windows 四条腿全绿；run 记录在 PR #35 收据 |
+| 输入与首装 | **PASS（自动）** — 真 PTY/ConPTY 粘贴、首装向导、stdio、busy-drop、断线重连均在候选或 rc.5 实验腿执行成功 |
+| 真正的 tarball | **PASS** — 干净构建后 `npm pack`，包内 `lib/` 与构建树 `diff` 为空；文件数、bytes 与 SHA-1/SHA-256/integrity 记录在 PR #35 收据 |
+| 升级冒烟 | **PASS** — 已发布 `0.8.4` → 候选 tarball，manifest、bundle 条目、凭据与会话存储保持 |
+| Windows 人工验收 | **PENDING（所有者）** — Windows Terminal/conhost、输入法、中文粘贴、复制和断线恢复；不能以 ConPTY 自动 CI 替代 |
+| 宿主兼容策略 | **RC 阶段采用 B** — 保留 peer 范围并明确披露 rc.5 为 EXPERIMENTAL；不写入 `dshReleases`；稳定 0.8.5 前复核 A |
 | 发布动作 | **NOT AUTHORIZED** — Tag、GitHub Prerelease、`npm publish --tag next` |
 
 历史 PR #34 的 4/4 CI、rc.5 实验 2/2 CI 与合并后 main 的验证只是候选准备依据，不能冒充版本化 tarball 的最终验收数据；此前的旧版本哈希、文件数量和安装回执不得复制为 0.8.5 的结果。
+
+### rc.5 兼容策略（RC 阶段：B，实验披露）
+
+当前 `peerDependencies` 与 `dsh.compatibility.dsh` 的 semver 范围可以匹配上游当前的 `0.2.1-rc.5`，但 `dshReleases` 只声明 `0.2.1-rc.2` 及两条 `0.2.0` RC 兼容。本候选采用**方案 B**：保留现有 peer 范围，在文档和发布说明中明确 `0.2.1-rc.5` 为 **EXPERIMENTAL / NOT DECLARED COMPATIBLE**，允许用户在自行承担实验宿主风险的前提下试用；不把它写入 `dshReleases`，也不改动默认开发线。
+
+rc.5 已通过 Linux/Windows 两条独立实验 CI（含首装、tarball、stdio、粘贴、busy-drop、断线重连），但仍缺真实 SSH 慢链路、Windows 人工终端与实时 Provider 验收，因此不足以宣称 `compatible`。稳定 `0.8.5` 发布前应复核方案 A（补齐剩余 Gate 后正式支持）或收紧范围；实验宿主的风险接受由所有者最终确认。
 
 ## 安装通道
 

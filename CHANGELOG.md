@@ -10,11 +10,13 @@
 
 ---
 
-## 0.8.5-rc.1 — DRAFT / UNRELEASED
+## 0.8.5-rc.1 — CANDIDATE / UNRELEASED
 
-候选说明草稿：[docs/release-notes-0.8.5-rc.1.md](docs/release-notes-0.8.5-rc.1.md)。
+候选说明：[docs/release-notes-0.8.5-rc.1.md](docs/release-notes-0.8.5-rc.1.md)。
 
-**本条是发布准备材料，不代表版本号已经修改、CI 已通过最终候选、Tag/GitHub Release/npm `next` 已发布。** 最终候选 SHA、产物哈希、升级测试、Windows 人工验收和兼容范围裁决均为 PENDING。
+**本条是候选材料，不代表 Tag、GitHub Release 或 npm `next` 已发布。** 版本与锁文件已改为 `0.8.5-rc.1`；最终候选提交的四腿 CI、真实 tarball、包外安装与 0.8.4 → rc.1 升级冒烟已通过，精确 SHA 与产物哈希记录在 PR #35 收据中。
+
+Windows Terminal/conhost 人工验收（输入法、中文粘贴、复制、断线恢复）与最终发布授权仍为 PENDING。`0.2.1-rc.5` 在 RC 阶段按方案 B 披露为 EXPERIMENTAL，不写入 `dshReleases`；稳定版前复核是否正式支持。
 
 ### Added
 
