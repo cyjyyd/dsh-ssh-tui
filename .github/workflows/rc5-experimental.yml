@@ -26,7 +26,16 @@ jobs:
       - run: node --test "tests/*.test.mjs"
       - run: npm run freeze
       - run: npm run freeze:input
+      - run: npm run bench
       - run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: First-install wizard (unconfigured home, pasted key)
+        run: node scripts/probe-home.mjs --probe --unconfigured --script tui-setup-probe.mjs
+      - name: Packed-artifact smoke (npm pack -> install -> probes)
+        run: node scripts/artifact-smoke.mjs
+      - name: Stdio pipe probe (no PTY)
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
+      - name: Busy-drop probe (window closed mid-turn)
+        run: node scripts/tui-mock-probe.mjs --busy
       - name: Paste probe (real PTY)
         run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
       - name: Drop/reattach probe (historical reconnect gate)
@@ -47,9 +56,14 @@ jobs:
       - run: npx tsc -p tsconfig.json --noEmit
       - run: node --test "tests/*.test.mjs"
       - run: npm run freeze
+      - run: npm run freeze:input
       # probe-home installs the checkout into a throwaway profile through the
       # product's own plugin command, which uses pnpm on Windows too.
       - run: npm install -g pnpm@10 --no-audit --no-fund
+      - name: Busy-drop probe (ConPTY window close)
+        run: node scripts/tui-mock-probe.mjs --busy
+      - name: Stdio pipe probe (no PTY)
+        run: node scripts/probe-home.mjs --probe --script tui-stdio-probe.mjs
       - name: Paste probe (ConPTY)
         run: node scripts/probe-home.mjs --probe --script tui-paste-probe.mjs
       - name: Drop/reattach probe (ConPTY, historical reconnect gate)
