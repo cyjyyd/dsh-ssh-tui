@@ -303,6 +303,15 @@ test('R29 compaction preview truncates seq rendering but keeps the exact count',
   assert.equal((text.match(/,/gu) ?? []).length < 200, true)
 })
 
+test('R30 a step span crossing candidate boundaries counts once per overlap', () => {
+  const p = project([
+    turnStart(0), stepStart(1), user(2), assistant(3), user(4), toolCall(5), stepEnd(6), user(7),
+  ])
+  assert.deepEqual(p.candidates.map(c => [c.startSeq, c.endSeq]), [[2, 3], [4, 6], [7, 7]])
+  assert.deepEqual(p.candidates.map(c => c.stepCount), [1, 1, 0])
+  assert.deepEqual(p.candidates.map(c => [c.turnStart, c.turnEnd]), [[1, 1], [1, 1], [1, 1]])
+})
+
 test('R13 formatter labels CURRENT SURFACE, never a stable ACTIVE lifecycle', () => {
   const p = project([user(1), assistant(2)], { activeNodeSeqs: [1, 2] })
   const view = formatContextList(p, t)
