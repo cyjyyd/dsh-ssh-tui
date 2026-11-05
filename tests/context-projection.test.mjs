@@ -224,6 +224,85 @@ test('R12 turn/step counts and event types are attached to the candidate', () =>
   assert.equal(c.stepCount, 1)
 })
 
+test('R26 multiple direct user messages in one turn remain separate heuristic candidates', () => {
+  const p = project([
+    turnStart(0), user(1), user(2, 'same-turn steering'), assistant(3), turnEnd(4),
+  ])
+  assert.equal(p.candidates.length, 2)
+  assert.deepEqual(p.candidates.map(c => [c.startSeq, c.endSeq]), [[1, 1], [2, 4]])
+  assert.deepEqual(p.candidates.map(c => [c.turnStart, c.turnEnd]), [[1, 1], [1, 1]])
+  assert.equal(p.candidates[0].counts.user, 1)
+  assert.equal(p.candidates[1].counts.user, 1)
+  assert.equal(p.candidates.every(c => c.heuristic && c.boundary === 'user-declared'), true)
+  assert.equal(p.warnings.includes('NO_DIRECT_USER_BOUNDARY'), false)
+})
+
+test('R27 injected and Goal-continuation messages never split a candidate', () => {
+  const p = project([
+    turnStart(0),
+    user(1),
+    user(2, 'goal continuation', { kind: 'goal', goalId: 'g-1', revision: 2, round: 1 }),
+    user(3, 'runtime context', { kind: 'runtime-context' }),
+    user(4, 'compaction checkpoint', { kind: 'compact-checkpoint' }),
+    assistant(5),
+    turnEnd(6),
+  ])
+  assert.equal(p.candidates.length, 1)
+  assert.equal(p.candidates[0].startSeq, 1)
+  assert.equal(p.candidates[0].endSeq, 6)
+  assert.equal(p.candidates[0].counts.user, 4)
+  assert.equal(p.candidates[0].boundary, 'user-declared')
+  assert.equal(p.candidates[0].heuristic, true)
+})
+
+test('R28 only a complete compaction is labelled COMPRESSED', () => {
+  const complete = project([
+    { type: 'compaction/start', seq: 0, time: 1, data: { compactionId: 'c-complete', turn: null } },
+    { type: 'compaction/summary', seq: 1, time: 2, data: { compactionId: 'c-complete', summary: [], shadowedRange: { start: 1, end: 0 }, shadowedSeqs: [0], shadowedTokenCount: 1, provider: 'p', model: 'm' } },
+    { type: 'user/message', seq: 2, time: 3, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0, 1], data: { id: 'r', role: 'user', source: { kind: 'compact-checkpoint' }, content: [{ type: 'text', text: 'summary' }] } },
+    { type: 'compaction/end', seq: 3, time: 4, data: { compactionId: 'c-complete', turn: null } },
+  ])
+  const completeText = formatContextList(complete, t).lines.map(line => line.text).join('\n')
+  assert.match(completeText, /\[COMPRESSED\]/)
+  assert.doesNotMatch(completeText, /\[COMPACTION\]/)
+
+  const failed = project([
+    { type: 'compaction/start', seq: 0, time: 1, data: { compactionId: 'c-failed', turn: null } },
+    { type: 'compaction/end', seq: 1, time: 2, data: { compactionId: 'c-failed', turn: null, error: 'boom' } },
+  ])
+  const failedText = formatContextList(failed, t).lines.map(line => line.text).join('\n')
+  assert.match(failedText, /\[COMPACTION\]/)
+  assert.match(failedText, /status: failed/)
+  assert.doesNotMatch(failedText, /\[COMPRESSED\]/)
+
+  const incomplete = project([
+    { type: 'compaction/start', seq: 0, time: 1, data: { compactionId: 'c-incomplete', turn: null } },
+    { type: 'compaction/summary', seq: 1, time: 2, data: { compactionId: 'c-incomplete', summary: [], shadowedRange: { start: 0, end: 0 }, shadowedSeqs: [0], shadowedTokenCount: 1, provider: 'p', model: 'm' } },
+  ])
+  const incompleteText = formatContextList(incomplete, t).lines.map(line => line.text).join('\n')
+  assert.match(incompleteText, /\[COMPACTION\]/)
+  assert.match(incompleteText, /status: incomplete/)
+  assert.doesNotMatch(incompleteText, /\[COMPRESSED\]/)
+})
+
+test('R29 compaction preview truncates seq rendering but keeps the exact count', () => {
+  const shadowedSeqs = Array.from({ length: 200 }, (_, index) => index)
+  const p = project([
+    { type: 'compaction/start', seq: 0, time: 1, data: { compactionId: 'c-large', turn: null } },
+    { type: 'compaction/summary', seq: 1, time: 2, data: { compactionId: 'c-large', summary: [], shadowedRange: { start: 199, end: 0 }, shadowedSeqs, shadowedTokenCount: 200, provider: 'p', model: 'm' } },
+  ])
+  assert.equal(p.compactions[0].shadowedSeqs.length, 200)
+  const view = formatContextList(p, t)
+  const row = view.items.find(item => item.kind === 'compaction')
+  assert.ok(row)
+  const text = formatContextPreview(row, t).lines.map(line => line.text).join('\n')
+  assert.match(text, /shadowed seqs:/)
+  assert.match(text, /truncated/)
+  assert.match(text, /\+\d+ more/)
+  assert.ok(text.length < 1200)
+  assert.equal((text.match(/,/gu) ?? []).length < 200, true)
+})
+
 test('R13 formatter labels CURRENT SURFACE, never a stable ACTIVE lifecycle', () => {
   const p = project([user(1), assistant(2)], { activeNodeSeqs: [1, 2] })
   const view = formatContextList(p, t)

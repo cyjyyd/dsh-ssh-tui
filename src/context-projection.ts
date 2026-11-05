@@ -568,15 +568,13 @@ export function projectContext(input: ContextProjectionInput): ContextProjection
   }
   if (direct.length === 0 && segmentationAvailable) addWarning(warnings, 'NO_DIRECT_USER_BOUNDARY')
 
+  const candidateBySeq = indexCandidates(candidates, lastSeq)
   const counts = candidates.map(() => emptyCounts())
-  let cursor = 0
   for (const value of events) {
     const event = raw(value)
-    while (cursor < candidates.length && event.seq > (candidates[cursor] as ContextCandidateView).endSeq) cursor += 1
-    if (cursor >= candidates.length) break
-    const candidate = candidates[cursor] as ContextCandidateView
-    if (event.seq < candidate.startSeq) continue
-    const target = counts[cursor] as ContextEventCounts
+    const index = candidateAt(candidateBySeq, event.seq, lastSeq)
+    if (index < 0) continue
+    const target = counts[index] as ContextEventCounts
     switch (event.type) {
       case 'user/message': target.user += 1; break
       case 'assistant/message': target.assistant += 1; break
@@ -587,44 +585,43 @@ export function projectContext(input: ContextProjectionInput): ContextProjection
       default: target.other += 1; break
     }
   }
+
+  // Interval sweeps over seq-sorted spans replace per-candidate filtering of
+  // every turn and step. Each span enters and leaves one active set at most once.
+  attachTurnStats(candidates, observed.turns, lastSeq)
+  attachStepCounts(candidates, observed.steps, lastSeq)
+
+  // Attribute each shadowed/pruned node once. Candidate ranges are disjoint, so
+  // one pass over every transaction's exact seq set replaces C×N nested scans.
+  const shadowed = candidates.map(() => new Set<number>())
+  const compactionIds = candidates.map(() => new Set<string>())
+  for (const transaction of observed.compactions) {
+    for (const seq of transaction.shadowedSeqs) {
+      const index = candidateAt(candidateBySeq, seq, lastSeq)
+      if (index < 0) continue
+      const nodes = shadowed[index] as Set<number>
+      const ids = compactionIds[index] as Set<string>
+      nodes.add(seq)
+      ids.add(transaction.id)
+    }
+  }
+  const pruned = candidates.map(() => new Set<number>())
+  for (const prune of observed.prunes) {
+    for (const seq of prune.shadowedSeqs) {
+      const index = candidateAt(candidateBySeq, seq, lastSeq)
+      if (index >= 0) (pruned[index] as Set<number>).add(seq)
+    }
+  }
+
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index] as ContextCandidateView
-    const target = counts[index] as ContextEventCounts
-    const turns = observed.turns.filter(span => span.startSeq <= candidate.endSeq && (span.endSeq ?? lastSeq) >= candidate.startSeq)
-    const steps = observed.steps.filter(span => span.startSeq <= candidate.endSeq && (span.endSeq ?? lastSeq) >= candidate.startSeq)
-    let turnStart: number | undefined
-    let turnEnd: number | undefined
-    for (const span of turns) {
-      turnStart = turnStart === undefined ? span.turn : Math.min(turnStart, span.turn)
-      turnEnd = turnEnd === undefined ? span.turn : Math.max(turnEnd, span.turn)
-    }
-    const currentSurfaceNodes = active === undefined ? 0 : countInRange(active, candidate.startSeq, candidate.endSeq)
-    const shadowed = new Set<number>()
-    const compactionIds = new Set<string>()
-    for (const transaction of observed.compactions) {
-      for (const seq of transaction.shadowedSeqs) {
-        if (seq >= candidate.startSeq && seq <= candidate.endSeq) {
-          shadowed.add(seq)
-          compactionIds.add(transaction.id)
-        }
-      }
-    }
-    const pruned = new Set<number>()
-    for (const prune of observed.prunes) {
-      for (const seq of prune.shadowedSeqs) {
-        if (seq >= candidate.startSeq && seq <= candidate.endSeq) pruned.add(seq)
-      }
-    }
     const next: ContextCandidateView = {
       ...candidate,
-      counts: target,
-      ...(turnStart === undefined ? {} : { turnStart }),
-      ...(turnEnd === undefined ? {} : { turnEnd }),
-      stepCount: steps.length,
-      currentSurfaceNodes,
-      shadowedNodes: shadowed.size,
-      prunedNodes: pruned.size,
-      compactionIds: [...compactionIds],
+      counts: counts[index] as ContextEventCounts,
+      currentSurfaceNodes: active === undefined ? 0 : countInRange(active, candidate.startSeq, candidate.endSeq),
+      shadowedNodes: (shadowed[index] as Set<number>).size,
+      prunedNodes: (pruned[index] as Set<number>).size,
+      compactionIds: [...(compactionIds[index] as Set<string>)],
     }
     candidates[index] = next
   }
@@ -677,6 +674,163 @@ export function projectContext(input: ContextProjectionInput): ContextProjection
     archive: 'UNAVAILABLE',
     deleted: 'NOT_REPRESENTED',
     warnings,
+  }
+}
+
+/** Map every seq in the displayed candidate ranges to its candidate index. */
+function indexCandidates(candidates: readonly ContextCandidateView[], lastSeq: number): Int32Array {
+  const index = new Int32Array(lastSeq + 1)
+  index.fill(-1)
+  for (let candidate = 0; candidate < candidates.length; candidate += 1) {
+    const range = candidates[candidate] as ContextCandidateView
+    const from = Math.max(0, range.startSeq)
+    const to = Math.min(lastSeq, range.endSeq)
+    for (let seq = from; seq <= to; seq += 1) index[seq] = candidate
+  }
+  return index
+}
+
+/** Resolve one seq without trusting an out-of-range array lookup. */
+function candidateAt(index: Int32Array, seq: number, lastSeq: number): number {
+  if (!Number.isSafeInteger(seq) || seq < 0 || seq > lastSeq) return -1
+  return index[seq] as number
+}
+
+/** Minimal binary heap; ties do not affect the active-set invariants. */
+class BinaryHeap<T> {
+  private readonly items: T[] = []
+  private readonly compare: (left: T, right: T) => number
+
+  constructor(compare: (left: T, right: T) => number) {
+    this.compare = compare
+  }
+
+  get size(): number {
+    return this.items.length
+  }
+
+  peek(): T | undefined {
+    return this.items[0]
+  }
+
+  push(value: T): void {
+    this.items.push(value)
+    let child = this.items.length - 1
+    while (child > 0) {
+      const parent = (child - 1) >> 1
+      if (this.compare(this.items[parent] as T, this.items[child] as T) <= 0) break
+      const swap = this.items[parent] as T
+      this.items[parent] = this.items[child] as T
+      this.items[child] = swap
+      child = parent
+    }
+  }
+
+  pop(): T | undefined {
+    const first = this.items[0]
+    const last = this.items.pop()
+    if (this.items.length === 0 || last === undefined) return first
+    this.items[0] = last
+    let parent = 0
+    for (;;) {
+      const left = parent * 2 + 1
+      const right = left + 1
+      let smallest = parent
+      if (left < this.items.length && this.compare(this.items[left] as T, this.items[smallest] as T) < 0) smallest = left
+      if (right < this.items.length && this.compare(this.items[right] as T, this.items[smallest] as T) < 0) smallest = right
+      if (smallest === parent) break
+      const swap = this.items[parent] as T
+      this.items[parent] = this.items[smallest] as T
+      this.items[smallest] = swap
+      parent = smallest
+    }
+    return first
+  }
+}
+
+/** Distinct active turn numbers with lazy min/max removal. */
+class ActiveTurns {
+  private readonly counts = new Map<number, number>()
+  private readonly lows = new BinaryHeap<number>((left, right) => left - right)
+  private readonly highs = new BinaryHeap<number>((left, right) => right - left)
+
+  add(turn: number): void {
+    this.counts.set(turn, (this.counts.get(turn) ?? 0) + 1)
+    this.lows.push(turn)
+    this.highs.push(turn)
+  }
+
+  remove(turn: number): void {
+    const count = this.counts.get(turn)
+    if (count === undefined) return
+    if (count <= 1) this.counts.delete(turn)
+    else this.counts.set(turn, count - 1)
+  }
+
+  get size(): number {
+    return this.counts.size
+  }
+
+  min(): number | undefined {
+    while (this.lows.size > 0 && !this.counts.has(this.lows.peek() as number)) this.lows.pop()
+    return this.lows.peek()
+  }
+
+  max(): number | undefined {
+    while (this.highs.size > 0 && !this.counts.has(this.highs.peek() as number)) this.highs.pop()
+    return this.highs.peek()
+  }
+}
+
+/** Sweep turn spans once and attach their overlapping turn-number range. */
+function attachTurnStats(
+  candidates: ContextCandidateView[],
+  spans: readonly TurnSpan[],
+  lastSeq: number,
+): void {
+  const ordered = [...spans].sort((left, right) => left.startSeq - right.startSeq)
+  const ends = new BinaryHeap<{ readonly end: number; readonly turn: number }>((left, right) => left.end - right.end)
+  const active = new ActiveTurns()
+  let next = 0
+  for (const candidate of candidates) {
+    while (next < ordered.length && (ordered[next] as TurnSpan).startSeq <= candidate.endSeq) {
+      const span = ordered[next] as TurnSpan
+      ends.push({ end: span.endSeq ?? lastSeq, turn: span.turn })
+      active.add(span.turn)
+      next += 1
+    }
+    while (ends.size > 0 && (ends.peek() as { readonly end: number }).end < candidate.startSeq) {
+      const expired = ends.pop() as { readonly end: number; readonly turn: number }
+      active.remove(expired.turn)
+    }
+    const first = active.min()
+    const last = active.max()
+    if (first !== undefined) candidate.turnStart = first
+    if (last !== undefined) candidate.turnEnd = last
+  }
+}
+
+/** Sweep step spans once and attach the number of spans overlapping each range. */
+function attachStepCounts(
+  candidates: ContextCandidateView[],
+  spans: readonly StepSpan[],
+  lastSeq: number,
+): void {
+  const ordered = [...spans].sort((left, right) => left.startSeq - right.startSeq)
+  const ends = new BinaryHeap<number>((left, right) => left - right)
+  let next = 0
+  let active = 0
+  for (const candidate of candidates) {
+    while (next < ordered.length && (ordered[next] as StepSpan).startSeq <= candidate.endSeq) {
+      ends.push((ordered[next] as StepSpan).endSeq ?? lastSeq)
+      active += 1
+      next += 1
+    }
+    while (ends.size > 0 && (ends.peek() as number) < candidate.startSeq) {
+      ends.pop()
+      active -= 1
+    }
+    candidate.stepCount = active
   }
 }
 

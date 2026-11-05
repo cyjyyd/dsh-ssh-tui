@@ -109,8 +109,29 @@ function candidatePreview(candidate: ContextCandidateView, projection: ContextPr
   return rendered(rows)
 }
 
+/** Bound one rendered seq list; the projection keeps the exact set internally. */
+const PREVIEW_SEQ_MAX_COUNT = 48
+const PREVIEW_SEQ_MAX_CHARS = 320
+
+function previewSeqList(seqs: readonly number[], t: ContextTranslator): string {
+  if (seqs.length === 0) return t('context.none')
+  const parts: string[] = []
+  let chars = 0
+  for (const seq of seqs) {
+    if (parts.length >= PREVIEW_SEQ_MAX_COUNT) break
+    const part = String(seq)
+    const separator = parts.length === 0 ? '' : ', '
+    if (chars + separator.length + part.length > PREVIEW_SEQ_MAX_CHARS) break
+    parts.push(part)
+    chars += separator.length + part.length
+  }
+  if (parts.length === seqs.length) return parts.join(', ')
+  const truncated = t('context.preview.moreSeqs', { count: seqs.length - parts.length })
+  return parts.length === 0 ? truncated : `${parts.join(', ')}, ${truncated}`
+}
+
 function compactionPreview(compaction: ContextCompactionView, t: ContextTranslator): ContextPreview {
-  const seqs = compaction.shadowedSeqs.length === 0 ? t('context.none') : compaction.shadowedSeqs.join(', ')
+  const seqs = previewSeqList(compaction.shadowedSeqs, t)
   const rows = [
     t('context.preview.title'),
     t('context.preview.compaction', { id: compaction.id }),
@@ -131,9 +152,7 @@ function prunePreview(prune: ContextPruneView, t: ContextTranslator): ContextPre
   return rendered([
     t('context.preview.title'),
     t('context.preview.prune', { seq: prune.seq }),
-    t('context.preview.shadowedSeqs', {
-      seqs: prune.shadowedSeqs.length === 0 ? t('context.none') : prune.shadowedSeqs.join(', '),
-    }),
+    t('context.preview.shadowedSeqs', { seqs: previewSeqList(prune.shadowedSeqs, t) }),
     ...(prune.replacementSeq === undefined ? [] : [t('context.preview.replacement', { seq: prune.replacementSeq })]),
     t('context.preview.evidence'),
     t('context.preview.hidden'),
@@ -215,7 +234,8 @@ function listView(projection: ContextProjection, t: ContextTranslator, selected:
     const preview = compactionPreview(compaction, t)
     const lineIndex = lines.length
     const marker = items.length === selected ? '> ' : '  '
-    push(`${marker}${t('context.compressed')}  ${t('context.compaction', { id: compaction.id })}`)
+    const heading = compaction.status === 'complete' ? t('context.compressed') : t('context.compactionPending')
+    push(`${marker}${heading}  ${t('context.compaction', { id: compaction.id })}`)
     push(`  ${t('context.source')}: DURABLE_EVENT`)
     push(`  ${t('context.statusLine', { status: compactStatus(compaction.status, t) })}`)
     push(`  ${t('context.shadowedNodes', { count: compaction.shadowedSeqs.length })}`)
