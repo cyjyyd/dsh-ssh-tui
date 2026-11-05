@@ -446,6 +446,35 @@ test('R32 replacement must cite the matching summarySeq', () => {
   ])
   assert.equal(missingCitation.compactions[0].status, 'incomplete')
   assert.equal(missingCitation.compactions[0].replacementSeq, undefined)
+
+  const crossSummary = project([
+    compactionStart(0, 'c-prior'),
+    compactionSummary(1, 'c-prior', [0]),
+    compactionEnd(2, 'c-prior'),
+    compactionStart(3, 'c-cross'),
+    compactionSummary(4, 'c-cross', [0]),
+    replacementUser(5, [1]),
+    compactionEnd(6, 'c-cross'),
+  ])
+  const cross = crossSummary.compactions.find(item => item.id === 'c-cross')
+  assert.ok(cross)
+  assert.equal(cross.status, 'incomplete')
+  assert.equal(cross.replacementSeq, undefined)
+
+  const appendCitation = project([
+    compactionStart(0, 'c-append'),
+    compactionSummary(1, 'c-append', [0]),
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append', sourceEventSeqs: [0, 1],
+      data: {
+        id: 'append-summary', role: 'user', source: { kind: 'compact-checkpoint' },
+        content: [{ type: 'text', text: 'synthetic summary' }],
+      },
+    },
+    compactionEnd(3, 'c-append'),
+  ])
+  assert.equal(appendCitation.compactions[0].status, 'incomplete')
+  assert.equal(appendCitation.compactions[0].replacementSeq, undefined)
 })
 
 test('R33 a complete ordered lifecycle remains COMPLETE', () => {
