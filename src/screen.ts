@@ -27,7 +27,7 @@ import type { SearchScreenState } from './search-screen.js'
 export type ScreenKind = 'inspect' | 'report' | 'setup' | 'search'
 
 /** The report a `report` Screen is showing. */
-export type ReportKind = 'status' | 'usage' | 'diag' | 'doctor' | 'help' | 'subagents'
+export type ReportKind = 'status' | 'usage' | 'diag' | 'doctor' | 'terminal' | 'help' | 'subagents'
 
 /**
  * A Screen's whole state.
@@ -100,7 +100,7 @@ export function screenFromDialog(dialog: Dialog | InspectDialog): ScreenState | 
  * from in a transcript (`/copy error` looks for `error` or `diag`).
  */
 export function reportRowKind(report: ReportKind): 'diag' | 'system' {
-  return report === 'diag' || report === 'doctor' ? 'diag' : 'system'
+  return report === 'diag' || report === 'doctor' || report === 'terminal' ? 'diag' : 'system'
 }
 
 /** The rows a Screen lays out, top to bottom. */

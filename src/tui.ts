@@ -81,6 +81,12 @@ import {
   type ScreenState,
 } from './screen.js'
 import { screenRuntimeStrip } from './footer-budget.js'
+import {
+  formatTerminalDoctor,
+  hostPolicyFrom,
+  TerminalEvidenceLedger,
+  type TerminalHostPolicy,
+} from './terminal-doctor.js'
 import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import {
@@ -2048,6 +2054,10 @@ export class SshTui {
    * alternate screen are only claimed where the terminal has them.
    */
   private readonly terminalCaps: TerminalCapabilities
+  /** The constructor snapshot, plus which capability answers were explicit. */
+  private readonly terminalDoctorPolicy: TerminalHostPolicy
+  /** Attachment-generation facts; never the footer's cached RTT or global width. */
+  private readonly terminalEvidence = new TerminalEvidenceLedger()
   /** The OSC 52 caveat is worth saying once, not after every copy. */
   private osc52HintShown = false
   private agentGone = false
@@ -2700,6 +2710,10 @@ export class SshTui {
     this.presetId = config.presetId ?? 'standard'
     this.presetName = presetLabel(this.presetId, config.presetName, config.presetTrust)
     this.terminalCaps = config.terminalCaps ?? terminalCapabilities()
+    this.terminalDoctorPolicy = hostPolicyFrom(this.terminalCaps, {
+      callerSupplied: config.terminalCaps !== undefined,
+      env: process.env,
+    })
     this.useAlternateScreen = !this.lineMode && this.terminalCaps.alternateScreen
     // Whether this process is inside an SSH session, kept apart from
     // `paintLink`: that one also becomes `'ssh'` whenever the launcher relayed
@@ -3547,6 +3561,43 @@ export class SshTui {
   }
 
   /**
+   * `/terminal`: a snapshot-only Terminal Doctor report.
+   *
+   * No byte is written to the Relay, no cursor position is requested and no
+   * cached footer RTT is promoted. The report is built from the constructor
+   * policy and the attachment ledger, both of which are already in memory.
+   */
+  private runTerminalCommand(): void {
+    const lines = this.terminalDoctorLines(this.lineMode)
+    this.openReport('terminal', this.lineMode ? [t('screen.title.terminal'), ...lines] : lines)
+    this.markDirty()
+  }
+
+  /** The canonical report body for the current ledger; pure formatting. */
+  private terminalDoctorLines(lineMode: boolean): string[] {
+    return formatTerminalDoctor(this.terminalDoctorPolicy, this.terminalEvidence.snapshot(), {
+      ascii: this.terminalDoctorPolicy.ascii,
+      lineMode,
+    })
+  }
+
+  /**
+   * Refresh an open Terminal Doctor in place after attach/detach/RTT/metrics.
+   *
+   * Only the existing Screen dirty path is used. The reader's offset, the
+   * hidden Composer and every other Screen are untouched; copyText is replaced
+   * from the same canonical lines so a copied report cannot disagree with it.
+   */
+  private refreshTerminalReport(): void {
+    const screen = this.screen
+    if (screen === undefined || screen.kind !== 'report' || screen.report !== 'terminal') return
+    const lines = this.terminalDoctorLines(false)
+    screen.lines = lines.map(text => ({ kind: 'system' as const, text }))
+    screen.copyText = lines.join('\n')
+    this.markDirty()
+  }
+
+  /**
    * Whether a host service is registered.
    *
    * The typed `ctx.get` knows only the services this plugin depends on;
@@ -3989,9 +4040,12 @@ export class SshTui {
         if (changed) this.requestResizePaint()
       },
       onRtt: (rttMs) => {
+        this.terminalEvidence.observeRtt(rttMs)
         this.applyProbedRtt(rttMs)
+        this.refreshTerminalReport()
       },
       onMetrics: metrics => {
+        this.terminalEvidence.observeMetrics(metrics)
         // The relay measured the terminal this session is displayed on. Adopt it
         // and repaint from scratch: every cached line was measured with the old
         // table, so a diff against them would compare different widths.
@@ -3999,15 +4053,20 @@ export class SshTui {
         setAmbiguousWidthReserve(metrics.reserve)
         this.forceFullPaint = true
         this.markDirty()
+        this.refreshTerminalReport()
       },
       onDetach: (info) => {
+        this.terminalEvidence.detach()
+        this.refreshTerminalReport()
         this.handleDisplayDetach(info)
       },
       onAttach: () => {
+        this.terminalEvidence.attach()
         if (this.disposed) return
         if (this.relayColumns !== undefined && this.relayRows !== undefined) {
           this.attachRelayDisplay()
         }
+        this.refreshTerminalReport()
       },
     })
     await host.listen()
@@ -13142,6 +13201,14 @@ export class SshTui {
       if (answer !== undefined) this.settleScreenConfirm(answer)
       return
     }
+    // Terminal Doctor reserves `r` for the future W6C recheck. In W6B it is
+    // only a notice: no DSR, no pump request, no terminal mode, no timer. The
+    // keystroke itself may legitimately arrive through inbound FRAME_STDIN.
+    if (screen.kind === 'report' && screen.report === 'terminal' && (combined === 'r' || combined === 'R')) {
+      screen.notice = t('terminal.recheck.unavailable')
+      this.markDirty()
+      return
+    }
     if (moved === 'copy' && (screen.copyText ?? '') !== '') {
       this.copyFromScreen(screen)
       return
@@ -15847,6 +15914,14 @@ export class SshTui {
           this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
         })
+        break
+      case 'terminal':
+        try {
+          this.runTerminalCommand()
+        } catch (error: unknown) {
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
+          this.markDirty()
+        }
         break
       case 'doctor':
         void this.runDoctorCommand(arg, /--fix|(^|\s)fix(\s|$)/u.test(arg)).catch((error: unknown) => {
