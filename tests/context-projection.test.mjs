@@ -361,3 +361,152 @@ test('R25 bilingual formatter keeps the same evidence, no raw paths', () => {
     setLocale('en')
   }
 })
+
+const compactionStart = (seq, compactionId, turn = null) => ({
+  type: 'compaction/start', seq, time: seq + 1, data: { compactionId, turn },
+})
+const compactionSummary = (seq, compactionId, shadowedSeqs = []) => ({
+  type: 'compaction/summary', seq, time: seq + 1,
+  data: {
+    compactionId, summary: [], shadowedRange: { start: 0, end: 0 }, shadowedSeqs,
+    shadowedTokenCount: shadowedSeqs.length, provider: 'p', model: 'm',
+  },
+})
+const compactionEnd = (seq, compactionId, error) => ({
+  type: 'compaction/end', seq, time: seq + 1,
+  data: { compactionId, turn: null, ...(error === undefined ? {} : { error }) },
+})
+const replacementUser = (seq, sourceEventSeqs) => ({
+  type: 'user/message', seq, time: seq + 1,
+  surfaceOp: { op: 'replace', startSeq: 0, endSeq: Math.max(0, seq - 1) },
+  sourceEventSeqs,
+  data: {
+    id: `summary-${seq}`, role: 'user', source: { kind: 'compact-checkpoint' },
+    content: [{ type: 'text', text: 'synthetic summary' }],
+  },
+})
+
+test('R31 compaction requires an observed compaction/start', () => {
+  const p = project([
+    compactionSummary(0, 'c-no-start', [0]),
+    replacementUser(1, [0]),
+    compactionEnd(2, 'c-no-start'),
+  ])
+  assert.equal(p.compactions.length, 1)
+  assert.equal(p.compactions[0].startSeq, undefined)
+  assert.equal(p.compactions[0].status, 'incomplete')
+  const text = formatContextList(p, t).lines.map(line => line.text).join('\n')
+  assert.match(text, /\[COMPACTION\]/)
+  assert.doesNotMatch(text, /\[COMPRESSED\]/)
+
+  const outOfOrder = project([
+    compactionSummary(0, 'c-late-start', [0]),
+    compactionStart(1, 'c-late-start'),
+    replacementUser(2, [0]),
+    compactionEnd(3, 'c-late-start'),
+  ])
+  assert.equal(outOfOrder.compactions[0].status, 'incomplete')
+  assert.equal(outOfOrder.compactions[0].startSeq, 1)
+
+  const failedWithoutStart = project([
+    compactionSummary(0, 'c-fail-no-start', [0]),
+    compactionEnd(1, 'c-fail-no-start', 'boom'),
+  ])
+  assert.equal(failedWithoutStart.compactions[0].status, 'failed')
+  assert.equal(failedWithoutStart.compactions[0].error, 'boom')
+})
+
+test('R32 replacement must cite the matching summarySeq', () => {
+  const wrongCitation = project([
+    compactionStart(0, 'c-wrong'),
+    compactionSummary(1, 'c-wrong', [0]),
+    replacementUser(2, [0, 99]),
+    compactionEnd(3, 'c-wrong'),
+  ])
+  assert.equal(wrongCitation.compactions[0].status, 'incomplete')
+  assert.equal(wrongCitation.compactions[0].replacementSeq, undefined)
+  const wrongText = formatContextList(wrongCitation, t).lines.map(line => line.text).join('\n')
+  assert.match(wrongText, /\[COMPACTION\]/)
+  assert.doesNotMatch(wrongText, /\[COMPRESSED\]/)
+
+  const missingSummary = project([
+    compactionStart(0, 'c-no-summary'),
+    replacementUser(1, [0]),
+    compactionEnd(2, 'c-no-summary'),
+  ])
+  assert.equal(missingSummary.compactions[0].status, 'incomplete')
+  assert.equal(missingSummary.compactions[0].summarySeq, undefined)
+  assert.equal(missingSummary.compactions[0].replacementSeq, undefined)
+
+  const missingCitation = project([
+    compactionStart(0, 'c-no-citation'),
+    compactionSummary(1, 'c-no-citation', [0]),
+    replacementUser(2, undefined),
+    compactionEnd(3, 'c-no-citation'),
+  ])
+  assert.equal(missingCitation.compactions[0].status, 'incomplete')
+  assert.equal(missingCitation.compactions[0].replacementSeq, undefined)
+})
+
+test('R33 a complete ordered lifecycle remains COMPLETE', () => {
+  const p = project([
+    compactionStart(0, 'c-good'),
+    compactionSummary(1, 'c-good', [0]),
+    replacementUser(2, [0, 1]),
+    compactionEnd(3, 'c-good'),
+  ])
+  assert.equal(p.compactions[0].startSeq, 0)
+  assert.equal(p.compactions[0].summarySeq, 1)
+  assert.equal(p.compactions[0].replacementSeq, 2)
+  assert.equal(p.compactions[0].endSeq, 3)
+  assert.equal(p.compactions[0].status, 'complete')
+  const text = formatContextList(p, t).lines.map(line => line.text).join('\n')
+  assert.match(text, /\[COMPRESSED\]/)
+  assert.doesNotMatch(text, /\[COMPACTION\]/)
+})
+
+test('R34 compaction shadowedSeqs keep surface order while active nodes stay sorted', () => {
+  const p = project([
+    compactionStart(0, 'c-order'),
+    compactionSummary(1, 'c-order', [10, 4, 10, 5]),
+    replacementUser(2, [0, 1]),
+    compactionEnd(3, 'c-order'),
+  ], { activeNodeSeqs: [10, 4, 4, 5] })
+  assert.deepEqual(p.compactions[0].shadowedSeqs, [10, 4, 5])
+  assert.equal(p.currentSurfaceNodeCount, 3)
+  const view = formatContextList(p, t)
+  const row = view.items.find(item => item.kind === 'compaction')
+  assert.ok(row)
+  const text = formatContextPreview(row, t).lines.map(line => line.text).join('\n')
+  assert.match(text, /shadowed seqs: 10, 4, 5/)
+  assert.doesNotMatch(text, /shadowed seqs: 4, 5, 10/)
+})
+
+test('R35 prune shadowedSeqs keep surface order while active nodes stay sorted', () => {
+  const p = project([
+    {
+      type: 'compaction/prune', seq: 0, time: 1,
+      data: { shadowedRange: { start: 0, end: 0 }, shadowedSeqs: [10, 4, 10, 5], shadowedTokenCount: 3 },
+    },
+    {
+      type: 'tool/result', seq: 1, time: 2,
+      surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 },
+      sourceEventSeqs: [0],
+      data: {
+        turn: 1, step: 1,
+        message: {
+          id: 'r1', role: 'tool', source: { kind: 'tool', callId: 'c1' },
+          content: [{ type: 'text', text: 'synthetic' }],
+        },
+      },
+    },
+  ], { activeNodeSeqs: [10, 4, 4, 5] })
+  assert.deepEqual(p.prunes[0].shadowedSeqs, [10, 4, 5])
+  assert.equal(p.currentSurfaceNodeCount, 3)
+  const view = formatContextList(p, t)
+  const row = view.items.find(item => item.kind === 'prune')
+  assert.ok(row)
+  const text = formatContextPreview(row, t).lines.map(line => line.text).join('\n')
+  assert.match(text, /shadowed seqs: 10, 4, 5/)
+  assert.doesNotMatch(text, /shadowed seqs: 4, 5, 10/)
+})

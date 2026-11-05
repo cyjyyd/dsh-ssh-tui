@@ -95,7 +95,7 @@ export interface ContextCandidateView {
 /** One compaction transaction, keyed by its transaction id, never a Segment id. */
 export interface ContextCompactionView {
   id: string
-  startSeq: number
+  startSeq?: number
   summarySeq?: number
   endSeq?: number
   status: 'complete' | 'incomplete' | 'failed'
@@ -185,7 +185,7 @@ interface StepSpan {
 
 interface WorkingCompaction {
   id: string
-  startSeq: number
+  startSeq?: number
   summarySeq?: number
   endSeq?: number
   turn: number | null
@@ -193,6 +193,8 @@ interface WorkingCompaction {
   shadowedSeqs: number[]
   shadowedTokenCount?: number
   replacementSeq?: number
+  /** Summary seq actually cited by the replacement's sourceEventSeqs. */
+  replacementSummarySeq?: number
   error?: string
 }
 
@@ -257,6 +259,23 @@ function seqArray(value: unknown): number[] {
 
 function unique(values: readonly number[]): number[] {
   return [...new Set(values)].sort((left, right) => left - right)
+}
+
+/** Deduplicate while preserving the producer's recorded surface order. */
+function stableUnique(values: readonly number[]): number[] {
+  const seen = new Set<number>()
+  const result: number[] = []
+  for (const value of values) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    result.push(value)
+  }
+  return result
+}
+
+/** Whether one raw replacement event cites the given summary seq. */
+function citesSeq(event: RawEvent, seq: number): boolean {
+  return Array.isArray(event.sourceEventSeqs) && event.sourceEventSeqs.includes(seq)
 }
 
 function addWarning(warnings: ContextWarning[], warning: ContextWarning): void {
@@ -333,8 +352,10 @@ function observe(events: readonly SessionEvent[]): Observed {
     const event = raw(value)
     if (pending !== undefined) {
       let replaced = false
-      if (pending.kind === 'compaction' && pending.compaction !== undefined && event.type === 'user/message' && isReplacement(event)) {
+      if (pending.kind === 'compaction' && pending.compaction !== undefined && pending.summarySeq !== undefined
+        && event.type === 'user/message' && isReplacement(event) && citesSeq(event, pending.summarySeq)) {
         pending.compaction.replacementSeq = event.seq
+        pending.compaction.replacementSummarySeq = pending.summarySeq
         replaced = true
       } else if (pending.kind === 'prune' && pending.prune !== undefined && event.type === 'tool/result' && isReplacement(event)) {
         pending.prune.replacementSeq = event.seq
@@ -407,15 +428,18 @@ function observe(events: readonly SessionEvent[]): Observed {
         const id = typeof data?.['compactionId'] === 'string' ? data['compactionId'] : undefined
         if (id === undefined) break
         const turn = data?.['turn'] === null ? null : safeSeq(data?.['turn']) ?? null
-        const transaction: WorkingCompaction = {
+        const transaction = compactions.get(id) ?? {
           id,
-          startSeq: event.seq,
           turn,
-          ...(typeof data?.['sourceCommandId'] === 'string' ? { sourceCommandId: data['sourceCommandId'] } : {}),
           shadowedSeqs: [],
         }
-        compactions.set(id, transaction)
-        observed.compactions.push(transaction)
+        if (!compactions.has(id)) {
+          compactions.set(id, transaction)
+          observed.compactions.push(transaction)
+        }
+        transaction.startSeq = event.seq
+        transaction.turn = turn
+        if (typeof data?.['sourceCommandId'] === 'string') transaction.sourceCommandId = data['sourceCommandId']
         break
       }
       case 'compaction/summary': {
@@ -423,7 +447,6 @@ function observe(events: readonly SessionEvent[]): Observed {
         if (id === undefined) break
         const transaction = compactions.get(id) ?? {
           id,
-          startSeq: event.seq,
           turn: null,
           shadowedSeqs: [],
         }
@@ -432,7 +455,7 @@ function observe(events: readonly SessionEvent[]): Observed {
           observed.compactions.push(transaction)
         }
         transaction.summarySeq = event.seq
-        transaction.shadowedSeqs = unique(seqArray(data?.['shadowedSeqs']))
+        transaction.shadowedSeqs = stableUnique(seqArray(data?.['shadowedSeqs']))
         const tokens = data?.['shadowedTokenCount']
         if (typeof tokens === 'number' && Number.isSafeInteger(tokens) && tokens >= 0) transaction.shadowedTokenCount = tokens
         pending = { kind: 'compaction', compaction: transaction, summarySeq: event.seq }
@@ -443,7 +466,6 @@ function observe(events: readonly SessionEvent[]): Observed {
         if (id === undefined) break
         const transaction = compactions.get(id) ?? {
           id,
-          startSeq: event.seq,
           turn: null,
           shadowedSeqs: [],
         }
@@ -458,7 +480,7 @@ function observe(events: readonly SessionEvent[]): Observed {
       case 'compaction/prune': {
         const prune: WorkingPrune = {
           seq: event.seq,
-          shadowedSeqs: unique(seqArray(data?.['shadowedSeqs'])),
+          shadowedSeqs: stableUnique(seqArray(data?.['shadowedSeqs'])),
         }
         observed.prunes.push(prune)
         pending = { kind: 'prune', prune }
@@ -476,10 +498,18 @@ function observe(events: readonly SessionEvent[]): Observed {
   return observed
 }
 
+/** Only an observed start → summary → cited replacement → successful end is complete. */
 function statusOf(transaction: WorkingCompaction): ContextCompactionView['status'] {
   if (transaction.endSeq !== undefined && transaction.error !== undefined) return 'failed'
-  if (transaction.endSeq !== undefined && transaction.summarySeq !== undefined && transaction.replacementSeq !== undefined) return 'complete'
-  return 'incomplete'
+  if (transaction.startSeq === undefined
+    || transaction.summarySeq === undefined
+    || transaction.replacementSeq === undefined
+    || transaction.endSeq === undefined) return 'incomplete'
+  if (!(transaction.startSeq < transaction.summarySeq
+    && transaction.summarySeq < transaction.replacementSeq
+    && transaction.replacementSeq < transaction.endSeq)) return 'incomplete'
+  if (transaction.replacementSummarySeq !== transaction.summarySeq) return 'incomplete'
+  return 'complete'
 }
 
 /** Project one current Session without reading persistence or another Session. */
@@ -628,7 +658,7 @@ export function projectContext(input: ContextProjectionInput): ContextProjection
 
   const compactions = observed.compactions.slice(0, MAX_CONTEXT_COMPACTIONS).map(transaction => ({
     id: transaction.id,
-    startSeq: transaction.startSeq,
+    ...(transaction.startSeq === undefined ? {} : { startSeq: transaction.startSeq }),
     ...(transaction.summarySeq === undefined ? {} : { summarySeq: transaction.summarySeq }),
     ...(transaction.endSeq === undefined ? {} : { endSeq: transaction.endSeq }),
     status: statusOf(transaction),

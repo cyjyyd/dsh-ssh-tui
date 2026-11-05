@@ -132,11 +132,12 @@ function previewSeqList(seqs: readonly number[], t: ContextTranslator): string {
 
 function compactionPreview(compaction: ContextCompactionView, t: ContextTranslator): ContextPreview {
   const seqs = previewSeqList(compaction.shadowedSeqs, t)
+  const start = compaction.startSeq
   const rows = [
     t('context.preview.title'),
     t('context.preview.compaction', { id: compaction.id }),
     t('context.preview.compactionStatus', { status: compactStatus(compaction.status, t) }),
-    t('context.preview.start', { seq: compaction.startSeq }),
+    ...(start === undefined ? [] : [t('context.preview.start', { seq: start })]),
     ...(compaction.summarySeq === undefined ? [] : [t('context.preview.summary', { seq: compaction.summarySeq })]),
     ...(compaction.replacementSeq === undefined ? [] : [t('context.preview.replacement', { seq: compaction.replacementSeq })]),
     ...(compaction.endSeq === undefined ? [] : [t('context.preview.end', { seq: compaction.endSeq })]),
