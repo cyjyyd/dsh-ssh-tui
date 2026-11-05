@@ -138,6 +138,9 @@ export class TerminalEvidenceLedger {
   }
 }
 
+/** Which explicit signal selected the effective colour depth, if any. */
+export type TerminalColorSource = 'forced' | 'no-color' | 'inferred'
+
 /** What the constructor snapshot says, and which parts were explicit. */
 export interface TerminalHostPolicy {
   readonly caps: TerminalCapabilities
@@ -149,7 +152,8 @@ export interface TerminalHostPolicy {
   readonly ignoredOverrideCount: number
   readonly ascii: boolean
   readonly asciiConfigured: boolean
-  readonly colorConfigured: boolean
+  /** Effective colour precedence, not merely whether the variable is non-empty. */
+  readonly colorSource: TerminalColorSource
 }
 
 /**
@@ -172,6 +176,18 @@ export function hostPolicyFrom(
   const osc8 = (env.DSH_TUI_OSC8 ?? '').trim().toLowerCase()
   if (['1', 'true', 'on', 'yes', '0', 'false', 'off', 'no'].includes(osc8)) configured.add('osc8')
   const asciiRaw = (env.DSH_TUI_ASCII ?? '').trim().toLowerCase()
+  // Mirror `colorDepth()`'s precedence for provenance only: a recognized
+  // forced value wins, then a non-empty NO_COLOR, otherwise the classifier.
+  const forcedColor = (env.DSH_TUI_COLOR_DEPTH ?? '').trim().toLowerCase()
+  const forcedColorValid = [
+    'truecolor', '24bit', '16m',
+    '256', '256color',
+    '8', '8color', 'basic',
+    'none', 'off', '0', 'no',
+  ].includes(forcedColor)
+  const colorSource: TerminalColorSource = forcedColorValid
+    ? 'forced'
+    : (env.NO_COLOR ?? '').trim() !== '' ? 'no-color' : 'inferred'
   return {
     caps,
     callerSupplied: options.callerSupplied === true,
@@ -179,7 +195,7 @@ export function hostPolicyFrom(
     ignoredOverrideCount: ignored.length,
     ascii: asciiFallbackEnabled(env, options.platform ?? process.platform),
     asciiConfigured: ['1', 'true', 'on', 'yes', 'ascii', '0', 'false', 'off', 'no', 'utf8', 'utf-8'].includes(asciiRaw),
-    colorConfigured: (env.DSH_TUI_COLOR_DEPTH ?? '').trim() !== '',
+    colorSource,
   }
 }
 
@@ -207,9 +223,34 @@ export function assertFactProvenance(fact: TerminalFact): void {
   }
 }
 
-function cleanLabel(text: string): string {
-  const printable = text.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim()
-  return [...printable].slice(0, 48).join('')
+const FAMILY_LABEL_KEYS: Record<TerminalCapabilities['family'], string> = {
+  'windows-terminal': 'terminal.family.windows-terminal',
+  'windows-console': 'terminal.family.windows-console',
+  vte: 'terminal.family.vte',
+  konsole: 'terminal.family.konsole',
+  xterm: 'terminal.family.xterm',
+  tmux: 'terminal.family.tmux',
+  screen: 'terminal.family.screen',
+  'linux-console': 'terminal.family.linux-console',
+  dumb: 'terminal.family.dumb',
+  unknown: 'terminal.family.unknown',
+}
+
+/**
+ * A fixed label derived from the finite family enum.
+ *
+ * `caps.label` can embed raw `TERM`/`TERM_PROGRAM`; this report must never
+ * echo either, so the family is the only input here.
+ */
+function terminalFamilyLabel(family: TerminalCapabilities['family']): string {
+  return t(FAMILY_LABEL_KEYS[family] ?? 'terminal.family.unknown')
+}
+
+function colorDetail(policy: TerminalHostPolicy): string | undefined {
+  if (policy.callerSupplied) return undefined
+  if (policy.colorSource === 'forced') return t('terminal.detail.colorForced')
+  if (policy.colorSource === 'no-color') return t('terminal.detail.colorNoColor')
+  return undefined
 }
 
 function stateLabel(state: TerminalEvidenceState): string {
@@ -237,14 +278,19 @@ function hostFact(
   policy: TerminalHostPolicy,
   configured: boolean,
   detail?: string,
+  options: { callerApplies?: boolean } = {},
 ): TerminalFact {
-  const isConfigured = policy.callerSupplied || configured
+  const caller = policy.callerSupplied && options.callerApplies !== false
+  const isConfigured = caller || configured
+  const provenance = caller
+    ? t('terminal.detail.caller')
+    : isConfigured ? t('terminal.detail.override') : t('terminal.detail.host')
   return {
     id,
     value,
     state: isConfigured ? 'CONFIGURED' : 'INFERRED',
-    source: policy.callerSupplied ? 'caller-config' : 'host-start',
-    detail: isConfigured ? (policy.callerSupplied ? t('terminal.detail.caller') : t('terminal.detail.override')) : (detail ?? hostDetail(policy)),
+    source: caller ? 'caller-config' : 'host-start',
+    detail: detail === undefined ? provenance : `${provenance} · ${detail}`,
   }
 }
 
@@ -295,8 +341,14 @@ export function formatTerminalDoctor(
     : t('terminal.relay.detached'))
   lines.push('')
 
-  lines.push(factRow(t('terminal.fact.family'), hostFact('family', cleanLabel(caps.label), policy, false), sep))
-  lines.push(factRow(t('terminal.fact.color'), hostFact('color', String(caps.colors), policy, policy.colorConfigured), sep))
+  lines.push(factRow(t('terminal.fact.family'), hostFact('family', terminalFamilyLabel(caps.family), policy, false), sep))
+  lines.push(factRow(t('terminal.fact.color'), hostFact(
+    'color',
+    String(caps.colors),
+    policy,
+    policy.colorSource !== 'inferred',
+    colorDetail(policy),
+  ), sep))
   lines.push(factRow(t('terminal.fact.mouse'), hostFact(
     'mouse',
     t('terminal.value.mouseSgr', { mouse: onOff(caps.mouse), sgr: onOff(caps.mouseSgr) }),
@@ -318,7 +370,14 @@ export function formatTerminalDoctor(
   }, sep))
   lines.push(factRow(t('terminal.fact.osc8'), hostFact('osc8', onOff(caps.osc8), policy, configured('osc8')), sep))
   lines.push(factRow(t('terminal.fact.title'), hostFact('title', onOff(caps.title), policy, configured('title')), sep))
-  lines.push(factRow(t('terminal.fact.ascii'), hostFact('ascii', onOff(policy.ascii), policy, policy.asciiConfigured), sep))
+  lines.push(factRow(t('terminal.fact.ascii'), hostFact(
+    'ascii',
+    onOff(policy.ascii),
+    policy,
+    policy.asciiConfigured,
+    policy.asciiConfigured ? t('terminal.detail.ascii') : undefined,
+    { callerApplies: false },
+  ), sep))
 
   const current = snapshot.current
   if (!snapshot.attached) {
@@ -360,7 +419,7 @@ export function formatTerminalDoctor(
     id: 'overrides',
     value: overrideValue,
     state: 'CONFIGURED',
-    source: policy.callerSupplied ? 'caller-config' : 'host-start',
+    source: 'host-start',
     detail: policy.ignoredOverrideCount > 0
       ? t('terminal.detail.invalidOverrides', { count: policy.ignoredOverrideCount })
       : t('terminal.detail.validated'),

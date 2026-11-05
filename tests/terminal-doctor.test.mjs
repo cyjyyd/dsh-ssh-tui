@@ -193,3 +193,74 @@ test('Chinese and English labels both exist for all five states', () => {
   }
   setLocale('en')
 })
+
+test('an invalid DSH_TUI_COLOR_DEPTH is not reported as configured', () => {
+  const env = { ...ENV, DSH_TUI_COLOR_DEPTH: 'bogus' }
+  const lines = linesFor(new TerminalEvidenceLedger(), env)
+  assert.match(row(lines, 'Color depth'), /256/)
+  assert.match(row(lines, 'Color depth'), /INFERRED/)
+  assert.doesNotMatch(row(lines, 'Color depth'), /CONFIGURED|explicit override/)
+})
+
+test('a recognized forced color is CONFIGURED with its real source', () => {
+  const env = { ...ENV, DSH_TUI_COLOR_DEPTH: '8' }
+  const lines = linesFor(new TerminalEvidenceLedger(), env)
+  assert.match(row(lines, 'Color depth'), /^Color depth: 8\s+CONFIGURED/)
+  assert.match(row(lines, 'Color depth'), /DSH_TUI_COLOR_DEPTH/)
+})
+
+test('NO_COLOR matches the effective none and is CONFIGURED', () => {
+  const env = { ...ENV, NO_COLOR: '1' }
+  const lines = linesFor(new TerminalEvidenceLedger(), env)
+  assert.match(row(lines, 'Color depth'), /^Color depth: none\s+CONFIGURED/)
+  assert.match(row(lines, 'Color depth'), /NO_COLOR/)
+})
+
+test('a recognized forced color keeps precedence over NO_COLOR', () => {
+  const env = { ...ENV, DSH_TUI_COLOR_DEPTH: 'truecolor', NO_COLOR: '1' }
+  const lines = linesFor(new TerminalEvidenceLedger(), env)
+  assert.match(row(lines, 'Color depth'), /^Color depth: truecolor\s+CONFIGURED/)
+  assert.match(row(lines, 'Color depth'), /DSH_TUI_COLOR_DEPTH/)
+  assert.doesNotMatch(row(lines, 'Color depth'), /NO_COLOR/)
+})
+
+test('caller-supplied caps do not configure the independent ASCII policy', () => {
+  const caps = terminalCapabilities({ env: ENV, platform: PLATFORM })
+  const caller = hostPolicyFrom(caps, { env: ENV, platform: PLATFORM, callerSupplied: true })
+  const lines = formatTerminalDoctor(caller, new TerminalEvidenceLedger().snapshot())
+  assert.match(row(lines, 'ASCII fallback'), /off\s+INFERRED/)
+  assert.doesNotMatch(row(lines, 'ASCII fallback'), /CONFIGURED|caller supplied/)
+  assert.match(row(lines, 'Terminal family'), /CONFIGURED/)
+  assert.match(row(lines, 'Terminal family'), /caller supplied/)
+})
+
+test('raw TERM and TERM_PROGRAM never reach the report', () => {
+  const xterm = linesFor(new TerminalEvidenceLedger(), {
+    TERM: 'xterm-256color-SECRET-TOKEN',
+    TERM_PROGRAM: 'PRIVATE-TERM-PROGRAM',
+  })
+  assert.match(row(xterm, 'Terminal family'), /xterm-compatible terminal/)
+  assert.doesNotMatch(joined(xterm), /SECRET-TOKEN|PRIVATE-TERM-PROGRAM/)
+
+  const vte = linesFor(new TerminalEvidenceLedger(), {
+    TERM: 'xterm-256color',
+    VTE_VERSION: '7000',
+    TERM_PROGRAM: 'SECRET-VTE-PROGRAM',
+  })
+  assert.match(row(vte, 'Terminal family'), /VTE-based terminal/)
+  assert.doesNotMatch(joined(vte), /SECRET-VTE-PROGRAM|TERM_PROGRAM/)
+
+  const control = linesFor(new TerminalEvidenceLedger(), {
+    TERM: 'xterm-\u202eEVIL\u0007',
+    TERM_PROGRAM: '\u202ePRIVATE',
+  })
+  assert.doesNotMatch(joined(control), /EVIL|PRIVATE|\u202e/)
+})
+
+test('the family label is an allowlisted name, not caps.label', () => {
+  const caps = terminalCapabilities({ env: { TERM: 'xterm-256color' }, platform: PLATFORM })
+  caps.label = 'RAW-ENV-LABEL-SECRET'
+  const lines = formatTerminalDoctor(hostPolicyFrom(caps, { env: ENV, platform: PLATFORM }), new TerminalEvidenceLedger().snapshot())
+  assert.doesNotMatch(joined(lines), /RAW-ENV-LABEL-SECRET/)
+  assert.match(row(lines, 'Terminal family'), /xterm-compatible terminal/)
+})

@@ -228,3 +228,24 @@ test('a second /terminal replaces the report rather than stacking a Screen', () 
   assert.equal(tui.screen.report, 'terminal')
   assert.notEqual(tui.screen, first)
 })
+
+test('crafted TERM and TERM_PROGRAM never reach the report or copyText', () => {
+  const keys = ['TERM', 'TERM_PROGRAM', 'VTE_VERSION', 'KONSOLE_VERSION', 'TMUX', 'STY', 'WT_SESSION']
+  const saved = new Map(keys.map(key => [key, process.env[key]]))
+  for (const key of keys) delete process.env[key]
+  process.env.TERM = 'xterm-256color-SECRET-TOKEN'
+  process.env.TERM_PROGRAM = 'PRIVATE-TERM-PROGRAM'
+  try {
+    const { tui } = fixture()
+    tui.runTerminalCommand()
+    const text = screenText(tui.screen)
+    assert.match(text, /xterm-compatible terminal/)
+    assert.doesNotMatch(text, /SECRET-TOKEN|PRIVATE-TERM-PROGRAM/)
+    assert.doesNotMatch(tui.screen.copyText, /SECRET-TOKEN|PRIVATE-TERM-PROGRAM/)
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
