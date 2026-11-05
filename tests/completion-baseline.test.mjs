@@ -220,10 +220,10 @@ test('E1 BASELINE: an async reader frame reaches the same handler as a read', as
   // `consumeFrame`, so W-4B.1 cannot put its refresh only in the read loop.
   const tui = makeTui()
   typeDraft(tui, '/')
-  assert.equal(tui.commandSuggestions.length, 28, '27 existing commands + /terminal')
+  assert.equal(tui.commandSuggestions.length, 29, '28 existing suggestions + /context')
   tui.handleData(Buffer.from('\x1b'))
   // The hold is 60 ms; the frame has not been emitted yet.
-  assert.equal(tui.commandSuggestions.length, 28, 'the escape is held, not handled')
+  assert.equal(tui.commandSuggestions.length, 29, 'the escape is held, not handled')
   await tick(140)
   assert.equal(tui.commandSuggestions.length, 0, 'the released escape reached handleEscape')
   assert.equal(tui.suggestionIndex, 0)

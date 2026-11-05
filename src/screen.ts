@@ -15,6 +15,8 @@
 import type { Dialog, InspectDialog } from './dialogs.js'
 import type { DiffDisplayLine } from './tool-present.js'
 import type { SearchScreenState } from './search-screen.js'
+import type { ContextListModel, ContextPreview } from './context-format.js'
+import type { ContextProjection } from './context-projection.js'
 
 /**
  * Which Screen is up. Adding one here is the only way to add one at all.
@@ -27,7 +29,17 @@ import type { SearchScreenState } from './search-screen.js'
 export type ScreenKind = 'inspect' | 'report' | 'setup' | 'search'
 
 /** The report a `report` Screen is showing. */
-export type ReportKind = 'status' | 'usage' | 'diag' | 'doctor' | 'terminal' | 'help' | 'subagents'
+export type ReportKind = 'status' | 'usage' | 'diag' | 'doctor' | 'terminal' | 'context' | 'help' | 'subagents'
+
+/** In-Screen context list/preview state; no second Screen is created. */
+export interface ContextScreenState {
+  projection: ContextProjection
+  mode: 'list' | 'preview'
+  selected: number
+  list: ContextListModel
+  listOffset: number
+  preview?: ContextPreview
+}
 
 /**
  * A Screen's whole state.
@@ -50,6 +62,8 @@ export interface ScreenState {
   report?: ReportKind
   /** Search query/hits/selection when `kind === 'search'`. */
   search?: SearchScreenState
+  /** Context list/preview when `kind === 'report' && report === 'context'`. */
+  context?: ContextScreenState
   /** What the copy key takes while this screen is up. */
   copyText?: string
   /**

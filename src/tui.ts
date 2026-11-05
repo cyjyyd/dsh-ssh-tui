@@ -30,7 +30,7 @@ import { METADATA_FILE, readPresetMetadata, type AgentPreset } from './preset-co
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef, type CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, errorChain, ReasoningEffortId, type GenerateOptions, type LlmCallConfig, type TokenUsage } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   commandAcceptsAttachments,
   forEachSessionEvent,
@@ -41,7 +41,10 @@ import {
   drainChildSubagents,
   readSettingsSection,
   REPLAY_YIELD_EVERY,
+  sessionEventCount,
   sessionEvents,
+  sessionInheritedEventCount,
+  sessionSurfaceNodes,
   settingsNamespace,
   streamChunkOf,
   streamFirstTokenTime,
@@ -77,6 +80,7 @@ import {
   screenFromDialog,
   screenLayout,
   screenPositionText,
+  type ContextScreenState,
   type ReportKind,
   type ScreenState,
 } from './screen.js'
@@ -87,6 +91,8 @@ import {
   TerminalEvidenceLedger,
   type TerminalHostPolicy,
 } from './terminal-doctor.js'
+import { formatContextList } from './context-format.js'
+import { MAX_CONTEXT_EVENTS, projectContext, type ContextProjection } from './context-projection.js'
 import { buildReviewUserMessage, parseReviewOutput, reviewSystemPrompt, type ReviewVerdict } from './approval-reviewer.js'
 import { loadProviderCatalog, mergeProviderEntries, type CatalogPreset, type ProviderListEntry } from './provider-catalog.js'
 import {
@@ -688,7 +694,10 @@ export {
   isTokenDeltaChunk,
   listPersistenceHeaders,
   inspectPersistenceSession,
+  sessionEventCount,
   sessionEvents,
+  sessionInheritedEventCount,
+  sessionSurfaceNodes,
   settingsNamespace,
   streamChunkOf,
   streamFirstTokenTime,
@@ -5118,6 +5127,157 @@ export class SshTui {
   }
 
   /**
+   * Build the current Session's read-only context report.
+   *
+   * The count is read from the cheap Session.seq preflight before any event
+   * snapshot is requested. Over-cap or unknown counts deliberately never call
+   * sessionEvents()/snapshotEvents(); they render a summary-only report.
+   */
+  private runContextCommand(): void {
+    const session = this.agent.session
+    const count = sessionEventCount(session)
+    const header = (session as { header?: SessionHeader }).header
+    if (count === undefined) {
+      this.openContextReport(projectContext({
+        header,
+        eventCount: undefined,
+        events: [],
+        activeNodeSeqs: undefined,
+        inheritedEventCount: undefined,
+      }))
+      return
+    }
+    if (count > MAX_CONTEXT_EVENTS) {
+      this.openContextReport(projectContext({
+        header,
+        eventCount: count,
+        events: [],
+        activeNodeSeqs: undefined,
+        inheritedEventCount: undefined,
+      }))
+      return
+    }
+    this.openContextReport(projectContext({
+      header,
+      eventCount: count,
+      events: sessionEvents(session),
+      activeNodeSeqs: sessionSurfaceNodes(session),
+      inheritedEventCount: sessionInheritedEventCount(session),
+    }))
+  }
+
+  /** Open the context report; line mode keeps the AD-7 textual path. */
+  private openContextReport(projection: ContextProjection): void {
+    const model = formatContextList(projection, t, 0)
+    if (this.lineMode) {
+      this.openReport('context', model.lines.map(line => line.text))
+      return
+    }
+    const context: ContextScreenState = {
+      projection,
+      mode: 'list',
+      selected: 0,
+      list: model,
+      listOffset: 0,
+    }
+    this.openScreen({
+      kind: 'report',
+      report: 'context',
+      title: t('screen.title.context'),
+      lines: model.lines,
+      offset: 0,
+      copyText: model.copyText,
+      context,
+    })
+  }
+
+  /** Rebuild the list around the current selection without leaving the Screen. */
+  private refreshContextScreen(screen: ScreenState): void {
+    const context = screen.context
+    if (context === undefined) return
+    context.list = formatContextList(context.projection, t, context.selected)
+    screen.lines = context.list.lines
+    screen.copyText = context.list.copyText
+    const row = context.list.items[context.selected]
+    if (row !== undefined && context.mode === 'list') {
+      const bodyRows = Math.max(1, screenLayout(this.screenRows()).bodyRows)
+      if (row.line < screen.offset) screen.offset = row.line
+      else if (row.line >= screen.offset + bodyRows) {
+        screen.offset = Math.max(0, row.line - bodyRows + 1)
+      }
+    }
+    this.markDirty()
+  }
+
+  /** List/preview keys; no lifecycle action is ever dispatched from here. */
+  private handleContextScreenInput(screen: ScreenState, combined: string, moved: string | undefined): void {
+    const context = screen.context
+    if (context === undefined) return
+    if (combined === 'q' || combined === 'Q') {
+      this.closeScreen()
+      return
+    }
+    if (moved === 'copy' || combined === 'c' || combined === 'C') {
+      this.copyFromScreen(screen)
+      return
+    }
+    if (context.mode === 'preview' && (combined === '\r' || combined === '\n')) return
+    if (context.mode === 'preview' && inspectClosesOn(combined)) {
+      context.mode = 'list'
+      context.preview = undefined
+      this.refreshContextScreen(screen)
+      screen.offset = context.listOffset
+      this.markDirty()
+      return
+    }
+    if (context.mode === 'preview') {
+      const page = /^\x1b\[([56])~$/u.exec(combined)
+      if (page !== null) this.scrollScreen(page[1] === '5' ? 5 : -5)
+      return
+    }
+    if (combined === '\r' || combined === '\n') {
+      const row = context.list.items[context.selected]
+      if (row === undefined) {
+        screen.notice = t('context.noPreview')
+        this.markDirty()
+        return
+      }
+      context.listOffset = screen.offset
+      context.mode = 'preview'
+      context.preview = row.preview
+      screen.lines = row.preview.lines
+      screen.copyText = row.preview.copyText
+      screen.offset = 0
+      screen.notice = undefined
+      this.markDirty()
+      return
+    }
+    if (inspectClosesOn(combined)) {
+      this.closeScreen()
+      return
+    }
+    const arrow = /^\x1b\[([AB])$/u.exec(combined)
+    if (arrow !== null) {
+      if (context.list.items.length === 0) return
+      const delta = arrow[1] === 'A' ? -1 : 1
+      context.selected = Math.max(0, Math.min(context.list.items.length - 1, context.selected + delta))
+      this.refreshContextScreen(screen)
+      return
+    }
+    const page = /^\x1b\[([56])~$/u.exec(combined)
+    if (page !== null) {
+      this.scrollScreen(page[1] === '5' ? 5 : -5)
+      return
+    }
+    const sgr = SGR_MOUSE_RE.exec(combined)
+    if (sgr !== null && sgr[4] === 'M') {
+      const button = Number(sgr[1])
+      if (button === 64) this.scrollScreen(3)
+      else if (button === 65) this.scrollScreen(-3)
+    }
+  }
+
+  /**
    * Open one report as a Screen.
    *
    * A report is not narrative: it cannot be rebuilt from the session log (it is not
@@ -5367,6 +5527,9 @@ export class SshTui {
     if (screen.notice !== undefined && screen.notice !== '') return screen.notice
     if (screen.kind === 'search' && screen.search !== undefined) {
       return screen.search.mode === 'preview' ? t('find.previewHint') : t('find.screenHint')
+    }
+    if (screen.kind === 'report' && screen.report === 'context' && screen.context !== undefined) {
+      return screen.context.mode === 'preview' ? t('context.previewHint') : t('context.listHint')
     }
     const pos = screenPositionText(screen.offset, lineCount, layout.bodyRows)
     const base = t('screen.footer', { pos })
@@ -13190,6 +13353,10 @@ export class SshTui {
       this.handleSetupKey(combined, moved)
       return
     }
+    if (screen.kind === 'report' && screen.report === 'context' && screen.context !== undefined) {
+      this.handleContextScreenInput(screen, combined, moved)
+      return
+    }
     // The Screen's own confirmation owns the keys while it is up: it is a question
     // asked by this Screen, and answering it must not reach into the workspace.
     if (this.screenSurface !== undefined) {
@@ -15918,6 +16085,14 @@ export class SshTui {
       case 'terminal':
         try {
           this.runTerminalCommand()
+        } catch (error: unknown) {
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
+          this.markDirty()
+        }
+        break
+      case 'context':
+        try {
+          this.runContextCommand()
         } catch (error: unknown) {
           this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
           this.markDirty()
