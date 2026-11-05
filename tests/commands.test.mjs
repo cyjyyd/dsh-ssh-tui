@@ -27,7 +27,8 @@ test('the bare slash lists this plugin commands, without aliases or dialog-test'
 
 test('a typed prefix brings aliases back and filters the list', () => {
   const names = commandSuggestions('/ex', []).map(command => command.name)
-  assert.deepEqual(names, ['exit'])
+  assert.equal(names[0], 'exit', 'the prefix match ranks first')
+  assert.equal(names.includes('context'), true, 'the new command contains the prefix')
   const usage = commandSuggestions('/usage', []).map(command => command.name)
   assert.equal(usage.includes('usage'), true)
 })

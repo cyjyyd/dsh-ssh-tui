@@ -38,6 +38,7 @@ export const LOCAL_COMMANDS = [
   // keeps the day-to-day commands (a bare `/` shows twelve rows).
   { name: 'doctor', key: 'cmd.doctor' },
   { name: 'terminal', key: 'cmd.terminal' },
+  { name: 'context', key: 'cmd.context' },
   { name: 'fix', key: 'cmd.fix' },
   { name: 'preset', key: 'cmd.preset' },
   { name: 'dialog-test', key: 'cmd.dialog-test' },

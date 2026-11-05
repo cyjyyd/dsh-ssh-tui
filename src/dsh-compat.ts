@@ -328,6 +328,40 @@ export function sessionEvents(session: object): readonly SessionEvent[] {
 }
 
 /**
+ * Cheap event-count preflight. Never asks for a snapshot; a missing or invalid
+ * `seq` returns undefined so the caller can fail closed before materializing.
+ */
+export function sessionEventCount(session: object): number | undefined {
+  try {
+    const value = (session as { seq?: unknown }).seq
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Exact fork-inherited prefix length when the supported Session exposes it. */
+export function sessionInheritedEventCount(session: object): number | undefined {
+  try {
+    const value = (session as { inheritedEventCount?: unknown }).inheritedEventCount
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Current Surface membership as event seqs; never a lifecycle flag. */
+export function sessionSurfaceNodes(session: object): readonly number[] | undefined {
+  try {
+    const surface = (session as { surface?: { nodes?: unknown } }).surface
+    const nodes = surface?.nodes
+    return Array.isArray(nodes) ? nodes.filter((node): node is number => typeof node === 'number' && Number.isSafeInteger(node) && node >= 0) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Walk the durable log without copying it. Prefer `eventAt` so resume does
  * not materialize a second array of every chunk.
  */
