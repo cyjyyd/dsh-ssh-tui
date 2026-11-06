@@ -9,7 +9,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { apply } from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as jsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,7 +39,10 @@ const titleEvent = (seq, title) => ({
 test('a flushed session/title survives reopen and invalidates the Picker cache', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh-title-g1-'))
   const ctx = new Context()
-  await apply(ctx, { root, compression: 'none' })
+  // 0.2.1-rc.2 exports the apply() seeder; the earlier 0.2.0 lines ship the
+  // plugin class as the default export. The synthetic test must run on both.
+  if (typeof jsonlPersistence.apply === 'function') await jsonlPersistence.apply(ctx, { root, compression: 'none' })
+  else await ctx.plugin(jsonlPersistence.default, { root, compression: 'none' })
   const persistence = ctx.sessionPersistence
   const id = 'synthetic-title-g1'
   const header = {
