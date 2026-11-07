@@ -42,6 +42,7 @@ import {
   readSettingsSection,
   REPLAY_YIELD_EVERY,
   sessionEvents,
+  sessionTitleService,
   settingsNamespace,
   streamChunkOf,
   streamFirstTokenTime,
@@ -49,6 +50,7 @@ import {
   streamFrameOwner,
   toolResultFailed,
   TUI_SOURCE_KIND,
+  type SessionTitleSnapshotLike,
   type SettingsGeneration,
   type StreamChunkLike,
 } from './dsh-compat.js'
@@ -174,6 +176,7 @@ import {
   type DialogAnswer,
   type InteractionKind,
   type QuestionDialog,
+  type RenameDialog,
   type SurfaceRole,
   isSurfaceDialog,
 } from './dialogs.js'
@@ -2638,6 +2641,10 @@ export class SshTui {
   /** The last few measured round-trips; the chip and the budget use their median. */
   private paintRttHistory: number[] = []
   private sessionTitle = ''
+  /** Latest accepted title metadata from the log or rename result; prefill uses the string above. */
+  private titleSnapshot: SessionTitleSnapshotLike | undefined
+  /** Accepted title awaiting/retrying the independent durability flush; never a second rename. */
+  private renamePending: { readonly eventSeq: number; readonly title: string; readonly unchanged: boolean; flushing: boolean } | undefined
   private llmRetry: { retry: number; maxRetries: number; delayMs: number; message: string } | undefined
   private quotaSnapshot: QuotaSnapshot | undefined
   private balanceSnapshot: AccountBalanceSnapshot | undefined
@@ -3506,6 +3513,8 @@ export class SshTui {
         dialog.resolve('cancel')
       } else if (dialog.kind === 'questions') {
         dialog.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
+      } else if (dialog.kind === 'rename') {
+        dialog.reject(new Error('TUI closed before the rename was submitted'))
       } else {
         this.cancelOnboarding()
       }
@@ -3515,8 +3524,11 @@ export class SshTui {
         pending.dialog.resolve('cancel')
       } else if (pending.dialog.kind === 'questions') {
         pending.dialog.reject(new UserQuestionError('TUI closed before the question was answered', 'ASK_ABORTED'))
+      } else if (pending.dialog.kind === 'rename') {
+        pending.dialog.reject(new Error('TUI closed before the rename was submitted'))
       }
     }
+    this.renamePending = undefined
     this.commandAbort?.abort()
     this.commandAbort = undefined
     for (const dispose of this.disposers.splice(0)) {
@@ -6989,6 +7001,13 @@ export class SshTui {
         this.dialogFocusLine = dialogLines.length
         addDialog(this.dialog.prompt)
         addDialog(`  ${this.dialog.hint}`)
+      } else if (this.dialog.kind === 'rename') {
+        this.dialogFocusLine = dialogLines.length
+        addDialog(t('rename.title'))
+        addDialog(t('rename.current', {
+          title: this.sessionTitle === '' ? t('rename.untitled') : this.sessionTitle,
+        }))
+        addDialog(t('rename.hint'))
       } else if (this.dialog.kind === 'questions') {
         // The `inspect` case can no longer reach here (it is a Screen, and the
         // frame returned above), so the branch states what it needs instead of
@@ -9106,11 +9125,16 @@ export class SshTui {
       return
     }
     if (type === 'session/title') {
-      const title = typeof (data as { title?: unknown } | undefined)?.title === 'string'
-        ? (data as { title: string }).title.trim()
-        : ''
+      const titleData = data as { title?: unknown; source?: { kind?: unknown } } | undefined
+      const title = typeof titleData?.title === 'string' ? titleData.title.trim() : ''
       if (title !== '') {
+        const sourceKind = typeof titleData?.source?.kind === 'string' ? titleData.source.kind : undefined
         this.sessionTitle = title
+        this.titleSnapshot = {
+          title,
+          eventSeq: event.seq,
+          ...(sourceKind === undefined ? {} : { source: { kind: sourceKind } }),
+        }
         this.updateTerminalTitle()
         this.markDirty()
       }
@@ -10373,13 +10397,18 @@ export class SshTui {
   /** Whether this dialog types into a field of its own rather than the composer. */
   private dialogNeedsText(dialog: Dialog): boolean {
     // A list answers with its highlight and its hotkeys; only a question with no
-    // options is answered by typing.
+    // options (or the rename editor) is answered by typing.
+    if (dialog.kind === 'rename') return true
     if (dialog.kind === 'questions') return (dialog.question.options?.length ?? 0) === 0
     return false
   }
 
   /** Give a text-needing dialog its own field. The composer draft stays put. */
   private borrowTextFor(dialog: Dialog): void {
+    if (dialog.kind === 'rename') {
+      this.borrowedText = { text: dialog.initial, cursor: dialog.initial.length }
+      return
+    }
     if (this.dialogNeedsText(dialog)) this.borrowedText ??= { text: '', cursor: 0 }
     else this.releaseBorrowedText()
   }
@@ -10750,6 +10779,11 @@ export class SshTui {
     if (dialog.kind === 'confirm') {
       this.pushRow(represent('surface-echo', { kind: 'system', text: dialog.prompt }))
       this.pushRow(represent('surface-echo', { kind: 'system', text: dialog.hint }))
+      return
+    }
+    if (dialog.kind === 'rename') {
+      this.pushRow(represent('surface-echo', { kind: 'system', text: t('rename.title') }))
+      this.pushRow(represent('surface-echo', { kind: 'system', text: t('rename.hint') }))
       return
     }
     if (dialog.kind === 'questions') {
@@ -14076,6 +14110,21 @@ export class SshTui {
       if (answer !== undefined) this.closeConfirm(answer)
       return
     }
+    if (dialog.kind === 'rename') {
+      if (text === '\r' || text === '\n') {
+        this.submitRenameDialog(dialog)
+        return
+      }
+      if (text === '\x1b' || text === '\x03') {
+        this.cancelRenameDialog(dialog)
+        return
+      }
+      for (const char of text) {
+        if (char >= ' ' && char !== '\x7f') this.insertIntoField(char)
+      }
+      this.markDirty()
+      return
+    }
     // Filter mode owns the printable keys: the list's hotkeys are letters and
     // digits, so the two cannot both be live at once.
     if (dialog.filtering === true) {
@@ -15200,26 +15249,31 @@ export class SshTui {
       this.handleScreenInput('\x1b', undefined)
       return
     }
-    if (this.dialog?.kind === 'questions'
-      && isSurfaceDialog(this.dialog)
-      && (this.dialog.filtering === true || (this.dialog.filter ?? '') !== '')) {
+    const dialog = this.dialog
+    if (dialog?.kind === 'rename') {
+      this.cancelRenameDialog(dialog)
+      return
+    }
+    if (dialog?.kind === 'questions'
+      && isSurfaceDialog(dialog)
+      && (dialog.filtering === true || (dialog.filter ?? '') !== '')) {
       // Esc means "show me everything again" while a filter is up; cancelling
       // the whole question on the same key would throw away the answer the user
       // is still composing.
-      clearQuestionFilter(this.dialog)
+      clearQuestionFilter(dialog)
       this.markDirty()
       return
     }
-    if (this.dialog !== undefined) {
-      if (!isSurfaceDialog(this.dialog)) {
+    if (dialog !== undefined) {
+      if (!isSurfaceDialog(dialog)) {
         // A deprecated shape cannot be answered; dropping it is the only honest exit
         // (the wizard is a Screen now and never gets here).
         this.dialog = undefined
         this.showNextDialog()
         return
       }
-      if (this.dialog.kind === 'confirm') this.closeConfirm('cancel')
-      else this.dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
+      if (dialog.kind === 'confirm') this.closeConfirm('cancel')
+      else dialog.reject(new UserQuestionError('ask_user_question was cancelled', 'ASK_ABORTED'))
       return
     }
     if (this.scrollOffset > 0) {
@@ -15654,7 +15708,7 @@ export class SshTui {
     if (text.startsWith('/')) {
       this.historyIndex = this.history.length
       this.historyDraft = ''
-      this.runCommand(text)
+      this.runCommand(text, true)
       return
     }
     if (this.agentGone) return
@@ -15687,9 +15741,199 @@ export class SshTui {
     this.markDirty()
   }
 
-  private runCommand(text: string): void {
-    const [command, ...rest] = text.slice(1).split(/\s+/u)
-    const arg = rest.join(' ')
+  /** Run `/rename [title]`: argument submits directly, bare opens the editor. */
+  private runRenameCommand(title: string): void {
+    if (title.trim() === '') {
+      if (this.lineMode) {
+        const current = this.sessionTitle === '' ? t('rename.untitled') : this.sessionTitle
+        this.renameNotice(t('rename.lineUsage', { title: current }))
+        return
+      }
+      this.openRenameEditor()
+      return
+    }
+    this.submitRename(title)
+  }
+
+  /** Open the one-line editor with the TUI's already-maintained accepted title. */
+  private openRenameEditor(): void {
+    if (sessionTitleService(this.ctx) === undefined) {
+      this.renameNotice(t('rename.unavailable'))
+      return
+    }
+    const dialog: RenameDialog = {
+      kind: 'rename',
+      initial: this.sessionTitle,
+      resolve: () => {},
+      reject: () => {},
+    }
+    this.openDialog(dialog, PICKER_ROLE)
+  }
+
+  /** Submit the editor text. Invalid input keeps the editor open and writable. */
+  private submitRenameDialog(dialog: RenameDialog): void {
+    const title = this.fieldText()
+    const previous = this.sessionTitle
+    const accepted = this.callRename(title)
+    if (accepted === undefined) return // keep the editor open on invalid/failed input
+    this.closeRenameDialog(dialog)
+    dialog.resolve(accepted.title)
+    this.acceptRename(accepted, title, previous)
+  }
+
+  /** Route one `/rename <title>` argument through the Host title API. */
+  private submitRename(title: string): void {
+    const previous = this.sessionTitle
+    const accepted = this.callRename(title)
+    if (accepted === undefined) return
+    this.acceptRename(accepted, title, previous)
+  }
+
+  /**
+   * Call the Host-owned title service. Returns undefined after showing a
+   * fail-closed notice; no storage fallback and no second writer is attempted.
+   */
+  private callRename(title: string): SessionTitleSnapshotLike | undefined {
+    const service = sessionTitleService(this.ctx)
+    if (service === undefined) {
+      this.renameNotice(t('rename.unavailable'))
+      return undefined
+    }
+    try {
+      const accepted = service.rename(this.agent.session, title)
+      if (accepted === null || typeof accepted !== 'object'
+        || typeof accepted.title !== 'string' || accepted.title === '') {
+        this.renameNotice(t('rename.failed', { error: t('rename.emptyAccepted') }))
+        return undefined
+      }
+      return accepted
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'SessionTitleInvalidError') {
+        this.renameNotice(t('rename.empty'))
+        return undefined
+      }
+      this.renameNotice(t('rename.failed', { error: errorChain(error) }))
+      return undefined
+    }
+  }
+
+  /** Update the accepted title, then start the independent durability check. */
+  private acceptRename(accepted: SessionTitleSnapshotLike, raw: string, previous: string): void {
+    const title = accepted.title
+    const unchanged = previous === title
+    const sourceKind = typeof accepted.source?.kind === 'string' ? accepted.source.kind : 'user'
+    const currentSeq = typeof this.agent.session.seq === 'number' ? this.agent.session.seq : 1
+    const eventSeq = typeof accepted.eventSeq === 'number' && Number.isSafeInteger(accepted.eventSeq)
+      ? accepted.eventSeq
+      : Math.max(0, currentSeq - 1)
+    this.sessionTitle = title
+    this.titleSnapshot = {
+      title,
+      eventSeq,
+      source: { kind: sourceKind },
+    }
+    this.updateTerminalTitle()
+    const normalized = title !== raw.trim()
+    this.renameNotice(normalized
+      ? t('rename.acceptedNormalized', { title })
+      : t('rename.accepted', { title }))
+    const pending = { eventSeq, title, unchanged, flushing: false }
+    this.renamePending = pending
+    void this.confirmRenameFlush(pending)
+  }
+
+  /**
+   * Await the exact SessionStore durability barrier. Only `true` is Saved;
+   * false/missing/throw stays accepted-in-memory and can be retried by the
+   * explicit flush-only entry (`/rename-retry`).
+   */
+  private async confirmRenameFlush(pending: NonNullable<SshTui['renamePending']>): Promise<void> {
+    if (pending.flushing) return
+    pending.flushing = true
+    // The lookup is inside the boundary too: a raising `ctx.get('sessions')`
+    // must settle the pending rename, not leave it permanently Busy.
+    try {
+      const sessions = this.ctx.get('sessions')
+      if (sessions === undefined || typeof sessions.flush !== 'function') {
+        if (this.renamePending === pending) this.renameNotice(t('rename.unconfirmedMissing', { title: pending.title }))
+        return
+      }
+      const confirmed = await sessions.flush(this.agent.session)
+      if (this.renamePending !== pending) return
+      if (confirmed === true) {
+        this.renamePending = undefined
+        this.renameNotice(pending.unchanged
+          ? t('rename.savedUnchanged', { title: pending.title })
+          : t('rename.saved', { title: pending.title }))
+      } else {
+        this.renameNotice(t('rename.unconfirmed', { title: pending.title }))
+      }
+    } catch (error: unknown) {
+      if (this.renamePending !== pending) return
+      this.renameNotice(t('rename.unconfirmedError', { title: pending.title, error: errorChain(error) }))
+    } finally {
+      pending.flushing = false
+      if (this.renamePending === pending && !this.disposed) this.markDirty()
+    }
+  }
+
+  /** Explicit flush-only retry; never issues another rename. */
+  private retryRenameFlush(): void {
+    const pending = this.renamePending
+    if (pending === undefined) {
+      this.renameNotice(t('rename.retryNone'))
+      return
+    }
+    if (pending.flushing) {
+      this.renameNotice(t('rename.retryBusy'))
+      return
+    }
+    void this.confirmRenameFlush(pending)
+  }
+
+  /** Framed mode uses the ephemeral notice; line mode writes one local row. */
+  private renameNotice(text: string): void {
+    if (this.lineMode) {
+      this.pushRow(represent('command-feedback', { kind: 'system', text }))
+      this.markDirty()
+      return
+    }
+    this.notice = { text, at: Date.now() }
+    this.armFeedbackExpiry()
+    this.markDirty()
+  }
+
+  /** Close the rename Surface without touching the accepted title or Composer. */
+  private closeRenameDialog(dialog: RenameDialog): void {
+    if (this.dialog !== dialog) {
+      this.removeQueuedDialog(dialog)
+      return
+    }
+    this.dialog = undefined
+    this.layerDialog = undefined
+    this.dialogRole = PICKER_ROLE
+    this.releaseBorrowedText()
+    this.showNextDialog()
+    this.refreshCompletion()
+    this.markDirty()
+  }
+
+  /** Esc/Ctrl+C: drop the editor only; no title event and no Composer write. */
+  private cancelRenameDialog(dialog: RenameDialog): void {
+    this.closeRenameDialog(dialog)
+    dialog.reject(new Error('rename cancelled'))
+  }
+
+  private runCommand(text: string, fromComposer = false): void {
+    const raw = text.slice(1)
+    const boundary = raw.search(/\s/u)
+    const command = boundary === -1 ? raw : raw.slice(0, boundary)
+    // `/rename` takes the whole remainder: internal/trailing spaces belong to
+    // the Host normalizer, not to command tokenization. Other commands keep the
+    // historical whitespace-collapsed argument shape.
+    const remainder = boundary === -1 ? '' : raw.slice(boundary).replace(/^\s+/u, '')
+    const rest = remainder === '' ? [] : remainder.split(/\s+/u)
+    const arg = command === 'rename' ? remainder : rest.join(' ')
     switch (command) {
       case 'help': {
         const local = localizedCommands()
@@ -15908,6 +16152,14 @@ export class SshTui {
           })
           this.openReport('status', lines)
         }
+        break
+      case 'rename':
+        this.runRenameCommand(arg)
+        break
+      case 'rename-retry':
+        // Deliberately absent from LOCAL_COMMANDS: this is the explicit, hidden
+        // flush-only retry offered after an accepted-but-unconfirmed rename.
+        this.retryRenameFlush()
         break
       case 'diag':
         void this.runDiagCommand().catch((error: unknown) => {
@@ -16130,8 +16382,14 @@ export class SshTui {
         }
         break
     }
-    this.setDraft('', 0)
-    this.inputFolded = false
+    // Bare `/rename` opened a borrowed-field editor: a direct command dispatch
+    // preserves the Composer draft until the editor closes. When that same text
+    // came from the Composer, it is the command that was consumed, not a draft
+    // to restore, so only that source clears it here.
+    if (!(command === 'rename' && arg.trim() === '' && !this.lineMode && !fromComposer)) {
+      this.setDraft('', 0)
+      this.inputFolded = false
+    }
     this.markDirty()
   }
 
