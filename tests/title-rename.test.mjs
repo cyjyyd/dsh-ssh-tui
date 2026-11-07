@@ -23,9 +23,10 @@ function invalidTitle(message = 'session title must contain visible characters')
   return error
 }
 
-function makeTui({ title, titleService, flush, service = true, sessions = true, lineMode = false } = {}) {
+function makeTui({ title, titleService, flush, service = true, sessions = true, sessionsErrorOnce, lineMode = false } = {}) {
   const calls = { rename: [], flush: 0, refresh: 0, get: 0, followup: 0 }
   const services = {}
+  let sessionsLookupFailed = false
   if (sessions) {
     services.sessions = {
       flush: async () => {
@@ -55,7 +56,16 @@ function makeTui({ title, titleService, flush, service = true, sessions = true, 
       },
     }
   }
-  const ctx = { get: name => services[name], on() { return () => {} } }
+  const ctx = {
+    get(name) {
+      if (name === 'sessions' && sessionsErrorOnce && !sessionsLookupFailed) {
+        sessionsLookupFailed = true
+        throw new Error('synthetic sessions lookup failure')
+      }
+      return services[name]
+    },
+    on() { return () => {} },
+  }
   const agent = {
     id: 'main-session',
     options: {},
@@ -246,6 +256,22 @@ test('G1-7 Enter saves from the borrowed field and preserves the composer draft'
   assert.equal(calls.rename[0].raw, 'New title')
 })
 
+test('G1-7 a bare /rename submitted from the Composer consumes the command text', () => {
+  const { tui, calls } = makeTui({ title: 'Old' })
+  tui.input = '/rename'
+  tui.cursor = 7
+  tui.submit()
+  assert.equal(tui.input, '', 'the executed command is not left as a draft')
+  assert.equal(tui.cursor, 0)
+  assert.equal(tui.dialog?.kind, 'rename')
+  assert.equal(tui.borrowedText?.text, 'Old')
+  tui.handleEscape()
+  assert.equal(tui.input, '')
+  tui.submit()
+  assert.equal(tui.dialog, undefined, 'a second Enter has no command to reopen')
+  assert.equal(calls.rename.length, 0)
+})
+
 test('G1-8 rename writes no transcript or model-visible row', async () => {
   const { tui, calls } = makeTui({ title: 'Old' })
   const rows = tui.rows.length
@@ -322,6 +348,19 @@ test('G1-3 a missing sessions service is accepted-only and never claims Saved', 
   tui.runCommand('/rename-retry')
   assert.match(tui.notice?.text ?? '', /no persistence listener/i)
   assert.equal(calls.rename.length, 1)
+})
+
+test('G1-3 a raising sessions lookup settles the flush instead of staying Busy', async () => {
+  const { tui, calls } = makeTui({ title: 'Old', sessionsErrorOnce: true })
+  tui.runCommand('/rename New')
+  await settledNotice(tui, /durability unconfirmed/i)
+  assert.equal(calls.flush, 0, 'the lookup failed before any listener ran')
+  assert.equal(tui.renamePending?.flushing, false, 'the failed lookup released the pending flush')
+  tui.runCommand('/rename-retry')
+  await settledNotice(tui, /Saved/i)
+  assert.equal(calls.flush, 1, 'the retry reaches the now-available sessions service')
+  assert.equal(calls.rename.length, 1, 'retry still never issues a second rename')
+  assert.doesNotMatch(tui.notice?.text ?? '', /already in progress/i)
 })
 
 test('G1-11 F2 stays unbound and does not open the rename editor', () => {

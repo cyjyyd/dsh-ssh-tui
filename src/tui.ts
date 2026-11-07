@@ -15708,7 +15708,7 @@ export class SshTui {
     if (text.startsWith('/')) {
       this.historyIndex = this.history.length
       this.historyDraft = ''
-      this.runCommand(text)
+      this.runCommand(text, true)
       return
     }
     if (this.agentGone) return
@@ -15850,13 +15850,14 @@ export class SshTui {
   private async confirmRenameFlush(pending: NonNullable<SshTui['renamePending']>): Promise<void> {
     if (pending.flushing) return
     pending.flushing = true
-    const sessions = this.ctx.get('sessions')
-    if (sessions === undefined || typeof sessions.flush !== 'function') {
-      pending.flushing = false
-      if (this.renamePending === pending) this.renameNotice(t('rename.unconfirmedMissing', { title: pending.title }))
-      return
-    }
+    // The lookup is inside the boundary too: a raising `ctx.get('sessions')`
+    // must settle the pending rename, not leave it permanently Busy.
     try {
+      const sessions = this.ctx.get('sessions')
+      if (sessions === undefined || typeof sessions.flush !== 'function') {
+        if (this.renamePending === pending) this.renameNotice(t('rename.unconfirmedMissing', { title: pending.title }))
+        return
+      }
       const confirmed = await sessions.flush(this.agent.session)
       if (this.renamePending !== pending) return
       if (confirmed === true) {
@@ -15923,7 +15924,7 @@ export class SshTui {
     dialog.reject(new Error('rename cancelled'))
   }
 
-  private runCommand(text: string): void {
+  private runCommand(text: string, fromComposer = false): void {
     const raw = text.slice(1)
     const boundary = raw.search(/\s/u)
     const command = boundary === -1 ? raw : raw.slice(0, boundary)
@@ -16381,10 +16382,11 @@ export class SshTui {
         }
         break
     }
-    // Bare `/rename` opened a borrowed-field editor: the Composer draft is not
-    // the command text and must survive until the editor closes. Every other
-    // command (and `/rename <title>`) keeps the historical submit-and-clear.
-    if (!(command === 'rename' && arg.trim() === '' && !this.lineMode)) {
+    // Bare `/rename` opened a borrowed-field editor: a direct command dispatch
+    // preserves the Composer draft until the editor closes. When that same text
+    // came from the Composer, it is the command that was consumed, not a draft
+    // to restore, so only that source clears it here.
+    if (!(command === 'rename' && arg.trim() === '' && !this.lineMode && !fromComposer)) {
       this.setDraft('', 0)
       this.inputFolded = false
     }
