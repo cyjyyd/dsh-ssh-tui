@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { setLocale } from '../lib/i18n/index.js'
+import { listResumableSessionsProgressive } from '../lib/session-list.js'
 import { SshTui } from '../lib/tui.js'
 import { waitFor } from './wait.mjs'
 
@@ -50,6 +51,16 @@ test('the real Composer, title service and JSONL backend persist one rename acro
     writer = await ctx.sessionPersistence.create(live.header, {
       inheritedEventCount: live.inheritedEventCount,
     })
+    // A real session has a prompt and an existing title before the user renames
+    // it: the prompt keeps the picker from pruning a blank log, and the pinned
+    // title keeps automatic fallback out of the event count.
+    ctx.sessionTitle.rename(live, 'Initial title')
+    live.append('user/message', {
+      id: 'm0',
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'synthetic prompt' }],
+    }, { surfaceOp: 'append' })
 
     const agent = {
       id,
@@ -86,10 +97,9 @@ test('the real Composer, title service and JSONL backend persist one rename acro
 
     assert.equal(tui.sessionTitle, '端到端 🚀')
     const titleEvents = live.snapshotEvents().filter(event => event.type === 'session/title')
-    assert.equal(titleEvents.length, 1, 'one user title event reaches the live log')
-    assert.equal(titleEvents[0]?.data?.title, '端到端 🚀')
-    assert.equal(titleEvents[0]?.data?.source?.kind, 'user')
-    assert.equal(titleEvents[0]?.data?.messageSeqs?.length, 0)
+    assert.equal(titleEvents.at(-1)?.data?.title, '端到端 🚀')
+    assert.equal(titleEvents.at(-1)?.data?.source?.kind, 'user')
+    assert.equal(titleEvents.at(-1)?.data?.messageSeqs?.length, 0)
 
     assert.equal(readdirSync(root, { recursive: true })
       .filter(name => String(name).endsWith('.jsonl')).length, 1,
@@ -104,6 +114,38 @@ test('the real Composer, title service and JSONL backend persist one rename acro
     const storedTitle = stored.events.filter(event => event.type === 'session/title').at(-1)
     assert.equal(storedTitle?.data?.title, '端到端 🚀')
     assert.equal(storedTitle?.data?.source?.kind, 'user')
+
+    const indexPath = join(root, 'picker-index.json')
+    const firstListing = await listResumableSessionsProgressive(ctx.sessionPersistence, '', {
+      listHosts: async () => [],
+      indexPath,
+    })
+    assert.equal(firstListing.complete[0]?.label, '端到端 🚀')
+
+    // Open the same Session for writing again, then let the real TUI/Title
+    // service append a second title. The already-primed picker index must miss
+    // on the changed artifact and show the new label, not the cached one.
+    writer = await ctx.sessionPersistence.open(id, 'write')
+    tui.runCommand('/rename 第二个标题')
+    await waitFor(() => /Saved/i.test(tui.notice?.text ?? '') && (tui.notice?.text ?? '').includes('第二个标题'), {
+      describe: 'Saved for the second real JSONL flush',
+      detail: () => JSON.stringify(tui.notice),
+    })
+    await writer.close()
+    writer = undefined
+
+    const secondListing = await listResumableSessionsProgressive(ctx.sessionPersistence, '', {
+      listHosts: async () => [],
+      indexPath,
+    })
+    assert.equal(secondListing.complete[0]?.label, '第二个标题')
+
+    const secondReader = await ctx.sessionPersistence.open(id, 'read')
+    const secondStored = await secondReader.read()
+    await secondReader.close()
+    const secondTitle = secondStored.events.filter(event => event.type === 'session/title').at(-1)
+    assert.equal(secondTitle?.data?.title, '第二个标题')
+    assert.equal(secondTitle?.data?.source?.kind, 'user')
   } finally {
     if (tui !== undefined) await tui.dispose()
     if (writer !== undefined) await writer.close().catch(() => {})
