@@ -1,0 +1,20 @@
+{"at":"2026-11-09T14:50:32.197Z","event":"netns/veth ready","hostLink":"h11h31","nsLink":"h11s31","nsPid":21}
+{"at":"2026-11-09T14:50:32.329Z","event":"mock ready in netns","baseURL":"http://127.0.0.1:41235"}
+{"at":"2026-11-09T14:50:32.445Z","event":"sshd ready","sshdPid":39}
+{"at":"2026-11-09T14:50:39.061Z","assertion":"ssh-established","passed":true,"actual":"ESTABLISHED"}
+{"at":"2026-11-09T14:50:39.061Z","event":"first SSH TUI idle","sessionId":"main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438"}
+{"at":"2026-11-09T14:50:39.182Z","assertion":"turn-running","passed":true,"actual":"running"}
+{"at":"2026-11-09T14:50:39.725Z","event":"blackhole applied","rules":"-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n-A INPUT -i h11s31 -p tcp -m tcp --dport 2222 -j DROP\n-A OUTPUT -o h11s31 -p tcp -m tcp --sport 2222 -j DROP\n"}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"tcp-established-during-drop","passed":true,"actual":"ESTABLISHED"}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"no-fin-rst","passed":true,"actual":true}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"host-alive","passed":true,"actual":true}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"session-running","passed":true,"actual":"running"}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"client-alive","passed":true,"actual":true}
+{"at":"2026-11-09T14:50:44.781Z","assertion":"client-quiet","passed":true,"actual":"quiet"}
+{"at":"2026-11-09T14:50:44.870Z","event":"blackhole removed"}
+{"at":"2026-11-09T14:50:46.507Z","assertion":"tcp-recovered","passed":true,"actual":"ESTABLISHED"}
+{"at":"2026-11-09T14:50:46.507Z","assertion":"recovered-responsive","passed":true,"actual":true}
+{"at":"2026-11-09T14:50:52.133Z","assertion":"one-user-message","passed":true,"actual":1}
+{"at":"2026-11-09T14:50:52.133Z","assertion":"transcript-once","passed":true,"actual":1}
+{"at":"2026-11-09T14:50:53.670Z","assertion":"reattach-ssh","passed":true,"actual":"ESTABLISHED"}
+{"at":"2026-11-09T14:50:53.676Z","assertion":"reattach-no-duplicate","passed":true,"actual":0}

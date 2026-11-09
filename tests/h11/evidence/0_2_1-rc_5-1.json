@@ -1,0 +1,192 @@
+{
+  "contract_version": "REL085-WIN-AUTO/v1",
+  "runner": {
+    "os": "Linux x64",
+    "machine": "h11-netns-1",
+    "utc_start": "2026-11-09T14:50:32.091Z",
+    "utc_end": "2026-11-09T14:50:53.849Z",
+    "session_id": 0,
+    "node": "v24.20.0",
+    "notes": "isolated netns/veth; real sshd and real DSH TUI; local synthetic mock provider"
+  },
+  "candidate": {
+    "relay_sha": "5ba9eff4ae90170ea8374781c06b3af5a38d46b7",
+    "relay_tarball_sha256": "a76ccf388fed33b9b94bbc57d9c2575c1fe0066d53918d352af87317df4be0e6"
+  },
+  "runs": [
+    {
+      "case_id": "H11-SSH-01",
+      "host": "0.2.1-rc.5",
+      "terminal": "posix-ssh-pty",
+      "mode": "REAL_SSH_NETWORK",
+      "status": "PASS",
+      "started_at": "2026-11-09T14:50:32.091Z",
+      "finished_at": "2026-11-09T14:50:53.849Z",
+      "assertions": [
+        {
+          "id": "ssh-established",
+          "kind": "tcp_state",
+          "expected": "ESTABLISHED",
+          "actual": "ESTABLISHED",
+          "passed": true
+        },
+        {
+          "id": "turn-running",
+          "kind": "session_state",
+          "expected": "running",
+          "actual": "running",
+          "passed": true,
+          "detail": "{\"lock\":{\"path\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-locks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438-7e49261d.json\",\"pid\":62,\"sessionId\":\"main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438\",\"startedAt\":\"2026-11-09T14:50:38.071Z\",\"bootId\":\"d63c5e6f-fe32-4428-8001-6e345e9217a1\",\"pidStart\":\"64734940\",\"tty\":\"/dev/pts/1\",\"sock\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-socks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d5-7e49261d.sock\",\"state\":\"attached\",\"disconnectPolicy\":\"pause\",\"agentStatus\":\"idle\"},\"turn\":\"running\"}"
+        },
+        {
+          "id": "tcp-established-during-drop",
+          "kind": "tcp_state",
+          "expected": "ESTABLISHED",
+          "actual": "ESTABLISHED",
+          "passed": true,
+          "detail": "State      Recv-Q Send-Q                          Local Address:Port                 Peer Address:Port Process                     \nTIME-WAIT  0      0                                  10.231.0.1:34186                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:33244                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:60558                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:34192                  10.231.0.2:2222                             \nESTAB      0      1656                               10.231.0.1:60562                  10.231.0.2:2222  users:((\"ssh\",pid=45,fd=3))\nTIME-WAIT  0      0                                  10.231.0.1:60556                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:34198                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:40868                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:33250                  10.231.0.2:2222                             "
+        },
+        {
+          "id": "no-fin-rst",
+          "kind": "no_fin_or_rst",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        },
+        {
+          "id": "host-alive",
+          "kind": "host_alive",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "detail": "{\"path\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-locks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438-7e49261d.json\",\"pid\":62,\"sessionId\":\"main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438\",\"startedAt\":\"2026-11-09T14:50:38.071Z\",\"bootId\":\"d63c5e6f-fe32-4428-8001-6e345e9217a1\",\"pidStart\":\"64734940\",\"tty\":\"/dev/pts/1\",\"sock\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-socks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d5-7e49261d.sock\",\"state\":\"attached\",\"disconnectPolicy\":\"pause\",\"agentStatus\":\"idle\"}"
+        },
+        {
+          "id": "session-running",
+          "kind": "session_state",
+          "expected": "running",
+          "actual": "running",
+          "passed": true,
+          "detail": "{\"lock\":{\"path\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-locks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438-7e49261d.json\",\"pid\":62,\"sessionId\":\"main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d59438\",\"startedAt\":\"2026-11-09T14:50:38.071Z\",\"bootId\":\"d63c5e6f-fe32-4428-8001-6e345e9217a1\",\"pidStart\":\"64734940\",\"tty\":\"/dev/pts/1\",\"sock\":\"/tmp/h11-0.2.1-rc.5-1-m4ERJp/home/tui-socks/main-session-h11-f20d7d4c-7a14-4f2c-8877-795db5d5-7e49261d.sock\",\"state\":\"attached\",\"disconnectPolicy\":\"pause\",\"agentStatus\":\"idle\"},\"turn\":\"running\"}"
+        },
+        {
+          "id": "client-alive",
+          "kind": "client_alive",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        },
+        {
+          "id": "client-quiet",
+          "kind": "client_quiet",
+          "expected": true,
+          "actual": "quiet",
+          "passed": true,
+          "detail": "11016->11516->11516 in 5056ms"
+        },
+        {
+          "id": "tcp-recovered",
+          "kind": "tcp_state",
+          "expected": "ESTABLISHED",
+          "actual": "ESTABLISHED",
+          "passed": true,
+          "detail": "State      Recv-Q Send-Q                          Local Address:Port                 Peer Address:Port Process                     \nTIME-WAIT  0      0                                  10.231.0.1:34186                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:33244                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:60558                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:34192                  10.231.0.2:2222                             \nESTAB      0      0                                  10.231.0.1:60562                  10.231.0.2:2222  users:((\"ssh\",pid=45,fd=3))\nTIME-WAIT  0      0                                  10.231.0.1:60556                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:34198                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:40868                  10.231.0.2:2222                             \nTIME-WAIT  0      0                                  10.231.0.1:33250                  10.231.0.2:2222                             "
+        },
+        {
+          "id": "recovered-responsive",
+          "kind": "reconnect_succeeds",
+          "expected": true,
+          "actual": true,
+          "passed": true
+        },
+        {
+          "id": "one-user-message",
+          "kind": "user_message_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true
+        },
+        {
+          "id": "transcript-once",
+          "kind": "transcript_contains_once",
+          "expected": 1,
+          "actual": 1,
+          "passed": true
+        },
+        {
+          "id": "reattach-ssh",
+          "kind": "tcp_state",
+          "expected": "ESTABLISHED",
+          "actual": "ESTABLISHED",
+          "passed": true,
+          "detail": "State      Recv-Q Send-Q                          Local Address:Port            Peer Address:Port Process                      \nTIME-WAIT  0      0                                  10.231.0.1:34186             10.231.0.2:2222                              \nTIME-WAIT  0      0                                  10.231.0.1:60558             10.231.0.2:2222                              \nTIME-WAIT  0      0                                  10.231.0.1:34192             10.231.0.2:2222                              \nTIME-WAIT  0      0                                  10.231.0.1:60562             10.231.0.2:2222                              \nTIME-WAIT  0      0                                  10.231.0.1:60556             10.231.0.2:2222                              \nTIME-WAIT  0      0                                  10.231.0.1:34198             10.231.0.2:2222                              \nESTAB      0      0                                  10.231.0.1:36782             10.231.0.2:2222  users:((\"ssh\",pid=112,fd=3))\nTIME-WAIT  0      0                                  10.231.0.1:33250             10.231.0.2:2222                              "
+        },
+        {
+          "id": "reattach-no-duplicate",
+          "kind": "duplicate_transcript_rows",
+          "expected": 0,
+          "actual": 0,
+          "passed": true
+        }
+      ],
+      "evidence": [
+        {
+          "type": "tcp_state",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/tcp-before.txt",
+          "sha256": "067ff90493c51b1be0a0a42793ed9b73519c887c333d9069c47ecbbe01704788"
+        },
+        {
+          "type": "tcp_state",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/tcp-during.txt",
+          "sha256": "01cfb9bc967272f2af64946cd0e9f202fd23751136114e5ced8e43eded5fe4c2"
+        },
+        {
+          "type": "session_log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/session-first.jsonl",
+          "sha256": "53fa3f55e5027d00e747c4190b06561d35c7bea309037e88821eccedc403a585"
+        },
+        {
+          "type": "log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/timeline.jsonl",
+          "sha256": "3802eabd0e0987a6791444c095608c4cee5ddb784143323e67f342b93d8a2c5c"
+        },
+        {
+          "type": "log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/sshd.log",
+          "sha256": "93e38f01317b14e4579610412c196442fd0760482871964a98881b2619b33d57"
+        },
+        {
+          "type": "log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/timeline.jsonl",
+          "sha256": "3802eabd0e0987a6791444c095608c4cee5ddb784143323e67f342b93d8a2c5c"
+        },
+        {
+          "type": "log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/sshd.log",
+          "sha256": "b568ecec8d3ac464c74568a61df2e9bf017ac360e3d2425112b8445680e2d9a8"
+        },
+        {
+          "type": "log",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1/mock.log",
+          "sha256": "1bd0494316626ee7bbfe4fb9f1758b428f9cfd1714ad91ac243684c370998d27"
+        },
+        {
+          "type": "json",
+          "path": "tests/h11/evidence/0_2_1-rc_5-1.json",
+          "description": "this result document"
+        }
+      ],
+      "cleanup": {
+        "status": "PASS",
+        "notes": "netns/veth, sshd, client, mock and disposable home are torn down"
+      },
+      "host_state": {
+        "pid": 62,
+        "alive": true,
+        "session_state": "running",
+        "tcp_state": "ESTABLISHED",
+        "fin_or_rst": false
+      }
+    }
+  ]
+}

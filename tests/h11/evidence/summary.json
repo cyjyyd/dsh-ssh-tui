@@ -1,0 +1,33 @@
+{
+  "contract_version": "REL085-WIN-AUTO/v1",
+  "runner": "linux",
+  "candidate": {
+    "relay_sha": "5ba9eff4ae90170ea8374781c06b3af5a38d46b7",
+    "relay_tarball_sha256": "a76ccf388fed33b9b94bbc57d9c2575c1fe0066d53918d352af87317df4be0e6"
+  },
+  "overall": "REAL_SSH_PASS",
+  "hosts": [
+    {
+      "host": "0.2.1-rc.5",
+      "status": "PASS",
+      "real_gui_pass": false,
+      "missing": [],
+      "failed": [],
+      "blocked": []
+    },
+    {
+      "host": "0.2.2-rc.1",
+      "status": "PASS",
+      "real_gui_pass": false,
+      "missing": [],
+      "failed": [],
+      "blocked": []
+    }
+  ],
+  "required_cases": [
+    "H11-SSH-01"
+  ],
+  "runs": 2,
+  "failures": [],
+  "warnings": []
+}

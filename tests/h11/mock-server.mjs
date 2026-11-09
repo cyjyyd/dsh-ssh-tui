@@ -4,8 +4,14 @@
  * network namespace so the SSH blackhole never touches provider traffic and the
  * host's firewall is not modified.
  */
-import { startMockLlmServer } from '/root/dsh-ssh-tui/node_modules/@deepseek-ai/dsh-llm-mock-server/lib/index.js'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import process from 'node:process'
+
+const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+const require = createRequire(join(ROOT, 'package.json'))
+const { startMockLlmServer } = await import(require.resolve('@deepseek-ai/dsh-llm-mock-server'))
 
 const port = Number(process.argv[2] ?? '0')
 const server = await startMockLlmServer({
