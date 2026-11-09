@@ -1,0 +1,36 @@
+Server listening on 10.231.0.2 port 2222.
+Connection from 10.231.0.1 port 60558 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 60558 ssh2 [preauth]
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 60558 ssh2: ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU
+User child is on pid 43
+Starting session: command for root from 10.231.0.1 port 60558 id 0
+Received disconnect from 10.231.0.1 port 60558:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 60558
+Connection from 10.231.0.1 port 60562 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 60562 ssh2 [preauth]
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 60562 ssh2: ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU
+User child is on pid 49
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+Starting session: command on pts/1 for root from 10.231.0.1 port 60562 id 0
+syslogin_perform_logout: logout() returned an error
+Close session: user root from 10.231.0.1 port 60562 id 0
+Received disconnect from 10.231.0.1 port 60562:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 60562
+Connection from 10.231.0.1 port 36782 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 36782 ssh2 [preauth]
+Accepted key ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU found at /tmp/h11-0.2.1-rc.5-1-m4ERJp/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 36782 ssh2: ED25519 SHA256:XkqfJjn3U86+7guSC0yU3/hDPAtbscpBUS9PNNYk3xU
+User child is on pid 116
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+Starting session: command on pts/1 for root from 10.231.0.1 port 36782 id 0
+Received disconnect from 10.231.0.1 port 36782:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 36782
+syslogin_perform_logout: logout() returned an error
+Received signal 15; terminating.

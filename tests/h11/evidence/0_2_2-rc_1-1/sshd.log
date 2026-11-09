@@ -1,0 +1,37 @@
+Server listening on 10.231.0.2 port 2222.
+Connection from 10.231.0.1 port 56378 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 56378 ssh2 [preauth]
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 56378 ssh2: ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs
+User child is on pid 44
+Starting session: command for root from 10.231.0.1 port 56378 id 0
+Close session: user root from 10.231.0.1 port 56378 id 0
+Received disconnect from 10.231.0.1 port 56378:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 56378
+Connection from 10.231.0.1 port 56384 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 56384 ssh2 [preauth]
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 56384 ssh2: ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs
+User child is on pid 50
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+Starting session: command on pts/1 for root from 10.231.0.1 port 56384 id 0
+syslogin_perform_logout: logout() returned an error
+Close session: user root from 10.231.0.1 port 56384 id 0
+Received disconnect from 10.231.0.1 port 56384:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 56384
+Connection from 10.231.0.1 port 44226 on 10.231.0.2 port 2222 rdomain ""
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Postponed publickey for root from 10.231.0.1 port 44226 ssh2 [preauth]
+Accepted key ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs found at /tmp/h11-0.2.2-rc.1-1-pGAE3Q/authorized_keys:1
+Accepted publickey for root from 10.231.0.1 port 44226 ssh2: ED25519 SHA256:UW5BqWwLcYQJNY0OAF08MB4n3Njd7k1r1U9vt+rU8Vs
+User child is on pid 117
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+lastlog_openseek: Couldn't stat /var/log/lastlog: No such file or directory
+Starting session: command on pts/1 for root from 10.231.0.1 port 44226 id 0
+Received disconnect from 10.231.0.1 port 44226:11: disconnected by user
+Disconnected from user root 10.231.0.1 port 44226
+syslogin_perform_logout: logout() returned an error
+Received signal 15; terminating.
