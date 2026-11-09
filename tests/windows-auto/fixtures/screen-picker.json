@@ -1,0 +1,7 @@
+{
+  "fixture_id": "screen-picker-001",
+  "synthetic": true,
+  "draft": "draft must survive the picker",
+  "commands": ["/status", "/model"],
+  "cancel_key": "\u001b"
+}

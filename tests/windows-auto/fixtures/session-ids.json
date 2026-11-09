@@ -1,0 +1,9 @@
+{
+  "fixture_id": "session-ids-001",
+  "synthetic": true,
+  "ids": [
+    "main-session-win-auto-0001",
+    "main-session-win-auto-0002",
+    "main-session-win-auto-0003"
+  ]
+}

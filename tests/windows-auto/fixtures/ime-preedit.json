@@ -1,0 +1,10 @@
+{
+  "fixture_id": "ime-pinyin-001",
+  "synthetic": true,
+  "ime": "Microsoft Pinyin",
+  "preedit": "zhongguo",
+  "candidates": ["中国", "中过"],
+  "commit": "中国",
+  "forbidden_before_commit": ["zhongguo", "zhōngguó"],
+  "expected_cursor": "end"
+}

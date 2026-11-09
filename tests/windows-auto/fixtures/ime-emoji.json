@@ -1,0 +1,9 @@
+{
+  "fixture_id": "ime-emoji-001",
+  "synthetic": true,
+  "preedit": "nihao",
+  "commit": "你好🙂",
+  "forbidden_before_commit": ["nihao"],
+  "expected_cursor": "end",
+  "expected_codepoints": ["你", "好", "🙂"]
+}

@@ -1,0 +1,6 @@
+{
+  "fixture_id": "escape-001",
+  "synthetic": true,
+  "keys": ["\u001b", "\u001b[A", "\u001b[200~第一行\n第二行\u001b[201~", "\u001b"],
+  "expect": "no literal ESC text in composer or transcript"
+}

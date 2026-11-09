@@ -1,0 +1,1163 @@
+{
+  "contract_version": "REL085-WIN-AUTO/v1",
+  "contract_status": "TEST_ONLY_FROZEN",
+  "generated_utc": "2026-11-09T14:35:00Z",
+  "owner_issue": 63,
+  "candidate": {
+    "relay_sha": "5ba9eff4ae90170ea8374781c06b3af5a38d46b7",
+    "relay_tarball_sha256": "a76ccf388fed33b9b94bbc57d9c2575c1fe0066d53918d352af87317df4be0e6",
+    "relay_tarball_sha1": "54e5e1a1dfd60bc959d5e800c79c33ffa17d4ea2",
+    "relay_tarball_bytes": 1591996,
+    "relay_tarball_files": 260,
+    "node": ">=24.9.0",
+    "targets": [
+      {
+        "dsh": "0.2.1-rc.5",
+        "cordis": "4.0.5",
+        "schemastery": "3.18.5",
+        "dsh_packages": 296,
+        "install_packages": 617,
+        "single_family": true,
+        "duplicates": 0
+      },
+      {
+        "dsh": "0.2.2-rc.1",
+        "cordis": "4.1.0",
+        "schemastery": "3.19.0",
+        "dsh_packages": 320,
+        "install_packages": 655,
+        "single_family": true,
+        "duplicates": 0
+      }
+    ],
+    "install_rule": "Install the exact candidate tarball with the exact Host family. Pin every DSH family package and the Host's Cordis/Schemastery roots; require one version per DSH package name and zero nested duplicates. Reject any tree containing two DSH versions.",
+    "install_command": "npm install --strict-peer-deps --ignore-scripts --no-audit --no-fund <candidate.tgz> <exact-dsh-family-and-roots>",
+    "forbidden_install_flags": [
+      "--force",
+      "--legacy-peer-deps"
+    ],
+    "source_install_evidence": "G2 #62 exact tarball strict installs: 617 packages/296 DSH/0 duplicates (rc.5), 655/320/0 (0.2.2)"
+  },
+  "modes": [
+    {
+      "id": "REAL_GUI",
+      "description": "Real interactive Windows desktop and real terminal window; mode may qualify as REAL_GUI_PASS."
+    },
+    {
+      "id": "SIMULATED_CONPTY",
+      "description": "Scripted ConPTY or capability simulation; may PASS the scripted check but never qualifies as REAL_GUI_PASS."
+    },
+    {
+      "id": "REAL_SSH_NETWORK",
+      "description": "Real SSH transport over an isolated network namespace/veth; may PASS only when packets are dropped without FIN/RST."
+    }
+  ],
+  "statuses": [
+    "PASS",
+    "FAIL",
+    "SKIP",
+    "NOT_MEASURED",
+    "BLOCKED_ENV"
+  ],
+  "evidence_types": [
+    "json",
+    "log",
+    "screenshot",
+    "clipboard",
+    "hwnd",
+    "uia",
+    "ime_state",
+    "session_log",
+    "tcp_state"
+  ],
+  "window_evidence": {
+    "method": "Win32 GetClassNameW + GetWindowThreadProcessId + process ancestry + IsWindowVisible",
+    "forbidden_evidence": [
+      "WT_SESSION alone",
+      "TERM alone",
+      "SESSIONNAME alone",
+      "screenshot alone",
+      "process name alone"
+    ],
+    "required_fields": [
+      "hwnd",
+      "window_class",
+      "window_title",
+      "pid",
+      "process_name",
+      "visible",
+      "window_rect",
+      "terminal_kind"
+    ]
+  },
+  "result_contract": {
+    "schema": "tests/windows-auto/result.schema.json",
+    "summary_command": "node scripts/win-auto-summarize.mjs --contract tests/windows-auto/gate-contract.v1.json --results <results.json>",
+    "pass_rule": "A case counts as REAL_GUI_PASS only when mode=REAL_GUI, status=PASS, every assertion passed, and min_evidence includes json plus the case-specific evidence. A SIMULATED_CONPTY PASS never satisfies a REAL_GUI case. Missing required cases are NOT_MEASURED, not PASS.",
+    "required_evidence_for_pass": [
+      "json"
+    ],
+    "per_host": true,
+    "unknown_cases_fail": true,
+    "duplicate_runs_fail": true
+  },
+  "fixture_manifest": [
+    {
+      "path": "tests/windows-auto/fixtures/ime-preedit.json",
+      "sha256": "19bcd7ec73c6c1e77fef2d9fc2d465a217dc4c0f7489a1816be1a4338ae589b3"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/ime-emoji.json",
+      "sha256": "719df275d4b8999fa2208b244f2ec8f672edc604c8949b8f5f5ed6f8e72c7695"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/paste-multiline.txt",
+      "sha256": "33cab0c3d77b9a843949e411b8da00bce41f4c00ca23d66a457a11ef1cdaecc5"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/mouse-copy.txt",
+      "sha256": "a8ead6a3e39384beb36d6236af84b527766a6120cb24067244d1a6956771d2f1"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/escape-sequence.json",
+      "sha256": "55690a672bda38664cb5b094b893754c555fd44d3c89b94e0c4a90562b523847"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/session-ids.json",
+      "sha256": "f1ac26fcb67294813ca6b2c15fc527bd62361af3afd6c7b90e3c2782f75dedc1"
+    },
+    {
+      "path": "tests/windows-auto/fixtures/screen-picker.json",
+      "sha256": "ffa09c3200067347a935cd196a9f2c8ca98acd2cb7d28bd6a949610e98616b05"
+    }
+  ],
+  "cases": [
+    {
+      "id": "WIN-ENV-01",
+      "title": "Real interactive Windows desktop is available",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [],
+      "stages": [
+        {
+          "id": "probe",
+          "inputs": {
+            "action": "capture_environment"
+          },
+          "assertions": [
+            {
+              "id": "desktop-interactive",
+              "kind": "desktop_interactive",
+              "expected": true,
+              "description": "The process has an unlocked interactive desktop, not Session 0/Service."
+            },
+            {
+              "id": "session-nonzero",
+              "kind": "session_id_nonzero",
+              "expected": true,
+              "description": "The automation runs in a logged-on user session with a non-zero Session ID."
+            },
+            {
+              "id": "windows-build",
+              "kind": "windows_build_present",
+              "expected": true,
+              "description": "Windows version/build is recorded."
+            },
+            {
+              "id": "foreground-available",
+              "kind": "foreground_window_available",
+              "expected": true,
+              "description": "A foreground window can be queried and activated."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 30000,
+      "cleanup": [
+        "release any activated window",
+        "restore original foreground window"
+      ],
+      "failure_attribution": [
+        "BLOCKED_ENV",
+        "AUTOMATION_DEFECT"
+      ],
+      "min_evidence": [
+        "json",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-CONHOST-01",
+      "title": "Real Console Host window, not a ConPTY simulation",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/session-ids.json"
+      ],
+      "stages": [
+        {
+          "id": "launch",
+          "inputs": {
+            "action": "launch_tui",
+            "terminal": "conhost",
+            "session_id": "main-session-win-auto-0001"
+          },
+          "assertions": [
+            {
+              "id": "window-class",
+              "kind": "window_class",
+              "expected": "ConsoleWindowClass",
+              "description": "Top-level HWND class is exactly ConsoleWindowClass."
+            },
+            {
+              "id": "conhost-ancestry",
+              "kind": "process_ancestry_contains",
+              "expected": "conhost.exe",
+              "description": "The terminal process ancestry contains conhost.exe."
+            },
+            {
+              "id": "window-visible",
+              "kind": "window_visible",
+              "expected": true,
+              "description": "HWND is visible and has a non-zero rect."
+            },
+            {
+              "id": "composer-visible",
+              "kind": "composer_visible",
+              "expected": true,
+              "description": "The TUI composer is readable from the console buffer/UI Automation."
+            }
+          ]
+        },
+        {
+          "id": "screen",
+          "inputs": {
+            "action": "send_keys",
+            "text": "/status\r"
+          },
+          "assertions": [
+            {
+              "id": "report-screen",
+              "kind": "screen_kind",
+              "expected": "report",
+              "description": "A report Screen opens."
+            },
+            {
+              "id": "screen-visible",
+              "kind": "screen_visible",
+              "expected": true,
+              "description": "The report body is visible."
+            }
+          ]
+        },
+        {
+          "id": "leave-screen",
+          "inputs": {
+            "action": "send_keys",
+            "text": "\u001b"
+          },
+          "assertions": [
+            {
+              "id": "composer-restored",
+              "kind": "composer_visible",
+              "expected": true,
+              "description": "Esc returns to the workspace composer."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "send /exit",
+        "kill only the disposable terminal process group"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "hwnd",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-WT-01",
+      "title": "Real Windows Terminal window, not a generic console",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/session-ids.json"
+      ],
+      "stages": [
+        {
+          "id": "launch",
+          "inputs": {
+            "action": "launch_tui",
+            "terminal": "windows-terminal",
+            "session_id": "main-session-win-auto-0002"
+          },
+          "assertions": [
+            {
+              "id": "window-class",
+              "kind": "window_class",
+              "expected": "CASCADIA_HOSTING_WINDOW_CLASS",
+              "description": "Top-level HWND class identifies Windows Terminal."
+            },
+            {
+              "id": "wt-ancestry",
+              "kind": "process_ancestry_contains",
+              "expected": "WindowsTerminal.exe",
+              "description": "The terminal process ancestry contains WindowsTerminal.exe."
+            },
+            {
+              "id": "window-visible",
+              "kind": "window_visible",
+              "expected": true,
+              "description": "HWND is visible and has a non-zero rect."
+            },
+            {
+              "id": "composer-visible",
+              "kind": "composer_visible",
+              "expected": true,
+              "description": "The TUI composer is readable from the terminal buffer/UI Automation."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "send /exit",
+        "close only the disposable WT window"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "hwnd",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-IME-01",
+      "title": "Microsoft Pinyin preedit never enters composer/transcript/request",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/ime-preedit.json"
+      ],
+      "stages": [
+        {
+          "id": "compose",
+          "inputs": {
+            "action": "ime_compose",
+            "text": "zhongguo",
+            "candidate": "\u4e2d\u56fd",
+            "ime": "Microsoft Pinyin"
+          },
+          "assertions": [
+            {
+              "id": "ime-enabled",
+              "kind": "ime_enabled",
+              "expected": "Microsoft Pinyin",
+              "description": "The active input method is Microsoft Pinyin, proven by IME state rather than a key injection."
+            },
+            {
+              "id": "composition-active",
+              "kind": "ime_composition_active",
+              "expected": true,
+              "description": "The IME composition window is active."
+            },
+            {
+              "id": "preedit-not-composer",
+              "kind": "composer_text_excludes",
+              "expected": [
+                "zhongguo",
+                "zh\u014dnggu\u00f3"
+              ],
+              "description": "Uncommitted pinyin is not in the composer."
+            },
+            {
+              "id": "preedit-not-transcript",
+              "kind": "transcript_excludes",
+              "expected": [
+                "zhongguo",
+                "zh\u014dnggu\u00f3"
+              ],
+              "description": "Uncommitted pinyin is not in the transcript."
+            },
+            {
+              "id": "preedit-not-request",
+              "kind": "model_request_excludes",
+              "expected": [
+                "zhongguo",
+                "zh\u014dnggu\u00f3"
+              ],
+              "description": "Uncommitted pinyin never reaches a model request."
+            }
+          ]
+        },
+        {
+          "id": "commit",
+          "inputs": {
+            "action": "ime_commit",
+            "candidate": "\u4e2d\u56fd"
+          },
+          "assertions": [
+            {
+              "id": "commit-composer",
+              "kind": "composer_text_equals",
+              "expected": "\u4e2d\u56fd",
+              "description": "The committed Chinese text is exactly in the composer."
+            },
+            {
+              "id": "commit-cursor",
+              "kind": "cursor_at_end",
+              "expected": true,
+              "description": "The caret is after the committed text."
+            },
+            {
+              "id": "commit-transcript",
+              "kind": "transcript_contains_once",
+              "expected": "\u4e2d\u56fd",
+              "description": "The committed text appears once in the transcript when submitted."
+            },
+            {
+              "id": "commit-request",
+              "kind": "model_request_contains",
+              "expected": "\u4e2d\u56fd",
+              "description": "The submitted model request carries the committed text."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 90000,
+      "cleanup": [
+        "switch IME back to the original input method",
+        "clear disposable composer/transcript"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "hwnd",
+        "ime_state",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-IME-02",
+      "title": "Chinese plus emoji commit preserves codepoints and caret",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/ime-emoji.json"
+      ],
+      "stages": [
+        {
+          "id": "compose",
+          "inputs": {
+            "action": "ime_compose",
+            "text": "nihao",
+            "candidate": "\u4f60\u597d\ud83d\ude42",
+            "ime": "Microsoft Pinyin"
+          },
+          "assertions": [
+            {
+              "id": "ime-enabled",
+              "kind": "ime_enabled",
+              "expected": "Microsoft Pinyin",
+              "description": "Microsoft Pinyin is active."
+            },
+            {
+              "id": "preedit-not-composer",
+              "kind": "composer_text_excludes",
+              "expected": [
+                "nihao"
+              ],
+              "description": "Uncommitted pinyin is absent from the composer."
+            }
+          ]
+        },
+        {
+          "id": "commit",
+          "inputs": {
+            "action": "ime_commit",
+            "candidate": "\u4f60\u597d\ud83d\ude42"
+          },
+          "assertions": [
+            {
+              "id": "commit-text",
+              "kind": "composer_text_equals",
+              "expected": "\u4f60\u597d\ud83d\ude42",
+              "description": "Committed Chinese and emoji are exact."
+            },
+            {
+              "id": "commit-cursor",
+              "kind": "cursor_at_end",
+              "expected": true,
+              "description": "Caret follows the emoji."
+            },
+            {
+              "id": "no-replacement",
+              "kind": "composer_text_excludes",
+              "expected": [
+                "\ufffd",
+                "??"
+              ],
+              "description": "No replacement characters or lost emoji."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "switch IME back",
+        "clear disposable composer"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "ime_state",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-PASTE-01",
+      "title": "Chinese multiline paste submits exactly once",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/paste-multiline.txt"
+      ],
+      "stages": [
+        {
+          "id": "paste",
+          "inputs": {
+            "action": "paste_clipboard",
+            "fixture": "tests/windows-auto/fixtures/paste-multiline.txt"
+          },
+          "assertions": [
+            {
+              "id": "paste-text",
+              "kind": "composer_text_equals_fixture",
+              "expected": "tests/windows-auto/fixtures/paste-multiline.txt",
+              "description": "Every pasted line is present exactly."
+            },
+            {
+              "id": "paste-no-submit",
+              "kind": "turn_count",
+              "expected": 0,
+              "description": "Pasting newlines does not submit a turn."
+            }
+          ]
+        },
+        {
+          "id": "submit",
+          "inputs": {
+            "action": "send_keys",
+            "text": "\r"
+          },
+          "assertions": [
+            {
+              "id": "one-turn",
+              "kind": "turn_count",
+              "expected": 1,
+              "description": "One Enter submits exactly one turn."
+            },
+            {
+              "id": "one-user-message",
+              "kind": "user_message_count",
+              "expected": 1,
+              "description": "One user message reaches the Host."
+            },
+            {
+              "id": "transcript-once",
+              "kind": "transcript_contains_once_fixture",
+              "expected": "tests/windows-auto/fixtures/paste-multiline.txt",
+              "description": "The multiline body appears once in the transcript."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 90000,
+      "cleanup": [
+        "send /exit",
+        "restore clipboard"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT"
+      ],
+      "min_evidence": [
+        "json",
+        "clipboard",
+        "screenshot",
+        "session_log"
+      ]
+    },
+    {
+      "id": "WIN-MOUSE-01",
+      "title": "Mouse drag selection and copy return the selected synthetic text",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/mouse-copy.txt"
+      ],
+      "stages": [
+        {
+          "id": "select-copy",
+          "inputs": {
+            "action": "mouse_drag_copy",
+            "fixture": "tests/windows-auto/fixtures/mouse-copy.txt"
+          },
+          "assertions": [
+            {
+              "id": "clipboard",
+              "kind": "clipboard_equals",
+              "expected": "WIN-AUTO-MOUSE-\u590d\u5236\u6837\u672c-001",
+              "description": "Clipboard contains exactly the selected synthetic line."
+            },
+            {
+              "id": "composer-unchanged",
+              "kind": "composer_text_equals",
+              "expected": "",
+              "description": "Selection/copy did not edit the composer."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "restore clipboard",
+        "clear selection"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "clipboard",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-RESIZE-01",
+      "title": "Resize keeps composer and footer visible",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [],
+      "stages": [
+        {
+          "id": "resize",
+          "inputs": {
+            "action": "resize",
+            "sizes": [
+              [
+                80,
+                24
+              ],
+              [
+                120,
+                36
+              ],
+              [
+                60,
+                20
+              ],
+              [
+                80,
+                24
+              ]
+            ]
+          },
+          "assertions": [
+            {
+              "id": "composer-visible",
+              "kind": "composer_visible",
+              "expected": true,
+              "description": "Composer is visible at every size."
+            },
+            {
+              "id": "footer-visible",
+              "kind": "footer_visible",
+              "expected": true,
+              "description": "Status/footer is visible at every size."
+            },
+            {
+              "id": "no-replacement",
+              "kind": "composer_text_excludes",
+              "expected": [
+                "\ufffd"
+              ],
+              "description": "No replacement glyphs in the composer."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "restore original window size"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT"
+      ],
+      "min_evidence": [
+        "json",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-SCREEN-01",
+      "title": "Report Screen opens, pages and returns to the composer",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/screen-picker.json"
+      ],
+      "stages": [
+        {
+          "id": "open",
+          "inputs": {
+            "action": "send_keys",
+            "text": "/status\r"
+          },
+          "assertions": [
+            {
+              "id": "screen-kind",
+              "kind": "screen_kind",
+              "expected": "report",
+              "description": "Report Screen owns the workspace."
+            },
+            {
+              "id": "screen-visible",
+              "kind": "screen_visible",
+              "expected": true,
+              "description": "Report body and pager are visible."
+            }
+          ]
+        },
+        {
+          "id": "leave",
+          "inputs": {
+            "action": "send_keys",
+            "text": "\u001b"
+          },
+          "assertions": [
+            {
+              "id": "composer-restored",
+              "kind": "composer_visible",
+              "expected": true,
+              "description": "Esc returns to the workspace."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "send /exit"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT"
+      ],
+      "min_evidence": [
+        "json",
+        "screenshot",
+        "session_log"
+      ]
+    },
+    {
+      "id": "WIN-PICKER-01",
+      "title": "Picker opens and Esc preserves the composer draft",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "conhost",
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/screen-picker.json"
+      ],
+      "stages": [
+        {
+          "id": "draft",
+          "inputs": {
+            "action": "send_keys",
+            "text": "draft must survive the picker"
+          },
+          "assertions": [
+            {
+              "id": "draft-visible",
+              "kind": "composer_text_equals",
+              "expected": "draft must survive the picker",
+              "description": "Draft is in the composer."
+            }
+          ]
+        },
+        {
+          "id": "picker",
+          "inputs": {
+            "action": "send_keys",
+            "text": "/model\r"
+          },
+          "assertions": [
+            {
+              "id": "picker-visible",
+              "kind": "picker_visible",
+              "expected": true,
+              "description": "Model picker is visible."
+            }
+          ]
+        },
+        {
+          "id": "cancel",
+          "inputs": {
+            "action": "send_keys",
+            "text": "\u001b"
+          },
+          "assertions": [
+            {
+              "id": "draft-preserved",
+              "kind": "composer_text_equals",
+              "expected": "draft must survive the picker",
+              "description": "Esc preserves the composer draft."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 60000,
+      "cleanup": [
+        "Esc any remaining layer",
+        "send /exit"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT"
+      ],
+      "min_evidence": [
+        "json",
+        "screenshot"
+      ]
+    },
+    {
+      "id": "WIN-ATTACH-01",
+      "title": "Closing the real terminal leaves the Host alive and reattach is append-only",
+      "runner_os": "windows",
+      "mode": "REAL_GUI",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "windows-terminal"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/session-ids.json"
+      ],
+      "stages": [
+        {
+          "id": "turn",
+          "inputs": {
+            "action": "start_turn",
+            "text": "H11-WIN-ATTACH-MARKER"
+          },
+          "assertions": [
+            {
+              "id": "turn-started",
+              "kind": "turn_count",
+              "expected": 1,
+              "description": "A turn is running before the window closes."
+            }
+          ]
+        },
+        {
+          "id": "close",
+          "inputs": {
+            "action": "close_terminal_window"
+          },
+          "assertions": [
+            {
+              "id": "host-alive",
+              "kind": "host_alive",
+              "expected": true,
+              "description": "The detached Host remains alive."
+            },
+            {
+              "id": "session-state",
+              "kind": "session_state",
+              "expected": "running-detached",
+              "description": "The lock records a running detached Host."
+            }
+          ]
+        },
+        {
+          "id": "reattach",
+          "inputs": {
+            "action": "resume_session",
+            "session_id": "main-session-win-auto-0003"
+          },
+          "assertions": [
+            {
+              "id": "reconnect",
+              "kind": "reconnect_succeeds",
+              "expected": true,
+              "description": "A new terminal attaches to the same Host."
+            },
+            {
+              "id": "marker-once",
+              "kind": "transcript_contains_once",
+              "expected": "H11-WIN-ATTACH-MARKER",
+              "description": "The pre-drop marker appears exactly once."
+            },
+            {
+              "id": "no-duplicate-rows",
+              "kind": "duplicate_transcript_rows",
+              "expected": 0,
+              "description": "Reattach adds no duplicate transcript rows."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 120000,
+      "cleanup": [
+        "resume and send /exit",
+        "kill only the disposable Host if still alive"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "hwnd",
+        "screenshot",
+        "session_log"
+      ]
+    },
+    {
+      "id": "H11-SSH-01",
+      "title": "Real SSH transport blackhole without FIN/RST preserves the Host and is append-only",
+      "runner_os": "linux",
+      "mode": "REAL_SSH_NETWORK",
+      "required": true,
+      "hosts": [
+        "0.2.1-rc.5",
+        "0.2.2-rc.1"
+      ],
+      "terminals": [
+        "posix-ssh-pty"
+      ],
+      "fixtures": [
+        "tests/windows-auto/fixtures/session-ids.json"
+      ],
+      "stages": [
+        {
+          "id": "establish",
+          "inputs": {
+            "action": "start_ssh_turn",
+            "text": "H11-SSH-MARKER",
+            "isolation": "netns-veth"
+          },
+          "assertions": [
+            {
+              "id": "tcp-established",
+              "kind": "tcp_state",
+              "expected": "ESTABLISHED",
+              "description": "The real SSH TCP connection is established."
+            },
+            {
+              "id": "turn-running",
+              "kind": "session_state",
+              "expected": "running",
+              "description": "The Host is running a turn."
+            }
+          ]
+        },
+        {
+          "id": "blackhole",
+          "inputs": {
+            "action": "drop_bidirectional",
+            "duration_ms": 5000,
+            "fin_or_rst": false
+          },
+          "assertions": [
+            {
+              "id": "tcp-still-established",
+              "kind": "tcp_state",
+              "expected": "ESTABLISHED",
+              "description": "Both endpoints still show ESTABLISHED during the drop."
+            },
+            {
+              "id": "no-fin-rst",
+              "kind": "no_fin_or_rst",
+              "expected": true,
+              "description": "No FIN/RST was observed; packets were silently dropped."
+            },
+            {
+              "id": "host-alive",
+              "kind": "host_alive",
+              "expected": true,
+              "description": "The Host process survives the silent cut."
+            },
+            {
+              "id": "session-running",
+              "kind": "session_state",
+              "expected": "running",
+              "description": "The lock still records a running Host."
+            }
+          ]
+        },
+        {
+          "id": "recover",
+          "inputs": {
+            "action": "remove_drop_and_probe"
+          },
+          "assertions": [
+            {
+              "id": "recover-connection",
+              "kind": "tcp_state",
+              "expected": "ESTABLISHED",
+              "description": "The same SSH connection recovers after rules are removed."
+            },
+            {
+              "id": "marker-once",
+              "kind": "transcript_contains_once",
+              "expected": "H11-SSH-MARKER",
+              "description": "The pre-cut marker appears exactly once after recovery."
+            },
+            {
+              "id": "one-user-message",
+              "kind": "user_message_count",
+              "expected": 1,
+              "description": "No duplicate user message/event was injected."
+            },
+            {
+              "id": "no-duplicate-rows",
+              "kind": "duplicate_transcript_rows",
+              "expected": 0,
+              "description": "Reattach/recovery adds no duplicate transcript rows."
+            }
+          ]
+        }
+      ],
+      "timeout_ms": 180000,
+      "cleanup": [
+        "remove iptables rules",
+        "terminate sshd/client/Host",
+        "delete veth and netns"
+      ],
+      "failure_attribution": [
+        "PRODUCT_DEFECT",
+        "AUTOMATION_DEFECT",
+        "INFRA",
+        "BLOCKED_ENV"
+      ],
+      "min_evidence": [
+        "json",
+        "log",
+        "tcp_state",
+        "session_log"
+      ]
+    }
+  ]
+}
