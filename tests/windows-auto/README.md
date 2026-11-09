@@ -43,7 +43,7 @@ node scripts/win-auto-summarize.mjs `
 Exit code `0` means `REAL_GUI_PASS`; `2` means `HOLD`, `FAIL`, `BLOCKED_ENV` or
 incomplete. `--runner linux` validates the H11 `REAL_SSH_NETWORK` case only.
 
-A result file has this shape (full schema in `result.schema.json`):
+Every `PASS` run must include a `json` evidence entry pointing at the result document itself (or an immutable snapshot); the summarizer also enforces each case's `min_evidence`. A result file has this shape (full schema in `result.schema.json`):
 
 ```json
 {
