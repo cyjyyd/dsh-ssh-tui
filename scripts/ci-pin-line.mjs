@@ -103,12 +103,14 @@ export const LINES = {
     presets: NEW_LINE_PRESETS,
     overrides: true,
     schemastery: '3.18.5',
+    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
   },
   '0.2.2-rc.1': {
     roots: RC022_LINE_ROOTS,
     presets: NEW_LINE_PRESETS,
     overrides: true,
     schemastery: '3.19.0',
+    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
   },
 }
 
