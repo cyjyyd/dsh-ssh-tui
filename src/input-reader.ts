@@ -544,6 +544,12 @@ export class InputReader {
     this.cancelHold()
     this.cancelPasteTail()
     this.pasteTail = ''
+    this.inPaste = false
+    this.held = ''
+    // A byte cut by the detach must not be completed against the next attach:
+    // `end()` flushes (and we discard) the partial UTF-8 tail; the same
+    // StringDecoder remains usable for the next attach.
+    this.decoder.end()
     this.guard.stop()
   }
 

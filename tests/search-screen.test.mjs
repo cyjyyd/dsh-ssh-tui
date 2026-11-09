@@ -1059,3 +1059,36 @@ test('G2: plain Enter returns to the list and ordinary read-only input stays ine
   assert.equal(stateOf(tui)?.mode, 'list')
   assert.equal(stateOf(tui)?.previewOffset, 0)
 })
+
+// ── F1: adjacent ownership fixes ───────────────────────────────────────────
+
+test('F1: an abandoned paste does not steal the next Screen paste', async () => {
+  const { tui } = makeTui()
+  tui.reader.options.pasteMarkerHoldMs = 25
+  openSetup(tui, 'old')
+  tui.handleData(Buffer.from('\u001b[200~secret'))
+  assert.equal(tui.onboarding?.field, 'oldsecret')
+  await tick(80)
+  tui.closeScreen()
+  openSetup(tui, 'new')
+  tui.handleData(Buffer.from('\u001b[200~second'))
+  assert.equal(tui.onboarding?.field, 'newsecond',
+    'the new Screen owns the new paste; the abandoned owner must not drop it')
+})
+
+test('F1: Search typing ignores C0 controls instead of inserting them', () => {
+  const { tui } = makeTui()
+  tui.runCommand('/find')
+  assert.equal(searchState(tui)?.query, '')
+  tui.handleData(Buffer.from('\u0017'))
+  assert.equal(searchState(tui)?.query, '', 'Ctrl+W is not query text')
+  tui.handleData(Buffer.from('deploy'))
+  assert.equal(searchState(tui)?.query, 'deploy')
+})
+
+test('F1: Search paste strips C0 controls but keeps printable text', () => {
+  const { tui } = makeTui()
+  tui.runCommand('/find')
+  tui.handleData(Buffer.from('\u001b[200~a\u0017b\u001b[201~'))
+  assert.equal(searchState(tui)?.query, 'ab')
+})
