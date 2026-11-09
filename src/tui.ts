@@ -921,7 +921,7 @@ export interface TuiConfig {
    */
   presetTrust?: string
   /** Notify the launcher of an explicit in-process selection change. */
-  onSelectionChanged?: (selection: ModelSelection) => void
+  onSelectionChanged?: (selection: ModelSelection) => boolean | void
   /**
    * Minimum milliseconds between paints while a turn is streaming.
    * Jump-host / proxied SSH can raise this so token ticks do not flood the
@@ -2033,7 +2033,7 @@ export class SshTui {
   private readonly providerName: string
   private readonly selectionRef: ModelSelectionRef | undefined
   private readonly subagentSelection: SubagentSelectionRef
-  private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
+  private readonly onSelectionChanged: ((selection: ModelSelection) => boolean | void) | undefined
   private readonly onRouteSettled: ((route: Omit<SessionRoute, 'updatedAt'>) => void) | undefined
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
@@ -11441,6 +11441,20 @@ export class SshTui {
     await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id))
   }
 
+  /**
+   * Commit one route only after the Host accepts it.
+   *
+   * On 0.2.1 the callback is the mutable-ref listener and returns nothing. On
+   * 0.2.2 the launcher writes Agent.model.select and returns false if the Host
+   * rejects the route; throwing here prevents the UI cache, default persistence
+   * and success notice from claiming a route the Host never adopted.
+   */
+  private applySelection(next: ModelSelection): void {
+    const accepted = this.onSelectionChanged?.(next)
+    if (accepted === false) throw new Error(t('model.hostRejected'))
+    if (this.selectionRef !== undefined) this.selectionRef.current = next
+  }
+
   /** /provider: pick a provider, then its model (remembered route pre-filled). */
   private async runProviderCommand(): Promise<void> {
     const providers = this.listSelectableProviders()
@@ -11611,8 +11625,7 @@ export class SshTui {
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
-    if (this.selectionRef !== undefined) this.selectionRef.current = next
-    this.onSelectionChanged?.(next)
+    this.applySelection(next)
     await this.persistDefaultSelection(next)
     await this.rememberRoute({ ...next, provider: display })
     const kind = describeProviderRoute(display)
@@ -12078,8 +12091,7 @@ export class SshTui {
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
-    if (this.selectionRef !== undefined) this.selectionRef.current = next
-    this.onSelectionChanged?.(next)
+    this.applySelection(next)
     await this.persistDefaultSelection(next)
     await this.rememberRoute(next)
     const effortText = effort ?? t('effort.defaultExplicit')
@@ -14770,11 +14782,8 @@ export class SshTui {
         const envRef = 'DEEPSEEK_API_KEY'
         await this.saveCredential(credentials, envRef, state.key)
         const model = state.defaultModel ?? state.models[0] ?? 'deepseek-v4-pro'
+        this.applySelection({ provider: 'deepseek-official', model })
         await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: 'deepseek-official', model })
-        if (this.selectionRef !== undefined) {
-          this.selectionRef.current = { provider: 'deepseek-official', model }
-        }
-        this.onSelectionChanged?.({ provider: 'deepseek-official', model })
         await this.rememberRoute({ provider: 'deepseek-official', model })
         await this.syncSubagentToProvider('deepseek-official', state.models, previousParentProvider !== 'deepseek-official')
         if (state.baseUrl !== '' && settings !== undefined) {
@@ -14945,11 +14954,8 @@ export class SshTui {
             model,
             ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
           }
+          this.applySelection(selection)
           await this.ctx.get('agentDefaultModel')?.saveSelection(selection)
-          if (this.selectionRef !== undefined) {
-            this.selectionRef.current = selection
-          }
-          this.onSelectionChanged?.(selection)
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
           await this.onboardDone(t('onboard.customDone', { id: ownerId, model }))
