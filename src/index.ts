@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
+import { agentModelOf, currentAgentSelection, installModelSelectionCompat, selectAgentModel } from './dsh-compat.js'
 
 /** Read the user's `agent-default-model` straight from `$DSH_HOME/settings.yaml`. */
 function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
@@ -582,7 +583,14 @@ export function apply(ctx: Context, config: Config): void {
         ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
       }
       const setup = async (agentCtx: Context): Promise<void> => {
-        installModelSelection(agentCtx, selectionRef)
+        // 0.2.1 installs the two-argument ref listener; 0.2.2 removed that
+        // argument and owns selection through Agent.model. Arity is the public
+        // distinction between the two tagged packages.
+        installModelSelectionCompat(
+          installModelSelection as unknown as (...args: unknown[]) => unknown,
+          agentCtx,
+          selectionRef,
+        )
         await agentPresets?.mount(agentCtx)
       }
       await takeSessionLock(String(sessionId))
@@ -628,6 +636,11 @@ export function apply(ctx: Context, config: Config): void {
         await dropSessionLock()
         return
       }
+      // On 0.2.2 the Session's durable selection (pending/last used, with the
+      // launch options as fallback) is authoritative. Adopt it before mounting
+      // the TUI so a resume does not display a stale launch route.
+      const hostSelection = currentAgentSelection(handle.agent)
+      if (hostSelection !== undefined) selectionRef.current = hostSelection as ModelSelection
       const presetId = agentPresets?.composedPreset(handle.agent.ctx) ?? agentPresets?.defaultId
       // A profile that composes no roster names no preset, and the TUI's own
       // default is the standard composition either way; label it in the active
@@ -674,7 +687,13 @@ export function apply(ctx: Context, config: Config): void {
         // only place that knows the session is real.
         onRouteSettled: (settled) => { noteRoute(settled) },
         onSelectionChanged: (next) => {
+          // Only the 0.2.2 Agent has `model.select`; on 0.2.1 the two-argument
+          // listener above remains the route authority. Never double-write.
+          if (agentModelOf(handle?.agent) !== undefined && !selectAgentModel(handle?.agent, next)) {
+            return false
+          }
           liveSelection = next
+          return true
         },
         onDetach: async () => {
           // The display is gone; the Host has not decided yet whether it stays.

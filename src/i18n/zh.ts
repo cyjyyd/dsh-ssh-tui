@@ -799,6 +799,7 @@ export const zh: Record<string, string> = {
   'model.live': '端点实时列表',
   'model.xaiCatalog': 'SuperGrok 目录',
   'model.persistFailSettings': '默认选择未能固化：agentDefaultModel 不可用且 settings 写入失败（{error}）。本次切换仅当前会话生效，重启会回退到保存过的提供商。',
+  'model.hostRejected': 'Host 未接受所选模型/思考强度；仍沿用原路由。',
   'model.persistFailNone': '默认选择未能固化：settings 服务不可用。本次切换仅当前会话生效。',
   'provider.none': '没有可切换的提供商。用 /setup 先配置一条 API Key 路由。',
   'provider.pick': '选择提供商',

@@ -797,6 +797,7 @@ export const en: Record<string, string> = {
   'model.live': 'live endpoint list',
   'model.xaiCatalog': 'SuperGrok catalog',
   'model.persistFailSettings': 'Could not persist the default: agentDefaultModel unavailable and settings write failed ({error}). This session only; restart falls back.',
+  'model.hostRejected': 'The Host did not accept the selected model/effort; the previous route remains active.',
   'model.persistFailNone': 'Could not persist the default: settings service unavailable. This session only.',
   'provider.none': 'No providers to switch. /setup an API-key route first.',
   'provider.pick': 'Pick a provider',
