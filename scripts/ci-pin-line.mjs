@@ -103,14 +103,14 @@ export const LINES = {
     presets: NEW_LINE_PRESETS,
     overrides: true,
     schemastery: '3.18.5',
-    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
+    dropDev: ['@deepseek-ai/dsh-invariants'],
   },
   '0.2.2-rc.1': {
     roots: RC022_LINE_ROOTS,
     presets: NEW_LINE_PRESETS,
     overrides: true,
     schemastery: '3.19.0',
-    devPins: { '@deepseek-ai/dsh-invariants': '0.2.0-rc.2' },
+    dropDev: ['@deepseek-ai/dsh-invariants'],
   },
 }
 
@@ -168,6 +168,7 @@ export function pinManifest(manifest, line) {
   // on this line keeps a pin of its own and must not be overwritten by the
   // family rewrite (see the rc.2 table entry).
   for (const [name, pinned] of Object.entries(target.devPins ?? {})) dev[name] = pinned
+  for (const name of target.dropDev ?? []) delete dev[name]
   for (const name of Object.keys(dev)) {
     if (isFamilyPackage(name) && target.devPins?.[name] === undefined) dev[name] = line
   }

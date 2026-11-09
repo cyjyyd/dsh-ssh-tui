@@ -118,7 +118,10 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // the two versions the family lines pin (0.1.5 → 3.18.2, 0.1.7 → ~3.18.4) and
   // nothing else; a floating range would let a fresh tree pick a version no host
   // ever resolved.
-  assert.equal(manifest.dependencies?.['@deepseek-ai/schemastery'], '3.18.5 || 3.19.0')
+  assert.equal(
+    manifest.dependencies?.['@deepseek-ai/schemastery'],
+    LINES[HOST_VERSION]?.schemastery ?? '3.18.5 || 3.19.0',
+  )
   // The four cordis plugins are here for the same reason and are not imported:
   // cordis peers them optionally, so without a root pin npm takes the newest
   // (`include@1.0.9` once resolved on the oldest leg) and that one demands
