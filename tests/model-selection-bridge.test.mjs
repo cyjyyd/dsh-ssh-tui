@@ -36,6 +36,25 @@ test('installModelSelectionCompat selects the one-argument 0.2.2 listener', () =
   assert.deepEqual(calls, [[ctx]])
 })
 
+test('an unknown installModelSelection arity fails closed', () => {
+  const ctx = { name: 'ctx' }
+  const ref = { current: { provider: 'p', model: 'm' } }
+  for (const install of [
+    () => {},
+    (a, b, c) => {},
+    (...args) => {},
+  ]) {
+    assert.throws(
+      () => installModelSelectionCompat(install, ctx, ref),
+      /unsupported installModelSelection arity/u,
+    )
+  }
+  assert.throws(
+    () => installModelSelectionCompat(undefined, ctx, ref),
+    /not a function/u,
+  )
+})
+
 test('selectAgentModel writes through Agent.model and currentAgentSelection reads it back', () => {
   let selected
   const agent = {

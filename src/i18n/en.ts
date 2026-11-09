@@ -607,6 +607,7 @@ export const en: Record<string, string> = {
   'onboard.agentPlaneRestart': 'The agent-plane rows are in {path}, but this session did not compose them; restart the TUI: dsh --profile {profile}. If they are still missing, run /doctor.',
   'onboard.agentPlaneFailed': 'Could not repair the agent-plane rows: {error}. This session still lacks the agent tools; fix {path}, then run /doctor --fix.',
   'onboard.saveFailed': 'Failed to save config: {error}',
+  'onboard.persistFailed': 'the model selection could not be persisted; the previous route remains active',
   'onboard.credSaved': '{env} saved → {path}',
   'onboard.envShadowWin': 'Environment variable {env} already wins; overwrote via setx + env.cmd. Open a new terminal.',
   'onboard.envShadowUnix': 'Environment variable {env} already wins; wrote a launch-env override. Open a new terminal.',

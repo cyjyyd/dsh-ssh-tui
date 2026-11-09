@@ -272,6 +272,33 @@ test('a wizard that failed to save stays up, with its error', async () => {
   assert.match(String(tui.onboarding?.notice?.text), /凭据服务离线/u)
 })
 
+test('a default-selection write failure does not half-apply the wizard route', async () => {
+  const previous = { provider: 'deepseek-official', model: 'deepseek-v4-pro' }
+  let selected = previous
+  const selectionRef = { current: previous, assembled: undefined }
+  const { tui } = makeTui({
+    selectionRef,
+    onSelectionChanged: next => { selected = next; selectionRef.current = next },
+  }, {
+    credentials: { set: async () => {} },
+    settings: { mutate: async () => {}, replace: async () => { throw new Error('settings read-only') } },
+    agentDefaultModel: { saveSelection: async () => { throw new Error('default write failed') } },
+  })
+  tui.onboarding = {
+    step: 'confirm', providerType: 'official', providerId: 'deepseek-official',
+    baseUrl: '', key: 'sk-live-1234', models: ['deepseek-flash'], defaultModel: 'deepseek-flash',
+    catalogPresets: undefined, catalog: undefined, providerCursor: 0, saving: true,
+    field: '', fieldCursor: 0, resolve() {},
+  }
+  tui.openScreen({ kind: 'setup', title: t('onboard.title'), lines: [], offset: 0 })
+  await tui.saveOnboarding()
+  assert.equal(tui.screen?.kind, 'setup', 'the wizard stays open on a persistence failure')
+  assert.equal(tui.onboarding?.notice?.kind, 'error')
+  assert.match(String(tui.onboarding?.notice?.text), /persist|保存|模型选择/u)
+  assert.deepEqual(selected, previous, 'the Host was never told to switch')
+  assert.deepEqual(selectionRef.current, previous, 'and the UI cache still names the old route')
+})
+
 // ── D. detach / reattach ────────────────────────────────────────────────────
 test('a reattach mid-step keeps the step, the field and the message', async () => {
   const { tui } = setup('base-url', { field: 'https://gw.example/v1', fieldCursor: 20 })

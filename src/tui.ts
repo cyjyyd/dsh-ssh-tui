@@ -14783,9 +14783,21 @@ export class SshTui {
         const envRef = 'DEEPSEEK_API_KEY'
         await this.saveCredential(credentials, envRef, state.key)
         const model = state.defaultModel ?? state.models[0] ?? 'deepseek-v4-pro'
-        this.applySelection({ provider: 'deepseek-official', model })
-        await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: 'deepseek-official', model })
-        await this.rememberRoute({ provider: 'deepseek-official', model })
+        const next = { provider: 'deepseek-official', model } as const
+        const previous = this.selectionRef?.current as ModelSelection | undefined
+        if (!await this.persistDefaultSelection(next)) {
+          throw new Error(t('onboard.persistFailed'))
+        }
+        try {
+          this.applySelection(next)
+        } catch (error) {
+          if (previous !== undefined) {
+            try { this.applySelection(previous) } catch { /* keep the original failure */ }
+            await this.persistDefaultSelection(previous)
+          }
+          throw error
+        }
+        await this.rememberRoute(next)
         await this.syncSubagentToProvider('deepseek-official', state.models, previousParentProvider !== 'deepseek-official')
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
@@ -14955,8 +14967,19 @@ export class SshTui {
             model,
             ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
           }
-          this.applySelection(selection)
-          await this.ctx.get('agentDefaultModel')?.saveSelection(selection)
+          const previous = this.selectionRef?.current as ModelSelection | undefined
+          if (!await this.persistDefaultSelection(selection)) {
+            throw new Error(t('onboard.persistFailed'))
+          }
+          try {
+            this.applySelection(selection)
+          } catch (error) {
+            if (previous !== undefined) {
+              try { this.applySelection(previous) } catch { /* keep the original failure */ }
+              await this.persistDefaultSelection(previous)
+            }
+            throw error
+          }
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
           await this.onboardDone(t('onboard.customDone', { id: ownerId, model }))

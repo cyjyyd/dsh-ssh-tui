@@ -23,7 +23,9 @@ Node 要求提升为 `>=24.9.0`。来源/provenance Gate 仍为 HOLD。
 - Setup / Screen-confirmation 的 Alt 抢占与 promise 遗弃。
 - `InputReader.stop()` 的 active paste、held prefix、partial UTF-8 残留。
 - 新 paste 的 owner 归属与 Search C0 控制字节。
-- 0.2.2 模型选择 API 桥接与 Host 拒绝回滚。
+- 0.2.2 模型选择 API 桥接与 Host 拒绝回滚；未知 `installModelSelection` arity 改为 fail-closed。
+- `/setup` 默认选择先持久化再切换 Host；settings 写入失败时保留原路由。
+- POSIX 重连探针的 `kill(pid, 0)` / `onExit` 竞态；历史 `got no exit event` 归类为 TEST_FLAKE，产品退出码 200/200 为 0。
 
 ## 0.8.5-rc.1 — CANDIDATE / UNRELEASED
 

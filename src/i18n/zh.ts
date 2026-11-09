@@ -609,6 +609,7 @@ export const zh: Record<string, string> = {
   'onboard.agentPlaneRestart': '代理平面行已在 {path}，但本次会话没有组合它们；请重启 TUI：dsh --profile {profile}。若重启后仍缺失，请运行 /doctor。',
   'onboard.agentPlaneFailed': '代理平面行修复失败：{error}。本次会话仍缺少代理工具；请修复 {path} 后运行 /doctor --fix。',
   'onboard.saveFailed': '保存配置失败: {error}',
+  'onboard.persistFailed': '模型选择未能持久化，原路由保持生效',
   'onboard.credSaved': '{env} 已保存 → {path}',
   'onboard.envShadowWin': '环境变量 {env} 已存在且优先，已用 setx + env.cmd 覆盖；新开的终端生效。',
   'onboard.envShadowUnix': '环境变量 {env} 已存在且优先，已写入启动环境覆盖；新开的终端生效。',

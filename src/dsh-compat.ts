@@ -775,14 +775,25 @@ export function selectAgentModel(agent: object | undefined, selection: ModelSele
  *
  * 0.2.1-rc.2's function has two parameters (ctx, selectionRef); 0.2.2's has one
  * (ctx) and reads the Agent's durable selection instead. Function arity is the
- * public distinction the two tagged packages expose; a missing/unknown shape
- * falls back to the one-argument call, which is inert for selection ownership.
+ * public distinction the two tagged packages expose. Any other shape is unknown
+ * and must fail closed: calling it with a guessed argument list could install a
+ * listener that silently ignores the Relay's selection on a future Host line.
  */
 export function installModelSelectionCompat(
   install: (...args: unknown[]) => unknown,
   ctx: object,
   selectionRef: object,
 ): void {
-  if (install.length >= 2) install(ctx, selectionRef)
-  else install(ctx)
+  if (typeof install !== 'function') {
+    throw new Error('dsh-ssh-tui: installModelSelection is not a function')
+  }
+  if (install.length === 2) {
+    install(ctx, selectionRef)
+    return
+  }
+  if (install.length === 1) {
+    install(ctx)
+    return
+  }
+  throw new Error(`dsh-ssh-tui: unsupported installModelSelection arity ${install.length}`)
 }
