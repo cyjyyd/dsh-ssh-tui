@@ -719,6 +719,12 @@ export interface AgentModelLike {
   select?: (selection: ModelSelectionLike) => void
 }
 
+/** The 0.2.1 mutable selection ref; 0.2.2 removed the type and the argument. */
+export interface ModelSelectionRefLike {
+  current: ModelSelectionLike | undefined
+  assembled: ModelSelectionLike | undefined
+}
+
 /** Return the host model selector when this Agent has one. */
 export function agentModelOf(agent: object | undefined): AgentModelLike | undefined {
   if (agent === null || typeof agent !== 'object') return undefined

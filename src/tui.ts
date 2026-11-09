@@ -22,7 +22,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
-import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -49,6 +49,7 @@ import {
   streamFrameOwner,
   toolResultFailed,
   TUI_SOURCE_KIND,
+  type ModelSelectionRefLike,
   type SettingsGeneration,
   type StreamChunkLike,
 } from './dsh-compat.js'
@@ -901,7 +902,7 @@ export interface TuiConfig {
   /** Model selected at launch (defaults to the saved/fallback model). */
   model?: string
   /** Live model-selection ref installed on the agent; mutated by /model. */
-  selectionRef?: ModelSelectionRef
+  selectionRef?: ModelSelectionRefLike
   /** Settings-backed model/effort selection applied to subagent requests. */
   subagentSelection?: SubagentSelectionRef
   /**
@@ -2031,7 +2032,7 @@ export class SshTui {
   private readonly goodbye: string
   private readonly resume: boolean
   private readonly providerName: string
-  private readonly selectionRef: ModelSelectionRef | undefined
+  private readonly selectionRef: ModelSelectionRefLike | undefined
   private readonly subagentSelection: SubagentSelectionRef
   private readonly onSelectionChanged: ((selection: ModelSelection) => boolean | void) | undefined
   private readonly onRouteSettled: ((route: Omit<SessionRoute, 'updatedAt'>) => void) | undefined

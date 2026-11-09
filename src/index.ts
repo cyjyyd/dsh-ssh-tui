@@ -5,7 +5,7 @@
  * subagents, sandbox approvals) is the same one the web surface uses.
  */
 
-import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import yaml from 'js-yaml'
-import { agentModelOf, currentAgentSelection, installModelSelectionCompat, selectAgentModel } from './dsh-compat.js'
+import { agentModelOf, currentAgentSelection, installModelSelectionCompat, selectAgentModel, type ModelSelectionRefLike } from './dsh-compat.js'
 
 /** Read the user's `agent-default-model` straight from `$DSH_HOME/settings.yaml`. */
 function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
@@ -572,7 +572,7 @@ export function apply(ctx: Context, config: Config): void {
         notedRoute = { ...route, updatedAt: Date.now() }
         void saveSessionRoute(String(sessionId), route).catch(() => {})
       }
-      const selectionRef: ModelSelectionRef = {
+      const selectionRef: ModelSelectionRefLike = {
         current: effectiveSelection,
         assembled: undefined,
       }
