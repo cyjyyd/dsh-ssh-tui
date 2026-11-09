@@ -1,6 +1,6 @@
 {
   "name": "dsh-ssh-tui",
-  "version": "0.8.5-rc.1",
+  "version": "0.8.5",
   "description": "Remote-first terminal UI for DeepSeek Harness with SSH reconnect, Windows/ConPTY and incremental ANSI rendering.",
   "keywords": [
     "deepseek-harness",
@@ -75,7 +75,7 @@
       "patch": "./cordis.patch.yml"
     },
     "compatibility": {
-      "dsh": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
+      "dsh": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
       "dshReleases": {
         "0.1.2-rc.1": "incompatible",
         "0.1.3-alpha.1": "incompatible",
@@ -89,7 +89,11 @@
         "0.1.7-rc.2": "incompatible",
         "0.2.0-rc.1": "compatible",
         "0.2.0-rc.2": "compatible",
-        "0.2.1-rc.2": "compatible"
+        "0.2.1-rc.2": "compatible",
+        "0.2.1-rc.3": "incompatible",
+        "0.2.1-rc.4": "incompatible",
+        "0.2.1-rc.5": "compatible",
+        "0.2.2-rc.1": "compatible"
       },
       "profiles": [
         "tui"
@@ -119,29 +123,29 @@
     "bench:report": "node scripts/bench-report.mjs"
   },
   "engines": {
-    "node": ">=22.19"
+    "node": ">=24.9.0"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "3.18.2 || ~3.18.4",
-    "commander": "^14.0.0"
+    "@deepseek-ai/schemastery": "3.18.5 || 3.19.0",
+    "commander": "^14.0.0 || ^15.0.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-agent-default-model": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-agent-loop": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-agent-preset": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-agent-preset-registry": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-cmdline": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-commands": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-credentials": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-session": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-session-persistence": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-settings": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-subagent": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-user-approval": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2",
-    "@deepseek-ai/dsh-user-questions": ">=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2"
+    "@deepseek-ai/cordis": "4.0.5 || 4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-default-model": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-loop": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-preset": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-cmdline": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-commands": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-credentials": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-subagent": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-questions": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent-preset": {

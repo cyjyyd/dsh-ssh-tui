@@ -60,6 +60,22 @@ const NEXT_LINE_ROOTS = {
   '@deepseek-ai/cordis-plugin-timer': '1.1.6',
   '@deepseek-ai/cordis-plugin-group': '1.0.5',
 }
+/** The rc.5 line moved the same roots one patch; timer is 1.1.7. */
+const RC5_LINE_ROOTS = {
+  '@deepseek-ai/cordis': '4.0.5',
+  '@deepseek-ai/cordis-plugin-include': '1.0.10',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.6',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.7',
+  '@deepseek-ai/cordis-plugin-group': '1.0.5',
+}
+/** The 0.2.2 rc.1 line's Cordis 4.1 / loader 1.1 / timer 1.2 roots. */
+const RC022_LINE_ROOTS = {
+  '@deepseek-ai/cordis': '4.1.0',
+  '@deepseek-ai/cordis-plugin-include': '1.1.0',
+  '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+  '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+  '@deepseek-ai/cordis-plugin-group': '1.1.0',
+}
 /** The presets split: the plural has no release on this line at all. */
 const NEW_LINE_PRESETS = ['@deepseek-ai/dsh-agent-preset', '@deepseek-ai/dsh-agent-preset-registry']
 
@@ -82,6 +98,18 @@ export const LINES = {
   },
   '0.2.0-rc.2': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
   '0.2.0-rc.1': { roots: NEW_LINE_ROOTS, presets: NEW_LINE_PRESETS, overrides: true },
+  '0.2.1-rc.5': {
+    roots: RC5_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.18.5',
+  },
+  '0.2.2-rc.1': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+  },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */
@@ -142,6 +170,10 @@ export function pinManifest(manifest, line) {
     if (isFamilyPackage(name) && target.devPins?.[name] === undefined) dev[name] = line
   }
   next.devDependencies = sorted(dev)
+  if (target.schemastery !== undefined && next.dependencies?.['@deepseek-ai/schemastery'] !== undefined) {
+    next.dependencies['@deepseek-ai/schemastery'] = target.schemastery
+    next.dependencies = sorted(next.dependencies)
+  }
 
   if (target.overrides) {
     const overrides = {}
