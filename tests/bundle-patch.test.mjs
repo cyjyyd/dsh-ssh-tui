@@ -72,7 +72,11 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.2.0-rc.1'], 'compatible')
   assert.equal(releases['0.2.0-rc.2'], 'compatible')
   assert.equal(releases['0.2.1-rc.2'], 'compatible')
-  assert.equal(manifest.engines?.node, '>=22.19')
+  assert.equal(releases['0.2.1-rc.3'], 'incompatible')
+  assert.equal(releases['0.2.1-rc.4'], 'incompatible')
+  assert.equal(releases['0.2.1-rc.5'], 'compatible')
+  assert.equal(releases['0.2.2-rc.1'], 'compatible')
+  assert.equal(manifest.engines?.node, '>=24.9.0')
 })
 
 test('root specs for the family-pinned packages are exact, not floating', async () => {
@@ -114,13 +118,16 @@ test('root specs for the family-pinned packages are exact, not floating', async 
   // the two versions the family lines pin (0.1.5 → 3.18.2, 0.1.7 → ~3.18.4) and
   // nothing else; a floating range would let a fresh tree pick a version no host
   // ever resolved.
-  assert.equal(manifest.dependencies?.['@deepseek-ai/schemastery'], '3.18.2 || ~3.18.4')
+  assert.equal(
+    manifest.dependencies?.['@deepseek-ai/schemastery'],
+    LINES[HOST_VERSION]?.schemastery ?? '3.18.5 || 3.19.0',
+  )
   // The four cordis plugins are here for the same reason and are not imported:
   // cordis peers them optionally, so without a root pin npm takes the newest
   // (`include@1.0.9` once resolved on the oldest leg) and that one demands
   // `cordis ~4.0.4`, which the pinned 4.0.2 can never satisfy. The peer ranges
   // stay ranges: consumers resolve cordis from their host.
-  assert.equal(manifest.peerDependencies?.['@deepseek-ai/cordis'], '^4.0.1')
+  assert.equal(manifest.peerDependencies?.['@deepseek-ai/cordis'], '4.0.5 || 4.1.0')
 })
 
 test('declared dsh range admits every release marked compatible', async () => {
@@ -156,11 +163,12 @@ test('declared dsh range admits every release marked compatible', async () => {
   // prerelease comparator, and the window stops at 0.2.2.
   assert.equal(inRange('0.2.0-rc.1'), true)
   assert.equal(inRange('0.2.0-rc.2'), true)
-  assert.equal(inRange('0.2.0'), true)
+  assert.equal(inRange('0.2.0'), false)
   assert.equal(inRange('0.2.1-rc.2'), true)
-  assert.equal(inRange('0.2.1'), true)
+  assert.equal(inRange('0.2.1'), false)
   assert.equal(inRange('0.2.2'), false)
-  assert.equal(inRange('0.2.2-rc.1'), false)
+  assert.equal(inRange('0.2.1-rc.5'), true)
+  assert.equal(inRange('0.2.2-rc.1'), true)
   // An alpha of the new line is still out: the promise is the rcs that were run.
   assert.equal(inRange('0.2.1-alpha.5'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
@@ -172,7 +180,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2'], range), '0.2.1-rc.2')
+  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1'], range), '0.2.2-rc.1')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
@@ -187,7 +195,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   // satisfy a comparator set when a comparator with the *same* [major, minor,
   // patch] tuple also carries a prerelease, so `>=0.1.7-rc.1 <0.1.8` alone
   // would reject every 0.2.0-rc.
-  const SUPPORTED = '>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2'
+  const SUPPORTED = '0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1'
   const dshPeers = Object.entries(manifest.peerDependencies ?? {})
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(dshPeers.length > 0)

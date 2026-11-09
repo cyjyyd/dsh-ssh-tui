@@ -10,6 +10,23 @@
 
 ---
 
+## 0.8.5 — CANDIDATE / UNRELEASED
+
+候选说明：[docs/release-notes-0.8.5.md](docs/release-notes-0.8.5.md)。
+
+**本条是稳定候选材料，不代表 Tag、GitHub Release 或 npm `latest` 已发布。**
+目标支持 `0.2.1-rc.5` + `0.2.2-rc.1`；旧 `0.2.0-rc.1/rc.2`、`0.2.1-rc.2` 在新矩阵验收和退役裁决前继续保留。
+Node 要求提升为 `>=24.9.0`。来源/provenance Gate 仍为 HOLD。
+
+### Fixed
+
+- Setup / Screen-confirmation 的 Alt 抢占与 promise 遗弃。
+- `InputReader.stop()` 的 active paste、held prefix、partial UTF-8 残留。
+- 新 paste 的 owner 归属与 Search C0 控制字节。
+- 0.2.2 模型选择 API 桥接与 Host 拒绝回滚；未知 `installModelSelection` arity 改为 fail-closed。
+- `/setup` 默认选择先持久化再切换 Host；settings 写入失败时保留原路由。
+- POSIX 重连探针的 `kill(pid, 0)` / `onExit` 竞态；历史 `got no exit event` 归类为 TEST_FLAKE，产品退出码 200/200 为 0。
+
 ## 0.8.5-rc.1 — CANDIDATE / UNRELEASED
 
 候选说明：[docs/release-notes-0.8.5-rc.1.md](docs/release-notes-0.8.5-rc.1.md)。
