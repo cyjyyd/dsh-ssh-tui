@@ -1,12 +1,11 @@
 # 0.8.5-rc.1 — Completion, Local Search, Input Reliability & Long-session Replay
 
-> **CANDIDATE / UNRELEASED — 0.8.5-rc.1 候选已通过工程验收，尚未发布。**
-> 此文件位于隔离准备分支，不表示候选包、Tag、GitHub Prerelease、npm `next` 已创建或发布。
+> **PUBLISHED PRERELEASE — 2026-11-03。** `0.8.5-rc.1` was published as annotated tag `v0.8.5-rc.1`, a GitHub prerelease, and npm `next` on 2026-11-03. It is retained here as historical release material; it is not the current stable `0.8.5`.
 > 基线：`main@35e62ebc564970ee8f9a20d966bc4f9c1b4de116`（合并 PR #34 之后）；版本 `0.8.5-rc.1`。
-> 最终提交 SHA 与 tarball 哈希记录在 PR #35 的候选收据中：本文档随包发布，不能自引用包自身的哈希。
-> 本候选来自新的 `main`，**不是** `release/0.8.4` 稳定维护分支。
+> 最终提交 SHA 与 tarball 哈希记录在 PR #35 的历史候选收据中：本文档随包发布，不能自引用包自身的哈希。
+> 本候选来自当时的开发线，**不是** `release/0.8.4` 稳定维护分支。
 >
-> DSH Relay 继续使用 npm 包名 `dsh-ssh-tui`；本候选未计划改变会话持久化格式、已有 Host 生命周期合同或正式支持的默认上游版本。
+> DSH Relay 继续使用 npm 包名 `dsh-ssh-tui`；本候选未改变会话持久化格式、已有 Host 生命周期合同或正式支持的默认上游版本。
 
 ## 为什么是 0.8.5
 
@@ -58,7 +57,7 @@ W6B.F0 的 current-socket 防护阻止被后续连接替换的旧 Relay 继续�
 | `0.2.0-rc.2` | 已声明支持 | 标准 CI 旧线 |
 | `0.2.1-rc.2` | 已声明支持、默认开发/Windows 线 | 标准 CI |
 | `0.2.1-rc.3` / `rc.4` | 未完成兼容验收 | 不从历史实验继承 PASS |
-| `0.2.1-rc.5` | **EXPERIMENTAL / NOT DECLARED COMPATIBLE** | 独立 Linux/Windows 实验 CI 通过部分覆盖，非正式声明 |
+| `0.2.1-rc.5` | **EXPERIMENTAL / NOT DECLARED COMPATIBLE at this RC** | This is the historical RC status; the later stable 0.8.5 completed exact dual-RC acceptance and declares rc.5 + 0.2.2 |
 | `0.2.2-alpha.*` | 未验收 | 不属于 RC 支持范围 |
 
 **发布前必须裁决的兼容策略：** 当前 `peerDependencies` 与 `dsh.compatibility.dsh` 的版本范围在 npm semver 下可匹配 `0.2.1-rc.5`，但 `dshReleases` 只明确标记 rc.2 已兼容；且 `dshReleases` 是诊断表态，不能视作阻止新 RC 加载的门禁。必须在“完整验证后晋升 rc.5 / 明确接受实验宿主风险 / 收紧兼容范围”中选定并验收方案，不能以默认开发线仍为 rc.2 代替决策。
@@ -80,18 +79,25 @@ W6B.F0 的 current-socket 防护阻止被后续连接替换的旧 Relay 继续�
 | 输入与首装 | **PASS（自动）** — 真 PTY/ConPTY 粘贴、首装向导、stdio、busy-drop、断线重连均在候选或 rc.5 实验腿执行成功 |
 | 真正的 tarball | **PASS** — 干净构建后 `npm pack`，包内 `lib/` 与构建树 `diff` 为空；文件数、bytes 与 SHA-1/SHA-256/integrity 记录在 PR #35 收据 |
 | 升级冒烟 | **PASS** — 已发布 `0.8.4` → 候选 tarball，manifest、bundle 条目、凭据与会话存储保持 |
-| Windows 人工验收 | **PENDING（所有者）** — Windows Terminal/conhost、输入法、中文粘贴、复制和断线恢复；不能以 ConPTY 自动 CI 替代 |
-| 宿主兼容策略 | **RC 阶段采用 B** — 保留 peer 范围并明确披露 rc.5 为 EXPERIMENTAL；不写入 `dshReleases`；稳定 0.8.5 前复核 A |
-| 发布动作 | **NOT AUTHORIZED** — Tag、GitHub Prerelease、`npm publish --tag next` |
+| Windows 人工验收 | **RC 时 PENDING** — Windows Terminal/conhost、输入法、中文粘贴、复制和断线恢复当时未完成；后续稳定版证据见 0.8.5 发版说明，不能以 ConPTY 自动 CI 替代 |
+| 宿主兼容策略 | **RC 阶段历史采用 B** — 当时披露 rc.5 为 EXPERIMENTAL；后续稳定 0.8.5 已完成 rc.5 + 0.2.2 精确验收并纳入 `dshReleases` |
+| 发布动作 | **已执行（历史）** — annotated tag `v0.8.5-rc.1`、GitHub Prerelease、`npm publish --tag next`，2026-11-03 |
 
 历史 PR #34 的 4/4 CI、rc.5 实验 2/2 CI 与合并后 main 的验证只是候选准备依据，不能冒充版本化 tarball 的最终验收数据；此前的旧版本哈希、文件数量和安装回执不得复制为 0.8.5 的结果。
 
-### rc.5 兼容策略（RC 阶段：B，实验披露）
+### rc.5 兼容策略（该 RC 的历史状态）
 
-当前 `peerDependencies` 与 `dsh.compatibility.dsh` 的 semver 范围可以匹配上游当前的 `0.2.1-rc.5`，但 `dshReleases` 只声明 `0.2.1-rc.2` 及两条 `0.2.0` RC 兼容。本候选采用**方案 B**：保留现有 peer 范围，在文档和发布说明中明确 `0.2.1-rc.5` 为 **EXPERIMENTAL / NOT DECLARED COMPATIBLE**，允许用户在自行承担实验宿主风险的前提下试用；不把它写入 `dshReleases`，也不改动默认开发线。
+在 `0.8.5-rc.1` 当时，`0.2.1-rc.5` 被披露为 **EXPERIMENTAL / NOT DECLARED
+COMPATIBLE**，`dshReleases` 只声明 `0.2.1-rc.2` 及两条 `0.2.0` RC。后续稳定
+`0.8.5` 已完成 `0.2.1-rc.5` + `0.2.2-rc.1` 的精确验收，并把两条新 RC 纳入
+精确支持范围；本历史 RC 说明不描述稳定版的最终支持矩阵。
 
-rc.5 已通过 Linux/Windows 两条独立实验 CI（含首装、tarball、stdio、粘贴、busy-drop、断线重连），但仍缺真实 SSH 慢链路、Windows 人工终端与实时 Provider 验收，因此不足以宣称 `compatible`。稳定 `0.8.5` 发布前应复核方案 A（补齐剩余 Gate 后正式支持）或收紧范围；实验宿主的风险接受由所有者最终确认。
+该 RC 已通过 Linux/Windows 实验 CI（含首装、tarball、stdio、粘贴、busy-drop、
+断线重连），但当时仍缺真实 SSH 慢链路、Windows 人工终端与实时 Provider 验收，
+因此没有在该 RC 宣称 `compatible`。
 
 ## 安装通道
 
-在最终发行授权前，`0.8.5-rc.1` **尚未发布，不能声称可从 npm 安装**。若之后批准正式候选发布，仅进入 npm `next`，不得变更 `latest`。观察期结束后是否发布稳定 `0.8.5`，另行独立决策。
+`0.8.5-rc.1` 已于 2026-11-03 发布到 GitHub Prerelease 与 npm `next`，不改变
+`latest`。稳定 `0.8.5` 是独立的版本和工件，必须从稳定候选 tag 发布；本历史
+文档不授权或描述稳定版的 npm 发布状态。

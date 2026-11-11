@@ -10,13 +10,13 @@
 
 ---
 
-## 0.8.5 — CANDIDATE / UNRELEASED
+## 0.8.5 — 稳定版
 
-候选说明：[docs/release-notes-0.8.5.md](docs/release-notes-0.8.5.md)。
+发版说明：[docs/release-notes-0.8.5.md](docs/release-notes-0.8.5.md)。
 
-**本条是稳定候选材料，不代表 Tag、GitHub Release 或 npm `latest` 已发布。**
-目标支持 `0.2.1-rc.5` + `0.2.2-rc.1`；旧 `0.2.0-rc.1/rc.2`、`0.2.1-rc.2` 在新矩阵验收和退役裁决前继续保留。
-Node 要求提升为 `>=24.9.0`。来源/provenance Gate 仍为 HOLD。
+**这是 0.8.5 的稳定版发布材料。** 精确 tag、GitHub Release、npm 工件与发布后读回记录在 Release 和 #65 G3 收据中；包内文档不写死实时 `latest` 或未来的 Actions run ID。
+支持 `0.2.1-rc.5` + `0.2.2-rc.1`；旧 `0.2.0-rc.1/rc.2`、`0.2.1-rc.2` 在新矩阵验收和退役裁决前继续保留。
+Node 要求提升为 `>=24.9.0`。来源/provenance Gate 独立记录，不改写为 PASS。
 
 ### Fixed
 
@@ -27,13 +27,13 @@ Node 要求提升为 `>=24.9.0`。来源/provenance Gate 仍为 HOLD。
 - `/setup` 默认选择先持久化再切换 Host；settings 写入失败时保留原路由。
 - POSIX 重连探针的 `kill(pid, 0)` / `onExit` 竞态；历史 `got no exit event` 归类为 TEST_FLAKE，产品退出码 200/200 为 0。
 
-## 0.8.5-rc.1 — CANDIDATE / UNRELEASED
+## 0.8.5-rc.1 — 2026-11-03（预发布）
 
 候选说明：[docs/release-notes-0.8.5-rc.1.md](docs/release-notes-0.8.5-rc.1.md)。
 
-**本条是候选材料，不代表 Tag、GitHub Release 或 npm `next` 已发布。** 版本与锁文件已改为 `0.8.5-rc.1`；最终候选提交的四腿 CI、真实 tarball、包外安装与 0.8.4 → rc.1 升级冒烟已通过，精确 SHA 与产物哈希记录在 PR #35 收据中。
+**该预发布已于 2026-11-03 发布**：annotated tag `v0.8.5-rc.1`、GitHub prerelease 与 npm `next` 均为 `0.8.5-rc.1`。历史收据保留在本文件和对应发版说明中，不再标记为 `UNRELEASED`。
 
-Windows Terminal/conhost 人工验收（输入法、中文粘贴、复制、断线恢复）与最终发布授权仍为 PENDING。`0.2.1-rc.5` 在 RC 阶段按方案 B 披露为 EXPERIMENTAL，不写入 `dshReleases`；稳定版前复核是否正式支持。
+RC 阶段的 Windows 人工验收不以 ConPTY 模拟替代；`0.2.1-rc.5` 在该 RC 按方案 B 披露为 EXPERIMENTAL；0.8.5 稳定版已另行完成双 RC 验收并纳入精确支持范围。
 
 ### Added
 
@@ -51,8 +51,8 @@ Windows Terminal/conhost 人工验收（输入法、中文粘贴、复制、断�
 - 极慢分片的粘贴结束标记与 Esc 字节不可完全消歧：已触发的 Esc 不能撤回。
 - 超长会话冷恢复仍约 11 秒；本地 Host/`agents.resume` C1 因风险与收益不成比例而 NO-GO。
 - W6B Terminal Doctor 快照、W6C 主动探测和 W-7 picker 重构均未纳入。
-- 默认正式支持仍是 DSH `0.2.1-rc.2` 与两条 `0.2.0` RC；`0.2.1-rc.5` 仅 EXPERIMENTAL。当前 peer semver 范围可能匹配 rc.5，发布前必须裁决并验证实际支持策略。
-- 本候选需在最终版本提交上重新运行四腿 CI、真实 tarball / 0.8.4 升级冒烟和 Windows 人工验收；旧收据不得充当候选 PASS。
+- RC 阶段默认正式支持仍是 DSH `0.2.1-rc.2` 与两条 `0.2.0` RC，`0.2.1-rc.5` 仅 EXPERIMENTAL；0.8.5 稳定版随后完成了双新 RC 的独立验收并纳入精确支持范围。
+- RC 候选的旧收据不充当稳定版 PASS；0.8.5 稳定版使用新的 docs-only 候选工件与独立验收收据。
 
 ## 0.8.4 — 2026-10-24（稳定版）
 
