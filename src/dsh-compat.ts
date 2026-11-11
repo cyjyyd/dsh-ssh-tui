@@ -699,3 +699,101 @@ export function drainChildSubagents(
   const drain = runtime.drainChildren ?? runtime.drainContinuableChildren
   return drain === undefined ? Promise.resolve() : drain.call(subagents, parent, childIds)
 }
+
+/**
+ * The 0.2.2 Agent-owned model selector, described structurally.
+ *
+ * 0.2.1-rc.2 exposes a mutable `ModelSelectionRef`; 0.2.2 removed the second
+ * `installModelSelection` argument and made `Agent.model` the authority. The
+ * Relay must run against both without importing either type package as a new
+ * peer.
+ */
+export interface ModelSelectionLike {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+export interface AgentModelLike {
+  current?: () => ModelSelectionLike | null | undefined
+  select?: (selection: ModelSelectionLike) => void
+}
+
+/** The 0.2.1 mutable selection ref; 0.2.2 removed the type and the argument. */
+export interface ModelSelectionRefLike {
+  current: ModelSelectionLike | undefined
+  assembled: ModelSelectionLike | undefined
+}
+
+/** Return the host model selector when this Agent has one. */
+export function agentModelOf(agent: object | undefined): AgentModelLike | undefined {
+  if (agent === null || typeof agent !== 'object') return undefined
+  const model = (agent as { model?: unknown }).model
+  if (model === null || typeof model !== 'object') return undefined
+  return model as AgentModelLike
+}
+
+/** Read the Host's durable/current selection, if the 0.2.2 API is present. */
+export function currentAgentSelection(agent: object | undefined): ModelSelectionLike | undefined {
+  const model = agentModelOf(agent)
+  if (model === undefined || typeof model.current !== 'function') return undefined
+  try {
+    const current = model.current()
+    if (current === null || typeof current !== 'object'
+      || typeof current.provider !== 'string' || current.provider === ''
+      || typeof current.model !== 'string' || current.model === '') return undefined
+    return {
+      provider: current.provider,
+      model: current.model,
+      ...(typeof current.reasoningEffort === 'string' && current.reasoningEffort !== ''
+        ? { reasoningEffort: current.reasoningEffort }
+        : {}),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Write one selection through the 0.2.2 Host API. Returns false on the legacy
+ * line or when the Host rejects the selection; callers keep the UI cache as
+ * the fallback rather than claiming a route the Host did not accept.
+ */
+export function selectAgentModel(agent: object | undefined, selection: ModelSelectionLike): boolean {
+  const model = agentModelOf(agent)
+  if (model === undefined || typeof model.select !== 'function') return false
+  try {
+    model.select(selection)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Install the model-switch notice listener on either host line.
+ *
+ * 0.2.1-rc.2's function has two parameters (ctx, selectionRef); 0.2.2's has one
+ * (ctx) and reads the Agent's durable selection instead. Function arity is the
+ * public distinction the two tagged packages expose. Any other shape is unknown
+ * and must fail closed: calling it with a guessed argument list could install a
+ * listener that silently ignores the Relay's selection on a future Host line.
+ */
+export function installModelSelectionCompat(
+  install: (...args: unknown[]) => unknown,
+  ctx: object,
+  selectionRef: object,
+): void {
+  if (typeof install !== 'function') {
+    throw new Error('dsh-ssh-tui: installModelSelection is not a function')
+  }
+  if (install.length === 2) {
+    install(ctx, selectionRef)
+    return
+  }
+  if (install.length === 1) {
+    install(ctx)
+    return
+  }
+  throw new Error(`dsh-ssh-tui: unsupported installModelSelection arity ${install.length}`)
+}

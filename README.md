@@ -28,7 +28,7 @@ dsh plugin --profile tui add dsh-ssh-tui@latest
 dsh --profile tui
 ```
 
-需要 Node.js ≥ 22.19 和 DeepSeek Harness CLI。断开之后接回来：`dsh --profile tui --resume`。
+需要 Node.js ≥ 24.9 和 DeepSeek Harness CLI。断开之后接回来：`dsh --profile tui --resume`。
 
 ![重连演示：一轮正在流式输出时窗口关闭，宿主进程不退出，同一条命令接回来，这个会话还在原处；演示用 continue 策略，所以这一轮也在后台跑完了](docs/screenshots/reconnect.gif)
 
@@ -156,19 +156,19 @@ TTY 是一种能力，不是宿主存在的前提。
 
 | DeepSeek Harness | 状态 |
 |---|---|
-| `0.2.1-rc.2` | ✅ 支持，默认开发线（提交的 manifest / 锁 / `test-windows` 都装它） |
-| `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持 |
+| `0.2.1-rc.5` / `0.2.2-rc.1` | ✅ 支持，0.8.5 的两个精确稳定目标；Node `>=24.9`，各自单一 DSH family strict graph |
+| `0.2.1-rc.2` | ✅ 支持，保留的默认开发线（提交的 manifest / 锁 / `test-windows` 装它） |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持，保留到独立退役裁决 |
 | `0.1.7` 整线（含 `0.1.7-rc.1` / `0.1.7-rc.2`） | ❌ 自 `dsh-ssh-tui 0.8.4-rc.1` 起摘除（`dshReleases` 明确表态 `incompatible`） |
 | `0.1.5` 及更早 | ❌ 自 `dsh-ssh-tui 0.8.0` 起不再支持 |
 
 声明范围：
 
 ```text
->=0.2.0-rc.1 <0.2.1
-|| >=0.2.1-rc.2 <0.2.2
+0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1
 ```
 
-两个 comparator 不是笔误：node-semver 只让 prerelease 被**同一** `major.minor.patch` 的 comparator 接纳。
+这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；旧的三条 RC 在新矩阵验收和退役裁决前继续保留。
 
 发布前会针对支持线重新安装依赖并运行类型检查、测试和真实终端探针。
 

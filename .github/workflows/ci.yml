@@ -29,12 +29,12 @@ jobs:
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
         # the newest rc of that generation it can install cleanly, plus the rcs
         # upstream still points a dist-tag at.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1"]
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # One rewrite for every non-default line. It replaces two inline node -e
       # heredocs: the version substitution was readable, but the presets split, the
       # family's root pins and the override map were not, and a typo in one of them
@@ -173,11 +173,19 @@ jobs:
   # path only gets real coverage on a Windows runner.
   test-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+      - name: Pin the tree to the dsh ${{ matrix.dsh }} line
+        run: |
+          node scripts/ci-pin-line.mjs ${{ matrix.dsh }}
+          Remove-Item package-lock.json -Force
       - run: npm install --no-audit --no-fund
       - run: npx tsc -p tsconfig.json --noEmit
       # Node expands the quoted glob itself: PowerShell does not glob for

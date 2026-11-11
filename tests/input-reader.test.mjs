@@ -692,3 +692,41 @@ test('a late fragment does not restart the marker deadline', async () => {
     'the piece is released at the original deadline, not 200 ms after the fragment')
   assert.ok(Date.now() - started < 430, `the watch ends near its first deadline (${Date.now() - started} ms)`)
 })
+
+// ── F1-2: stop() is a true detach reset ────────────────────────────────────
+
+test('stop() leaves an active paste and frames the next read as new input', () => {
+  const reader = new InputReader({ onRead() {}, onFrame() {} })
+  assert.deepEqual(reader.read('\u001b[200~pasted'), [{ kind: 'paste', text: 'pasted' }])
+  assert.equal(reader.isPasting(), true)
+  reader.stop()
+  assert.equal(reader.isPasting(), false, 'the abandoned paste is not still open after detach')
+  assert.deepEqual(reader.read('hello'), [{ kind: 'burst', text: 'hello' }],
+    'the first reattach read is ordinary input, not a paste payload')
+})
+
+test('stop() drops a held sequence prefix instead of prepending it to the next key', () => {
+  const reader = new InputReader({ onRead() {}, onFrame() {} })
+  assert.equal(reader.hold('\u001b['), true)
+  reader.stop()
+  assert.equal(reader.assemble('A'), 'A', 'the old prefix cannot synthesize an arrow after reattach')
+})
+
+test('stop() drops a partial UTF-8 decoder tail', () => {
+  const reads = []
+  const reader = new InputReader({ onRead: text => reads.push(text), onFrame() {} })
+  reader.push(Buffer.from([0xe4]))
+  reader.stop()
+  reader.push(Buffer.from('A'))
+  assert.deepEqual(reads, ['A'], 'a byte split by detach cannot become a replacement character in the new session')
+})
+
+test('repeat stop() is idempotent and a new paste still works', () => {
+  const reader = new InputReader({ onRead() {}, onFrame() {} })
+  assert.deepEqual(reader.read('\u001b[200~old'), [{ kind: 'paste', text: 'old' }])
+  reader.stop()
+  reader.stop()
+  assert.deepEqual(reader.read('\u001b[200~new'), [{ kind: 'paste', text: 'new' }])
+  assert.deepEqual(reader.read('\u001b[201~'), [])
+  assert.equal(reader.isPasting(), false)
+})

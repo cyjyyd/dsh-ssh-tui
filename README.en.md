@@ -82,7 +82,7 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** `0.8.4` is the stable release promoted from the observed `0.8.4-rc.2` candidate; `0.8.4-rc.1` was the earlier candidate. It supports the `0.2.0-rc` line (the desktop harness's baseline) as well as `0.2.1-rc.2` (upstream `next`). The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** `0.8.5` is the stable release for the two newest RCs, `0.2.1-rc.5` and `0.2.2-rc.1` (Node `>=24.9`), while `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 **Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
@@ -182,17 +182,18 @@ The plugin declares and tests **every `@deepseek-ai/dsh` line in flight**:
 
 | Host line | Status |
 | --- | --- |
-| `0.2.1-rc.2` (upstream `next`) | declared compatible; **default development line** — the committed manifest, the lock and the `test-windows` leg install it, and it gets the full real-PTY probe set |
-| `0.2.0-rc.1` / `0.2.0-rc.2` (`latest`, also the desktop app's baseline) | declared compatible; rc.2 gets the full probe set, rc.1 gets typecheck + suite |
+| `0.2.1-rc.5` / `0.2.2-rc.1` | declared compatible; the two exact 0.8.5 stable targets; Node `>=24.9`, one strict DSH family per target |
+| `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest, the lock and the `test-windows` leg install it |
+| `0.2.0-rc.1` / `0.2.0-rc.2` | declared compatible; retained until a separate retirement decision |
 | `0.1.7-rc.1` / `0.1.7-rc.2` | **dropped in 0.8.4-rc.1**: `dshReleases` says `incompatible` and the launcher refuses it, so a user still on that line gets "upgrade" rather than a half-working plugin |
 | `0.1.5` and older | **unsupported as of 0.8.0**, with an explicit `incompatible` entry in `dshReleases` |
 
-The declared window is `>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2` (peer dependencies and `dshReleases`
-state the same fact). The second comparator is not a typo: node-semver only admits a prerelease through a
-comparator carrying the same `major.minor.patch` tuple. Every release re-installs those versions in a clean
-tree and re-runs the types, the suite and the real-PTY probes — not "no errors, so it probably works". Many
-terminal plugins on npm are still stranded on the 0.1.5 line; few terminal UIs install on a 0.2.x-rc line at
-all, which is why the window is maintained this tightly.
+The declared window is the exact union
+`0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1`
+(peer dependencies and `dshReleases` state the same fact), not an unbounded
+semver range. Node.js `>=24.9.0` is required. Every release re-installs those
+versions in a clean tree and re-runs the types, the suite and the real-PTY
+probes — not "no errors, so it probably works".
 
 ## A warning before the Desktop section
 
@@ -225,8 +226,8 @@ The full diagnosis, both desktop defects, the strategy and a copy-paste-ready up
 
 ## Requirements
 
-- Node.js >= 22.19
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (this repo develops on `0.2.1-rc.2`; CI covers `0.2.1-rc.2` / `0.2.0-rc.2` / `0.2.0-rc.1`: the default leg installs the committed manifest and gets the full real-PTY probe set, every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock, and `test-windows` runs the default line on ConPTY. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
+- Node.js >= 24.9
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact 0.8.5 targets are `0.2.1-rc.5` and `0.2.2-rc.1`; CI covers both, plus the retained `0.2.1-rc.2` / `0.2.0-rc.2` / `0.2.0-rc.1` lines. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the two new RC lines on ConPTY. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 - an ANSI terminal (SSH directly, or PowerShell / Windows Terminal on Windows)
 - **Windows**: install, troubleshooting and how to read `/doctor` are in [docs/windows.md](docs/windows.md)

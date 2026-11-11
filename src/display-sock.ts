@@ -738,7 +738,7 @@ export class DisplayHost {
     socket.on('data', chunk => {
       let frames: Array<{ type: number; payload: Buffer }>
       try {
-        frames = reader.push(chunk)
+        frames = reader.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk)
       } catch {
         socket.destroy()
         return
@@ -1024,7 +1024,7 @@ export async function queryDisplayAttachment(
     socket.on('data', chunk => {
       let frames: Array<{ type: number; payload: Buffer }>
       try {
-        frames = reader.push(chunk)
+        frames = reader.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk)
       } catch {
         finish(undefined)
         return
@@ -2116,7 +2116,7 @@ export async function runDisplayRelay(
     socket.on('data', chunk => {
       let frames: Array<{ type: number; payload: Buffer }>
       try {
-        frames = reader.push(chunk)
+        frames = reader.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk)
       } catch (error) {
         fail(error)
         return

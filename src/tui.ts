@@ -22,7 +22,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
-import type { Agent, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -49,6 +49,7 @@ import {
   streamFrameOwner,
   toolResultFailed,
   TUI_SOURCE_KIND,
+  type ModelSelectionRefLike,
   type SettingsGeneration,
   type StreamChunkLike,
 } from './dsh-compat.js'
@@ -901,7 +902,7 @@ export interface TuiConfig {
   /** Model selected at launch (defaults to the saved/fallback model). */
   model?: string
   /** Live model-selection ref installed on the agent; mutated by /model. */
-  selectionRef?: ModelSelectionRef
+  selectionRef?: ModelSelectionRefLike
   /** Settings-backed model/effort selection applied to subagent requests. */
   subagentSelection?: SubagentSelectionRef
   /**
@@ -921,7 +922,7 @@ export interface TuiConfig {
    */
   presetTrust?: string
   /** Notify the launcher of an explicit in-process selection change. */
-  onSelectionChanged?: (selection: ModelSelection) => void
+  onSelectionChanged?: (selection: ModelSelection) => boolean | void
   /**
    * Minimum milliseconds between paints while a turn is streaming.
    * Jump-host / proxied SSH can raise this so token ticks do not flood the
@@ -2031,9 +2032,9 @@ export class SshTui {
   private readonly goodbye: string
   private readonly resume: boolean
   private readonly providerName: string
-  private readonly selectionRef: ModelSelectionRef | undefined
+  private readonly selectionRef: ModelSelectionRefLike | undefined
   private readonly subagentSelection: SubagentSelectionRef
-  private readonly onSelectionChanged: ((selection: ModelSelection) => void) | undefined
+  private readonly onSelectionChanged: ((selection: ModelSelection) => boolean | void) | undefined
   private readonly onRouteSettled: ((route: Omit<SessionRoute, 'updatedAt'>) => void) | undefined
   private readonly disposers: (() => void)[] = []
   private userQuestionDisposer: (() => void) | undefined
@@ -2434,7 +2435,10 @@ export class SshTui {
     // Capture the Screen/Surface that opened the paste at the marker, before the
     // first payload frame can be routed to whoever is on screen later.
     onPasteStart: () => {
-      this.pasteOwner ??= { screen: this.layerScreen, dialog: this.layerDialog }
+      // A new paste owns its provenance even if a previous paste was abandoned
+      // without a close marker. `??=` kept the dead Screen and dropped the next
+      // paste at the layer-identity check.
+      this.pasteOwner = { screen: this.layerScreen, dialog: this.layerDialog }
     },
   })
   /**
@@ -5102,10 +5106,16 @@ export class SshTui {
    */
   private openScreen(screen: ScreenState): void {
     this.clearSearchRefresh()
+    const pendingConfirm = this.screenSurfaceResolve
     this.screen = screen
     this.layerScreen = screen
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
+    // A Screen replacement owns the old confirmation's outcome: leaving the
+    // promise unresolved would strand the caller that asked this Screen. The
+    // Alt-chord gate above prevents the common path; this covers programmatic
+    // replacements as well.
+    if (pendingConfirm !== undefined) pendingConfirm('cancel')
     this.screenNeedsFullPaint = true
     this.refreshCompletion()
     this.markDirty()
@@ -5115,11 +5125,13 @@ export class SshTui {
   closeScreen(): void {
     if (this.screen === undefined) return
     this.clearSearchRefresh()
+    const pendingConfirm = this.screenSurfaceResolve
     this.screen = undefined
     this.layerScreen = undefined
     this.screenDismissals += 1
     this.screenSurface = undefined
     this.screenSurfaceResolve = undefined
+    if (pendingConfirm !== undefined) pendingConfirm('cancel')
     this.refreshCompletion()
     // One full repaint when a Screen closes, and it is deliberate: the transcript
     // may have grown (or been compacted) while the reader was away, so the frame
@@ -6133,7 +6145,13 @@ export class SshTui {
     // non-bracketed bursts and split-read payloads, so the guard covers every
     // terminal form without reinterpreting payload as keys.
     if (state === undefined || state.mode === 'preview') return
-    const flat = text.split(/\r?\n/u).map(part => part.trim()).filter(part => part !== '').join(' ')
+    const flat = text.split(/\r?\n/u)
+      // Search is a text field: C0 bytes are keys elsewhere, not query data.
+      // Newlines are folded above; every other control is dropped rather than
+      // becoming an invisible query that no result can match.
+      .map(part => part.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/gu, '').trim())
+      .filter(part => part !== '')
+      .join(' ')
     if (flat === '') return
     this.commitSearchState(insertSearchText(state, flat, [...this.visibleRows()]))
   }
@@ -6231,7 +6249,12 @@ export class SshTui {
       // Alt+f/F// at Search is a no-op; other CSI is consumed by the Screen.
       return
     }
-    if (combined !== '') apply(insertSearchText(state, combined, rows))
+    // C0 controls are not query text. Handled keys (Ctrl+U/K/A/E, backspace,
+    // Enter, Esc) returned above; any other control is consumed here rather
+    // than becoming an invisible query character.
+    if (combined !== '' && !/[\x00-\x1f\x7f]/u.test(combined)) {
+      apply(insertSearchText(state, combined, rows))
+    }
   }
 
   /**
@@ -11419,6 +11442,20 @@ export class SshTui {
     await this.applyModelSelection(provider, selected.id, modelOptions.map(option => option.id))
   }
 
+  /**
+   * Commit one route only after the Host accepts it.
+   *
+   * On 0.2.1 the callback is the mutable-ref listener and returns nothing. On
+   * 0.2.2 the launcher writes Agent.model.select and returns false if the Host
+   * rejects the route; throwing here prevents the UI cache, default persistence
+   * and success notice from claiming a route the Host never adopted.
+   */
+  private applySelection(next: ModelSelection): void {
+    const accepted = this.onSelectionChanged?.(next)
+    if (accepted === false) throw new Error(t('model.hostRejected'))
+    if (this.selectionRef !== undefined) this.selectionRef.current = next
+  }
+
   /** /provider: pick a provider, then its model (remembered route pre-filled). */
   private async runProviderCommand(): Promise<void> {
     const providers = this.listSelectableProviders()
@@ -11589,8 +11626,7 @@ export class SshTui {
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
-    if (this.selectionRef !== undefined) this.selectionRef.current = next
-    this.onSelectionChanged?.(next)
+    this.applySelection(next)
     await this.persistDefaultSelection(next)
     await this.rememberRoute({ ...next, provider: display })
     const kind = describeProviderRoute(display)
@@ -12056,8 +12092,7 @@ export class SshTui {
       model: modelId,
       ...(effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) }),
     }
-    if (this.selectionRef !== undefined) this.selectionRef.current = next
-    this.onSelectionChanged?.(next)
+    this.applySelection(next)
     await this.persistDefaultSelection(next)
     await this.rememberRoute(next)
     const effortText = effort ?? t('effort.defaultExplicit')
@@ -13098,10 +13133,23 @@ export class SshTui {
       this.markDirty()
       return
     }
+    // A confirmation asked by this Screen owns every key, including an Alt
+    // chord: replacing the Screen here would orphan the promise the caller is
+    // awaiting. This branch must stay before the global Screen shortcuts.
+    if (this.screenSurface !== undefined) {
+      if (combined === '\x1b' || combined === '\x03') {
+        this.settleScreenConfirm('cancel')
+        return
+      }
+      const answer = confirmAnswer(combined)
+      if (answer !== undefined) this.settleScreenConfirm(answer)
+      return
+    }
     // Alt+f/F// at a report/inspect replaces it with Search; Alt+n/p navigate a
-    // last Search or open one. Search itself handles these inside its own adapter.
+    // last Search or open one. Setup is not a report: its field and step machine
+    // own the keyboard, and W-5A only permits replacing Report/Inspect.
     const screenAlt = /^\x1b([fF/nNpP])$/u.exec(combined)
-    if (screen.kind !== 'search' && screenAlt !== null) {
+    if ((screen.kind === 'report' || screen.kind === 'inspect') && screenAlt !== null) {
       const key = screenAlt[1]
       if (key === 'f' || key === 'F' || key === '/') this.openSearchScreen('')
       else if (key === 'n' || key === 'N') this.navigateSearch(1)
@@ -13129,17 +13177,6 @@ export class SshTui {
     // composer, history or transcript (B2.6 §4).
     if (screen.kind === 'setup') {
       this.handleSetupKey(combined, moved)
-      return
-    }
-    // The Screen's own confirmation owns the keys while it is up: it is a question
-    // asked by this Screen, and answering it must not reach into the workspace.
-    if (this.screenSurface !== undefined) {
-      if (combined === '\x1b' || combined === '\x03') {
-        this.settleScreenConfirm('cancel')
-        return
-      }
-      const answer = confirmAnswer(combined)
-      if (answer !== undefined) this.settleScreenConfirm(answer)
       return
     }
     if (moved === 'copy' && (screen.copyText ?? '') !== '') {
@@ -14746,12 +14783,21 @@ export class SshTui {
         const envRef = 'DEEPSEEK_API_KEY'
         await this.saveCredential(credentials, envRef, state.key)
         const model = state.defaultModel ?? state.models[0] ?? 'deepseek-v4-pro'
-        await this.ctx.get('agentDefaultModel')?.saveSelection({ provider: 'deepseek-official', model })
-        if (this.selectionRef !== undefined) {
-          this.selectionRef.current = { provider: 'deepseek-official', model }
+        const next = { provider: 'deepseek-official', model } as const
+        const previous = this.selectionRef?.current as ModelSelection | undefined
+        if (!await this.persistDefaultSelection(next)) {
+          throw new Error(t('onboard.persistFailed'))
         }
-        this.onSelectionChanged?.({ provider: 'deepseek-official', model })
-        await this.rememberRoute({ provider: 'deepseek-official', model })
+        try {
+          this.applySelection(next)
+        } catch (error) {
+          if (previous !== undefined) {
+            try { this.applySelection(previous) } catch { /* keep the original failure */ }
+            await this.persistDefaultSelection(previous)
+          }
+          throw error
+        }
+        await this.rememberRoute(next)
         await this.syncSubagentToProvider('deepseek-official', state.models, previousParentProvider !== 'deepseek-official')
         if (state.baseUrl !== '' && settings !== undefined) {
           await settings.update(settingsNamespace('llm-deepseek'), { baseURL: state.baseUrl })
@@ -14921,11 +14967,19 @@ export class SshTui {
             model,
             ...(defaultEffort === undefined ? {} : { reasoningEffort: defaultEffort }),
           }
-          await this.ctx.get('agentDefaultModel')?.saveSelection(selection)
-          if (this.selectionRef !== undefined) {
-            this.selectionRef.current = selection
+          const previous = this.selectionRef?.current as ModelSelection | undefined
+          if (!await this.persistDefaultSelection(selection)) {
+            throw new Error(t('onboard.persistFailed'))
           }
-          this.onSelectionChanged?.(selection)
+          try {
+            this.applySelection(selection)
+          } catch (error) {
+            if (previous !== undefined) {
+              try { this.applySelection(previous) } catch { /* keep the original failure */ }
+              await this.persistDefaultSelection(previous)
+            }
+            throw error
+          }
           await this.rememberRoute(selection)
           await this.syncSubagentToProvider(ownerId, state.models, previousParentProvider !== ownerId)
           await this.onboardDone(t('onboard.customDone', { id: ownerId, model }))
