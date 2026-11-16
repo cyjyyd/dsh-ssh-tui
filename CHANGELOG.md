@@ -10,6 +10,18 @@
 
 ---
 
+## 0.8.6-rc.1 — 兼容候选（未发布）
+
+候选说明：[docs/release-notes-0.8.6-rc.1.md](docs/release-notes-0.8.6-rc.1.md)。
+
+**纯兼容候选，未发布。** 从 `v0.8.5@78b456a` 切出，仅增加 `0.2.2-rc.2` / `rc.3` 的精确兼容与 Agent root 迁移；W6B Terminal Doctor、Context、TITLE、V09 不进入本候选。
+
+### Changed
+
+- 新增 `0.2.2-rc.2`、`0.2.2-rc.3` 到精确 peer / `dshReleases` / CI / root pins；原五条 Host 保留。
+- `ctx.agents.roots()` 迁移为 Session header `origin === 'subagent'` 判定，并用 `ctx.agents.get(sessionId)` 读取精确实例。
+- rc.2/rc.3 来源仍为 `EVIDENCE_LIMITED / SOURCE_PAYLOAD_MATCH`；旧 #42 的 rc.1 例外不延伸。
+
 ## 0.8.5 — 稳定版
 
 发版说明：[docs/release-notes-0.8.5.md](docs/release-notes-0.8.5.md)。
