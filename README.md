@@ -157,7 +157,7 @@ TTY 是一种能力，不是宿主存在的前提。
 | DeepSeek Harness | 状态 |
 |---|---|
 | `0.2.1-rc.5` / `0.2.2-rc.1` | ✅ 支持，0.8.5 的两个精确稳定目标；Node `>=24.9`，各自单一 DSH family strict graph |
-| `0.2.1-rc.2` | ✅ 支持，保留的默认开发线（提交的 manifest / 锁 / `test-windows` 装它） |
+| `0.2.1-rc.2` | ✅ 支持，保留的默认开发线：提交的 manifest 与锁安装它，默认 Linux leg 跑全量探针；Windows ConPTY leg 只覆盖 `0.2.1-rc.5` / `0.2.2-rc.1` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持，保留到独立退役裁决 |
 | `0.1.7` 整线（含 `0.1.7-rc.1` / `0.1.7-rc.2`） | ❌ 自 `dsh-ssh-tui 0.8.4-rc.1` 起摘除（`dshReleases` 明确表态 `incompatible`） |
 | `0.1.5` 及更早 | ❌ 自 `dsh-ssh-tui 0.8.0` 起不再支持 |

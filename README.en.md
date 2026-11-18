@@ -183,7 +183,7 @@ The plugin declares and tests **every `@deepseek-ai/dsh` line in flight**:
 | Host line | Status |
 | --- | --- |
 | `0.2.1-rc.5` / `0.2.2-rc.1` | declared compatible; the two exact 0.8.5 stable targets; Node `>=24.9`, one strict DSH family per target |
-| `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest, the lock and the `test-windows` leg install it |
+| `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest and lock install it and the default Linux leg runs the full probe set; the Windows ConPTY leg covers only `0.2.1-rc.5` / `0.2.2-rc.1` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | declared compatible; retained until a separate retirement decision |
 | `0.1.7-rc.1` / `0.1.7-rc.2` | **dropped in 0.8.4-rc.1**: `dshReleases` says `incompatible` and the launcher refuses it, so a user still on that line gets "upgrade" rather than a half-working plugin |
 | `0.1.5` and older | **unsupported as of 0.8.0**, with an explicit `incompatible` entry in `dshReleases` |
