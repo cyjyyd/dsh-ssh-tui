@@ -10,17 +10,33 @@
 
 ---
 
-## 0.8.6-rc.1 — 兼容候选（未发布）
+## 0.8.6 — 七 Host 兼容稳定候选
+
+发版说明：[docs/release-notes-0.8.6.md](docs/release-notes-0.8.6.md)。
+
+**0.8.6 是七 Host 兼容稳定候选（准备中）。** 源码基线为 `v0.8.5@78b456a` + `#69@8b3c8b8`；Stable 转换只改 `package.json` / lockfile 版本与发版材料，`src/` / peer / `dshReleases` / CI matrix 不变。W6B Terminal Doctor、Context、TITLE、V09、AgentTeam 深度行为与 rc.4 不进入本候选。最终 tag / GitHub Release / npm 仍需 Owner 对新 exact SHA/artifact 单独签署 `OWNER RELEASE GO`。
+
+### Changed
+
+- 版本从 `0.8.6-rc.1` 转为 `0.8.6`；无运行时代码变更。
+- 七 Host 精确并集保持：`0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3`；Node `>=24.9.0`。
+- `0.2.2-rc.2` / `rc.3` 来源仍为 `EVIDENCE_LIMITED / SOURCE_PAYLOAD_MATCH`；#42-R2 仅覆盖本 0.8.6 线与这两枚 Host，不是官方 CI/attestation PASS。
+
+### Docs
+
+- 新增 `docs/release-notes-0.8.6.md`；RC 发版说明改为历史记录。
+
+## 0.8.6-rc.1 — 兼容候选（历史，已作为预发布发布）
 
 候选说明：[docs/release-notes-0.8.6-rc.1.md](docs/release-notes-0.8.6-rc.1.md)。
 
-**纯兼容候选，未发布。** 从 `v0.8.5@78b456a` 切出，仅增加 `0.2.2-rc.2` / `rc.3` 的精确兼容与 Agent root 迁移；W6B Terminal Doctor、Context、TITLE、V09 不进入本候选。
+**该预发布已作为 `0.8.6-rc.1` 发布**：annotated tag `v0.8.6-rc.1`、GitHub prerelease 与 npm `next` 的记录见 Release / #70 RC24；本文件不再标记为 `UNRELEASED`。从 `v0.8.5@78b456a` 切出，仅增加 `0.2.2-rc.2` / `rc.3` 的精确兼容与 Agent root 迁移；W6B Terminal Doctor、Context、TITLE、V09 不进入本候选。
 
 ### Changed
 
 - 新增 `0.2.2-rc.2`、`0.2.2-rc.3` 到精确 peer / `dshReleases` / CI / root pins；原五条 Host 保留。
 - `ctx.agents.roots()` 迁移为 Session header `origin === 'subagent'` 判定，并用 `ctx.agents.get(sessionId)` 读取精确实例。
-- rc.2/rc.3 来源仍为 `EVIDENCE_LIMITED / SOURCE_PAYLOAD_MATCH`；旧 #42 的 rc.1 例外不延伸。
+- rc.2/rc.3 来源仍为 `EVIDENCE_LIMITED / SOURCE_PAYLOAD_MATCH`；#42-R2 仅覆盖本 0.8.6 线与这两枚 Host，不延伸为官方 CI/attestation PASS。
 
 ## 0.8.5 — 稳定版
 
