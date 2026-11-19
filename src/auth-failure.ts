@@ -78,6 +78,22 @@ const LOCAL_PATTERNS: readonly RegExp[] = [
   /缺少[^。]{0,12}(?:密钥|凭据|token)/iu,
 ]
 
+/**
+ * The host's content-refusal message, introduced by dsh 0.2.2-rc.4.
+ *
+ * The prefix is authoritative; the provider-supplied explanation that follows
+ * may contain words ("unauthorized", "quota", "403") that the auth classifier
+ * would otherwise read as a credential problem. A refusal is a provider policy
+ * decision, not an auth failure: the opt-in auth retry would only spend the
+ * same context again on the same refusal.
+ *
+ * @param message - the failure text the host attached to the turn.
+ * @returns true when the provider refused the content itself.
+ */
+export function isContentRefusedFailure(message: string): boolean {
+  return /^\s*DeepSeek refused to answer under its content safety review\b/iu.test(String(message ?? ''))
+}
+
 /** The HTTP status inside a host-formatted failure, if there is one. */
 export function statusOf(message: string): number | undefined {
   // `OpenAI API error (403): …` and `HTTP 403` are the two shapes the host and
@@ -98,6 +114,9 @@ export function statusOf(message: string): number | undefined {
 export function classifyAuthFailure(message: string): AuthFailure | undefined {
   const text = String(message ?? '')
   if (text.trim() === '') return undefined
+  // rc.4 appends a provider explanation to the refusal; it may quote auth-shaped
+  // words, but the refusal class wins and must never trigger auth advice/retry.
+  if (isContentRefusedFailure(text)) return undefined
   const status = statusOf(text)
   // A local message wins: a provider body can quote the word "key", and the
   // actionable advice for "nothing configured here" is the opposite one.
