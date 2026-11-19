@@ -623,11 +623,13 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
  * the agent loop persists that chunk in `assistant/attempt` because a failed
  * attempt never gets an `assistant/message` settlement. A replay that ignores
  * the attempt therefore loses tokens the provider already billed, while the
- * live path recorded them. Only well-formed integer samples are accepted; the
- * last one wins, matching `recordUsage`'s per-step replacement.
+ * live path recorded them. Only samples whose required counters and present
+ * optional counters are nonnegative safe integers are accepted; a malformed
+ * sample is skipped whole rather than being sanitized or zero-filled, so the
+ * last valid sample still wins and matches `recordUsage`'s replacement rule.
  *
  * @param stream - a durable `stream` array from the Session log.
- * @returns the last usage sample, or undefined when the stream carries none.
+ * @returns the last valid usage sample, or undefined when the stream carries none.
  */
 export function streamUsage(stream: unknown): TokenUsage | undefined {
   if (!Array.isArray(stream)) return undefined
@@ -642,19 +644,30 @@ export function streamUsage(stream: unknown): TokenUsage | undefined {
     if (usage === null || typeof usage !== 'object') continue
     const input = usage.inputTokens
     const output = usage.outputTokens
-    if (typeof input !== 'number' || !Number.isFinite(input)) continue
-    if (typeof output !== 'number' || !Number.isFinite(output)) continue
-    const optional = (value: number | undefined): value is number => typeof value === 'number' && Number.isFinite(value)
+    if (!isTokenCount(input) || !isTokenCount(output)) continue
+    const total = usage.totalTokens
+    const cacheRead = usage.cacheReadTokens
+    const cacheWrite = usage.cacheWriteTokens
+    const reasoning = usage.reasoningTokens
+    if (total !== undefined && !isTokenCount(total)) continue
+    if (cacheRead !== undefined && !isTokenCount(cacheRead)) continue
+    if (cacheWrite !== undefined && !isTokenCount(cacheWrite)) continue
+    if (reasoning !== undefined && !isTokenCount(reasoning)) continue
     found = {
       inputTokens: input,
       outputTokens: output,
-      ...(optional(usage.totalTokens) ? { totalTokens: usage.totalTokens } : {}),
-      ...(optional(usage.cacheReadTokens) ? { cacheReadTokens: usage.cacheReadTokens } : {}),
-      ...(optional(usage.cacheWriteTokens) ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
-      ...(optional(usage.reasoningTokens) ? { reasoningTokens: usage.reasoningTokens } : {}),
+      ...(total === undefined ? {} : { totalTokens: total }),
+      ...(cacheRead === undefined ? {} : { cacheReadTokens: cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
+      ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
     }
   }
   return found
+}
+
+/** A token counter is a nonnegative safe integer; anything else is malformed. */
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /**

@@ -121,6 +121,101 @@ test('streamUsage reads the last well-formed usage chunk from a packed attempt',
   assert.equal(streamUsage({}), undefined)
 })
 
+test('streamUsage rejects malformed counters and keeps the last valid sample', () => {
+  const chunk = usage => ({ type: 'chunk', chunk: { type: 'usage', usage } })
+  const valid = {
+    inputTokens: 12, outputTokens: 5,
+    totalTokens: 17, cacheReadTokens: 2, cacheWriteTokens: 3, reasoningTokens: 1,
+  }
+  const malformed = [
+    { inputTokens: -1, outputTokens: 0 },
+    { inputTokens: 1.5, outputTokens: 0 },
+    { inputTokens: Number.NaN, outputTokens: 0 },
+    { inputTokens: Number.POSITIVE_INFINITY, outputTokens: 0 },
+    { inputTokens: 0, outputTokens: -1 },
+    { inputTokens: 0, outputTokens: 1.5 },
+    { inputTokens: 0, outputTokens: Number.NaN },
+    { inputTokens: 0, outputTokens: 0, totalTokens: -1 },
+    { inputTokens: 0, outputTokens: 0, totalTokens: 1.5 },
+    { inputTokens: 0, outputTokens: 0, totalTokens: Number.MAX_SAFE_INTEGER + 1 },
+    { inputTokens: 0, outputTokens: 0, totalTokens: null },
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: -1 },
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: '2' },
+    { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 2.5 },
+    { inputTokens: 0, outputTokens: 0, reasoningTokens: Number.NaN },
+  ]
+  for (const bad of malformed) {
+    assert.deepEqual(
+      streamUsage([chunk(valid), chunk(bad)]),
+      valid,
+      `a malformed sample must not displace the last valid one: ${JSON.stringify(bad)}`,
+    )
+  }
+  // The safe-integer boundary is still a well-formed sample.
+  const boundary = { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 0 }
+  assert.deepEqual(streamUsage([chunk(boundary)]), boundary)
+  assert.equal(
+    streamUsage([chunk({ inputTokens: 0, outputTokens: 0, totalTokens: -1 })]),
+    undefined,
+    'a stream with only malformed samples has no usage to replay',
+  )
+})
+
+test('streamUsage keeps absent optionals absent and present zeros present', () => {
+  const chunk = usage => ({ type: 'chunk', chunk: { type: 'usage', usage } })
+  assert.deepEqual(
+    streamUsage([chunk({ inputTokens: 1, outputTokens: 2 })]),
+    { inputTokens: 1, outputTokens: 2 },
+    'no optional counter is fabricated as zero',
+  )
+  assert.deepEqual(
+    streamUsage([chunk({ inputTokens: 1, outputTokens: 2, totalTokens: 0 })]),
+    { inputTokens: 1, outputTokens: 2, totalTokens: 0 },
+    'an explicit zero is a real reported total, not an absent one',
+  )
+  assert.deepEqual(
+    streamUsage([chunk({ inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 })]),
+    { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  )
+})
+
+test('a replayed attempt without a harness total keeps its billed parts', () => {
+  const { tui, agent } = makeTui()
+  tui.replaying = true
+  try {
+    send(tui, agent, 'turn/start', { turn: 1 })
+    send(tui, agent, 'step/start', { turn: 1, step: 1 })
+    send(tui, agent, 'assistant/attempt', {
+      turn: 1,
+      step: 1,
+      stream: [{ type: 'chunk', time: 1, chunk: { type: 'usage', usage: { inputTokens: 5, outputTokens: 10 } } }],
+    })
+    send(tui, agent, 'step/end', { turn: 1, step: 1 })
+    // An attempt with no usage chunk at all must contribute nothing.
+    send(tui, agent, 'turn/start', { turn: 2 })
+    send(tui, agent, 'step/start', { turn: 2, step: 1 })
+    send(tui, agent, 'assistant/attempt', {
+      turn: 2,
+      step: 1,
+      stream: [{ type: 'text-chunks', time0: 0, index: 0, dt: [], texts: ['no usage here'] }],
+    })
+    send(tui, agent, 'step/end', { turn: 2, step: 1 })
+  } finally {
+    tui.replaying = false
+  }
+  const usage = tui.stats.usage
+  assert.deepEqual(
+    {
+      input: usage.inputTokens,
+      output: usage.outputTokens,
+      reported: usage.reportedTokens,
+      unreportedSteps: usage.unreportedSteps,
+    },
+    { input: 5, output: 10, reported: 0, unreportedSteps: 1 },
+    'the un-totalled attempt is billed from its parts; the empty attempt adds nothing',
+  )
+})
+
 test('a refusal turn does not duplicate tools or leak its draft into the next turn', () => {
   const { tui, agent } = makeTui()
   send(tui, agent, 'turn/start', { turn: 1 })
