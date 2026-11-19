@@ -51,7 +51,7 @@ const { sessionLockLookupPaths } = await import(
 )
 // The seam: how a window dies differs per platform, and the spec says which
 // primitive each death maps to. One module owns that so the probes cannot drift.
-const { closeWindow, windowDeathNote, IS_WINDOWS } = await import(
+const { closeWindow, waitForWindowGone, windowDeathNote, IS_WINDOWS } = await import(
   pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'pty-window.mjs')).href,
 )
 // The same grid the paint tests assert on. A byte tail cannot say what the
@@ -134,15 +134,6 @@ async function removeSessionDir(home, sessionId) {
   }
 }
 
-/** True when the pid still exists (signal 0 is the portable liveness probe). */
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
 
 /** The probe may only run against a home whose state all lives in one tree. */
 function assertHomeIsCoherent(home) {
@@ -241,22 +232,6 @@ async function runProbe({ sessionId, keep, home }) {
       resolve(exitCode)
     })
   })
-
-  /**
-   * The launcher is gone — asked two ways on purpose. Windows can keep the pid
-   * answering `kill(pid, 0)` while a handle to it is still open, and node-pty's
-   * exit event is the one that carries the code but only arrives once the ConPTY
-   * output socket closes. Either answer means the window is not lingering.
-   */
-  const waitForWindowGone = async (window, timeoutMs) => {
-    const deadline = Date.now() + timeoutMs
-    for (;;) {
-      if (window.exited !== undefined) return true
-      if (!isAlive(window.term.pid)) return true
-      if (Date.now() >= deadline) return false
-      await delay(100)
-    }
-  }
 
   const problems = []
   const check = (condition, message) => {

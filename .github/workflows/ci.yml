@@ -9,32 +9,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json pins the whole dsh family to 0.2.1-rc.2 — the committed
-        # manifest, the lock and the Windows leg all install it, and it is where
-        # upstream's `next` points. It is the line this checkout develops against.
+        # The committed manifest and lock develop against the default 0.2.1-rc.2
+        # line (package.json's devDependencies pin it; @deepseek-ai/dsh-invariants
+        # stays on 0.2.0-rc.2). That is the leg which installs the committed tree
+        # and runs the full probe set; every other Linux leg rewrites the manifest
+        # with scripts/ci-pin-line.mjs and installs from scratch.
         #
-        # The window it declares is `>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2`
-        # (two comparators: node-semver only admits a prerelease through one on the
-        # same tuple), so both 0.2.0 rcs keep a leg: rc.2 at full depth, rc.1 with
-        # typecheck plus the suite. The 0.1.7 line is no longer declared — its
-        # `dshReleases` entries say `incompatible` and its legs are gone with it,
-        # so a user still on that line gets a refusal from the launcher instead of
-        # a half-working plugin.
+        # The declared window is the exact five-version union
+        # `0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1`
+        # (peer dependencies and dshReleases state the same fact), not an
+        # unbounded semver range. Every declared Linux version keeps a leg: the
+        # default runs the full probe set, the other four typecheck plus the suite
+        # and the host-independent probes.
         #
-        # Every version we declare stays covered, at the depth its risk deserves:
-        # the default (0.2.1-rc.2) and 0.2.0-rc.2 run the full probe set, while
-        # 0.2.0-rc.1 — same generation as rc.2 — keeps typecheck plus the suite.
+        # The Windows ConPTY leg is narrower than the Linux matrix: it covers only
+        # the two new stable targets, 0.2.1-rc.5 and 0.2.2-rc.1. It does not
+        # install the default 0.2.1-rc.2 line.
+        #
+        # The 0.1.7 line is no longer declared — its `dshReleases` entries say
+        # `incompatible` and its legs are gone with it, so a user still on that
+        # line gets a refusal from the launcher instead of a half-working plugin.
         #
         # Pinning a leg to an older rc *within* a line does not resolve when that
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
-        # the newest rc of that generation it can install cleanly, plus the rcs
-        # upstream still points a dist-tag at.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1"]
+        # the newest rc of that generation it can install cleanly, plus the two
+        # new stable targets.
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # One rewrite for every non-default line. It replaces two inline node -e
       # heredocs: the version substitution was readable, but the presets split, the
       # family's root pins and the override map were not, and a typo in one of them
@@ -173,11 +178,19 @@ jobs:
   # path only gets real coverage on a Windows runner.
   test-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+      - name: Pin the tree to the dsh ${{ matrix.dsh }} line
+        run: |
+          node scripts/ci-pin-line.mjs ${{ matrix.dsh }}
+          Remove-Item package-lock.json -Force
       - run: npm install --no-audit --no-fund
       - run: npx tsc -p tsconfig.json --noEmit
       # Node expands the quoted glob itself: PowerShell does not glob for

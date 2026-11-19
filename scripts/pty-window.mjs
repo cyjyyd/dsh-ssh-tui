@@ -62,6 +62,44 @@ export function crashWindow(term) {
   else term.kill('SIGKILL')
 }
 
+/**
+ * Wait until a closed window is gone, but give node-pty's `exit` event a
+ * bounded grace after the pid disappears.
+ *
+ * `kill(pid, 0)` can start failing a few milliseconds before node-pty delivers
+ * `onExit`; the old probe returned on the dead pid and immediately asserted the
+ * exit code, which is how the historical `got no exit event` flake was made.
+ * The process is still reported gone when the grace expires — a genuinely lost
+ * event remains a failure, not a pass — but the ordinary pid/event skew no
+ * longer decides the assertion.
+ */
+export async function waitForWindowGone(window, timeoutMs, options = {}) {
+  const now = options.now ?? Date.now
+  const sleep = options.delay ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
+  const isAlive = options.isAlive ?? (pid => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  })
+  const exitGraceMs = options.exitGraceMs ?? 500
+  const deadline = now() + timeoutMs
+  let deadSince
+  for (;;) {
+    if (window.exited !== undefined) return true
+    if (!isAlive(window.term.pid)) {
+      deadSince ??= now()
+      if (now() - deadSince >= exitGraceMs) return true
+    } else {
+      deadSince = undefined
+    }
+    if (now() >= deadline) return false
+    await sleep(10)
+  }
+}
+
 /** One line for the probe log, so a CI run says which death it drove. */
 export function windowDeathNote(kind) {
   if (IS_WINDOWS) {

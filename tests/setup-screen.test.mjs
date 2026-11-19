@@ -272,6 +272,33 @@ test('a wizard that failed to save stays up, with its error', async () => {
   assert.match(String(tui.onboarding?.notice?.text), /凭据服务离线/u)
 })
 
+test('a default-selection write failure does not half-apply the wizard route', async () => {
+  const previous = { provider: 'deepseek-official', model: 'deepseek-v4-pro' }
+  let selected = previous
+  const selectionRef = { current: previous, assembled: undefined }
+  const { tui } = makeTui({
+    selectionRef,
+    onSelectionChanged: next => { selected = next; selectionRef.current = next },
+  }, {
+    credentials: { set: async () => {} },
+    settings: { mutate: async () => {}, replace: async () => { throw new Error('settings read-only') } },
+    agentDefaultModel: { saveSelection: async () => { throw new Error('default write failed') } },
+  })
+  tui.onboarding = {
+    step: 'confirm', providerType: 'official', providerId: 'deepseek-official',
+    baseUrl: '', key: 'sk-live-1234', models: ['deepseek-flash'], defaultModel: 'deepseek-flash',
+    catalogPresets: undefined, catalog: undefined, providerCursor: 0, saving: true,
+    field: '', fieldCursor: 0, resolve() {},
+  }
+  tui.openScreen({ kind: 'setup', title: t('onboard.title'), lines: [], offset: 0 })
+  await tui.saveOnboarding()
+  assert.equal(tui.screen?.kind, 'setup', 'the wizard stays open on a persistence failure')
+  assert.equal(tui.onboarding?.notice?.kind, 'error')
+  assert.match(String(tui.onboarding?.notice?.text), /persist|保存|模型选择/u)
+  assert.deepEqual(selected, previous, 'the Host was never told to switch')
+  assert.deepEqual(selectionRef.current, previous, 'and the UI cache still names the old route')
+})
+
 // ── D. detach / reattach ────────────────────────────────────────────────────
 test('a reattach mid-step keeps the step, the field and the message', async () => {
   const { tui } = setup('base-url', { field: 'https://gw.example/v1', fieldCursor: 20 })
@@ -614,4 +641,71 @@ test('a held sequence is dropped when the wizard closes before it completes', as
     assert.equal(tui.rows.length, rows, 'and no row was written by the release')
     assert.equal(tui.history.length, 0)
   }
+})
+
+// ── F1: F1-1 — the Alt chord cannot take Setup or a confirmation ──────────
+
+test('Alt+f/F///n/N/p/P cannot replace the Setup Screen', async () => {
+  const { tui } = makeTui()
+  let settled = false
+  const pending = tui.runOnboarding()
+  pending.then(() => { settled = true }, () => { settled = true })
+  assert.equal(tui.screen?.kind, 'setup')
+  for (const key of ['\u001bf', '\u001bF', '\u001b/', '\u001bn', '\u001bN', '\u001bp', '\u001bP']) {
+    tui.handleData(Buffer.from(key))
+    assert.equal(tui.screen?.kind, 'setup', `${JSON.stringify(key)} must not replace Setup`)
+    assert.equal(tui.onboarding !== undefined, true)
+    assert.equal(settled, false, `${JSON.stringify(key)} must not settle the wizard promise`)
+  }
+  tui.handleEscape()
+  await tick(20)
+  assert.equal(settled, true, 'cancelling Setup settles its promise exactly once')
+  assert.equal(tui.screen, undefined)
+  tui.runCommand('/setup')
+  assert.equal(tui.screen?.kind, 'setup', 'a later /setup can open a fresh wizard')
+  await tui.dispose()
+})
+
+test('Alt chords cannot orphan a Screen confirmation', async () => {
+  const { tui } = makeTui()
+  tui.openReport('doctor', ['synthetic report'])
+  const pending = tui.askScreenConfirm('synthetic repair?', 'y/n')
+  assert.notEqual(pending, undefined)
+  let result
+  let settled = false
+  pending.then(value => { result = value; settled = true })
+  for (const key of ['\u001bf', '\u001bF', '\u001b/', '\u001bn', '\u001bN', '\u001bp', '\u001bP']) {
+    tui.handleData(Buffer.from(key))
+    assert.equal(tui.screen?.kind, 'report', `${JSON.stringify(key)} must leave the report up`)
+    assert.equal(tui.screenSurface?.kind, 'confirm', 'the confirmation still owns the keys')
+    assert.equal(settled, false, 'the confirmation promise is still pending')
+  }
+  tui.handleData(Buffer.from('y'))
+  await tick()
+  assert.equal(result, 'y')
+  assert.equal(tui.screenSurface, undefined)
+  assert.equal(tui.screen?.kind, 'report')
+  tui.handleData(Buffer.from('q'))
+  assert.equal(tui.screen, undefined, 'the Screen remains usable after the answer')
+})
+
+test('a report without a confirmation still honors the W-5A Alt+f replacement', () => {
+  const { tui } = makeTui()
+  tui.openReport('doctor', ['synthetic report'])
+  tui.handleData(Buffer.from('\u001bf'))
+  assert.equal(tui.screen?.kind, 'search')
+})
+
+test('programmatic openScreen cancels a pending Screen confirmation instead of orphaning it', async () => {
+  const { tui } = makeTui()
+  tui.openReport('doctor', ['synthetic report'])
+  let result
+  let settled = false
+  const pending = tui.askScreenConfirm('synthetic repair?', 'y/n')
+  pending.then(value => { result = value; settled = true })
+  tui.openScreen({ kind: 'report', title: 'next', lines: [], offset: 0 })
+  await tick()
+  assert.equal(settled, true, 'the replaced Screen settles its confirmation')
+  assert.equal(result, 'cancel')
+  assert.equal(tui.screen?.title, 'next')
 })
