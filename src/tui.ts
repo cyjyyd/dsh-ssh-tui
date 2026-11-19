@@ -45,6 +45,7 @@ import {
   settingsNamespace,
   streamChunkOf,
   streamFirstTokenTime,
+  streamUsage,
   streamFrameAttemptId,
   streamFrameOwner,
   toolResultFailed,
@@ -102,7 +103,7 @@ import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type Doc
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
 import { appendRow, lineModeEnabled, lineModeLines } from './line-mode.js'
 import { keymapReport, resolveKeymap, type KeyAction, type ResolvedKeymap } from './keymap.js'
-import { classifyAuthFailure, isReasoningReplayFailure, isRequestRejectedFailure, type AuthFailure } from './auth-failure.js'
+import { classifyAuthFailure, isContentRefusedFailure, isReasoningReplayFailure, isRequestRejectedFailure, type AuthFailure } from './auth-failure.js'
 import {
   activeTheme,
   resolveTheme,
@@ -687,6 +688,7 @@ export {
   settingsNamespace,
   streamChunkOf,
   streamFirstTokenTime,
+  streamUsage,
   streamFrameAttemptId,
   streamFrameOwner,
 } from './dsh-compat.js'
@@ -8451,6 +8453,15 @@ export class SshTui {
         }
         break
       }
+      case 'assistant/attempt': {
+        // A failed attempt settles as `assistant/attempt`, never as
+        // `assistant/message`. rc.4 reports the billed usage before the
+        // refusal, so replay must recover it or a resumed session loses the
+        // tokens the live path recorded. The packed stream is the only source.
+        const usage = streamUsage((event.data as { stream?: unknown }).stream)
+        if (usage !== undefined) this.statsTracker.recordUsage(event.data.turn, event.data.step, usage)
+        break
+      }
       case 'assistant/message': {
         const text = event.data.message.content
           .filter(block => block.type === 'text')
@@ -12315,6 +12326,9 @@ export class SshTui {
    */
   private reportAuthFailure(message: string): void {
     if (this.replaying) return
+    // rc.4's refusal explanation is provider text and may quote auth-shaped
+    // words. The refusal prefix is authoritative: no auth advice, no retry.
+    if (isContentRefusedFailure(message)) return
     // The reasoning-replay 400 is an upstream bug with its own workarounds, so it
     // gets its own sentence rather than the auth advice.
     if (isReasoningReplayFailure(message)) {

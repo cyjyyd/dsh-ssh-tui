@@ -11,7 +11,7 @@
  */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
@@ -613,6 +613,48 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * The final usage sample inside a durable packed assistant stream
+ * (`assistant/attempt.stream` or `assistant/message.stream`).
+ *
+ * rc.4 emits a usage chunk immediately before a `CONTENT_REFUSED` error, and
+ * the agent loop persists that chunk in `assistant/attempt` because a failed
+ * attempt never gets an `assistant/message` settlement. A replay that ignores
+ * the attempt therefore loses tokens the provider already billed, while the
+ * live path recorded them. Only well-formed integer samples are accepted; the
+ * last one wins, matching `recordUsage`'s per-step replacement.
+ *
+ * @param stream - a durable `stream` array from the Session log.
+ * @returns the last usage sample, or undefined when the stream carries none.
+ */
+export function streamUsage(stream: unknown): TokenUsage | undefined {
+  if (!Array.isArray(stream)) return undefined
+  let found: TokenUsage | undefined
+  for (const entry of stream) {
+    if (entry === null || typeof entry !== 'object') continue
+    const record = entry as { type?: unknown; chunk?: unknown }
+    if (record.type !== 'chunk') continue
+    const chunk = record.chunk as { type?: unknown; usage?: unknown } | undefined
+    if (chunk === null || typeof chunk !== 'object' || chunk.type !== 'usage') continue
+    const usage = chunk.usage as Partial<TokenUsage> | undefined
+    if (usage === null || typeof usage !== 'object') continue
+    const input = usage.inputTokens
+    const output = usage.outputTokens
+    if (typeof input !== 'number' || !Number.isFinite(input)) continue
+    if (typeof output !== 'number' || !Number.isFinite(output)) continue
+    const optional = (value: number | undefined): value is number => typeof value === 'number' && Number.isFinite(value)
+    found = {
+      inputTokens: input,
+      outputTokens: output,
+      ...(optional(usage.totalTokens) ? { totalTokens: usage.totalTokens } : {}),
+      ...(optional(usage.cacheReadTokens) ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+      ...(optional(usage.cacheWriteTokens) ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+      ...(optional(usage.reasoningTokens) ? { reasoningTokens: usage.reasoningTokens } : {}),
+    }
+  }
+  return found
 }
 
 /**
