@@ -82,7 +82,7 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** `0.8.5` remains the current stable release (`0.2.1-rc.5` / `0.2.2-rc.1`, Node `>=24.9`). The `0.9.0` mainline development candidate (S1-A) extends the exact set with `0.2.2-rc.2` and `0.2.2-rc.3`, while `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. This `0.9.0` mainline development candidate (S1-A) is **unreleased**: its package version intentionally remains `0.8.5`, with no 0.9 release or admission yet. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 **Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
