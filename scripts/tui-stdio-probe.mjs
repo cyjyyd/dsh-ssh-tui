@@ -187,7 +187,7 @@ try {
   let mark = output.length
   child.stdin.write('/')
   const listed = await waitFor(
-    () => plain(output.slice(mark)).includes('/disconnect'),
+    () => plain(output.slice(mark)).includes('/context'),
     STEP_TIMEOUT_MS,
     'the completion list',
   )
