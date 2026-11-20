@@ -33,7 +33,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -229,7 +229,12 @@ export function pinFile(line, cwd = process.cwd()) {
   return next
 }
 
-if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+// `file://${process.argv[1]}` only matches a POSIX path. On Windows argv[1] is
+// `D:\a\...` while import.meta.url is `file:///D:/a/...`, so the comparison was
+// silently false and CI's pin step did nothing: every Windows leg installed the
+// default 0.2.1-rc.2 line under its matrix label. pathToFileURL() is the
+// cross-platform spelling of the same identity check.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const line = process.argv[2]
   if (line === undefined) {
     process.stderr.write(`usage: node scripts/ci-pin-line.mjs <${Object.keys(LINES).join('|')}>\n`)
