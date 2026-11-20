@@ -95,6 +95,78 @@ test('a cached route that differs from the current route is STALE even at the sa
   assert.match(joined(report, 1, 78), /STALE \(路由不一致\)/)
 })
 
+const ROUTE_A = { provider: 'A', model: 'model-a' }
+const ROUTE_B = { provider: 'B', model: 'model-b' }
+
+function splitRoute(lastUsed, next, asOfSeq = 10) {
+  return snapshot({
+    contextPressure: { pressureTokens: 1000, projectedTokens: 1012, contextWindow: 128000 },
+    modelSelection: { lastUsed, next },
+  }, asOfSeq)
+}
+
+test('cached occupancy follows lastUsed, so an A→B switch is STALE, never CACHED-as-B', () => {
+  const report = buildContextReport(splitRoute(ROUTE_A, ROUTE_B), {
+    headSeq: 10,
+    currentRoute: ROUTE_B,
+  })
+  assert.equal(report.overview.usedTokens, 1012)
+  assert.deepEqual(report.overview.cachedRoute, ROUTE_A, 'the provider-anchored sample belongs to lastUsed A')
+  assert.deepEqual(report.overview.plannedRoute, ROUTE_B, 'next is a plan and is not occupancy provenance')
+  assert.equal(report.overview.routeMatches, false)
+  assert.equal(report.overview.freshness, 'STALE')
+  assert.deepEqual(report.overview.staleReasons, ['ROUTE'])
+  const body = joined(report, 1, 78)
+  assert.match(body, /STALE \(路由不一致\)/)
+  assert.doesNotMatch(body, /CACHED/, 'A sample is never presented as verified B capacity')
+})
+
+test('a planned switch away from lastUsed does not turn a matching current route into STALE', () => {
+  const report = buildContextReport(splitRoute(ROUTE_B, ROUTE_A), {
+    headSeq: 10,
+    currentRoute: ROUTE_B,
+  })
+  assert.deepEqual(report.overview.cachedRoute, ROUTE_B)
+  assert.deepEqual(report.overview.plannedRoute, ROUTE_A)
+  assert.equal(report.overview.routeMatches, true)
+  assert.equal(report.overview.routeVerified, true)
+  assert.equal(report.overview.freshness, 'CACHED')
+  assert.deepEqual(report.overview.staleReasons, [])
+})
+
+test('same last-used, planned and current route stays CACHED', () => {
+  const report = buildContextReport(splitRoute(ROUTE, ROUTE), { headSeq: 10, currentRoute: ROUTE })
+  assert.deepEqual(report.overview.cachedRoute, ROUTE)
+  assert.deepEqual(report.overview.plannedRoute, ROUTE)
+  assert.equal(report.overview.routeMatches, true)
+  assert.equal(report.overview.freshness, 'CACHED')
+  assert.deepEqual(report.overview.staleReasons, [])
+})
+
+test('a planned route without lastUsed provenance is unverified, not a cache match', () => {
+  const report = buildContextReport(snapshot({
+    contextPressure: { pressureTokens: 1000, projectedTokens: 1012, contextWindow: 128000 },
+    modelSelection: { next: ROUTE_B },
+  }, 10), { headSeq: 10, currentRoute: ROUTE_B })
+  assert.equal(report.overview.usedTokens, 1012)
+  assert.equal(report.overview.cachedRoute, undefined, 'next alone is never promoted to provenance')
+  assert.deepEqual(report.overview.plannedRoute, ROUTE_B)
+  assert.equal(report.overview.routeMatches, undefined)
+  assert.equal(report.overview.routeVerified, false)
+  assert.match(joined(report, 1, 78), /路由未由缓存投影验证/)
+})
+
+test('missing modelSelection leaves provenance unknown instead of guessing a route', () => {
+  const report = buildContextReport(snapshot({
+    contextPressure: { pressureTokens: 1000, projectedTokens: 1012, contextWindow: 128000 },
+  }, 10), { headSeq: 10, currentRoute: ROUTE_B })
+  assert.equal(report.overview.cachedRoute, undefined)
+  assert.equal(report.overview.plannedRoute, undefined)
+  assert.equal(report.overview.routeMatches, undefined)
+  assert.equal(report.overview.routeVerified, false)
+  assert.match(joined(report, 1, 78), /路由未由缓存投影验证/)
+})
+
 test('>100% keeps the true number and clamps only the bar', () => {
   const report = buildContextReport(snapshot({
     contextPressure: { pressureTokens: 200000, projectedTokens: 200012, contextWindow: 128000 },

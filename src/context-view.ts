@@ -49,7 +49,11 @@ export interface ContextOverview {
   lagEvents?: number
   freshness: ContextFreshness
   staleReasons: ContextStaleReason[]
+  /** Route that produced the provider-anchored `contextPressure` sample. */
   cachedRoute?: ContextRoute
+  /** Planned next route (`modelSelection.next`); never occupancy provenance. */
+  plannedRoute?: ContextRoute
+  /** Route the next request would use, when the caller can supply it. */
   currentRoute?: ContextRoute
   routeVerified: boolean
   routeMatches?: boolean
@@ -127,10 +131,25 @@ function routeOf(value: unknown): ContextRoute | undefined {
   return { provider, model }
 }
 
+/**
+ * Route that produced the cached `contextPressure` sample.
+ *
+ * `contextPressure` is provider-anchored: it is the last provider request's
+ * occupancy, so its provenance is `modelSelection.lastUsed`. `next` is only the
+ * planned route and must never be promoted to provenance; doing so would label
+ * an A sample as a verified B capacity after a route switch.
+ */
 function cachedRouteOf(values: Readonly<Record<string, unknown>>): ContextRoute | undefined {
   const selection = asRecord(values.modelSelection)
   if (selection === undefined) return undefined
-  return routeOf(selection.next) ?? routeOf(selection.lastUsed)
+  return routeOf(selection.lastUsed)
+}
+
+/** The planned next route, kept separate from the occupancy provenance. */
+function plannedRouteOf(values: Readonly<Record<string, unknown>>): ContextRoute | undefined {
+  const selection = asRecord(values.modelSelection)
+  if (selection === undefined) return undefined
+  return routeOf(selection.next)
 }
 
 function sameRoute(left: ContextRoute | undefined, right: ContextRoute | undefined): boolean | undefined {
@@ -208,6 +227,7 @@ export function buildContextReport(read: ContextCacheRead, options: ContextBuild
     ? (usedTokens / window) * 100
     : undefined
   const cachedRoute = cachedRouteOf(values)
+  const plannedRoute = plannedRouteOf(values)
   const routeMatches = sameRoute(cachedRoute, options.currentRoute)
   const staleReasons: ContextStaleReason[] = []
   if (usedTokens !== undefined) {
@@ -230,6 +250,7 @@ export function buildContextReport(read: ContextCacheRead, options: ContextBuild
     freshness,
     staleReasons,
     ...(cachedRoute === undefined ? {} : { cachedRoute }),
+    ...(plannedRoute === undefined ? {} : { plannedRoute }),
     ...(options.currentRoute === undefined ? {} : { currentRoute: options.currentRoute }),
     routeVerified: routeMatches !== undefined,
     ...(routeMatches === undefined ? {} : { routeMatches }),
