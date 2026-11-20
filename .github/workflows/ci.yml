@@ -15,16 +15,17 @@ jobs:
         # and runs the full probe set; every other Linux leg rewrites the manifest
         # with scripts/ci-pin-line.mjs and installs from scratch.
         #
-        # The declared window is the exact five-version union
-        # `0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1`
+        # The declared window is the exact seven-version union
+        # `0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1
+        # || 0.2.2-rc.2 || 0.2.2-rc.3`
         # (peer dependencies and dshReleases state the same fact), not an
         # unbounded semver range. Every declared Linux version keeps a leg: the
-        # default runs the full probe set, the other four typecheck plus the suite
+        # default runs the full probe set, the other six typecheck plus the suite
         # and the host-independent probes.
         #
-        # The Windows ConPTY leg is narrower than the Linux matrix: it covers only
-        # the two new stable targets, 0.2.1-rc.5 and 0.2.2-rc.1. It does not
-        # install the default 0.2.1-rc.2 line.
+        # The Windows ConPTY leg is narrower than the Linux matrix: it covers the
+        # 0.2.1-rc.5 target and the three 0.2.2 rc targets, 0.2.2-rc.1 / rc.2 /
+        # rc.3. It does not install the default 0.2.1-rc.2 line.
         #
         # The 0.1.7 line is no longer declared — its `dshReleases` entries say
         # `incompatible` and its legs are gone with it, so a user still on that
@@ -32,9 +33,9 @@ jobs:
         #
         # Pinning a leg to an older rc *within* a line does not resolve when that
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
-        # the newest rc of that generation it can install cleanly, plus the two
-        # new stable targets.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1"]
+        # the newest rc of that generation it can install cleanly, plus the stable
+        # 0.2.1-rc.5 / 0.2.2-rc.1 targets.
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -181,7 +182,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ["0.2.1-rc.5", "0.2.2-rc.1"]
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

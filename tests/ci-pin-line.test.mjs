@@ -116,6 +116,20 @@ test('the family root pins follow the line, including the launcher-only one', ()
       '@deepseek-ai/cordis-plugin-timer': '1.2.0',
       '@deepseek-ai/cordis-plugin-group': '1.1.0',
     },
+    '0.2.2-rc.2': {
+      '@deepseek-ai/cordis': '4.1.0',
+      '@deepseek-ai/cordis-plugin-include': '1.1.0',
+      '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+      '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+      '@deepseek-ai/cordis-plugin-group': '1.1.0',
+    },
+    '0.2.2-rc.3': {
+      '@deepseek-ai/cordis': '4.1.0',
+      '@deepseek-ai/cordis-plugin-include': '1.1.0',
+      '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+      '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+      '@deepseek-ai/cordis-plugin-group': '1.1.0',
+    },
   }
   const pinnedRoots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
     .filter(([name]) => name.startsWith('@deepseek-ai/cordis'))

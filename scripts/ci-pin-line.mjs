@@ -112,6 +112,20 @@ export const LINES = {
     schemastery: '3.19.0',
     dropDev: ['@deepseek-ai/dsh-invariants'],
   },
+  '0.2.2-rc.2': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
+  '0.2.2-rc.3': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */
