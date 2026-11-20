@@ -168,6 +168,39 @@ jobs:
       - name: Reply copy probe (scripted turn)
         if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/tui-mock-probe.mjs
+  # rc.5 is a test-only 0.9.0 candidate, not a supported Host: the peer ranges
+  # and `dsh.compatibility` stay untouched. The characterization suite therefore
+  # installs the exact rc.5 family (and rc.4 only as the differential baseline)
+  # into its own trees, outside the repository dependency graph, and runs the
+  # synthetic loopback/refusal/event tests. No step reads a real key or reaches
+  # an external endpoint; the default-endpoint case replaces `fetch` with a
+  # tripwire. The suite skips in the normal `test` job, where those trees do not
+  # exist, so this job is where the rc.5 claim is actually executed.
+  rc5-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Relay build dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      - name: Strict single-family rc.5 install (rc.4 comparator)
+        run: |
+          set -euo pipefail
+          for version in 0.2.2-rc.5 0.2.2-rc.4; do
+            root=".probe-tree/dsh-${version}"
+            mkdir -p "$root"
+            printf '{"name":"dsh-%s-strict","private":true,"version":"1.0.0","dependencies":{"@deepseek-ai/dsh":"%s"}}\n' "$version" "$version" > "$root/package.json"
+            (cd "$root" && npm install --ignore-scripts --no-audit --no-fund)
+          done
+      - name: rc.5 characterization (synthetic HTTP, refusal, replay)
+        env:
+          DSH_RC5_ROOT: ${{ github.workspace }}/.probe-tree/dsh-0.2.2-rc.5
+          DSH_RC4_ROOT: ${{ github.workspace }}/.probe-tree/dsh-0.2.2-rc.4
+        run: node --test --test-reporter=spec tests/rc5-compat-characterization.test.mjs tests/rc5-rc4-differential.test.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
   # path only gets real coverage on a Windows runner.
