@@ -126,6 +126,17 @@ export const LINES = {
     schemastery: '3.19.0',
     dropDev: ['@deepseek-ai/dsh-invariants'],
   },
+  // rc.4 is the 0.9.0 compatibility target (#76 U2). It shares the rc.1/rc.2/
+  // rc.3 roots and still has no `dsh-invariants` release; the leg exists to
+  // prove the plugin on the exact host before any compatibility declaration is
+  // widened (that widening is an Owner-gated admission step, not this leg).
+  '0.2.2-rc.4': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */
