@@ -75,7 +75,7 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.2.1-rc.3'], 'incompatible')
   assert.equal(releases['0.2.1-rc.4'], 'incompatible')
   assert.equal(releases['0.2.1-rc.5'], 'compatible')
-  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3']) assert.equal(releases[line], 'compatible')
+  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4']) assert.equal(releases[line], 'compatible')
   assert.equal(manifest.engines?.node, '>=24.9.0')
 })
 
@@ -168,7 +168,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.2.1'), false)
   assert.equal(inRange('0.2.2'), false)
   assert.equal(inRange('0.2.1-rc.5'), true)
-  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3']) assert.equal(inRange(line), true, line)
+  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4']) assert.equal(inRange(line), true, line)
   // An alpha of the new line is still out: the promise is the rcs that were run.
   assert.equal(inRange('0.2.1-alpha.5'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
@@ -180,7 +180,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3'], range), '0.2.2-rc.3')
+  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4'], range), '0.2.2-rc.4')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
@@ -195,7 +195,7 @@ test('declared dsh range admits every release marked compatible', async () => {
   // satisfy a comparator set when a comparator with the *same* [major, minor,
   // patch] tuple also carries a prerelease, so `>=0.1.7-rc.1 <0.1.8` alone
   // would reject every 0.2.0-rc.
-  const SUPPORTED = '0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3'
+  const SUPPORTED = '0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4'
   const dshPeers = Object.entries(manifest.peerDependencies ?? {})
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(dshPeers.length > 0)

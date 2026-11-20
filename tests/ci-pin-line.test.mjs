@@ -20,7 +20,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { DEFAULT_LINE, isFamilyPackage, LINES, pinManifest } from '../scripts/ci-pin-line.mjs'
@@ -130,6 +132,13 @@ test('the family root pins follow the line, including the launcher-only one', ()
       '@deepseek-ai/cordis-plugin-timer': '1.2.0',
       '@deepseek-ai/cordis-plugin-group': '1.1.0',
     },
+    '0.2.2-rc.4': {
+      '@deepseek-ai/cordis': '4.1.0',
+      '@deepseek-ai/cordis-plugin-include': '1.1.0',
+      '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+      '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+      '@deepseek-ai/cordis-plugin-group': '1.1.0',
+    },
   }
   const pinnedRoots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
     .filter(([name]) => name.startsWith('@deepseek-ai/cordis'))
@@ -193,4 +202,25 @@ test('the declared peer window is the same on every line', () => {
 test('an unknown line is refused instead of silently leaving the default in place', () => {
   assert.throws(() => pinManifest(copy(), '0.1.6-alpha.1'), /unknown dsh line/u)
   assert.throws(() => pinManifest(copy(), undefined), /unknown dsh line/u)
+})
+
+test('the command-line entry point rewrites the manifest on this platform', () => {
+  // The pure function above can be right while the entry guard is wrong: the
+  // first Windows run of this workflow proved it, installing the default
+  // 0.2.1-rc.2 tree under every matrix label because `file://${argv[1]}` is not
+  // the URL form of a Windows path. Run the real CLI so the guard is covered on
+  // Windows too, not only the function it calls.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pin-entry-'))
+  try {
+    copyFileSync(join(REPO, 'package.json'), join(dir, 'package.json'))
+    const result = spawnSync(process.execPath, [join(REPO, 'scripts', 'ci-pin-line.mjs'), '0.2.2-rc.4'], {
+      cwd: dir,
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    const pinned = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    assert.equal(pinned.devDependencies['@deepseek-ai/dsh'], '0.2.2-rc.4')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
