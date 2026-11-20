@@ -214,6 +214,8 @@ test('80/40/20 repaints rebuild the body from state without a second read', () =
   assert.match(narrow, /上下文 1\/3/)
   assert.doesNotMatch(narrow, /[█░]/, '20 columns draws no bar')
   assert.match(compact, /█/)
+  assert.match(compact, /q/, 'the 40-column hint keeps the close key')
+  assert.match(narrow, /q/, 'the 20-column hint keeps the close key')
   assert.equal(reads, 1, 'repaint is pure; it did not read the cache again')
 })
 
