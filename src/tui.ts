@@ -5202,6 +5202,7 @@ export class SshTui {
   /** The context Screen's bottom hint, short enough for a 20-column terminal. */
   private contextHintLine(context: ContextScreenState): string {
     if (this.screenColumns() < 30) return t('context.hintNarrow')
+    if (this.screenColumns() < 60) return t('context.hintCompact')
     return context.expanded ? t('context.hintExpanded') : t('context.hint')
   }
 
