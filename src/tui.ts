@@ -78,9 +78,12 @@ import {
   screenFromDialog,
   screenLayout,
   screenPositionText,
+  type ContextScreenState,
   type ReportKind,
   type ScreenState,
 } from './screen.js'
+import { readContextCache } from './context-cache.js'
+import { buildContextReport, formatContextReport, formatContextTextReport, type ContextPage } from './context-view.js'
 import { screenRuntimeStrip } from './footer-budget.js'
 import {
   formatTerminalDoctor,
@@ -5122,6 +5125,142 @@ export class SshTui {
   }
 
   /**
+   * Open `/context`: one cached read, one Screen, no event history.
+   *
+   * The read is funneled through `readContextCache` so this method cannot grow a
+   * second data source. Missing cache data is rendered as UNKNOWN; there is no
+   * fallback to a live projection or a session replay. Line mode keeps the
+   * textual path and prints all three pages because it has no paging keys.
+   */
+  private runContextCommand(): void {
+    const session = this.agent.session as { header?: unknown; seq?: unknown }
+    const read = readContextCache(this.ctx, session)
+    const provider = this.currentProviderId()
+    const model = this.selectionRef?.current?.model ?? this.agent.options.model
+    const report = buildContextReport(read, {
+      ...(typeof session.seq === 'number' ? { headSeq: session.seq } : {}),
+      ...(typeof provider === 'string' && provider !== '' && typeof model === 'string' && model !== ''
+        ? { currentRoute: { provider, model } }
+        : {}),
+    })
+    if (this.lineMode) {
+      this.openReport('context', formatContextTextReport(report))
+      return
+    }
+    const context: ContextScreenState = { report, page: 1, expanded: false }
+    const rendered = formatContextReport(report, {
+      page: 1,
+      width: Math.max(8, this.screenColumns() - 2),
+      ascii: asciiFallbackEnabled(),
+    })
+    this.openScreen({
+      kind: 'report',
+      report: 'context',
+      title: t('screen.title.context'),
+      lines: rendered.lines.map(text => ({ kind: 'system' as const, text })),
+      offset: 0,
+      copyText: rendered.copyText,
+      context,
+    })
+  }
+
+  /** Rebuild the context body and copy text after an in-Screen page/detail move. */
+  private refreshContextScreen(screen: ScreenState): void {
+    const context = screen.context
+    if (context === undefined) return
+    const rendered = formatContextReport(context.report, {
+      page: context.page,
+      width: Math.max(8, this.screenColumns() - 2),
+      expanded: context.expanded,
+      ascii: asciiFallbackEnabled(),
+    })
+    screen.lines = rendered.lines.map(text => ({ kind: 'system' as const, text }))
+    screen.copyText = rendered.copyText
+    this.markDirty()
+  }
+
+  /**
+   * The context Screen's body for the width actually being painted.
+   *
+   * A reattach or a terminal resize can change the width while the Screen is up;
+   * rebuilding here keeps 80/40/20 layouts honest instead of wrapping or clipping
+   * a body formatted for the old width.
+   */
+  private renderContextScreenBody(screen: ScreenState, innerWidth: number): string[] {
+    const context = screen.context
+    if (context === undefined) return []
+    const rendered = formatContextReport(context.report, {
+      page: context.page,
+      width: Math.max(8, innerWidth),
+      expanded: context.expanded,
+      ascii: asciiFallbackEnabled(),
+    })
+    screen.copyText = rendered.copyText
+    return rendered.lines.map(text => this.styleLine('system', `  ${text}`))
+  }
+
+  /** The context Screen's bottom hint, short enough for a 20-column terminal. */
+  private contextHintLine(context: ContextScreenState): string {
+    if (this.screenColumns() < 30) return t('context.hintNarrow')
+    return context.expanded ? t('context.hintExpanded') : t('context.hint')
+  }
+
+  /**
+   * Keys owned by the context Screen.
+   *
+   * Only the keys that mean something specific here are claimed: page tabs, the
+   * detail toggle, copy, and collapsing an expanded detail. Arrows, paging, Home,
+   * End and mouse scroll deliberately fall through to the shared Screen adapter,
+   * so this command does not grow a second key parser. `q` and a second Esc close
+   * through the same generic path every report uses.
+   * @returns true when the key was consumed here, false to let the Screen adapter
+   *   handle it.
+   */
+  private handleContextScreenInput(screen: ScreenState, combined: string, moved: string | undefined): boolean {
+    const context = screen.context
+    if (context === undefined) return false
+    if (moved === 'copy' || combined === 'c' || combined === 'C') {
+      this.copyFromScreen(screen)
+      return true
+    }
+    if (combined === '1' || combined === '2' || combined === '3') {
+      const page = Number(combined) as ContextPage
+      if (page !== context.page) {
+        context.page = page
+        context.expanded = false
+        screen.offset = 0
+        screen.notice = undefined
+        this.refreshContextScreen(screen)
+      }
+      return true
+    }
+    if (combined === '\r' || combined === '\n') {
+      context.expanded = !context.expanded
+      screen.offset = 0
+      screen.notice = undefined
+      this.refreshContextScreen(screen)
+      return true
+    }
+    if (combined === 'q' || combined === 'Q') {
+      this.closeScreen()
+      return true
+    }
+    if (inspectClosesOn(combined)) {
+      if (context.expanded) {
+        context.expanded = false
+        screen.offset = 0
+        screen.notice = undefined
+        this.refreshContextScreen(screen)
+        return true
+      }
+      // Not expanded: the generic Screen close path owns Esc / Ctrl-C / q / Enter
+      // after this method declines. Enter was handled above; q closes there too.
+      return false
+    }
+    return false
+  }
+
+  /**
    * Open one report as a Screen.
    *
    * A report is not narrative: it cannot be rebuilt from the session log (it is not
@@ -5379,6 +5518,9 @@ export class SshTui {
     if (screen.notice !== undefined && screen.notice !== '') return screen.notice
     if (screen.kind === 'search' && screen.search !== undefined) {
       return screen.search.mode === 'preview' ? t('find.previewHint') : t('find.screenHint')
+    }
+    if (screen.kind === 'report' && screen.report === 'context' && screen.context !== undefined) {
+      return this.contextHintLine(screen.context)
     }
     const pos = screenPositionText(screen.offset, lineCount, layout.bodyRows)
     const base = t('screen.footer', { pos })
@@ -5674,6 +5816,9 @@ export class SshTui {
 
   private renderScreenBody(screen: ScreenState, width: number): string[] {
     if (screen.kind === 'setup') return this.renderSetupBody(width)
+    if (screen.kind === 'report' && screen.report === 'context' && screen.context !== undefined) {
+      return this.renderContextScreenBody(screen, Math.max(1, width - 2))
+    }
     const rendered: string[] = []
     for (const line of screen.lines) {
       const inner = Math.max(1, width - 2)
@@ -13246,6 +13391,14 @@ export class SshTui {
       this.markDirty()
       return
     }
+    // `/context` owns its page/detail keys before the generic Screen shortcuts:
+    // `1/2/3`, Enter, Esc-collapse, q, c and paging all mean something specific
+    // inside this one Screen, and none of them may reach the composer behind it.
+    if (screen.kind === 'report' && screen.report === 'context' && screen.context !== undefined) {
+      if (this.handleContextScreenInput(screen, combined, moved)) return
+      // Fall through: the shared Screen adapter owns arrows, paging, Home/End,
+      // mouse scrolling, the printable-key hint and the closing keys.
+    }
     if (moved === 'copy' && (screen.copyText ?? '') !== '') {
       this.copyFromScreen(screen)
       return
@@ -15961,6 +16114,14 @@ export class SshTui {
             throughput: this.statsTracker.throughput(),
           })
           this.openReport('status', lines)
+        }
+        break
+      case 'context':
+        try {
+          this.runContextCommand()
+        } catch (error: unknown) {
+          this.pushRow(represent('command-error', { kind: 'error', text: t('cmd.failedNamed', { command, error: errorChain(error) }) }))
+          this.markDirty()
         }
         break
       case 'diag':
