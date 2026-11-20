@@ -29,7 +29,7 @@ jobs:
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
         # the newest rc of that generation it can install cleanly, plus the rcs
         # upstream still points a dist-tag at.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.4"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -176,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.4"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
