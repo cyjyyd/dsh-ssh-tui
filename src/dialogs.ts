@@ -52,6 +52,15 @@ export interface QuestionDialog {
   reject(error: unknown): void
 }
 
+/** One single-line current-Session rename editor, owned like a picker Surface. */
+export interface RenameDialog {
+  kind: 'rename'
+  /** Current accepted title used to seed the borrowed field. */
+  initial: string
+  resolve(value: string): void
+  reject(error?: unknown): void
+}
+
 /**
  * @deprecated Superseded by a Screen (`ScreenState`, `kind: 'setup'`) in B2.6.
  *
@@ -107,19 +116,19 @@ export interface InspectDialog {
  * from it, and it never enters `dialogQueue` (`screenFromDialog` converts the legacy
  * shape, and `docs/decisions/b2-architecture-decisions.md` AD-1…AD-3 freeze why).
  */
-export type Dialog = ConfirmDialog | QuestionDialog | OnboardingDialog
+export type Dialog = ConfirmDialog | QuestionDialog | RenameDialog | OnboardingDialog
 
 /**
  * The dialogs the *live* dialog path can actually receive.
  *
  * `OnboardingDialog` is in the union only for 0.8.x importers; the wizard is a Screen
- * now, so the queue, the role and the painter only ever see these two (B2.6 §17).
+ * now, so the queue, the role and the painter only ever see the live Surface shapes (B2.6 §17).
  */
-export type SurfaceDialog = Extract<Dialog, { kind: 'confirm' | 'questions' }>
+export type SurfaceDialog = Extract<Dialog, { kind: 'confirm' | 'questions' | 'rename' }>
 
 /** Whether this is a dialog the live path can own (see {@link SurfaceDialog}). */
 export function isSurfaceDialog(dialog: Dialog): dialog is SurfaceDialog {
-  return dialog.kind === 'confirm' || dialog.kind === 'questions'
+  return dialog.kind === 'confirm' || dialog.kind === 'questions' || dialog.kind === 'rename'
 }
 
 /**
