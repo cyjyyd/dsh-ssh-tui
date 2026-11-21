@@ -167,6 +167,39 @@ test('missing modelSelection leaves provenance unknown instead of guessing a rou
   assert.match(joined(report, 1, 78), /路由未由缓存投影验证/)
 })
 
+test('a narrow CACHED sample without lastUsed discloses the unverified route, never a bare CACHED', () => {
+  const report = buildContextReport(snapshot({
+    contextPressure: { pressureTokens: 1000, projectedTokens: 1012, contextWindow: 128000 },
+    modelSelection: { next: ROUTE_B },
+  }, 10), { headSeq: 10, currentRoute: ROUTE_B })
+  assert.equal(report.overview.usedTokens, 1012)
+  assert.equal(report.overview.freshness, 'CACHED')
+  assert.equal(report.overview.routeVerified, false)
+
+  // A 20-column body spells the qualifier out in full inside the narrow tier.
+  const twenty = page(report, 1, 20)
+  assert.match(twenty.join('\n'), /路由未由缓存投影验证/, '20 columns spells out the unverified route')
+  assert.ok(twenty.some(line => line.startsWith('asOf 10 CACHED')), 'the cached sample itself is still reported')
+
+  // A 20-column terminal paints an 18-cell body (the Screen's two-cell margin).
+  const twentyColumnTerminal = page(report, 1, 18)
+  assert.match(twentyColumnTerminal.join(''), /路由未由缓存投影/, '18 cells keeps the qualifier, ellipsized if needed')
+  for (const line of twentyColumnTerminal) {
+    assert.ok(displayWidth(line) <= 18, `18w narrow overflows: ${JSON.stringify(line)} (${displayWidth(line)})`)
+    assert.equal(line.includes('\x1b'), false, 'formatter output is plain text')
+  }
+
+  // A verified route stays compact: no qualifier and no truncation marker.
+  const verified = buildContextReport(snapshot({
+    contextPressure: { pressureTokens: 1000, projectedTokens: 1012, contextWindow: 128000 },
+    modelSelection: { lastUsed: ROUTE_B, next: ROUTE_B },
+  }, 10), { headSeq: 10, currentRoute: ROUTE_B })
+  assert.equal(verified.overview.routeVerified, true)
+  const verifiedNarrow = page(verified, 1, 18)
+  assert.equal(verifiedNarrow.some(line => line.includes('路由未由缓存投影验证')), false)
+  assert.equal(verifiedNarrow.join('').includes('…'), false)
+})
+
 test('>100% keeps the true number and clamps only the bar', () => {
   const report = buildContextReport(snapshot({
     contextPressure: { pressureTokens: 200000, projectedTokens: 200012, contextWindow: 128000 },

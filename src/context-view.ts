@@ -390,7 +390,7 @@ function overviewLines(
   } else {
     lines.push(statusText(overview, translate, tier === 'narrow'))
   }
-  if (tier !== 'narrow' && overview.freshness === 'CACHED' && !overview.routeVerified) {
+  if (overview.freshness === 'CACHED' && !overview.routeVerified) {
     lines.push(translate('context.routeUnverified'))
   }
   if (tier === 'full') {
