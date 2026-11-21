@@ -132,6 +132,23 @@ test('the family root pins follow the line, including the launcher-only one', ()
       '@deepseek-ai/cordis-plugin-timer': '1.2.0',
       '@deepseek-ai/cordis-plugin-group': '1.1.0',
     },
+    // rc.4 (#76) and rc.5 (#74) share the same exact strict-install roots as
+    // rc.1/rc.2/rc.3: each was checked against its published `dsh-app-boot`
+    // peers and the resulting single-family tree, not copied by generation.
+    '0.2.2-rc.4': {
+      '@deepseek-ai/cordis': '4.1.0',
+      '@deepseek-ai/cordis-plugin-include': '1.1.0',
+      '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+      '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+      '@deepseek-ai/cordis-plugin-group': '1.1.0',
+    },
+    '0.2.2-rc.5': {
+      '@deepseek-ai/cordis': '4.1.0',
+      '@deepseek-ai/cordis-plugin-include': '1.1.0',
+      '@deepseek-ai/cordis-plugin-loader': '1.1.0',
+      '@deepseek-ai/cordis-plugin-timer': '1.2.0',
+      '@deepseek-ai/cordis-plugin-group': '1.1.0',
+    },
   }
   const pinnedRoots = manifest => Object.fromEntries(Object.entries(manifest.devDependencies)
     .filter(([name]) => name.startsWith('@deepseek-ai/cordis'))

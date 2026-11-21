@@ -15,17 +15,17 @@ jobs:
         # and runs the full probe set; every other Linux leg rewrites the manifest
         # with scripts/ci-pin-line.mjs and installs from scratch.
         #
-        # The declared window is the exact seven-version union
+        # The declared window is the exact nine-version union
         # `0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1
-        # || 0.2.2-rc.2 || 0.2.2-rc.3`
+        # || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5`
         # (peer dependencies and dshReleases state the same fact), not an
         # unbounded semver range. Every declared Linux version keeps a leg: the
-        # default runs the full probe set, the other six typecheck plus the suite
-        # and the host-independent probes.
+        # default runs the full probe set, the other eight typecheck plus the
+        # suite and the host-independent probes.
         #
         # The Windows ConPTY leg is narrower than the Linux matrix: it covers the
-        # 0.2.1-rc.5 target and the three 0.2.2 rc targets, 0.2.2-rc.1 / rc.2 /
-        # rc.3. It does not install the default 0.2.1-rc.2 line.
+        # 0.2.1-rc.5 target and every 0.2.2 rc, 0.2.2-rc.1 / rc.2 / rc.3 / rc.4 /
+        # rc.5. It does not install the default 0.2.1-rc.2 line.
         #
         # The 0.1.7 line is no longer declared — its `dshReleases` entries say
         # `incompatible` and its legs are gone with it, so a user still on that
@@ -35,7 +35,7 @@ jobs:
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
         # the newest rc of that generation it can install cleanly, plus the stable
         # 0.2.1-rc.5 / 0.2.2-rc.1 targets.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.4", "0.2.2-rc.5"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -101,8 +101,11 @@ jobs:
       # packs (`npm pack`), inspects the manifest, installs the tarball into a home
       # outside the repository, proves the plugin resolves to the profile rather than
       # the checkout, and then runs the wizard and workspace probes against it.
+      # It also runs on rc.5: that is the only step that invokes the default
+      # `dsh plugin add` end to end, so it is where the ninth peer window is
+      # proven to install without `allow-version`.
       - name: Packed-artifact smoke (npm pack → install → probes)
-        if: matrix.dsh == '0.2.1-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2' || matrix.dsh == '0.2.2-rc.5'
         run: node scripts/artifact-smoke.mjs
       - name: Terminal-capability probe
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
@@ -174,6 +177,40 @@ jobs:
       - name: Reply copy probe (scripted turn)
         if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/tui-mock-probe.mjs
+  # rc.5 is the ninth declared Host line (#74 U2) but is still not admitted or
+  # released; the real Host legs above prove installation and lifecycle. This
+  # job keeps the independent characterization evidence: it installs the exact
+  # rc.5 family (and rc.4 only as the differential baseline) into its own trees,
+  # outside the repository dependency graph, and runs the synthetic
+  # loopback/refusal/event tests. No step reads a real key or reaches an external
+  # endpoint; the default-endpoint case replaces `fetch` with a tripwire. The
+  # suite skips in the normal `test` job, where those trees do not exist, so this
+  # job is where the rc.5 behavioral claim is actually executed.
+  rc5-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Relay build dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      - name: Strict single-family rc.5 install (rc.4 comparator)
+        run: |
+          set -euo pipefail
+          for version in 0.2.2-rc.5 0.2.2-rc.4; do
+            root=".probe-tree/dsh-${version}"
+            mkdir -p "$root"
+            printf '{"name":"dsh-%s-strict","private":true,"version":"1.0.0","dependencies":{"@deepseek-ai/dsh":"%s"}}\n' "$version" "$version" > "$root/package.json"
+            (cd "$root" && npm install --ignore-scripts --no-audit --no-fund)
+          done
+      - name: rc.5 characterization (synthetic HTTP, refusal, replay)
+        env:
+          DSH_RC5_ROOT: ${{ github.workspace }}/.probe-tree/dsh-0.2.2-rc.5
+          DSH_RC4_ROOT: ${{ github.workspace }}/.probe-tree/dsh-0.2.2-rc.4
+        run: node --test --test-reporter=spec tests/rc5-compat-characterization.test.mjs tests/rc5-rc4-differential.test.mjs
   # The display channel is an AF_UNIX socket on POSIX but a \\.\pipe\ named
   # pipe on Windows (fs.access() cannot see pipes), so the Windows startup
   # path only gets real coverage on a Windows runner.
@@ -182,7 +219,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.4", "0.2.2-rc.5"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

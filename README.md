@@ -157,8 +157,9 @@ TTY 是一种能力，不是宿主存在的前提。
 | DeepSeek Harness | 状态 |
 |---|---|
 | `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | ✅ 0.9.0 主线开发候选（S1-A）的精确目标；Node `>=24.9`，各自单一 DSH family strict graph；rc.2/rc.3 来源为 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ✅ 0.9.0 主线合流候选（S1-C）新增的第九 Host 目标；Node `>=24.9`，各自单一 DSH family strict graph；来源均为 `EVIDENCE_LIMITED`。当前只到 `INTEGRATED_CANDIDATE / COMPAT_ADMISSION_PENDING`，不是最终 Host 准入；rc.5 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE` |
 | `0.2.1-rc.5` | ✅ 0.8.5 稳定目标，继续保留 |
-| `0.2.1-rc.2` | ✅ 支持，保留的默认开发线：提交的 manifest 与锁安装它，默认 Linux leg 跑全量探针；Windows ConPTY leg 覆盖 `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` |
+| `0.2.1-rc.2` | ✅ 支持，保留的默认开发线：提交的 manifest 与锁安装它，默认 Linux leg 跑全量探针；Windows ConPTY leg 覆盖 `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持，保留到独立退役裁决 |
 | `0.1.7` 整线（含 `0.1.7-rc.1` / `0.1.7-rc.2`） | ❌ 自 `dsh-ssh-tui 0.8.4-rc.1` 起摘除（`dshReleases` 明确表态 `incompatible`） |
 | `0.1.5` 及更早 | ❌ 自 `dsh-ssh-tui 0.8.0` 起不再支持 |
@@ -166,10 +167,16 @@ TTY 是一种能力，不是宿主存在的前提。
 声明范围：
 
 ```text
-0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3
+0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5
 ```
 
-这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有的五条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.8.6`，覆盖七个冻结 Host 版本**；本分支是尚未发布的 0.9.0 主线开发候选（S1-A），package 版本有意保持 `0.8.5`，尚无 0.9 发布或准入。
+这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有七条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.8.6`，覆盖七个冻结 Host 版本**；本分支是尚未发布的 0.9.0 主线候选，package 版本有意保持 `0.8.5`，声明九 Host 但 rc.4/rc.5 仍待独立 `COMPAT_ADMISSION`，尚无 0.9 发布或准入。
+
+#### Search 出口与计费边界（0.9 候选）
+
+rc.5 的 DeepSeek 模型路由（`deepseek-official` / `deepseek-account`）默认走 **Messages Search**；其他路由或没有模型请求时可选择 **Search API**。`llm-deepseek.baseURL` 只是模型网关，**不会自动约束搜索端点**。legacy Messages Search 使用独立的 `web-search-deepseek.baseURL` / `DEEPSEEK_SEARCH_BASE_URL`（官方默认 `https://api.deepseek.com/anthropic/v1/messages`）和对应密钥；Search API 则使用其自身来源（source）的 origin 与 key，不继承模型网关。
+
+搜索请求可能被上游单独计费，但 Relay 的 token 统计只汇总对话 turn 的 usage；辅助搜索请求事件不携带 usage，也不进入 `/status` 的 Relay totals。相关测试只使用 fake key、loopback/mock HTTP 和 `fetch` tripwire，**不会向真实官方或网关发起请求**。
 
 发布前会针对支持线重新安装依赖并运行类型检查、测试和真实终端探针。
 

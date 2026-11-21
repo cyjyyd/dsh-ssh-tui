@@ -82,7 +82,7 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. This `0.9.0` mainline development candidate (S1-A) is **unreleased**: its package version intentionally remains `0.8.5`, with no 0.9 release or admission yet. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. This `0.9.0` mainline candidate is **unreleased**: its package version intentionally remains `0.8.5`, with no 0.9 release or admission yet. It declares nine Hosts, but `0.2.2-rc.4` / `0.2.2-rc.5` are still `INTEGRATED_CANDIDATE / COMPAT_ADMISSION_PENDING`, pending the independent admission review. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 **Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
@@ -112,7 +112,7 @@ repaints the whole screen.
 
 Both commands above are the evidence: `npm run bench` (the numbers), `npm run freeze`
 (that the architecture stayed what it claims). CI re-runs them on every leg — Linux and
-Windows, four host versions. The link-side promises have their own real-PTY probes:
+Windows, nine host versions plus the six-line ConPTY subset. The link-side promises have their own real-PTY probes:
 drop/reattach, a host that outlives the window mid-turn, a resume with history, and the
 "terminal does not answer cursor probes" case; `npm run freeze` lists them.
 
@@ -182,19 +182,35 @@ The plugin declares and tests **every `@deepseek-ai/dsh` line in flight**:
 
 | Host line | Status |
 | --- | --- |
-| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the `0.9.0` mainline development candidate (S1-A); Node `>=24.9`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
+| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the `0.9.0` mainline candidate (S1-A); Node `>=24.9`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ninth-Host targets merged in the `0.9.0` S1-C candidate; Node `>=24.9`, one strict DSH family per target; provenance is `EVIDENCE_LIMITED`. Currently `INTEGRATED_CANDIDATE / COMPAT_ADMISSION_PENDING`, not final admission; the rc.5 Windows trailing-newline flake remains `INCONCLUSIVE` |
 | `0.2.1-rc.5` | exact 0.8.5 stable target; retained |
-| `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest and lock install it and the default Linux leg runs the full probe set; the Windows ConPTY leg covers `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` |
+| `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest and lock install it and the default Linux leg runs the full probe set; the Windows ConPTY leg covers `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | declared compatible; retained until a separate retirement decision |
 | `0.1.7-rc.1` / `0.1.7-rc.2` | **dropped in 0.8.4-rc.1**: `dshReleases` says `incompatible` and the launcher refuses it, so a user still on that line gets "upgrade" rather than a half-working plugin |
 | `0.1.5` and older | **unsupported as of 0.8.0**, with an explicit `incompatible` entry in `dshReleases` |
 
 The declared window is the exact union
-`0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3`
+`0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5`
 (peer dependencies and `dshReleases` state the same fact), not an unbounded
 semver range. Node.js `>=24.9.0` is required. Every release re-installs those
 versions in a clean tree and re-runs the types, the suite and the real-PTY
 probes — not "no errors, so it probably works".
+
+### Search endpoint and billing boundary (0.9 candidate)
+
+On rc.5, DeepSeek model routes (`deepseek-official` / `deepseek-account`) default to
+**Messages Search**; other routes, or a request with no model route, may select the
+**Search API**. `llm-deepseek.baseURL` is only the model gateway and does **not**
+constrain the search endpoint. Legacy Messages Search uses its own
+`web-search-deepseek.baseURL` / `DEEPSEEK_SEARCH_BASE_URL` (default
+`https://api.deepseek.com/anthropic/v1/messages`) and its own key; the Search API
+follows its own source origin and key instead of inheriting the model gateway.
+
+Search requests may be billed separately upstream, but Relay token totals cover
+conversation-turn usage only: the auxiliary search-request event carries no usage
+and never enters `/status` Relay totals. The tests use a fake key, loopback/mock HTTP
+and a `fetch` tripwire — they never contact the real official endpoint or a gateway.
 
 ## A warning before the Desktop section
 
@@ -228,7 +244,7 @@ The full diagnosis, both desktop defects, the strategy and a copy-paste-ready up
 ## Requirements
 
 - Node.js >= 24.9
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact `0.9.0` S1-A development-candidate targets are `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the four ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact `0.9.0` S1-C candidate targets are `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the six ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 - an ANSI terminal (SSH directly, or PowerShell / Windows Terminal on Windows)
 - **Windows**: install, troubleshooting and how to read `/doctor` are in [docs/windows.md](docs/windows.md)

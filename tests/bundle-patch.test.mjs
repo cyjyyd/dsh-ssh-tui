@@ -75,7 +75,18 @@ test('manifest declares exact dshReleases for the store window', async () => {
   assert.equal(releases['0.2.1-rc.3'], 'incompatible')
   assert.equal(releases['0.2.1-rc.4'], 'incompatible')
   assert.equal(releases['0.2.1-rc.5'], 'compatible')
-  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3']) assert.equal(releases[line], 'compatible')
+  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5']) {
+    assert.equal(releases[line], 'compatible', line)
+  }
+  // The window is exactly the nine verified hosts, no more and no fewer: a
+  // store that silently grows or drops a line would be a different promise.
+  assert.deepEqual(
+    Object.entries(releases).filter(([, status]) => status === 'compatible').map(([version]) => version),
+    [
+      '0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5',
+      '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5',
+    ],
+  )
   assert.equal(manifest.engines?.node, '>=24.9.0')
 })
 
@@ -168,7 +179,9 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.2.1'), false)
   assert.equal(inRange('0.2.2'), false)
   assert.equal(inRange('0.2.1-rc.5'), true)
-  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3']) assert.equal(inRange(line), true, line)
+  for (const line of ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5']) {
+    assert.equal(inRange(line), true, line)
+  }
   // An alpha of the new line is still out: the promise is the rcs that were run.
   assert.equal(inRange('0.2.1-alpha.5'), false)
   // The 0.1.6/0.1.7 alphas are published; the range deliberately does not
@@ -180,13 +193,14 @@ test('declared dsh range admits every release marked compatible', async () => {
   assert.equal(inRange('0.1.6-alpha.2'), false)
   assert.equal(inRange('0.1.6'), false)
   assert.equal(inRange('0.1.7-alpha.1'), false)
-  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3'], range), '0.2.2-rc.3')
+  assert.equal(semver.maxSatisfying(['0.2.0-rc.1', '0.2.0-rc.2', '0.2.1-rc.2', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5'], range), '0.2.2-rc.5')
   // Every release the manifest calls compatible must actually satisfy the range.
   for (const [version, status] of Object.entries(manifest.dsh.compatibility.dshReleases)) {
     if (status !== 'compatible') continue
     assert.equal(inRange(version), true, `${version} is marked compatible but outside ${range}`)
   }
-  // Every dsh peer declares both supported lines in one window. The plural
+  // Every dsh peer declares every supported line in one window (nine hosts).
+  // The plural
   // `dsh-agent-presets` used to be here for the 0.1.5 line; it has no release
   // past 0.1.6-alpha.2, and 0.8.0 dropped that line, so the declaration is gone
   // with it — a peer range nothing can satisfy would veto the plugin instead.
@@ -195,12 +209,12 @@ test('declared dsh range admits every release marked compatible', async () => {
   // satisfy a comparator set when a comparator with the *same* [major, minor,
   // patch] tuple also carries a prerelease, so `>=0.1.7-rc.1 <0.1.8` alone
   // would reject every 0.2.0-rc.
-  const SUPPORTED = '0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3'
+  const SUPPORTED = '0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5'
   const dshPeers = Object.entries(manifest.peerDependencies ?? {})
     .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
-  assert.ok(dshPeers.length > 0)
+  assert.equal(dshPeers.length, 15, 'all 15 DSH family peers stay declared')
   for (const [name, peerRange] of dshPeers) {
-    assert.equal(peerRange, SUPPORTED, `${name} must accept both supported hosts (host ${HOST_VERSION})`)
+    assert.equal(peerRange, SUPPORTED, `${name} must accept every supported host (host ${HOST_VERSION})`)
   }
   // The two preset packages are optional: a host that composes presets
   // process-wide has no such service, and a required peer npm cannot satisfy is

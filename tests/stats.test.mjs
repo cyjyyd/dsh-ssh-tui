@@ -26,6 +26,9 @@ test('a step reported twice is counted once, and a changed report replaces it', 
     // says so, instead of inventing a total from counters the provider defines
     // however it likes.
     reportedTokens: 0, reportedSteps: 0, unreportedSteps: 2,
+    // Both steps are unreported, so their billed parts (17 + 55) are exactly
+    // the subset `sessionTokenTotal` is allowed to add to a harness total.
+    unreportedBilledTokens: 72,
   })
 })
 
@@ -42,6 +45,55 @@ test('a reported full-call total is preferred to the billed parts', () => {
   stats.recordUsage(1, 2, { inputTokens: 6, outputTokens: 12, totalTokens: 18 })
   assert.equal(stats.snapshot().usage.reportedTokens, 78)
   assert.equal(stats.snapshot().usage.reportedSteps, 2)
+})
+
+test('a mixed reported/unreported session counts each step once', () => {
+  const stats = new SessionStatsTracker()
+  // F1 fixture: step 1's harness total is 60 for billed parts 50; step 2 has
+  // no total and contributes its 15 billed tokens once, not on top of every
+  // reported step's parts.
+  stats.recordUsage(1, 1, { inputTokens: 10, outputTokens: 40, totalTokens: 60 })
+  stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 75, basis: 'sum' })
+  // Settlement only drops the per-step dedupe key; the total must not move.
+  stats.noteStepEnd(1, 1)
+  stats.noteStepEnd(1, 2)
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 75, basis: 'sum' })
+})
+
+test('re-reporting a step moves its contribution between total and billed parts', () => {
+  const stats = new SessionStatsTracker()
+  stats.recordUsage(1, 1, { inputTokens: 10, outputTokens: 40, totalTokens: 60 })
+  stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 75, basis: 'sum' })
+  // Step 2 later reports a harness total: its billed parts leave the sum.
+  stats.recordUsage(1, 2, { inputTokens: 6, outputTokens: 14, totalTokens: 20 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 80, basis: 'harness' })
+  // A replacement without a total puts step 2 back on the billed basis.
+  stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 75, basis: 'sum' })
+  // Replacing step 1's total and parts must leave the unreported step once.
+  stats.recordUsage(1, 1, { inputTokens: 20, outputTokens: 50, totalTokens: 90 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 105, basis: 'sum' })
+})
+
+test('mixed totals add cache counters only from unreported steps', () => {
+  const stats = new SessionStatsTracker()
+  stats.recordUsage(1, 1, {
+    inputTokens: 10, outputTokens: 40, totalTokens: 60,
+    cacheReadTokens: 1_000, cacheWriteTokens: 200,
+  })
+  stats.recordUsage(1, 2, { inputTokens: 5, outputTokens: 10, cacheReadTokens: 7, cacheWriteTokens: 3 })
+  // 60 + (5 + 10 + 7 + 3): the reported step's cache counters are already
+  // inside its harness total and must not be billed a second time.
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 85, basis: 'sum' })
+})
+
+test('an unreported zero-token step does not resurrect reported billed parts', () => {
+  const stats = new SessionStatsTracker()
+  stats.recordUsage(1, 1, { inputTokens: 10, outputTokens: 40, totalTokens: 60 })
+  stats.recordUsage(1, 2, { inputTokens: 0, outputTokens: 0 })
+  assert.deepEqual(sessionTokenTotal(stats.snapshot().usage), { tokens: 60, basis: 'sum' })
 })
 
 test('missing cache counters count as zero, present ones are kept', () => {
