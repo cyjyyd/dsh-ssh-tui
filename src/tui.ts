@@ -16349,7 +16349,7 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
   let controller: SshTui | undefined
 
   const start = (agent: Agent): void => {
-    if (settled || agent.id !== sessionId || !ctx.agents.roots().includes(agent)) return
+    if (settled || agent.id !== sessionId || agent.session.header.origin === 'subagent') return
     settled = true
     stopWaiting()
     controller = new SshTui(ctx, agent, config)
@@ -16386,7 +16386,7 @@ export function mountTui(ctx: Context, config: TuiConfig): TuiController {
     disposeFailure()
   }
 
-  const existing = ctx.agents.roots().find(agent => agent.id === sessionId)
+  const existing = ctx.agents.get(sessionId)
   if (existing !== undefined) start(existing)
 
   return {
