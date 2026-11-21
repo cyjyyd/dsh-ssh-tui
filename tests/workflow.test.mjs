@@ -114,6 +114,21 @@ test('the Windows leg drives the real TUI, not just the unit suite', () => {
   )
 })
 
+test('the rc.5 legs prove the default plugin add accepts the eighth host', () => {
+  // The peer window is only worth widening if the host's own `dsh plugin add`
+  // accepts the packed artifact without `allow-version`. That assertion lives in
+  // `artifact-smoke.mjs`; losing its rc.5 condition would leave the metadata
+  // tested only by semver, not by the command users actually run.
+  const text = readWorkflow()
+  const linux = jobStepBlocks(text, 'test')
+    .find(block => block.includes('artifact-smoke.mjs'))
+  assert.ok(linux !== undefined, 'the Linux job must run the packed-artifact smoke')
+  assert.match(linux, /matrix\.dsh == '0\.2\.2-rc\.5'/, 'and must run it on the rc.5 leg')
+  assert.doesNotMatch(linux, /allow-version/u, 'without granting a version exemption')
+  const windows = jobStepBlocks(text, 'test-windows').join('\n')
+  assert.match(windows, /artifact-smoke\.mjs/u, 'the Windows rc.5 leg installs the packed artifact too')
+})
+
 test('only the non-default legs rewrite the manifest, and the default one is declared', async () => {
   // `package.json` commits one host line, and exactly the legs that are *not*
   // that line rewrite it before installing. Losing the guard (or leaving the
