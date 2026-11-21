@@ -327,6 +327,36 @@ export function sessionEvents(session: object): readonly SessionEvent[] {
   return typeof host.snapshotEvents === 'function' ? host.snapshotEvents() : []
 }
 
+/** Minimal structural view of the Host title service; no title-package peer is required. */
+export interface SessionTitleSnapshotLike {
+  readonly title: string
+  readonly eventSeq?: number
+  readonly source?: { readonly kind?: string }
+}
+
+/** The one Host-owned title-domain operation G1 uses. */
+export interface SessionTitleServiceLike {
+  rename(session: object, title: string): SessionTitleSnapshotLike
+}
+
+/**
+ * Feature-detect the Host title service without importing its package.
+ * A missing/raising service is unavailable, never a reason to write storage.
+ */
+export function sessionTitleService(ctx: object): SessionTitleServiceLike | undefined {
+  try {
+    const get = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof get !== 'function') return undefined
+    const service = get.call(ctx, 'sessionTitle')
+    if (service === null || typeof service !== 'object') return undefined
+    const rename = (service as { rename?: unknown }).rename
+    if (typeof rename !== 'function') return undefined
+    return service as SessionTitleServiceLike
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Walk the durable log without copying it. Prefer `eventAt` so resume does
  * not materialize a second array of every chunk.
