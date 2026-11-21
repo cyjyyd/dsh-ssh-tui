@@ -33,7 +33,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -120,6 +120,19 @@ export const LINES = {
     dropDev: ['@deepseek-ai/dsh-invariants'],
   },
   '0.2.2-rc.3': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
+  // rc.5 is the eighth declared Host (#74 U2). It shares the rc.1/rc.2/rc.3
+  // roots — checked against the published `dsh-app-boot@0.2.2-rc.5` peers
+  // (cordis ~4.1.0, include/loader/group ~1.1.0, timer 1.2.0) and the exact
+  // strict-install tree — and still has no `dsh-invariants` release. The
+  // separate `rc5-characterization` job covers the synthetic search/refusal
+  // behaviour; this entry only makes the real Host leg installable.
+  '0.2.2-rc.5': {
     roots: RC022_LINE_ROOTS,
     presets: NEW_LINE_PRESETS,
     overrides: true,
@@ -218,7 +231,13 @@ export function pinFile(line, cwd = process.cwd()) {
   return next
 }
 
-if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+// `file://${process.argv[1]}` only matches a POSIX path with no characters the
+// URL spelling has to escape (a space alone makes it false). On Windows argv[1]
+// is `D:\a\...` while import.meta.url is `file:///D:/a/...`, so the comparison
+// was silently false and CI's pin step did nothing: every Windows leg installed
+// the default 0.2.1-rc.2 line under its matrix label. pathToFileURL() is the
+// cross-platform spelling of the same identity check.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const line = process.argv[2]
   if (line === undefined) {
     process.stderr.write(`usage: node scripts/ci-pin-line.mjs <${Object.keys(LINES).join('|')}>\n`)

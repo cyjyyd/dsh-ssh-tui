@@ -13,23 +13,25 @@ jobs:
         # manifest, the lock and the Windows leg all install it, and it is where
         # upstream's `next` points. It is the line this checkout develops against.
         #
-        # The window it declares is `>=0.2.0-rc.1 <0.2.1 || >=0.2.1-rc.2 <0.2.2`
-        # (two comparators: node-semver only admits a prerelease through one on the
-        # same tuple), so both 0.2.0 rcs keep a leg: rc.2 at full depth, rc.1 with
-        # typecheck plus the suite. The 0.1.7 line is no longer declared — its
-        # `dshReleases` entries say `incompatible` and its legs are gone with it,
-        # so a user still on that line gets a refusal from the launcher instead of
-        # a half-working plugin.
+        # The window it declares is the explicit eight-host list in package.json:
+        # 0.2.0-rc.1/rc.2, 0.2.1-rc.2/rc.5 and 0.2.2-rc.1/rc.2/rc.3/rc.5. rc.4 is
+        # deliberately absent — it is a separate, still-pending candidate (#76 /
+        # PR #85), and adding it here would turn eight declared hosts into nine.
+        # The 0.1.7 line is no longer declared — its `dshReleases` entries say
+        # `incompatible` and its legs are gone with it, so a user still on that
+        # line gets a refusal from the launcher instead of a half-working plugin.
         #
         # Every version we declare stays covered, at the depth its risk deserves:
-        # the default (0.2.1-rc.2) and 0.2.0-rc.2 run the full probe set, while
-        # 0.2.0-rc.1 — same generation as rc.2 — keeps typecheck plus the suite.
+        # the default (0.2.1-rc.2) runs the full probe set, while the older rc.1
+        # and every newer line keep typecheck plus the suite and the real-PTY
+        # lifecycle probes. rc.5 additionally runs the packed-artifact install so
+        # `dsh plugin add` is proven against the eighth host without allow-version.
         #
         # Pinning a leg to an older rc *within* a line does not resolve when that
         # rc peer-ranges a sibling the family later re-pinned, so each line keeps
         # the newest rc of that generation it can install cleanly, plus the rcs
         # upstream still points a dist-tag at.
-        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.2", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.5"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -95,8 +97,12 @@ jobs:
       # packs (`npm pack`), inspects the manifest, installs the tarball into a home
       # outside the repository, proves the plugin resolves to the profile rather than
       # the checkout, and then runs the wizard and workspace probes against it.
+      #
+      # It also runs on rc.5: that is the only step that invokes the default
+      # `dsh plugin add` end to end, so it is where the eighth peer window is
+      # proven to install without `allow-version`.
       - name: Packed-artifact smoke (npm pack → install → probes)
-        if: matrix.dsh == '0.2.1-rc.2'
+        if: matrix.dsh == '0.2.1-rc.2' || matrix.dsh == '0.2.2-rc.5'
         run: node scripts/artifact-smoke.mjs
       - name: Terminal-capability probe
         run: node scripts/probe-home.mjs --probe --script tui-term-probe.mjs
@@ -168,14 +174,15 @@ jobs:
       - name: Reply copy probe (scripted turn)
         if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/tui-mock-probe.mjs
-  # rc.5 is a test-only 0.9.0 candidate, not a supported Host: the peer ranges
-  # and `dsh.compatibility` stay untouched. The characterization suite therefore
-  # installs the exact rc.5 family (and rc.4 only as the differential baseline)
-  # into its own trees, outside the repository dependency graph, and runs the
-  # synthetic loopback/refusal/event tests. No step reads a real key or reaches
-  # an external endpoint; the default-endpoint case replaces `fetch` with a
-  # tripwire. The suite skips in the normal `test` job, where those trees do not
-  # exist, so this job is where the rc.5 claim is actually executed.
+  # rc.5 is now the eighth declared Host line (#74 U2) but is still not admitted
+  # or released; the real Host legs above prove installation and lifecycle. This
+  # job keeps the independent characterization evidence: it installs the exact
+  # rc.5 family (and rc.4 only as the differential baseline) into its own trees,
+  # outside the repository dependency graph, and runs the synthetic
+  # loopback/refusal/event tests. No step reads a real key or reaches an external
+  # endpoint; the default-endpoint case replaces `fetch` with a tripwire. The
+  # suite skips in the normal `test` job, where those trees do not exist, so this
+  # job is where the rc.5 behavioral claim is actually executed.
   rc5-characterization:
     runs-on: ubuntu-latest
     steps:
@@ -209,7 +216,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3"]
+        dsh: ["0.2.1-rc.5", "0.2.2-rc.1", "0.2.2-rc.2", "0.2.2-rc.3", "0.2.2-rc.5"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
