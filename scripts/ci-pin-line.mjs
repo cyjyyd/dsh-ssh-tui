@@ -126,6 +126,26 @@ export const LINES = {
     schemastery: '3.19.0',
     dropDev: ['@deepseek-ai/dsh-invariants'],
   },
+  // rc.4 (#76) and rc.5 (#74) share the rc.1/rc.2/rc.3 strict-install roots —
+  // each was checked against its published `dsh-app-boot` peers and the exact
+  // single-family tree, not inferred from the generation. Both still have no
+  // `dsh-invariants` release. The separate `rc5-characterization` job covers the
+  // rc.5 synthetic search/refusal behaviour; these entries only make the real
+  // Host legs installable.
+  '0.2.2-rc.4': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
+  '0.2.2-rc.5': {
+    roots: RC022_LINE_ROOTS,
+    presets: NEW_LINE_PRESETS,
+    overrides: true,
+    schemastery: '3.19.0',
+    dropDev: ['@deepseek-ai/dsh-invariants'],
+  },
 }
 
 /** Every root name any line pins: the ones this line does not get deleted. */

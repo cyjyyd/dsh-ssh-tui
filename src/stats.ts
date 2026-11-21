@@ -31,6 +31,16 @@ export interface SessionUsage {
   unreportedSteps: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  /**
+   * Billed parts belonging to the steps counted by `unreportedSteps`. Only
+   * this subset may be added to `reportedTokens`: the session-wide counters
+   * above also include reported steps, whose harness total already accounts
+   * for their parts.
+   *
+   * Tracker snapshots carry it; it stays optional so hand-built snapshots
+   * keep the historical all-billed fallback.
+   */
+  unreportedBilledTokens?: number
 }
 
 /** The session-size number the second row shows, and how it was derived. */
@@ -62,7 +72,10 @@ export function sessionTokenTotal(usage: SessionUsage): SessionTokenTotal | unde
     return { tokens: usage.reportedTokens, basis: 'harness' }
   }
   if (usage.reportedSteps === 0) return { tokens: billed, basis: 'sum' }
-  return { tokens: usage.reportedTokens + billed, basis: 'sum' }
+  // Mixed session: a reported step's parts are already inside its harness
+  // total, so only the unreported steps may contribute billed parts. A
+  // hand-built snapshot without that subset keeps the historical fallback.
+  return { tokens: usage.reportedTokens + (usage.unreportedBilledTokens ?? billed), basis: 'sum' }
 }
 
 
@@ -227,14 +240,19 @@ export class SessionStatsTracker {
   recordUsage(turn: number, step: number, usage: TokenUsage): void {
     const key = `${turn}:${step}`
     const total = usage.totalTokens
+    const reportedTotal =
+      typeof total === 'number' && Number.isSafeInteger(total) && total >= 0 ? total : undefined
+    const billed =
+      usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) + usage.outputTokens
     const next: SessionUsage = {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
-      reportedTokens: typeof total === 'number' && Number.isFinite(total) && total >= 0 ? total : 0,
-      reportedSteps: typeof total === 'number' && Number.isFinite(total) && total >= 0 ? 1 : 0,
-      unreportedSteps: typeof total === 'number' && Number.isFinite(total) && total >= 0 ? 0 : 1,
+      reportedTokens: reportedTotal ?? 0,
+      reportedSteps: reportedTotal === undefined ? 0 : 1,
+      unreportedSteps: reportedTotal === undefined ? 1 : 0,
       cacheReadTokens: usage.cacheReadTokens ?? 0,
       cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+      unreportedBilledTokens: reportedTotal === undefined ? billed : 0,
     }
     const previous = this.usageByStep.get(key)
     const totals = this.stats.usage
@@ -246,6 +264,10 @@ export class SessionStatsTracker {
       unreportedSteps: totals.unreportedSteps - (previous?.unreportedSteps ?? 0) + next.unreportedSteps,
       cacheReadTokens: totals.cacheReadTokens - (previous?.cacheReadTokens ?? 0) + next.cacheReadTokens,
       cacheWriteTokens: totals.cacheWriteTokens - (previous?.cacheWriteTokens ?? 0) + next.cacheWriteTokens,
+      unreportedBilledTokens:
+        (totals.unreportedBilledTokens ?? 0)
+        - (previous?.unreportedBilledTokens ?? 0)
+        + (next.unreportedBilledTokens ?? 0),
     }
     this.usageByStep.set(key, next)
   }

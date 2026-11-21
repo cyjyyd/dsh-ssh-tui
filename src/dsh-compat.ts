@@ -11,7 +11,7 @@
  */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type z from '@deepseek-ai/schemastery'
@@ -643,6 +643,61 @@ export function streamFirstTokenTime(stream: unknown): number | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * The final usage sample inside a durable packed assistant stream
+ * (`assistant/attempt.stream` or `assistant/message.stream`).
+ *
+ * rc.4 emits a usage chunk immediately before a `CONTENT_REFUSED` error, and
+ * the agent loop persists that chunk in `assistant/attempt` because a failed
+ * attempt never gets an `assistant/message` settlement. A replay that ignores
+ * the attempt therefore loses tokens the provider already billed, while the
+ * live path recorded them. Only samples whose required counters and present
+ * optional counters are nonnegative safe integers are accepted; a malformed
+ * sample is skipped whole rather than being sanitized or zero-filled, so the
+ * last valid sample still wins and matches `recordUsage`'s replacement rule.
+ *
+ * @param stream - a durable `stream` array from the Session log.
+ * @returns the last valid usage sample, or undefined when the stream carries none.
+ */
+export function streamUsage(stream: unknown): TokenUsage | undefined {
+  if (!Array.isArray(stream)) return undefined
+  let found: TokenUsage | undefined
+  for (const entry of stream) {
+    if (entry === null || typeof entry !== 'object') continue
+    const record = entry as { type?: unknown; chunk?: unknown }
+    if (record.type !== 'chunk') continue
+    const chunk = record.chunk as { type?: unknown; usage?: unknown } | undefined
+    if (chunk === null || typeof chunk !== 'object' || chunk.type !== 'usage') continue
+    const usage = chunk.usage as Partial<TokenUsage> | undefined
+    if (usage === null || typeof usage !== 'object') continue
+    const input = usage.inputTokens
+    const output = usage.outputTokens
+    if (!isTokenCount(input) || !isTokenCount(output)) continue
+    const total = usage.totalTokens
+    const cacheRead = usage.cacheReadTokens
+    const cacheWrite = usage.cacheWriteTokens
+    const reasoning = usage.reasoningTokens
+    if (total !== undefined && !isTokenCount(total)) continue
+    if (cacheRead !== undefined && !isTokenCount(cacheRead)) continue
+    if (cacheWrite !== undefined && !isTokenCount(cacheWrite)) continue
+    if (reasoning !== undefined && !isTokenCount(reasoning)) continue
+    found = {
+      inputTokens: input,
+      outputTokens: output,
+      ...(total === undefined ? {} : { totalTokens: total }),
+      ...(cacheRead === undefined ? {} : { cacheReadTokens: cacheRead }),
+      ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
+      ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
+    }
+  }
+  return found
+}
+
+/** A token counter is a nonnegative safe integer; anything else is malformed. */
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /**

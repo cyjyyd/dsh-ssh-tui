@@ -114,6 +114,51 @@ test('the Windows leg drives the real TUI, not just the unit suite', () => {
   )
 })
 
+test('the host matrices cover all nine Hosts on Linux and six on Windows', () => {
+  // The metadata in package.json is only meaningful if every declared line gets
+  // a real install. Nine declared Hosts means nine Linux legs; the ConPTY leg is
+  // deliberately narrower (the 0.2.1-rc.5 target plus every 0.2.2 rc), and both
+  // matrices must name rc.4 and rc.5 explicitly rather than inherit them.
+  const text = readWorkflow()
+  const matrices = [...text.matchAll(/^ {8}dsh: \[([^\]]*)\]$/gmu)].map(match =>
+    match[1].split(',').map(entry => entry.trim().replaceAll('"', '')).filter(Boolean))
+  assert.equal(matrices.length, 2, 'the workflow must keep exactly the Linux and Windows matrices')
+  assert.deepEqual(matrices[0], [
+    '0.2.1-rc.2', '0.2.0-rc.2', '0.2.0-rc.1', '0.2.1-rc.5',
+    '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5',
+  ], 'nine Linux legs, one per declared Host')
+  assert.deepEqual(matrices[1], [
+    '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3', '0.2.2-rc.4', '0.2.2-rc.5',
+  ], 'six Windows ConPTY legs, including rc.4 and rc.5')
+})
+
+test('the rc.5 characterization has its own isolated, synthetic-only job', () => {
+  // rc.5 is characterized, not admitted: the dedicated job installs the exact
+  // single-family trees outside the repository graph, and the tests replace
+  // `fetch` with a tripwire for the default endpoint. Losing the job would let
+  // the two suites skip on every leg and call the result green.
+  const text = readWorkflow()
+  const jobs = jobNames(text)
+  for (const job of ['test', 'test-windows', 'rc5-characterization']) {
+    assert.ok(jobs.includes(job), `the workflow must keep the ${job} job`)
+  }
+  const rc5 = jobStepBlocks(text, 'rc5-characterization').join('\n')
+  assert.match(rc5, /0\.2\.2-rc\.5/u, 'the exact rc.5 family is installed')
+  assert.match(rc5, /0\.2\.2-rc\.4/u, 'rc.4 is installed as the differential baseline')
+  assert.match(rc5, /DSH_RC5_ROOT/u)
+  assert.match(rc5, /DSH_RC4_ROOT/u)
+  assert.match(rc5, /rc5-compat-characterization\.test\.mjs/u)
+  assert.match(rc5, /rc5-rc4-differential\.test\.mjs/u)
+  assert.doesNotMatch(rc5, /allow-version|legacy-peer-deps/u, 'strict peers stay on')
+  // The packed-artifact smoke is the one step that runs the default
+  // `dsh plugin add`; rc.5 must be exercised there without a version exemption.
+  const smoke = jobStepBlocks(text, 'test').find(block => block.includes('artifact-smoke.mjs'))
+  assert.ok(smoke !== undefined, 'the Linux job must keep the packed-artifact smoke')
+  assert.match(smoke, /matrix\.dsh == '0\.2\.1-rc\.2'/u)
+  assert.match(smoke, /matrix\.dsh == '0\.2\.2-rc\.5'/u)
+  assert.doesNotMatch(smoke, /allow-version/u)
+})
+
 test('only the non-default legs rewrite the manifest, and the default one is declared', async () => {
   // `package.json` commits one host line, and exactly the legs that are *not*
   // that line rewrite it before installing. Losing the guard (or leaving the
