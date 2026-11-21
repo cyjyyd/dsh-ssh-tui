@@ -99,6 +99,12 @@ async function withLiveTui(t) {
   const home = await mkdtemp(join(tmpdir(), 'dsh-tui-transcript-'))
   const previousHome = process.env.DSH_HOME
   const previousKey = process.env.DEEPSEEK_API_KEY
+  // The published-version check can open an update question over the workspace
+  // while a CI runner has network access; that Surface would cover the very
+  // transcript these cases fingerprint. It is unrelated to drop/reattach
+  // behaviour, so keep it out of this fixture (and restore it afterwards).
+  const previousUpdate = process.env.DSH_TUI_NO_UPDATE_CHECK
+  process.env.DSH_TUI_NO_UPDATE_CHECK = '1'
   process.env.DSH_HOME = home
   // Configured credentials, not an environment key, keep the first-run wizard
   // away. An env key would also add its (asynchronous) "already in use" notice
@@ -109,6 +115,8 @@ async function withLiveTui(t) {
     else process.env.DSH_HOME = previousHome
     if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY
     else process.env.DEEPSEEK_API_KEY = previousKey
+    if (previousUpdate === undefined) delete process.env.DSH_TUI_NO_UPDATE_CHECK
+    else process.env.DSH_TUI_NO_UPDATE_CHECK = previousUpdate
     await rm(home, { recursive: true, force: true })
   })
   const sessionId = 'main-session-transcript'
