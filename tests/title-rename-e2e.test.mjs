@@ -26,6 +26,12 @@ setLocale('en')
 
 async function mount(root) {
   const ctx = new Context()
+  // 0.2.2 added "agents" to SessionTitleService.inject; the user-pin path never
+  // asks for a turn boundary, so a boundary-only stub lets the real service
+  // mount on those Host lines without a real Host or model.
+  if (SessionTitleService.inject?.includes('agents')) {
+    ctx.provide('agents', { turnBoundaryOf: () => ({ lastStepBoundary: undefined }) })
+  }
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SessionTitleService, {
