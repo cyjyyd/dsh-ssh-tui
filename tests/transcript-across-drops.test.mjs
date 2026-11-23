@@ -106,9 +106,9 @@ async function withLiveTui(t) {
   // to the transcript this test is fingerprinting.
   process.env.DEEPSEEK_API_KEY = ''
   // The live npm check can raise its update modal over the transcript mid-
-  // assertion (the branch intentionally stays on 0.8.5 while 0.8.6 is the
-  // published latest). These cases are about the display handover, not the
-  // notifier, so keep them hermetic like the other booting fixtures.
+  // assertion (the rc.1 candidate is unpublished while 0.8.6 is the published
+  // latest). These cases are about the display handover, not the notifier, so
+  // keep them hermetic like the other booting fixtures.
   process.env.DSH_TUI_NO_UPDATE_CHECK = '1'
   t.after(async () => {
     if (previousHome === undefined) delete process.env.DSH_HOME
