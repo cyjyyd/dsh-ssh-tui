@@ -636,14 +636,14 @@ test('pickerWindowStart keeps a 12-row window around the cursor', () => {
   assert.equal(pickerWindowStart(29, 30), 18)
 })
 
-test('slash suggestions on a bare slash include /disconnect', () => {
+test('slash suggestions on a bare slash include /context after /status', () => {
   const ctx = { get: () => undefined, on() { return () => {} } }
   const agent = { id: 'main-session', options: {}, status: 'idle', session: { id: 'main-session', events: [] }, cancel() {} }
   const tui = new SshTui(ctx, agent, { sessionId: 'main-session', color: false })
   tui.handleData(Buffer.from('/'))
   const text = tui.captureFrame(88, 28).join('\n')
-  assert.ok(text.includes('/disconnect'))
-  assert.ok(text.includes('断线策略'))
+  assert.ok(text.includes('/context'))
+  assert.ok(text.includes('上下文详情'))
   assert.equal(/select model and reasoning/u.test(text), false)
   assert.equal(text.includes('/dialog-test'), false)
   assert.equal(text.includes('/exit'), false)

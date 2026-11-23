@@ -17,6 +17,7 @@ export const LOCAL_COMMANDS = [
   { name: 'exit', key: 'cmd.quit', aliasOf: 'quit' },
   { name: 'clear', key: 'cmd.clear' },
   { name: 'status', key: 'cmd.status' },
+  { name: 'context', key: 'cmd.context' },
   { name: 'diag', key: 'cmd.diag' },
   { name: 'disconnect', key: 'cmd.disconnect' },
   { name: 'rename', key: 'cmd.rename' },

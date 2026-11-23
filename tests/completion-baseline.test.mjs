@@ -66,7 +66,8 @@ test('BASELINE: a bare slash lists the catalog in a 12-row window, aliases held 
   const frame = typeDraft(tui, '/')
   assert.ok(tui.commandSuggestions.length > 12, `the catalog is longer than the window (${tui.commandSuggestions.length})`)
   assert.equal(listRows(frame).length, 12, 'the window is twelve rows')
-  assert.ok(listRows(frame).some(line => line.includes('/disconnect')), 'a day-to-day command is in the window')
+  assert.ok(listRows(frame).some(line => line.includes('/context')), 'the new context command is on the first page')
+  assert.ok(listRows(frame).some(line => line.includes('/diag')), 'and the rest of the day-to-day catalog follows it')
   assert.equal(listRows(frame).some(line => line.includes('/exit')), false, 'aliases wait for a prefix')
   assert.equal(frame.join('\n').includes('/dialog-test'), false, 'and the test-only command is never suggested')
 })
@@ -220,10 +221,10 @@ test('E1 BASELINE: an async reader frame reaches the same handler as a read', as
   // `consumeFrame`, so W-4B.1 cannot put its refresh only in the read loop.
   const tui = makeTui()
   typeDraft(tui, '/')
-  assert.equal(tui.commandSuggestions.length, 29, '28 existing commands + /rename')
+  assert.equal(tui.commandSuggestions.length, 30, '29 existing commands (28 + S1-B /rename) + /context')
   tui.handleData(Buffer.from('\x1b'))
   // The hold is 60 ms; the frame has not been emitted yet.
-  assert.equal(tui.commandSuggestions.length, 29, 'the escape is held, not handled')
+  assert.equal(tui.commandSuggestions.length, 30, 'the escape is held, not handled')
   await tick(140)
   assert.equal(tui.commandSuggestions.length, 0, 'the released escape reached handleEscape')
   assert.equal(tui.suggestionIndex, 0)
