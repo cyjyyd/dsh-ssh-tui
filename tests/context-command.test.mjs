@@ -219,6 +219,33 @@ test('80/40/20 repaints rebuild the body from state without a second read', () =
   assert.equal(reads, 1, 'repaint is pure; it did not read the cache again')
 })
 
+test('a disconnect/reattach rebuilds the same page from state without a second read', () => {
+  let reads = 0
+  const cache = { cachedSnapshot: () => { reads += 1; return { asOfSeq: 9, values: values() } } }
+  const { tui, agent } = fixture({ cache })
+  guardSession(agent.session)
+  tui.runCommand('/context')
+  tui.handleInputText('2')
+  tui.handleInputText('\r')
+  assert.equal(tui.screen?.context?.page, 2)
+  assert.equal(tui.screen?.context?.expanded, true)
+
+  // The link drops (the Host stays alive) and a fresh relay reattaches. The
+  // Screen must rebuild from its own state, at the new width, without asking
+  // the projection cache again or touching the Session's event accessors.
+  tui.detachDisplay()
+  assert.equal(tui.screen?.report, 'context', 'the Screen state survives the drop')
+  tui.displayHost = { attached: true, pendingBytes: () => 0, sendStdout() {}, sendGoodbye() {}, close: async () => {} }
+  tui.attachRelayDisplay()
+  assert.equal(tui.screen?.report, 'context')
+  assert.equal(tui.screen?.context?.page, 2, 'the page survives the reconnect')
+  assert.equal(tui.screen?.context?.expanded, true, 'the detail state survives the reconnect')
+  const frame = tui.captureFrame(40, 20).map(plain).join('\n')
+  assert.match(frame, /构成（启发式）/)
+  assert.match(frame, /S 系统 ~9K/)
+  assert.equal(reads, 1, 'the reconnect did not read the cache again')
+})
+
 test('line mode keeps the report as text with all sections', () => {
   const { tui } = fixture({ lineMode: true })
   tui.runCommand('/context')
