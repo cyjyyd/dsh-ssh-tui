@@ -20,6 +20,7 @@ test('the bare slash lists this plugin commands, without aliases or dialog-test'
   assert.equal(names.includes('help'), true)
   assert.equal(names.includes('diag'), true, 'the /diag command is offered')
   assert.equal(names.includes('rename'), true, 'the title command is offered')
+  assert.equal(names.includes('context'), true, 'the cached context view is offered')
   assert.equal(names.includes('resume'), false, 'in-app session switching was removed; resume is a launch flag')
   assert.equal(names.includes('exit'), false, 'an alias waits for a typed prefix')
   assert.equal(names.includes('dialog-test'), false, 'a test-only command stays out of the list')
@@ -27,8 +28,11 @@ test('the bare slash lists this plugin commands, without aliases or dialog-test'
 })
 
 test('a typed prefix brings aliases back and filters the list', () => {
-  const names = commandSuggestions('/ex', []).map(command => command.name)
+  const names = commandSuggestions('/exi', []).map(command => command.name)
   assert.deepEqual(names, ['exit'])
+  // `/context` contains "ex", so the existing contains-match also surfaces it.
+  const contains = commandSuggestions('/ex', []).map(command => command.name)
+  assert.equal(contains.includes('context'), true)
   const usage = commandSuggestions('/usage', []).map(command => command.name)
   assert.equal(usage.includes('usage'), true)
 })
