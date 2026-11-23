@@ -5213,6 +5213,26 @@ export class SshTui {
     return rendered.lines.map(text => this.styleLine('system', `  ${text}`))
   }
 
+  /**
+   * The row count of the Context body at the terminal's *current* width.
+   *
+   * `screen.lines` is formatted when the Screen opens or a page/detail key
+   * rebuilds it; an SSH resize can change the tier while the Screen is up and
+   * leave that cache at the old width. End/PageDown must clamp against the body
+   * the paint path will actually draw, not the stale one. The formatter is pure
+   * over `screen.context.report`, so this cannot read the projection cache again.
+   */
+  private contextScreenLineCount(screen: ScreenState): number {
+    const context = screen.context
+    if (context === undefined) return screen.lines.length
+    return formatContextReport(context.report, {
+      page: context.page,
+      width: Math.max(8, this.screenColumns() - 2),
+      expanded: context.expanded,
+      ascii: asciiFallbackEnabled(),
+    }).lines.length
+  }
+
   /** The context Screen's bottom hint, short enough for a 20-column terminal. */
   private contextHintLine(context: ContextScreenState): string {
     if (this.screenColumns() < 30) return t('context.hintNarrow')
@@ -13536,7 +13556,10 @@ export class SshTui {
     const screen = this.screen
     if (screen === undefined) return
     const layout = screenLayout(Math.max(6, this.screenRows()))
-    const next = clampScreenOffset(offset, screen.lines.length, layout.bodyRows)
+    const lineCount = screen.kind === 'report' && screen.report === 'context'
+      ? this.contextScreenLineCount(screen)
+      : screen.lines.length
+    const next = clampScreenOffset(offset, lineCount, layout.bodyRows)
     if (next === screen.offset) return
     screen.offset = next
     this.markDirty()

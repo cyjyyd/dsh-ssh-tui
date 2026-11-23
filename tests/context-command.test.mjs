@@ -219,6 +219,70 @@ test('80/40/20 repaints rebuild the body from state without a second read', () =
   assert.equal(reads, 1, 'repaint is pure; it did not read the cache again')
 })
 
+test('20→80 resize keeps the same Context Screen scrollable to its last rows', () => {
+  let reads = 0
+  const cache = { cachedSnapshot: () => { reads += 1; return { asOfSeq: 9, values: values() } } }
+  const { tui } = fixture({ cache })
+  const previousColumns = process.stdout.columns
+  const previousRows = process.stdout.rows
+  let copied
+  tui.copyPlainText = text => { copied = text }
+  try {
+    // Open page 1 narrow: the cached body has four rows at 20 columns.
+    process.stdout.columns = 20
+    process.stdout.rows = 8
+    tui.runContextCommand()
+    assert.equal(tui.screen?.lines.length, 4)
+    tui.captureFrame(20, 8)
+
+    // Resize the *same* Screen to the full layout (80×8). No page/detail key
+    // rebuilds `screen.lines`; only the paint path sees the wider formatter.
+    process.stdout.columns = 80
+    process.stdout.rows = 8
+    const full = tui.captureFrame(80, 8).map(plain).join('\n')
+    assert.match(full, /第 1\/3 页 · 总览 · 只读 · 缓存投影/)
+    assert.equal(tui.screen?.offset, 0)
+
+    // End must measure the current-width body (8 rows / 4 body rows), not the
+    // stale narrow list (4 rows -> max offset 0).
+    tui.handleInputText('\x1b[F')
+    assert.equal(tui.screen?.offset, 4, 'End reaches the last page after expanding')
+    const bottom = tui.captureFrame(80, 8).map(plain).join('\n')
+    assert.match(bottom, /计费累计（不是上下文占用）/)
+    assert.match(bottom, /仅为估算：缓存检查点，不是实时精确值。/)
+
+    // Home and PageDown use the same current-width clamp through other keys.
+    tui.handleInputText('\x1b[H')
+    assert.equal(tui.screen?.offset, 0)
+    tui.handleInputText('\x1b[6~')
+    assert.equal(tui.screen?.offset, 3, 'the first PageDown moves by bodyRows - 1')
+    tui.handleInputText('\x1b[6~')
+    assert.equal(tui.screen?.offset, 4, 'the second PageDown reaches the last page')
+
+    // 80→20 must clamp the old offset without requiring a repaint first.
+    process.stdout.columns = 20
+    process.stdout.rows = 8
+    tui.handleInputText('\x1b[F')
+    assert.equal(tui.screen?.offset, 0)
+    const narrow = tui.captureFrame(20, 8).map(plain).join('\n')
+    assert.match(narrow, /上下文 1\/3/)
+    assert.doesNotMatch(narrow, /计费累计/)
+
+    // Paging and copy still rebuild from the Screen's own state at this width.
+    tui.handleInputText('2')
+    assert.equal(tui.screen?.context?.page, 2)
+    assert.equal(tui.screen?.offset, 0)
+    tui.handleInputText('c')
+    assert.equal(typeof copied, 'string')
+    assert.match(copied, /S ~9K/)
+    assert.equal(copied.includes('\u001b'), false)
+    assert.equal(reads, 1, 'resize, scroll, paging and copy never read the cache again')
+  } finally {
+    process.stdout.columns = previousColumns
+    process.stdout.rows = previousRows
+  }
+})
+
 test('a disconnect/reattach rebuilds the same page from state without a second read', () => {
   let reads = 0
   const cache = { cachedSnapshot: () => { reads += 1; return { asOfSeq: 9, values: values() } } }
