@@ -10,6 +10,57 @@
 
 ---
 
+## 0.9.0-rc.1 — 冻结候选（未发布）
+
+候选说明：[docs/release-notes-0.9.0-rc.1.md](docs/release-notes-0.9.0-rc.1.md)。
+
+**这是 `0.9.0-rc.1` 的冻结候选材料，尚未发布**：没有 Git tag、GitHub Release 或 npm
+版本；`latest` / `next` 均不改动。候选技术状态最多为 `CANDIDATE_PREP_COMPLETE`，
+`RC_CUT_READY` 需独立 exact-SHA + artifact 评审；实际发布需 Owner 单独的
+`RC_RELEASE_GO`。相对已发布 Stable `0.8.6`，本候选来自 `0.9.0` 主线，加入下列已评审
+能力并把兼容矩阵扩到九个精确 Host；没有额外的新用户功能。
+
+### Added
+
+- **W6B `/terminal`**：Terminal Doctor 快照屏，报告当前 attach 已知的终端能力、证据年龄
+  与 `MEASURED` / `STALE` / `CONFIGURED` / `INFERRED` / `UNMEASURED` 状态；不含 W6C
+  主动重新探测。
+- **TITLE.G1 `/rename`**：只重命名当前会话标题，写回 Host title 服务并刷新本地元数据；
+  覆盖持久化、Unicode 与中断/重连语义；不含归档或历史会话批量操作。
+- **cache-only `/context`**：Overview + Composition 两层视图，20/40/80 列分级与 18 cell
+  有界回退；只读一次 `sessionProjectionCache` 的 `cachedSnapshot`，不读事件日志、投影
+  注册表或历史正文；STALE / UNKNOWN / `routeUnverified` 与 `modelSelection.lastUsed`
+  provenance 如实展示。
+
+### Changed
+
+- **版本身份**：`package.json` 与 lockfile 根版本改为 `0.9.0-rc.1`；`dsh.compatibility.dsh`
+  与根 peer 保持精确九 Host 并集，`dshReleases` 九个版本均为 `compatible`：
+  `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.1-rc.5` / `0.2.2-rc.1` /
+  `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`。
+- **候选范围有限技术准入**：九 Host 仅获 candidate-only qualified technical admission
+  （`EVIDENCE_LIMITED`），**不是**已公开发布的 Host 支持，也不是 `0.9.0` 已发布声明。
+  已发布 Stable 仍是 `0.8.6` / 七个冻结 Host。
+
+### Docs
+
+- `README.md` / `README.en.md`：把 rc.4/rc.5 的 `COMPAT_ADMISSION_PENDING` 更正为
+  `0.9.0-rc.1` 候选范围内的有限技术准入；保留 0.8.6 Stable 的七 Host 声明。
+- **Windows Server 排除**：中英双语披露“Windows Server 系列（含 Server 2025）不在
+  0.9.0-rc.1 支持范围”，保留历史 question-wait 双换行 CI RED 与独立 D5 审计链接；
+  根因未明、不保证 Server 兼容性，也不把该 RED 改写为 GREEN。
+- 新增 `docs/rc1-candidate-evidence.md`，记录 source、本地验证、CI、双包、升级/回滚与
+  未验证限制；`docs/release-notes-0.9.0-rc.1.md` 随包发布。
+
+### Known limitations
+
+- 上游 rc.4/rc.5 source-to-artifact 仅 `EVIDENCE_LIMITED`，不是完整 npm `gitHead` /
+  attestation 或 `FULL_PASS`；既有 qualified Owner exceptions 原样保留。
+- rc.5 Windows 尾换行 flake 仍为 `INCONCLUSIVE`；真机 Windows 11、IME、所有桌面终端
+  组合与 Windows-side H11 为 `NOT_MEASURED`，ConPTY 覆盖不等于这些通过。
+- 明确排除：PR #49 / #50 / #73 historical Reader、`/search` V09、Picker / F2、
+  archive / restore / delete / reset、AgentTeam deep。
+
 ## 0.8.5 — 稳定版
 
 发版说明：[docs/release-notes-0.8.5.md](docs/release-notes-0.8.5.md)。
