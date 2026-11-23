@@ -75,3 +75,25 @@ test('READMEs distinguish published 0.8.6 Stable from unreleased 0.9 S1-A (packa
     'README.md must state the package version intentionally remains 0.8.5',
   );
 });
+
+// The 0.9 matrix added four Linux legs and four ConPTY legs. README.en.md was
+// updated with the new count, README.md was not: it still told Chinese readers
+// that CI covers "four host versions". The two READMEs must agree on the matrix
+// the workflow actually runs (tests/workflow.test.mjs owns the matrix itself).
+test('READMEs agree on the nine-Linux / six-ConPTY CI matrix', () => {
+  const en = read('README.en.md');
+  const zh = read('README.md');
+
+  assert.match(
+    en,
+    /nine host versions plus the six-line ConPTY subset/i,
+    'README.en.md must state the nine-Linux/six-ConPTY CI matrix',
+  );
+  assert.match(zh, /九条 Host 线/, 'README.md must state the nine-Linux CI matrix');
+  assert.match(zh, /六条 ConPTY 线/, 'README.md must state the six-ConPTY CI matrix');
+  assert.doesNotMatch(
+    zh,
+    /四个宿主版本/,
+    'README.md still tells Chinese readers that CI covers four host versions',
+  );
+});

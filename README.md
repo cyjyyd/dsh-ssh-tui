@@ -58,7 +58,7 @@ English: [README.en.md](README.en.md)
 画面按行增量重绘，不会因为一次 tick 把整屏重画一遍。
 <!-- bench:end -->
 
-跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 与 Windows、四个宿主版本）。
+跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 九条 Host 线、Windows 六条 ConPTY 线）。
 链路上的承诺另有真 PTY 探针：断链重接、断线后宿主存活、带历史的 resume、以及"终端不回光标位置"
 时的链路显示，各自一个脚本，全部在 CI 里跑（`npm run freeze` 会把它们列出来）。
 
