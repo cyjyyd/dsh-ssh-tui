@@ -1,6 +1,7 @@
 // F1 regression guard: the docs must distinguish the *published* 0.8.6
-// Stable (seven frozen Host versions) from this *unpublished* 0.9.0-rc.1
-// freeze candidate, whose package identity is now 0.9.0-rc.1.
+// Stable (seven frozen Host versions), the *published historical* 0.9.0-rc.1
+// prerelease, and this *unpublished* 0.9.0 stable candidate, whose package
+// identity is now 0.9.0.
 //
 // The pre-fix READMEs claimed 0.8.5 "remains the current stable release"
 // (EN) / "0.8.5 仍是当前稳定版" (ZH). That is the defect this test pins.
@@ -11,7 +12,7 @@ import { readFileSync } from 'node:fs';
 
 const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
 
-test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1 candidate', () => {
+test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0 candidate', () => {
   const en = read('README.en.md');
   const zh = read('README.md');
   const pkg = JSON.parse(read('package.json'));
@@ -60,19 +61,32 @@ test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1
     'README.md must state the seven-Host stable scope',
   );
 
-  // Negative scope: the 0.9.0-rc.1 candidate is unpublished.
-  assert.equal(pkg.version, '0.9.0-rc.1', 'the freeze candidate must carry the 0.9.0-rc.1 identity');
-  assert.match(en, /unreleased/i, 'README.en.md must call the 0.9.0-rc.1 candidate unpublished');
+  // Negative scope: the 0.9.0 candidate is unpublished.
+  assert.equal(pkg.version, '0.9.0', 'the stable candidate must carry the 0.9.0 identity');
+  assert.match(en, /unreleased/i, 'README.en.md must call the 0.9.0 candidate unpublished');
   assert.match(
     en,
-    /package identity `0\.9\.0-rc\.1`/,
+    /package identity `0\.9\.0`/,
     'README.en.md must state the candidate package identity',
   );
-  assert.match(zh, /尚未公开发布/, 'README.md must call the 0.9.0-rc.1 candidate unpublished');
+  assert.match(zh, /尚未公开发布/, 'README.md must call the 0.9.0 candidate unpublished');
   assert.match(
     zh,
-    /package identity `0\.9\.0-rc\.1`/,
+    /package identity `0\.9\.0`/,
     'README.md must state the candidate package identity',
+  );
+
+  // Historical state: 0.9.0-rc.1 is already published as a prerelease, while
+  // 0.9.0 itself remains unpublished.
+  assert.match(
+    en,
+    /published prerelease is `0\.9\.0-rc\.1`/i,
+    'README.en.md must record 0.9.0-rc.1 as the published historical prerelease',
+  );
+  assert.match(
+    zh,
+    /已发布的预发布是 `0\.9\.0-rc\.1`/,
+    'README.md must record 0.9.0-rc.1 as the published historical prerelease',
   );
 });
 

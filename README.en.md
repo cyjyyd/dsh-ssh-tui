@@ -82,17 +82,17 @@ dsh --profile tui
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. This branch is the **unreleased** `0.9.0-rc.1` freeze candidate (package identity `0.9.0-rc.1`). It declares nine Hosts and grants candidate-only **qualified technical admission** (`EVIDENCE_LIMITED`) for all nine; that is not a claim that `0.9.0` is published, publicly supported, or on npm `latest` / `next`. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. The published prerelease is `0.9.0-rc.1` (historical, npm `next`). This branch is the **unreleased** `0.9.0` stable candidate (package identity `0.9.0`, stable candidate in preparation). It declares nine Hosts and grants candidate-only **qualified technical admission** (`EVIDENCE_LIMITED`) for all nine; that is not a claim that `0.9.0` is published, publicly supported, or on npm `latest` / `next`. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
-> **⚠️ Windows Server is outside the `0.9.0-rc.1` supported scope**
+> **⚠️ Windows Server is outside the `0.9.0` supported scope**
 >
-> **Windows Server family (including Server 2025) is outside the supported scope of 0.9.0-rc.1. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.**
+> **Windows Server family (including Server 2025) is outside the supported scope of 0.9.0. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.**
 >
-> **Windows Server 系列（含 Server 2025）不在 0.9.0-rc.1 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。**
+> **Windows Server 系列（含 Server 2025）不在 0.9.0 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。**
 >
-> Original RED: [Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174). Independent bounded D5 audit: [PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703). Server compatibility may only be investigated separately after rc.2, on new feedback/tests; it is neither a release promise nor an rc.1 blocker.
+> Original RED: [Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174). Independent bounded D5 audit: [PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703). Server compatibility may only be investigated separately on new feedback/tests; it is neither a release promise nor a 0.9.0 blocker.
 >
-> **Supported desktop Windows scope**: Windows 10 / Windows 11 desktop editions using Windows Terminal or conhost. CI covers the six ConPTY Host lines on the GitHub Windows runner; that runner is test infrastructure and does not make Windows Server a supported OS. Real-machine Windows 11 and specific terminal/IME combinations remain `NOT_MEASURED`; this candidate does not claim that every desktop Windows combination passed.
+> **Supported desktop Windows scope**: Windows 10 / Windows 11 desktop editions using Windows Terminal or conhost. Windows 10 is only **bounded-measured** within the existing CI / real-machine scope, not a claim that every Windows 10 configuration passed. CI covers the six ConPTY Host lines on the GitHub Windows runner; that runner is test infrastructure and does not make Windows Server a supported OS. Real-machine Windows 11 and specific terminal/IME combinations remain `NOT_MEASURED`; this candidate does not claim that every desktop Windows combination passed.
 
 **Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
 pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
@@ -192,8 +192,8 @@ The plugin declares and tests **every `@deepseek-ai/dsh` line in flight**:
 
 | Host line | Status |
 | --- | --- |
-| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the `0.9.0-rc.1` freeze candidate (S1-A/B); Node `>=24.9`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
-| `0.2.2-rc.4` / `0.2.2-rc.5` | ninth-Host targets merged in the `0.9.0-rc.1` S1-C candidate; Node `>=24.9`, one strict DSH family per target; provenance is `EVIDENCE_LIMITED`. Candidate-only qualified technical admission, **not published Host support**; the rc.5 Windows trailing-newline flake remains `INCONCLUSIVE` |
+| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the `0.9.0` stable candidate (S1-A/B); Node `>=24.9`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ninth-Host targets merged in the `0.9.0` S1-C candidate; Node `>=24.9`, one strict DSH family per target; provenance is `EVIDENCE_LIMITED`. Candidate-only qualified technical admission, **not published Host support**; the rc.5 Windows trailing-newline flake remains `INCONCLUSIVE` |
 | `0.2.1-rc.5` | exact 0.8.5 stable target; retained |
 | `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest and lock install it and the default Linux leg runs the full probe set; the Windows ConPTY leg covers `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | declared compatible; retained until a separate retirement decision |
@@ -254,7 +254,7 @@ The full diagnosis, both desktop defects, the strategy and a copy-paste-ready up
 ## Requirements
 
 - Node.js >= 24.9
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact `0.9.0-rc.1` S1-C candidate targets are `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the six ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact `0.9.0` S1-C candidate targets are `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the six ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 - an ANSI terminal (SSH directly, or PowerShell / Windows Terminal on Windows)
 - **Windows**: install, troubleshooting and how to read `/doctor` are in [docs/windows.md](docs/windows.md)

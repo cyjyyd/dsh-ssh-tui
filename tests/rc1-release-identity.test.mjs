@@ -1,21 +1,21 @@
-// REL090-RC1.PREP.W1: the freeze candidate's release identity is the product
-// contract for this branch, not an implementation detail.
+// REL090-STABLE.PREP4: the release identity is a state machine, not one fixed
+// version string. This branch now carries the *unpublished* 0.9.0 stable
+// candidate; 0.9.0-rc.1 is a *published historical prerelease*, and 0.8.6
+// remains the current published Stable.
 //
 // The S1-E development tree intentionally stayed at package version 0.8.5 and
-// described rc.4/rc.5 as COMPAT_ADMISSION_PENDING. That is correct for an
-// unreleased development candidate and wrong for a 0.9.0-rc.1 freeze candidate:
-// an installer would see the old identity, and the release notes would still
-// deny the admission the candidate is being cut to carry.
+// described rc.4/rc.5 as COMPAT_ADMISSION_PENDING. That was correct for an
+// unreleased development candidate and wrong for the 0.9.0-rc.1 freeze
+// candidate; it is likewise wrong for the 0.9.0 stable candidate.
 //
-// This test is written before the identity/docs correction and is expected to
-// be RED on the S1-E tree. It pins:
-//   - package/lock identity 0.9.0-rc.1 and the exact nine-Host union;
-//   - the README distinction between published 0.8.6 Stable and this
-//     unpublished RC candidate, with candidate-only qualified admission;
-//   - the conspicuous Chinese + English Windows Server exclusion, including
-//     the original RED and the bounded D5 audit;
-//   - the release notes / CHANGELOG / candidate evidence inventory (features,
-//     nine Host pins, Windows desktop scope, explicit exclusions).
+// After the state-driven promotion this test pins:
+//   - package/lock identity 0.9.0 and the exact nine-Host union;
+//   - the README distinction between published 0.8.6 Stable, the published
+//     historical 0.9.0-rc.1 prerelease, and this unpublished 0.9.0 candidate;
+//   - the conspicuous Chinese + English Windows Server exclusion for 0.9.0,
+//     including the original RED and the bounded D5 audit;
+//   - the 0.9.0 release notes, the preserved rc.1 historical notes, the
+//     CHANGELOG and the candidate evidence inventory.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,25 +35,30 @@ const HOSTS = [
   '0.2.2-rc.5',
 ];
 const UNION = HOSTS.join(' || ');
-const RC = '0.9.0-rc.1';
+const CANDIDATE = '0.9.0';
+const RC1 = '0.9.0-rc.1';
 const RED_RUN =
   'https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174';
 const D5_AUDIT =
   'https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703';
 const ZH_DISCLOSURE =
-  'Windows Server 系列（含 Server 2025）不在 0.9.0-rc.1 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。';
+  'Windows Server 系列（含 Server 2025）不在 0.9.0 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。';
 const EN_DISCLOSURE =
+  'Windows Server family (including Server 2025) is outside the supported scope of 0.9.0. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.';
+const ZH_RC1_DISCLOSURE =
+  'Windows Server 系列（含 Server 2025）不在 0.9.0-rc.1 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。';
+const EN_RC1_DISCLOSURE =
   'Windows Server family (including Server 2025) is outside the supported scope of 0.9.0-rc.1. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.';
 
-test('package identity is the exact 0.9.0-rc.1 freeze candidate with nine Hosts', () => {
+test('package identity is the unpublished 0.9.0 stable candidate with nine Hosts', () => {
   const pkg = JSON.parse(read('package.json'));
   const lock = JSON.parse(read('package-lock.json'));
 
-  assert.equal(pkg.version, RC, 'package.json must identify the RC freeze candidate');
-  assert.equal(lock.version, RC, 'package-lock.json root version must match the package');
+  assert.equal(pkg.version, CANDIDATE, 'package.json must identify the 0.9.0 stable candidate');
+  assert.equal(lock.version, CANDIDATE, 'package-lock.json root version must match the package');
   assert.equal(
     lock.packages['']?.version,
-    RC,
+    CANDIDATE,
     'package-lock.json packages[""].version must match the package',
   );
 
@@ -88,7 +93,7 @@ test('package identity is the exact 0.9.0-rc.1 freeze candidate with nine Hosts'
   );
 });
 
-test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1 candidate', () => {
+test('READMEs distinguish published 0.8.6 / historical rc.1 from the unpublished 0.9.0 candidate', () => {
   const zh = read('README.md');
   const en = read('README.en.md');
 
@@ -97,7 +102,15 @@ test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1
       !text.includes('COMPAT_ADMISSION_PENDING'),
       `${name} still describes rc.4/rc.5 admission as pending`,
     );
-    assert.ok(text.includes(RC), `${name} must name the ${RC} candidate`);
+    assert.match(
+      text,
+      /package identity `0\.9\.0`/,
+      `${name} must name the ${CANDIDATE} candidate identity`,
+    );
+    assert.ok(
+      text.includes(RC1),
+      `${name} must record the published historical ${RC1} prerelease`,
+    );
     assert.match(text, /EVIDENCE_LIMITED/, `${name} must keep the evidence limitation label`);
     assert.match(
       text,
@@ -116,6 +129,18 @@ test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1
   );
   assert.match(en, /seven (?:frozen )?Host versions/i, 'README.en.md must keep seven Hosts stable');
 
+  // The already-published rc.1 is history, not the current candidate.
+  assert.match(
+    zh,
+    /已发布的预发布是 `0\.9\.0-rc\.1`/,
+    'README.md must record 0.9.0-rc.1 as the published historical prerelease',
+  );
+  assert.match(
+    en,
+    /published prerelease is `0\.9\.0-rc\.1`/i,
+    'README.en.md must record 0.9.0-rc.1 as the published historical prerelease',
+  );
+
   // Candidate-only qualified admission, not public support and not a release.
   assert.match(zh, /有限技术准入/, 'README.md must describe candidate-only qualified admission');
   assert.match(
@@ -123,8 +148,8 @@ test('READMEs distinguish published 0.8.6 Stable from the unpublished 0.9.0-rc.1
     /qualified technical admission/i,
     'README.en.md must describe candidate-only qualified admission',
   );
-  assert.match(zh, /尚未(?:公开)?发布/, 'README.md must call the RC candidate unpublished');
-  assert.match(en, /unreleased/i, 'README.en.md must call the RC candidate unreleased');
+  assert.match(zh, /尚未公开发布/, 'README.md must call the 0.9.0 candidate unpublished');
+  assert.match(en, /unreleased/i, 'README.en.md must call the 0.9.0 candidate unreleased');
   assert.doesNotMatch(zh, /当前稳定版是 `0\.9\.0`/, 'README.md must not call 0.9.0 stable');
   assert.doesNotMatch(en, /0\.9\.0 is the current stable/i, 'README.en.md must not call 0.9.0 stable');
   assert.doesNotMatch(zh, /0\.9\.0 已发布/, 'README.md must not claim 0.9.0 was published');
@@ -151,8 +176,26 @@ test('READMEs carry the conspicuous Chinese + English Windows Server exclusion',
   }
 });
 
-test('release notes inventory the candidate accurately', () => {
+test('rc.1 release notes are preserved as the published historical prerelease', () => {
   const path = 'docs/release-notes-0.9.0-rc.1.md';
+  assert.ok(existsSync(new URL(`../${path}`, import.meta.url)), `${path} must exist`);
+  const notes = read(path);
+
+  assert.match(notes, /HISTORICAL PUBLISHED PRERELEASE/, `${path} must be marked historical`);
+  assert.match(notes, /GitHub prerelease/, `${path} must record the published GitHub prerelease`);
+  assert.match(notes, /npm dist-tag `next`/, `${path} must record the published npm next tag`);
+  assert.ok(
+    notes.includes(ZH_RC1_DISCLOSURE),
+    `${path} must keep the historical Chinese 0.9.0-rc.1 disclosure verbatim`,
+  );
+  assert.ok(
+    notes.includes(EN_RC1_DISCLOSURE),
+    `${path} must keep the historical English 0.9.0-rc.1 disclosure verbatim`,
+  );
+});
+
+test('release notes inventory the 0.9.0 candidate accurately', () => {
+  const path = 'docs/release-notes-0.9.0.md';
   assert.ok(existsSync(new URL(`../${path}`, import.meta.url)), `${path} must exist`);
   const notes = read(path);
 
@@ -200,18 +243,37 @@ test('release notes inventory the candidate accurately', () => {
   assert.match(notes, /not published|unpublished|UNRELEASED/i, 'release notes must say it is unpublished');
 });
 
-test('CHANGELOG records the RC candidate without claiming publication', () => {
+test('CHANGELOG records the 0.9.0 candidate and rc.1 history without claiming publication', () => {
   const changelog = read('CHANGELOG.md');
-  assert.match(changelog, /## 0\.9\.0-rc\.1/, 'CHANGELOG.md must have a 0.9.0-rc.1 section');
+  assert.match(
+    changelog,
+    /## 0\.9\.0 — 稳定候选准备/,
+    'CHANGELOG.md must have a 0.9.0 stable-candidate preparation section',
+  );
+  assert.match(
+    changelog,
+    /docs\/release-notes-0\.9\.0\.md/,
+    'CHANGELOG.md must link the 0.9.0 release notes',
+  );
+  assert.match(
+    changelog,
+    /## 0\.9\.0-rc\.1 — 已发布预发布/,
+    'CHANGELOG.md must mark 0.9.0-rc.1 as the published historical prerelease',
+  );
   assert.match(
     changelog,
     /docs\/release-notes-0\.9\.0-rc\.1\.md/,
-    'CHANGELOG.md must link the candidate release notes',
+    'CHANGELOG.md must keep the historical rc.1 release-notes link',
   );
   for (const token of ['/terminal', '/rename', '/context', 'Windows Server']) {
     assert.ok(changelog.includes(token), `CHANGELOG.md must mention ${token}`);
   }
   assert.doesNotMatch(changelog, /## 0\.9\.0 — 稳定版/, 'CHANGELOG.md must not invent a 0.9.0 stable release');
+  assert.doesNotMatch(
+    changelog,
+    /## 0\.9\.0-rc\.1 — 冻结候选（未发布）/,
+    'CHANGELOG.md must not leave rc.1 labelled as an unpublished candidate',
+  );
 });
 
 test('candidate evidence report keeps the required sections audit-visible', () => {

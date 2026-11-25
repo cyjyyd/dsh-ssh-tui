@@ -10,15 +10,55 @@
 
 ---
 
-## 0.9.0-rc.1 — 冻结候选（未发布）
+## 0.9.0 — 稳定候选准备（未发布）
 
-候选说明：[docs/release-notes-0.9.0-rc.1.md](docs/release-notes-0.9.0-rc.1.md)。
+候选说明：[docs/release-notes-0.9.0.md](docs/release-notes-0.9.0.md)。
 
-**这是 `0.9.0-rc.1` 的冻结候选材料，尚未发布**：没有 Git tag、GitHub Release 或 npm
-版本；`latest` / `next` 均不改动。候选技术状态最多为 `CANDIDATE_PREP_COMPLETE`，
-`RC_CUT_READY` 需独立 exact-SHA + artifact 评审；实际发布需 Owner 单独的
-`RC_RELEASE_GO`。相对已发布 Stable `0.8.6`，本候选来自 `0.9.0` 主线，加入下列已评审
-能力并把兼容矩阵扩到九个精确 Host；没有额外的新用户功能。
+**这是 `0.9.0` 稳定候选的发布材料，尚未发布**：没有 `v0.9.0` Git tag、GitHub Release
+或 npm `0.9.0` 版本；`latest` 仍指向已发布 Stable `0.8.6`，`next` 仍指向已发布预发布
+`0.9.0-rc.1`。当前状态是 **stable candidate in preparation**，不是 Stable，也不是发布
+声明；任何 tag / Release / npm publish 都需要 Owner 单独的发布授权，本准备单不执行。
+
+相对已发布 Stable `0.8.6`，本候选来自 `0.9.0` 主线，内容与 `0.9.0-rc.1` 冻结候选一致；
+本准备单只把候选身份从 `0.9.0-rc.1` 转正为 `0.9.0` 并同步状态文案，没有新增用户功能，
+不改运行时源码。
+
+### Changed
+
+- **版本身份**：`package.json` 与 lockfile 根版本从 `0.9.0-rc.1` 改为 `0.9.0`；
+  `dsh.compatibility.dsh`、根 peer 与 `dshReleases` 保持精确九 Host 并集不变：
+  `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.1-rc.5` / `0.2.2-rc.1` /
+  `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`。
+- **候选范围有限技术准入**：九 Host 仍仅获 candidate-only qualified technical admission
+  （`EVIDENCE_LIMITED`），**不是**已公开发布的 Host 支持，也不是 `0.9.0` 已发布声明。
+  已发布 Stable 仍是 `0.8.6` / 七个冻结 Host。
+
+### Docs
+
+- 新增 `docs/release-notes-0.9.0.md`：保留九 Host pin、qualified admission、Windows
+  Server（含 2025）不支持、Windows 10 有界实测 / Windows 11 `NOT_MEASURED` 与
+  Search/credential 警告；明确 stable candidate in preparation / not published。
+- `docs/release-notes-0.9.0-rc.1.md` 标为已发布预发布/历史，保留当时的中英双语 Windows
+  Server disclosure 原文。
+- `README.md` / `README.en.md`：已发布 Stable 仍为 `0.8.6`，本分支候选身份改为 `0.9.0`
+  且明确 unreleased；Windows Server 声明跟随 `0.9.0` 候选；保留九 Linux / 六 ConPTY 矩阵。
+
+### Known limitations
+
+- 上游 rc.4/rc.5 source-to-artifact 仅 `EVIDENCE_LIMITED`，不是完整 npm `gitHead` /
+  attestation 或 `FULL_PASS`；既有 qualified Owner exceptions 原样保留。
+- rc.5 Windows 尾换行 flake 仍为 `INCONCLUSIVE`；真机 Windows 11、IME、所有桌面终端
+  组合与 Windows-side H11 为 `NOT_MEASURED`，ConPTY 覆盖不等于这些通过。
+- 明确排除：PR #49 / #50 / #73 historical Reader、`/search` V09、Picker / F2、
+  archive / restore / delete / reset、AgentTeam deep。
+
+## 0.9.0-rc.1 — 已发布预发布 / 历史（2026-11-24）
+
+历史发版说明：[docs/release-notes-0.9.0-rc.1.md](docs/release-notes-0.9.0-rc.1.md)。
+
+**`0.9.0-rc.1` 已于 2026-11-24 作为 GitHub prerelease 与 npm dist-tag `next` 发布**
+（`latest` 保持 `0.8.6`）。以下内容保留冻结候选当时的变更记录；当前 `0.9.0` 稳定候选
+见上一节。本准备单不改写 rc.1 的已发布事实，也不把 rc.1 的历史 RED 改写为 GREEN。
 
 ### Added
 

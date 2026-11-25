@@ -156,8 +156,8 @@ TTY 是一种能力，不是宿主存在的前提。
 
 | DeepSeek Harness | 状态 |
 |---|---|
-| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | ✅ `0.9.0-rc.1` 冻结候选（S1-A/B）的精确目标；Node `>=24.9`，各自单一 DSH family strict graph；rc.2/rc.3 来源为 `EVIDENCE_LIMITED` |
-| `0.2.2-rc.4` / `0.2.2-rc.5` | ✅ `0.9.0-rc.1` 冻结候选（S1-C）的第九 Host 目标；Node `>=24.9`，各自单一 DSH family strict graph；来源均为 `EVIDENCE_LIMITED`。按**候选范围**给出有限技术准入（qualified technical admission），**不是已公开发布的 Host 支持**；rc.5 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE` |
+| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | ✅ `0.9.0` 稳定候选（S1-A/B）的精确目标；Node `>=24.9`，各自单一 DSH family strict graph；rc.2/rc.3 来源为 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ✅ `0.9.0` 稳定候选（S1-C）的第九 Host 目标；Node `>=24.9`，各自单一 DSH family strict graph；来源均为 `EVIDENCE_LIMITED`。按**候选范围**给出有限技术准入（qualified technical admission），**不是已公开发布的 Host 支持**；rc.5 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE` |
 | `0.2.1-rc.5` | ✅ 0.8.5 稳定目标，继续保留 |
 | `0.2.1-rc.2` | ✅ 支持，保留的默认开发线：提交的 manifest 与锁安装它，默认 Linux leg 跑全量探针；Windows ConPTY leg 覆盖 `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持，保留到独立退役裁决 |
@@ -170,17 +170,17 @@ TTY 是一种能力，不是宿主存在的前提。
 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5
 ```
 
-这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有七条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.8.6`，覆盖七个冻结 Host 版本**；本分支是尚未公开发布的 `0.9.0-rc.1` 冻结候选（package identity `0.9.0-rc.1`），九条 Host 线仅获**候选范围内的有限技术准入（qualified technical admission，`EVIDENCE_LIMITED`）**，不是 0.9 已发布或已公开支持的声明，也不改变 npm `latest` / `next` 指针。
+这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有七条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.8.6`，覆盖七个冻结 Host 版本**；已发布的预发布是 `0.9.0-rc.1`（历史，npm `next`）。本分支是尚未公开发布的 `0.9.0` 稳定候选（package identity `0.9.0`，stable candidate in preparation），九条 Host 线仅获**候选范围内的有限技术准入（qualified technical admission，`EVIDENCE_LIMITED`）**，不是 0.9 已发布或已公开支持的声明，也不改变 npm `latest` / `next` 指针。
 
-> **⚠️ Windows Server 不在 `0.9.0-rc.1` 支持范围**
+> **⚠️ Windows Server 不在 `0.9.0` 支持范围**
 >
-> **Windows Server 系列（含 Server 2025）不在 0.9.0-rc.1 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。**
+> **Windows Server 系列（含 Server 2025）不在 0.9.0 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。**
 >
-> **Windows Server family (including Server 2025) is outside the supported scope of 0.9.0-rc.1. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.**
+> **Windows Server family (including Server 2025) is outside the supported scope of 0.9.0. The historical Windows Server 2025 question-wait double-newline CI RED remains, with root cause unknown; Server compatibility is not guaranteed.**
 >
-> 原始 RED：[Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174)。独立 bounded D5 审计：[PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703)。Server 兼容性只可能在 rc.2 之后按新反馈/新测试另行调查，不是 rc.1 的发布承诺或阻塞项。
+> 原始 RED：[Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174)。独立 bounded D5 审计：[PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703)。Server 兼容性只可能按新反馈/新测试另行调查，不是 0.9.0 的发布承诺或阻塞项。
 >
-> **支持的桌面 Windows 范围**：Windows 10 / Windows 11 桌面版，使用 Windows Terminal 或 conhost。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 Host 线；该 runner 是测试基础设施，不构成对 Windows Server 的支持。真机 Windows 11、特定终端/IME 组合仍为 `NOT_MEASURED`，本候选不声称“所有桌面 Windows 组合都已通过”。
+> **支持的桌面 Windows 范围**：Windows 10 / Windows 11 桌面版，使用 Windows Terminal 或 conhost。Windows 10 仅在既有 CI / 真机范围内做**有界实测**，不等于所有 Windows 10 配置通过。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 Host 线；该 runner 是测试基础设施，不构成对 Windows Server 的支持。真机 Windows 11、特定终端/IME 组合仍为 `NOT_MEASURED`，本候选不声称“所有桌面 Windows 组合都已通过”。
 
 #### Search 出口与计费边界（0.9 候选）
 

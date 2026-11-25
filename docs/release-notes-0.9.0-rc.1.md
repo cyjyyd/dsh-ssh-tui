@@ -1,16 +1,17 @@
-# 0.9.0-rc.1 — Freeze Candidate（未发布）
+# 0.9.0-rc.1 — 已发布预发布 / 历史（2026-11-24）
 
-> **UNRELEASED CANDIDATE — NOT A RELEASE.** 本文档随 `0.9.0-rc.1` 候选源码树一起准备，
-> 但该候选**尚未**创建 Git tag、GitHub Release 或 npm 版本，也**没有**改动 `latest` /
-> `next`。它的技术状态最多是 `CANDIDATE_PREP_COMPLETE`；只有独立 exact-SHA + artifact
-> 评审给出 `TECH_PASS`、且 #81 的全部 MUST gate 满足后，才可能标为 `RC_CUT_READY`。
-> 真正的发布还需要 Owner 单独签署 `RC_RELEASE_GO`，并绑定精确 SHA、tarball 哈希与
-> GitHub/npm 发布事务。
+> **HISTORICAL PUBLISHED PRERELEASE — NOT THE CURRENT CANDIDATE.** 本文档保留
+> `0.9.0-rc.1` 冻结候选发布前的原始材料，作为历史记录。该版本已于 2026-11-24 作为
+> **GitHub prerelease** 与 **npm dist-tag `next`** 发布；`latest` 保持 `0.8.6`。
+> 当前 `0.9.0` stable candidate 的发布材料见
+> [docs/release-notes-0.9.0.md](release-notes-0.9.0.md)。
+>
+> 以下保留冻结候选当时的候选边界、九 Host 矩阵与中英双语 Windows Server disclosure
+> 原文，不把已发布的 rc.1 改写为 Stable，也不把历史 RED 改写为 GREEN。
 >
 > 源码基线：PR #91 OPEN/Draft head `bdb36cd5889a7c1d65f0b6bf7a1bbd75d34208a3`
-> （tree `54d030dfae606645305126698034cfb244bedcd4`）；本候选只在其上增加版本身份、
-> 文档、发版材料与必要的候选测试，不改产品运行时行为。精确候选 SHA、CI run、tarball
-> 哈希记录在 #81 的 canonical 完成回执中；包内文档不能自引用发布后的哈希。
+> （tree `54d030dfae606645305126698034cfb244bedcd4`）；该候选只在其上增加版本身份、
+> 文档、发版材料与必要的候选测试，不改产品运行时行为。
 
 本候选来自 `0.9.0` 主线开发栈（9 Host 候选），**不是**已发布 Stable `0.8.6` 的重新打包，
 也不是 `release/0.8.4` 维护线。
@@ -122,10 +123,14 @@ Windows Server 的支持。真机 Windows 11、特定终端/IME 组合、以及�
 - 本文档不包含自己发布后的哈希、run ID 或 dist-tag 状态；这些只能由 #81 回执和发布后
   read-back 提供。
 
-## 发布边界
+## 历史发布边界（rc.1 准备期）
 
-本候选**不**创建 tag、GitHub Release、npm publish，不修改 dist-tags，不合并 `main`，
+以下文字记录的是 `0.9.0-rc.1` **发布前**的候选边界，现作为历史保留；rc.1 随后已按独立
+发布事务创建 tag / GitHub prerelease / npm `next`，因此“不创建”的表述不再描述当前状态：
+
+本候选**当时不**创建 tag、GitHub Release、npm publish，不修改 dist-tags，不合并 `main`，
 不把 PR 转为 Ready，不代签 Owner 签名。合并 `main` 仍需 Owner `MAIN_INTEGRATION_GO`
-绑定已评审 commit/PR 图；发布仍需独立的 `RC_RELEASE_GO` 绑定精确未来 SHA、tarball
-哈希与发布事务。`RC_CUT_READY` 表示候选已备好，不等于 `RC_RELEASE_GO`，也不启动 T0 /
-24h 时钟。
+绑定已评审 commit/PR 图；发布仍需独立的 `RC_RELEASE_GO` 绑定精确 SHA、tarball 哈希与
+发布事务。`RC_CUT_READY` 表示候选已备好，不等于 `RC_RELEASE_GO`，也不启动 T0 / 24h
+时钟。当前 `0.9.0` 稳定候选仍未发布，发布边界见
+[docs/release-notes-0.9.0.md](release-notes-0.9.0.md)。
