@@ -1,0 +1,35 @@
+name: npm-readback
+on:
+  push:
+    branches: [evidence/npm-readback]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Official npm metadata
+        run: |
+          set -euo pipefail
+          echo "utc=$(date -u +%FT%TZ)"
+          npm view dsh-ssh-tui@0.9.0-rc.1 version gitHead dist.integrity dist.shasum --json | tee version.json
+          npm view dsh-ssh-tui dist-tags --json | tee dist-tags.json
+      - name: Download and hash exact tarball
+        run: |
+          set -euo pipefail
+          curl -fsSL https://registry.npmjs.org/dsh-ssh-tui/-/dsh-ssh-tui-0.9.0-rc.1.tgz -o pkg.tgz
+          echo "bytes=$(stat -c%s pkg.tgz)"
+          echo "sha256=$(sha256sum pkg.tgz | cut -d' ' -f1)"
+          echo "sha1=$(sha1sum pkg.tgz | cut -d' ' -f1)"
+          echo "sri=sha512-$(openssl dgst -sha512 -binary pkg.tgz | base64 -w0)"
+      - name: Summary
+        run: |
+          { echo '## npm readback'; echo '```json'; cat version.json; cat dist-tags.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-readback
+          path: |
+            version.json
+            dist-tags.json
+            pkg.tgz
