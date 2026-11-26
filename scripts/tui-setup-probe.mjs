@@ -31,10 +31,13 @@ import { provisionProbeCredential } from './probe-home.mjs'
 // The pty in front may rewrite the frame shape these row checks read (see the export).
 import { PTY_IS_CONPTY } from './pty-window.mjs'
 import {
+  markTeardown,
+  observeChild,
   reportOutcome,
   runtimeFacts,
-  sanitizeText,
-  workspaceReady,
+  safeExcerpt,
+  safeRows,
+  workspaceFrameReady,
   writeDiagnosticBundle,
 } from './probe-diagnostics.mjs'
 
@@ -71,6 +74,33 @@ async function wizardRows(output, cols = 100, rows = 30) {
   const grid = await newGrid(cols, rows)
   await grid.write(output)
   return grid.lines()
+}
+
+/**
+ * A live view of the *current* visible frame while a child keeps writing.
+ *
+ * The bytes are replayed once; later calls only feed the new suffix, so a readiness
+ * wait can poll the grid without re-parsing the whole transcript every 100 ms.
+ * `grid()` (not `lines()`) is the visible screen: scrollback is deliberately not
+ * part of "what is on the terminal right now".
+ */
+function frameReader(feed, cols = 100, rows = 30) {
+  let gridPromise
+  let consumed = 0
+  return async () => {
+    const text = feed()
+    if (text.length < consumed) {
+      gridPromise = undefined
+      consumed = 0
+    }
+    gridPromise ??= newGrid(cols, rows)
+    const grid = await gridPromise
+    if (text.length > consumed) {
+      await grid.write(text.slice(consumed))
+      consumed = text.length
+    }
+    return grid.grid()
+  }
 }
 
 /** The row the wizard draws its field on — the only one that opens with `›`. */
@@ -152,13 +182,31 @@ async function runProbe(argv) {
   let phase = 'first-run'
   // A child that exits between a write and the next read used to look exactly like
   // a slow frame: the wait loop only read bytes. Keep the exit status so a failure
-  // can say which one happened.
+  // can say which one happened, and freeze the observation before cleanup so a
+  // deliberate kill is never reported as the run's own exit.
   const trackChild = (name, child) => {
-    const state = { name, pid: child.pid, startedAt: Date.now(), exit: undefined }
+    const state = {
+      name,
+      pid: child.pid,
+      child,
+      startedAt: Date.now(),
+      exit: undefined,
+      observed: undefined,
+      teardown: false,
+    }
     child.onExit(({ exitCode, signal }) => {
+      if (state.exit !== undefined) return
       state.exit = { exitCode: exitCode ?? null, signal: signal ?? null, at: Date.now() }
     })
     return state
+  }
+  // The observation belongs at the readiness/timeout boundary, not after `kill()`
+  // has made every child look exited. `markTeardown` then records that the exit (if
+  // any) was ours, without changing what the observation saw.
+  const stopChild = state => {
+    if (state.observed === undefined) state.observed = observeChild(state)
+    markTeardown(state)
+    try { state.child.kill() } catch { /* already gone */ }
   }
   const termState = trackChild('setup', term)
   // The child/output the diagnostics should read when a phase fails. Updated as the
@@ -171,6 +219,7 @@ async function runProbe(argv) {
       if (predicate()) return true
       await delay(50)
     }
+    if (active.child.observed === undefined) active.child.observed = observeChild(active.child)
     throw new Error(`timed out waiting for ${label}\n--- captured ---\n${plain(output).slice(-1200)}`)
   }
 
@@ -330,7 +379,7 @@ async function runProbe(argv) {
   } catch (error) {
     problems.push(error instanceof Error ? error.message : String(error))
   } finally {
-    try { term.kill() } catch { /* already gone */ }
+    stopChild(termState)
     if (keep) console.log(`probe home kept: ${home}`)
   }
 
@@ -384,15 +433,18 @@ async function runProbe(argv) {
         await delay(100)
       }
       const text = plain(secondOutput)
+      // Freeze the child at the read that decides the assertions; `finally` will
+      // then stop it on purpose and must not rewrite this observation.
+      const observed = secondState.observed ?? (secondState.observed = observeChild(secondState))
       check(/目录:|目录：/u.test(text), 'the second boot reaches the workspace')
-      check(secondState.exit === undefined,
-        `the second boot stays alive until the workspace is read (exit ${secondState.exit?.exitCode ?? 'none'}, signal ${secondState.exit?.signal ?? 'none'})`)
+      check(observed.alive,
+        `the second boot stays alive until the workspace is read (observed ${observed.alive ? 'alive' : 'exited'}; exit ${observed.exit?.exitCode ?? 'none'}, signal ${observed.exit?.signal ?? 'none'}, teardown ${observed.teardown})`)
       check(!/安装向导|选择提供商/u.test(text), 'and does not open the wizard again')
       successLines.push(`second boot on the configured home: ${/目录:|目录：/u.test(text) ? 'workspace, no wizard' : 'no workspace'}`)
     } catch (error) {
       problems.push(error instanceof Error ? error.message : String(error))
     } finally {
-      try { second.kill() } catch { /* already gone */ }
+      stopChild(secondState)
       // Put the home back the way this run found it.
       if (previousCredential === undefined) rmSync(credentialFile, { force: true })
       else writeFileSync(credentialFile, previousCredential, { mode: 0o600 })
@@ -443,11 +495,13 @@ async function runProbe(argv) {
         const deadline = Date.now() + 60_000
         while (Date.now() < deadline) {
           if (resumedState.exit !== undefined) {
+            if (resumedState.observed === undefined) resumedState.observed = observeChild(resumedState)
             throw new Error(`the TUI exited while waiting for step ${want.join('/')} (${label}); exit ${resumedState.exit.exitCode}, signal ${resumedState.exit.signal}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
           }
           if (want.includes(wizardOf(thirdOutput).step)) return
           await delay(100)
         }
+        if (resumedState.observed === undefined) resumedState.observed = observeChild(resumedState)
         throw new Error(`timed out waiting for step ${want.join('/')} (${label}); at ${wizardOf(thirdOutput).step}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
       }
       try {
@@ -471,26 +525,34 @@ async function runProbe(argv) {
         const beforeSave = thirdOutput.length
         resumed.write('y') // save — and nothing is pressed after this
         const back = Date.now() + 30_000
-        // The workspace is ready only when its footer cwd chip and a composer are both
-        // on screen. A single `❯` or `╭` can be a transcript row or a dialog border;
-        // the old wait accepted either and reported success on an empty capture.
-        while (Date.now() < back && !workspaceReady(plain(thirdOutput.slice(beforeSave)))) {
+        // The workspace is ready only when the *current visible grid* carries the
+        // composer (boundary + prompt) and the footer cwd chip. The old test read the
+        // accumulated stream, where a cleared dialog and its stale glyphs survive
+        // forever; this one replays the stream into the terminal grid the reader is
+        // actually looking at.
+        const currentFrame = frameReader(() => thirdOutput)
+        while (Date.now() < back) {
+          if (workspaceFrameReady(await currentFrame())) break
           if (resumedState.exit !== undefined) break
           await delay(100)
         }
+        // Freeze liveness at the observation, before `finally` stops the child.
+        const observed = resumedState.observed ?? (resumedState.observed = observeChild(resumedState))
+        const frame = await currentFrame()
         const after = plain(thirdOutput.slice(beforeSave))
-        check(workspaceReady(after),
-          `the workspace frame is ready after the save (目录 + composer; ${JSON.stringify(after.slice(-160))})`)
-        check(resumedState.exit === undefined,
-          `the TUI stays alive after the save (exit ${resumedState.exit?.exitCode ?? 'none'}, signal ${resumedState.exit?.signal ?? 'none'})`)
-        check(/❯|╭/u.test(after), `the workspace comes back on its own after the save (${JSON.stringify(after.slice(-160))})`)
+        check(workspaceFrameReady(frame),
+          `the workspace frame is ready after the save (current-frame 目录 + composer; ${JSON.stringify(frame.slice(-4))})`)
+        check(observed.alive,
+          `the TUI stays alive after the save (observed ${observed.alive ? 'alive' : 'exited'}; exit ${observed.exit?.exitCode ?? 'none'}, signal ${observed.exit?.signal ?? 'none'}, teardown ${observed.teardown})`)
+        check(frame.some(row => /^\s*(?:❯|>)(?:\s|$)/u.test(row)),
+          `the workspace composer comes back on its own after the save (${JSON.stringify(frame.slice(-4))})`)
         check(!/安装向导\s*9\/9/u.test(after), 'and the wizard is not still on screen')
         check(/配置完成/u.test(plain(thirdOutput)), 'the confirmation reaches the transcript, not just the Screen')
         successLines.push('resumed first run: wizard saved on step 9, workspace back with no extra keypress')
       } catch (error) {
         problems.push(error instanceof Error ? error.message : String(error))
       } finally {
-        try { resumed.kill() } catch { /* already gone */ }
+        stopChild(resumedState)
         // The saved key is this phase's own doing: put the home back unconfigured, or
         // the next run of this probe skips phase 1 as "already configured".
         if (previousCredential === undefined) rmSync(credentialFile, { force: true })
@@ -501,6 +563,7 @@ async function runProbe(argv) {
 
   // PROBE_DIAG_ALWAYS keeps the synthetic screen/transcript for a green user-path
   // run too; CI uploads the packet only on failure, so the default stays `failure`.
+  const knownHome = process.env.HOME ?? process.env.USERPROFILE
   if (problems.length > 0 || process.env.PROBE_DIAG_ALWAYS === '1') {
     // The packet is written before anything is printed so a truncated log still
     // points at the directory CI uploaded.
@@ -511,21 +574,23 @@ async function runProbe(argv) {
         phase: problems.length > 0 ? phase : `${phase}-complete`,
         problems,
         // The raw PTY stream is ANSI; the bundle carries the readable transcript
-        // and the synthetic screen separately.
+        // and the synthetic screen separately. Both are sanitised whole inside.
         output: plain(active.output()),
         screen: screen.join('\n'),
         child: active.child,
         elapsedMs: Date.now() - startedAt,
         runtime: runtimeFacts(),
-        home: process.env.HOME ?? process.env.USERPROFILE,
+        home: knownHome,
       })
       const say = problems.length > 0 ? console.error : console.log
       say(`diagnostics: ${bundle.dir}`)
       if (problems.length > 0) {
+        // Sanitise the whole values first, then take the log excerpt. Slicing first
+        // would let a cut through `sk-` turn the payload into unredacted text.
         console.error('--- captured screen (last 12 rows) ---')
-        console.error(sanitizeText(screen.slice(-12).join('\n')))
+        console.error(safeRows(screen, 12, { home: knownHome }))
         console.error('--- captured transcript (last 1600 chars) ---')
-        console.error(sanitizeText(active.output().slice(-1600)))
+        console.error(safeExcerpt(active.output(), 1600, { home: knownHome }))
       }
     } catch (error) {
       console.error(`diagnostics: could not write the bundle: ${error instanceof Error ? error.message : String(error)}`)
@@ -534,7 +599,7 @@ async function runProbe(argv) {
   if (problems.length > 0) {
     // Success lines are unreachable here: reportOutcome only prints them when
     // `problems` is empty.
-    return reportOutcome({ problems, successLines: [] })
+    return reportOutcome({ problems, successLines: [], home: knownHome })
   }
   if (PTY_IS_CONPTY) {
     // Not a pass: the frame-shape half did not run. Everything the wizard *does*
@@ -551,9 +616,67 @@ async function runProbe(argv) {
   return reportOutcome({ problems, successLines })
 }
 
+/**
+ * Synthetic failure-path control used by the diagnostics test.
+ *
+ * It drives the same writer, sanitiser and log-excerpt helpers as a real failed
+ * probe, but with sentinels only: no PTY, no provider, no real home. The control is
+ * expected to exit nonzero, and it refuses to report success if any written file
+ * still carries a sentinel, a home path, or an escape byte.
+ */
+async function runDiagnosticSelfTest() {
+  const home = '/home/synthetic-user'
+  const key = 'sk-SYNTHETIC-ONLY-1234567890'
+  const transcript = `${key}\n${'x'.repeat(65_539 - key.length - 1)}`
+  const screen = [
+    '配置完成',
+    `目录:${home}/project`,
+    'Bearer\x1b[0m SYNTHETIC-ONLY-BEARER-TOKEN',
+    'sk-\x1b[31mSYNTHETIC-ONLY-SPLIT-KEY',
+  ].join('\n')
+  const state = {
+    name: 'self-test-child',
+    pid: 4242,
+    startedAt: Date.now() - 1_234,
+    exit: { exitCode: 0, signal: null, at: Date.now() - 1_000 },
+  }
+  const observed = observeChild(state)
+  state.observed = observed
+  markTeardown(state) // after the observation: the bundle must keep teardown false
+  const bundle = writeDiagnosticBundle({
+    dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
+    phase: 'self-test',
+    problems: [`synthetic failure: ${key} and ${home}`],
+    output: transcript,
+    screen,
+    child: state.observed,
+    elapsedMs: 1_234,
+    runtime: runtimeFacts(),
+    home,
+  })
+  const forbidden = ['SYNTHETIC-ONLY', home, '\x1b']
+  for (const name of readdirSync(bundle.dir)) {
+    const text = readFileSync(join(bundle.dir, name), 'utf8')
+    for (const value of forbidden) {
+      if (text.includes(value)) throw new Error(`self-test wrote an unsafe ${name}`)
+    }
+  }
+  const json = JSON.parse(readFileSync(join(bundle.dir, 'diagnostics.json'), 'utf8'))
+  if (json.child?.teardown !== false || json.child?.exit?.exitCode !== 0) {
+    throw new Error('self-test lost the pre-teardown child observation')
+  }
+  console.error('--- synthetic failure log excerpt ---')
+  console.error(safeExcerpt(`synthetic log line: ${key} home ${home}`, 400, { home }))
+  console.error(`diagnostics: ${bundle.dir}`)
+  return reportOutcome({ problems: ['synthetic failure: the workspace never came back'], successLines: [], home })
+}
+
 const argv = process.argv.slice(2)
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(USAGE)
   process.exit(0)
+}
+if (process.env.PROBE_DIAG_SELFTEST === '1') {
+  process.exit(await runDiagnosticSelfTest())
 }
 process.exit(await runProbe(argv))
