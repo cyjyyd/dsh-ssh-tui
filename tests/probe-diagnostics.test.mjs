@@ -23,9 +23,11 @@ import { fileURLToPath } from 'node:url'
 
 import { screen } from './screen.mjs'
 import {
+  assertDiagnosticSafe,
   markTeardown,
   observeChild,
   reportOutcome,
+  safeDetail,
   safeExcerpt,
   sanitizeText,
   workspaceFrameReady,
@@ -249,6 +251,135 @@ test('an unverifiable key prefix fails closed and writes no file', () => {
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
+})
+
+test('a captured failure detail sanitises the whole input before the 1200-character cut', () => {
+  const home = '/home/synthetic-user'
+  const marker = 'SYNTHETIC-ONLY-TAIL-MARKER'
+  // The prefix sits before the cut: slice(-1200) drops `sk-` and keeps the body.
+  const key = `sk-SYNTHETICONLY${'A'.repeat(100)}${marker}${'B'.repeat(1_100)}`
+  const raw = `${'q'.repeat(20)} ${key}`
+  assert.ok(raw.length > 1_200)
+  const detail = safeDetail(raw, 1_200, { home })
+  assert.ok(!detail.includes(marker), 'the cut cannot leave key body behind')
+  assert.ok(!detail.includes('sk-'), 'no key prefix is left in the detail')
+  assert.match(detail, /<redacted-key>/u)
+
+  const problem = `timed out waiting for the workspace\n--- captured ---\n${detail}`
+  const base = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-detail-'))
+  try {
+    const bundle = writeDiagnosticBundle({
+      dir: base,
+      phase: 'red-a-green',
+      problems: [problem],
+      output: 'safe synthetic transcript',
+      screen: 'safe synthetic screen',
+      now: new Date('2026-11-26T02:30:00Z'),
+      home,
+    })
+    for (const name of readdirSync(bundle.dir)) {
+      const text = readFileSync(join(bundle.dir, name), 'utf8')
+      assert.ok(!text.includes(marker), `${name} leaked the surviving key body`)
+      assert.ok(!text.includes('SYNTHETIC-ONLY'), `${name} leaked the synthetic key`)
+    }
+    const logs = []
+    const code = reportOutcome({
+      problems: [problem],
+      successLines: [],
+      log: line => logs.push(line),
+      error: line => logs.push(line),
+      home,
+    })
+    assert.equal(code, 1)
+    assert.ok(!logs.join('\n').includes(marker), 'the reporter emitted the surviving key body')
+    assert.ok(!logs.join('\n').includes('SYNTHETIC-ONLY'), 'the reporter emitted the synthetic key')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('the reporter fails closed on an unverifiable split-prefix key', () => {
+  const body = 'SYNTHETIC-ONLY-SPLIT-KEY-123456'
+  const split = `sk-\u200b${body}`
+  assert.throws(() => assertDiagnosticSafe(sanitizeText(split)), /unsafe/u)
+  const logs = []
+  const code = reportOutcome({
+    problems: [split],
+    successLines: [],
+    log: line => logs.push(line),
+    error: line => logs.push(line),
+  })
+  const text = logs.join('\n')
+  assert.equal(code, 1)
+  assert.ok(!text.includes(body), 'the reporter emitted the split key body')
+  assert.ok(!text.includes('sk-'), 'the reporter emitted the key prefix')
+  assert.match(text, /withheld/u, 'the reporter substituted fixed class-only metadata')
+})
+
+test('an unverifiable problem in an otherwise safe packet becomes class-only metadata', () => {
+  const body = 'SYNTHETIC-ONLY-PACKET-KEY-123456'
+  const split = `sk-\u200b${body}`
+  const base = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-problem-'))
+  try {
+    const bundle = writeDiagnosticBundle({
+      dir: base,
+      problems: [split],
+      output: 'safe synthetic transcript',
+      screen: 'safe synthetic screen',
+      now: new Date('2026-11-26T02:30:00Z'),
+    })
+    for (const name of readdirSync(bundle.dir)) {
+      const text = readFileSync(join(bundle.dir, name), 'utf8')
+      assert.ok(!text.includes(body), `${name} leaked the split key body`)
+      assert.ok(!text.includes('sk-'), `${name} leaked the key prefix`)
+    }
+    const json = JSON.parse(readFileSync(join(bundle.dir, 'diagnostics.json'), 'utf8'))
+    assert.match(json.problems[0], /withheld/u)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a rejected packet does not emit the unsafe value through the reporter', () => {
+  const body = 'SYNTHETIC-ONLY-REJECTED-KEY-123456'
+  const split = `sk-\u200b${body}`
+  const base = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-rejected-'))
+  try {
+    assert.throws(() => writeDiagnosticBundle({
+      dir: base,
+      problems: [split],
+      output: split,
+      screen: '',
+      home: '/home/synthetic-user',
+    }), /unsafe/u)
+    assert.deepEqual(readdirSync(base), [], 'a rejected packet leaves no file behind')
+    const logs = []
+    const code = reportOutcome({
+      problems: [split],
+      successLines: [],
+      log: line => logs.push(line),
+      error: line => logs.push(line),
+      home: '/home/synthetic-user',
+    })
+    const text = logs.join('\n')
+    assert.equal(code, 1)
+    assert.ok(!text.includes(body), 'the reporter emitted the rejected key body')
+    assert.ok(!text.includes('sk-'), 'the reporter emitted the rejected key prefix')
+    assert.match(text, /withheld/u)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('a format control inside diagnostic text is unverifiable', () => {
+  assert.throws(
+    () => assertDiagnosticSafe(sanitizeText('before\u200bafter')),
+    /format control/u,
+  )
+  assert.throws(
+    () => assertDiagnosticSafe(sanitizeText('sk-SYNTHETIC\u200bONLY-123456')),
+    /unsafe/u,
+  )
 })
 
 test('a spontaneous child exit is frozen before teardown', () => {

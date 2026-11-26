@@ -14,8 +14,10 @@
  *   - `writeDiagnosticBundle` writes a sanitised, self-contained directory that CI can
  *     upload as an artifact (synthetic screen, transcript, child exit status, versions).
  *     The whole input is sanitised *before* any tail or excerpt is taken, and the
- *     result is re-checked before a single byte is written. If that check cannot
- *     prove the output safe, nothing is written and the caller fails closed.
+ *     result is re-checked before a single byte is written. Screen/transcript/version
+ *     content that cannot be proven safe aborts the write; a derived problem message
+ *     that cannot be proven safe is replaced by fixed class-only metadata. The log
+ *     reporter applies the same fail-closed substitution instead of echoing a value.
  *
  * The bundle is public by construction: keys, bearer tokens, real home paths and
  * session ids are replaced before anything is written. The probe's home is a throwaway
@@ -47,6 +49,10 @@ const CSI = /\x1b\[[0-?]*[ -/]*[@-~]/gu
 const OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/gu
 const SINGLE_ESCAPE = /\x1b[@-_]/gu
 const C0 = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu
+// Zero-width/bidi controls can split a key prefix (`sk-\u200b…`) or hide it from a
+// regex that only knows ASCII. They are not printable diagnostic content: a value
+// carrying one cannot be classified, so it must fail closed rather than be published.
+const FORMAT_CONTROL = /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/u
 
 /** Strip terminal control sequences so a value split by SGR is one value again. */
 export function stripTerminalControls(text) {
@@ -105,6 +111,9 @@ export function assertDiagnosticSafe(text, { home } = {}) {
     SINGLE_ESCAPE.lastIndex = 0
     throw new Error('diagnostic output is unsafe: terminal control sequence remains')
   }
+  if (FORMAT_CONTROL.test(value)) {
+    throw new Error('diagnostic output is unsafe: unverifiable format control remains')
+  }
   if (KEY.test(value)) {
     KEY.lastIndex = 0
     throw new Error('diagnostic output is unsafe: key-shaped value remains')
@@ -144,6 +153,66 @@ export function safeExcerpt(text, max, { home } = {}) {
 export function safeRows(rows, count, { home } = {}) {
   const safe = assertDiagnosticSafe(sanitizeText(Array.isArray(rows) ? rows.join('\n') : rows, { home }), { home })
   return safe.split('\n').slice(-count).join('\n')
+}
+
+/** Fixed, value-free substitutes for content that cannot be proven safe. */
+export const WITHHELD_DETAIL = '[diagnostic detail withheld: unsafe content class]'
+
+const UNSAFE_CLASSES = new Set([
+  'terminal control sequence remains',
+  'unverifiable format control remains',
+  'key-shaped value remains',
+  'bearer value remains',
+  'session id remains',
+  'home path remains',
+  'known home remains',
+  'unverifiable key prefix remains',
+])
+
+/** The class name from this module's own assertion, never the offending value. */
+function unsafeClass(error) {
+  const message = String(error?.message ?? '')
+  const prefix = 'diagnostic output is unsafe: '
+  const klass = message.startsWith(prefix) ? message.slice(prefix.length) : ''
+  return UNSAFE_CLASSES.has(klass) ? klass : 'unsafe content class'
+}
+
+/**
+ * A problem string that is guaranteed not to carry an unverifiable value.
+ *
+ * The caller must still build the problem from the *whole* input (never a slice):
+ * a key body whose prefix was already cut cannot be classified later. This helper
+ * covers the remaining case where cleaning detects an unsafe class and replaces the
+ * whole problem with fixed metadata instead of publishing it.
+ */
+export function safeProblem(problem, { home } = {}) {
+  const raw = String(problem ?? '')
+  try {
+    return assertDiagnosticSafe(sanitizeText(raw, { home }), { home })
+  } catch (error) {
+    return `[diagnostic problem withheld: ${unsafeClass(error)}]`
+  }
+}
+
+/**
+ * A safe excerpt for stdout/stderr. The whole value is sanitised and checked before
+ * the tail is taken; when that cannot be proven safe the caller gets metadata only.
+ */
+export function safeDetail(text, max = 1_600, { home } = {}) {
+  try {
+    return safeExcerpt(text, max, { home })
+  } catch {
+    return WITHHELD_DETAIL
+  }
+}
+
+/** Row-oriented `safeDetail`: fixed metadata instead of a throw when unverifiable. */
+export function safeRowsDetail(rows, count, { home } = {}) {
+  try {
+    return safeRows(rows, count, { home })
+  } catch {
+    return WITHHELD_DETAIL
+  }
 }
 
 /**
@@ -187,7 +256,7 @@ export function workspaceFrameReady(rows) {
 export function reportOutcome({ problems = [], successLines = [], log = console.log, error = console.error, home } = {}) {
   if (problems.length > 0) {
     error('FAIL')
-    for (const problem of problems) error(`  - ${sanitizeText(String(problem), { home })}`)
+    for (const problem of problems) error(`  - ${safeProblem(problem, { home })}`)
     return 1
   }
   for (const line of successLines) log(line)
@@ -313,7 +382,10 @@ export function writeDiagnosticBundle({
   home,
 } = {}) {
   const clean = text => assertDiagnosticSafe(sanitizeText(text, { home }), { home })
-  const safeProblems = problems.map(problem => clean(String(problem)))
+  // A problem is a derived *message*: when its class cannot be proven safe, keep the
+  // packet class-only rather than failing the whole bundle. Screen/transcript/version
+  // content stays strict: if that cannot be proven safe, nothing is written.
+  const safeProblems = problems.map(problem => safeProblem(problem, { home }))
   const safeScreen = tail(clean(String(screen ?? '')), 32 * 1024)
   const safeTranscript = tail(clean(String(output ?? '')), 64 * 1024)
   const safeChild = childDocument(child, home)
