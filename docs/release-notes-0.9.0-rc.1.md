@@ -3,7 +3,7 @@
 > **HISTORICAL PUBLISHED PRERELEASE — NOT THE CURRENT CANDIDATE.** 本文档保留
 > `0.9.0-rc.1` 冻结候选发布前的原始材料，作为历史记录。该版本已于 2026-11-24 作为
 > **GitHub prerelease** 与 **npm dist-tag `next`** 发布；`latest` 保持 `0.8.6`。
-> 当前 `0.9.0` stable candidate 的发布材料见
+> `0.9.0` 已于 2026-11-26 发布为 Stable，发布材料见
 > [docs/release-notes-0.9.0.md](release-notes-0.9.0.md)。
 >
 > 以下保留冻结候选当时的候选边界、九 Host 矩阵与中英双语 Windows Server disclosure
@@ -132,5 +132,5 @@ Windows Server 的支持。真机 Windows 11、特定终端/IME 组合、以及�
 不把 PR 转为 Ready，不代签 Owner 签名。合并 `main` 仍需 Owner `MAIN_INTEGRATION_GO`
 绑定已评审 commit/PR 图；发布仍需独立的 `RC_RELEASE_GO` 绑定精确 SHA、tarball 哈希与
 发布事务。`RC_CUT_READY` 表示候选已备好，不等于 `RC_RELEASE_GO`，也不启动 T0 / 24h
-时钟。当前 `0.9.0` 稳定候选仍未发布，发布边界见
+时钟。`0.9.0` 已于 2026-11-26 发布为 Stable；后续维护边界见
 [docs/release-notes-0.9.0.md](release-notes-0.9.0.md)。

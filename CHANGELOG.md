@@ -10,18 +10,30 @@
 
 ---
 
-## 0.9.0 — 稳定候选准备（未发布）
+## 0.9.1 — 开发中（未发布）
 
-候选说明：[docs/release-notes-0.9.0.md](docs/release-notes-0.9.0.md)。
+`0.9.1` 是 0.9.0 发布后的维护开发线，**尚未发布**；package identity 仍为 `0.9.0`，
+不创建 `0.9.1` Git tag、GitHub Release 或 npm 版本，也不修改 dist-tags。
+本开发线按 #94 的 I1 范围只合入安装/发布状态文档与回归测试，没有运行时、
+版本号或兼容窗口变更。发布材料以将来单独授权的 0.9.1 发版单为准。
 
-**这是 `0.9.0` 稳定候选的发布材料，尚未发布**：没有 `v0.9.0` Git tag、GitHub Release
-或 npm `0.9.0` 版本；`latest` 仍指向已发布 Stable `0.8.6`，`next` 仍指向已发布预发布
-`0.9.0-rc.1`。当前状态是 **stable candidate in preparation**，不是 Stable，也不是发布
-声明；任何 tag / Release / npm publish 都需要 Owner 单独的发布授权，本准备单不执行。
+## 0.9.0 — 稳定版（2026-11-26）
 
-相对已发布 Stable `0.8.6`，本候选来自 `0.9.0` 主线，内容与 `0.9.0-rc.1` 冻结候选一致；
-本准备单只把候选身份从 `0.9.0-rc.1` 转正为 `0.9.0` 并同步状态文案，没有新增用户功能，
-不改运行时源码。
+发版说明：[docs/release-notes-0.9.0.md](docs/release-notes-0.9.0.md)。
+
+**`0.9.0` 已于 2026-11-26 发布为 Stable**：annotated tag `v0.9.0`
+（tag object `f9fbbb8fa0470b086c76e1058f2149f2fa8e4faf`，peel 到
+`8f85ab4a0563c9366c8469d4ffaf7697563cfc36`）；GitHub Release id `458821277`
+（2026-11-26T01:01:54Z，非 draft、非 prerelease、latest，唯一精确 asset
+`dsh-ssh-tui-0.9.0.tgz`，1,638,517 B）；npm `dsh-ssh-tui@0.9.0`
+（2026-11-26T01:05:32.535Z，gitHead 同上，shasum `4ca0edd5ccecfbbbdf8fbcbe4f7cce1836b705a6`）。
+发布读回时 `latest` / `next` 均为 `0.9.0`；这是 2026-11-26 的读回，不是永久指针承诺。
+最终独立 registry/asset 字节读回仍为 HOLD；执行层回执不是独立字节验证。
+主分支 CI 首跑 attempt 1 在 rc.5 Linux packed wizard 上 RED，attempt 2 16/16 通过；
+根因 `INCONCLUSIVE` / `NOT_REPRODUCED`，不写成已修复，也不代表所有组合已实测。
+
+相对 0.8.6，本版本来自 0.9.0 主线，内容与 0.9.0-rc.1 冻结候选一致；只把候选身份转正，
+未新增用户功能，未改运行时源码。九条 Host 的准入仍带既有 `EVIDENCE_LIMITED` 限制。
 
 ### Changed
 
@@ -29,22 +41,26 @@
   `dsh.compatibility.dsh`、根 peer 与 `dshReleases` 保持精确九 Host 并集不变：
   `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-rc.2` / `0.2.1-rc.5` / `0.2.2-rc.1` /
   `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`。
-- **候选范围有限技术准入**：九 Host 仍仅获 candidate-only qualified technical admission
-  （`EVIDENCE_LIMITED`），**不是**已公开发布的 Host 支持，也不是 `0.9.0` 已发布声明。
-  已发布 Stable 仍是 `0.8.6` / 七个冻结 Host。
+- **已发布范围的有限技术准入**：九 Host 保留 qualified technical admission
+  （`EVIDENCE_LIMITED`），不等于所有终端/平台组合已实测。`0.8.6` / 七个冻结 Host
+  是历史 Stable，`0.9.0-rc.1` 是历史预发布。
 
 ### Docs
 
-- 新增 `docs/release-notes-0.9.0.md`：保留九 Host pin、qualified admission、Windows
-  Server（含 2025）不支持、Windows 10 有界实测 / Windows 11 `NOT_MEASURED` 与
-  Search/credential 警告；明确 stable candidate in preparation / not published。
-- `docs/release-notes-0.9.0-rc.1.md` 标为已发布预发布/历史，保留当时的中英双语 Windows
-  Server disclosure 原文。
-- `README.md` / `README.en.md`：已发布 Stable 仍为 `0.8.6`，本分支候选身份改为 `0.9.0`
-  且明确 unreleased；Windows Server 声明跟随 `0.9.0` 候选；保留九 Linux / 六 ConPTY 矩阵。
+- `docs/release-notes-0.9.0.md`：记录 0.9.0 的 GitHub/npm 发布读回、精确 tag/asset、
+  九 Host pin、qualified admission、Windows Server（含 2025）不支持、Windows 10 有界实测 /
+  Windows 11 `NOT_MEASURED` 与 Search/credential 警告；同时保留独立字节读回 HOLD 和
+  主分支 CI 首红/重跑 `INCONCLUSIVE`。
+- `docs/release-notes-0.9.0-rc.1.md` 保持已发布预发布/历史身份，保留当时的中英双语 Windows
+  Server disclosure 原文，并指向已发布的 0.9.0 发版说明。
+- `README.md` / `README.en.md`：当前已发布 Stable 为 `0.9.0`（2026-11-26）；`0.8.6` 与
+  `0.9.0-rc.1` 标为历史，`0.9.1` 标为未发布开发线；Windows Server 声明跟随已发布 `0.9.0`；
+  保留九 Linux / 六 ConPTY / characterization 矩阵。
 
 ### Known limitations
 
+- 主分支 CI attempt 1 的 rc.5 Linux packed wizard RED 仍为 `INCONCLUSIVE` /
+  `NOT_REPRODUCED`；attempt 2 的 16/16 不表示所有组合已测，也不把该 RED 改写成 fixed。
 - 上游 rc.4/rc.5 source-to-artifact 仅 `EVIDENCE_LIMITED`，不是完整 npm `gitHead` /
   attestation 或 `FULL_PASS`；既有 qualified Owner exceptions 原样保留。
 - rc.5 Windows 尾换行 flake 仍为 `INCONCLUSIVE`；真机 Windows 11、IME、所有桌面终端
@@ -57,7 +73,7 @@
 历史发版说明：[docs/release-notes-0.9.0-rc.1.md](docs/release-notes-0.9.0-rc.1.md)。
 
 **`0.9.0-rc.1` 已于 2026-11-24 作为 GitHub prerelease 与 npm dist-tag `next` 发布**
-（`latest` 保持 `0.8.6`）。以下内容保留冻结候选当时的变更记录；当前 `0.9.0` 稳定候选
+（`latest` 保持 `0.8.6`）。以下内容保留冻结候选当时的变更记录；已发布 `0.9.0` Stable
 见上一节。本准备单不改写 rc.1 的已发布事实，也不把 rc.1 的历史 RED 改写为 GREEN。
 
 ### Added
@@ -94,6 +110,8 @@
 
 ### Known limitations
 
+- 主分支 CI attempt 1 的 rc.5 Linux packed wizard RED 仍为 `INCONCLUSIVE` /
+  `NOT_REPRODUCED`；attempt 2 的 16/16 不表示所有组合已测，也不把该 RED 改写成 fixed。
 - 上游 rc.4/rc.5 source-to-artifact 仅 `EVIDENCE_LIMITED`，不是完整 npm `gitHead` /
   attestation 或 `FULL_PASS`；既有 qualified Owner exceptions 原样保留。
 - rc.5 Windows 尾换行 flake 仍为 `INCONCLUSIVE`；真机 Windows 11、IME、所有桌面终端

@@ -23,12 +23,14 @@
 > `DSH Relay` 是产品展示名。见 [`docs/decisions/brand-dsh-relay.md`](docs/decisions/brand-dsh-relay.md)。
 
 ```bash
-npm i -g @deepseek-ai/dsh
-dsh plugin --profile tui add dsh-ssh-tui@latest
+node --version                    # 需要 >= 24.9.0；Host 0.2.2-rc.5 的 engines 也是 >=24.9.0
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
+dsh --version                     # 应输出 0.2.2-rc.5（九个精确 Host pin 之一）
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
 dsh --profile tui
 ```
 
-需要 Node.js ≥ 24.9 和 DeepSeek Harness CLI。断开之后接回来：`dsh --profile tui --resume`。
+`0.9.0` 是 2026-11-26 发布的当前 Stable；`0.2.2-rc.5` + `0.9.0` 是一个已知的精确组合，两者都要求 Node.js `>=24.9.0`。不要省略 Host 版本，也不要把未准入的新 Host 当成默认；九条精确 pin 与 `NOT_ADMITTED` 边界见[兼容范围](#harness-本身仍在快速变化)。断开后接回来：`dsh --profile tui --resume`。
 
 ![重连演示：一轮正在流式输出时窗口关闭，宿主进程不退出，同一条命令接回来，这个会话还在原处；演示用 continue 策略，所以这一轮也在后台跑完了](docs/screenshots/reconnect.gif)
 
@@ -58,7 +60,7 @@ English: [README.en.md](README.en.md)
 画面按行增量重绘，不会因为一次 tick 把整屏重画一遍。
 <!-- bench:end -->
 
-跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 九条 Host 线、Windows 六条 ConPTY 线）。
+跑法就是上面两条命令；这两条断言在 CI 的每一条腿上都会重跑（Linux 九条 Host 线、Windows 六条 ConPTY 线、外加一条 synthetic characterization）。
 链路上的承诺另有真 PTY 探针：断链重接、断线后宿主存活、带历史的 resume、以及"终端不回光标位置"
 时的链路显示，各自一个脚本，全部在 CI 里跑（`npm run freeze` 会把它们列出来）。
 
@@ -79,13 +81,35 @@ English: [README.en.md](README.en.md)
 dsh --profile tui --resume
 ```
 
-更新：
+更新（跟随当前 stable；本次发布读回为 `0.9.0`，要可复现请用精确版本）：
 
 ```bash
 dsh plugin --profile tui add dsh-ssh-tui@latest
 ```
 
-> `dsh plugin` 由 profile 内的 pnpm 管理依赖。更新时请显式带 `@latest`，否则已有 lockfile 可能继续沿用旧版本。
+> `dsh plugin` 由 profile 内的 pnpm 管理依赖。更新时请显式带版本或 `@latest`，否则已有 lockfile 可能继续沿用旧版本。
+
+### 精确安装、升级与回退
+
+quickstart 用精确版本；`@latest` 只在“跟随当前 stable”时使用，指针会随时间移动。
+
+```bash
+# 先确认 Node 与 Host 都在准入范围内
+node --version
+dsh --version
+
+# 从旧 Relay 升级到本次发布（显式 profile + 精确版本）
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
+
+# 回退示例：仍在 0.9.0 的九条已准入 Host 内，换一条 Host pin
+npm i -g @deepseek-ai/dsh@0.2.2-rc.3
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
+dsh --profile tui
+```
+
+`0.8.6` 是历史 Stable，只覆盖七个冻结 Host，不能与 `0.2.2-rc.4` / `0.2.2-rc.5` 组合。换 profile 名即可；不要把生产 profile 的 `cordis.patch.yml` 手工改写来“修”版本，先让 `dsh plugin` 管理声明，再用 `/doctor` 看组合。
+
+如果 `/doctor` / `/diag` 起不来：只收集失败命令的完整终端输出、`node --version`、`dsh --version`、profile 名与 Host/插件版本；Windows 的 Host stderr 在 `%USERPROFILE%\.dsh\tui-socks\`。不要上传 `env.cmd`、`.credentials.yaml`、token、真实生产 transcript、内网主机名或未脱敏的绝对路径；先把它们替换成 `REDACTED`。一段最小复现比整份生产日志有用。
 
 Windows 用户见 [Windows 指南](docs/windows.md)。
 
@@ -156,8 +180,8 @@ TTY 是一种能力，不是宿主存在的前提。
 
 | DeepSeek Harness | 状态 |
 |---|---|
-| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | ✅ `0.9.0` 稳定候选（S1-A/B）的精确目标；Node `>=24.9`，各自单一 DSH family strict graph；rc.2/rc.3 来源为 `EVIDENCE_LIMITED` |
-| `0.2.2-rc.4` / `0.2.2-rc.5` | ✅ `0.9.0` 稳定候选（S1-C）的第九 Host 目标；Node `>=24.9`，各自单一 DSH family strict graph；来源均为 `EVIDENCE_LIMITED`。按**候选范围**给出有限技术准入（qualified technical admission），**不是已公开发布的 Host 支持**；rc.5 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE` |
+| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | ✅ 已发布 `0.9.0` 的精确目标；Node `>=24.9.0`，各自单一 DSH family strict graph；rc.2/rc.3 来源为 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ✅ 已发布 `0.9.0` 的第九 Host 目标；Node `>=24.9.0`，各自单一 DSH family strict graph；来源均为 `EVIDENCE_LIMITED`。按**已发布范围**保留有限技术准入（qualified technical admission），不等于所有组合都已实测；rc.5 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE` |
 | `0.2.1-rc.5` | ✅ 0.8.5 稳定目标，继续保留 |
 | `0.2.1-rc.2` | ✅ 支持，保留的默认开发线：提交的 manifest 与锁安装它，默认 Linux leg 跑全量探针；Windows ConPTY leg 覆盖 `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | ✅ 支持，保留到独立退役裁决 |
@@ -170,7 +194,9 @@ TTY 是一种能力，不是宿主存在的前提。
 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5
 ```
 
-这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有七条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.8.6`，覆盖七个冻结 Host 版本**；已发布的预发布是 `0.9.0-rc.1`（历史，npm `next`）。本分支是尚未公开发布的 `0.9.0` 稳定候选（package identity `0.9.0`，stable candidate in preparation），九条 Host 线仅获**候选范围内的有限技术准入（qualified technical admission，`EVIDENCE_LIMITED`）**，不是 0.9 已发布或已公开支持的声明，也不改变 npm `latest` / `next` 指针。
+这是精确并集，不是无界 semver 窗口。Node.js 最低版本为 `>=24.9.0`；原有七条 Host 在新矩阵验收和退役裁决前继续保留。**当前已发布的稳定版是 `0.9.0`（2026-11-26），覆盖九条精确 Host**；`0.8.6`（七个冻结 Host）和 `0.9.0-rc.1`（2026-11-24）均为历史版本。九条 Host 线保留**已发布范围内的有限技术准入（qualified technical admission，`EVIDENCE_LIMITED`）**，不等于所有终端/平台组合都已实测。发布读回时 npm `latest` / `next` 均为 `0.9.0`；这是 2026-11-26 的读回，不是永久指针承诺。最终独立 registry/asset 字节读回仍为 HOLD，不能把发布回执当作独立字节验证。
+
+**`0.9.1` 是尚未发布的未来开发版本**；开发期间 package identity 保持 `0.9.0`，不创建 `0.9.1` tag、GitHub Release 或 npm 版本，也不把 0.9.1 写成已发布。九条精确 pin 之外（例如更新的 0.2.3 alpha）一律是 **NOT_ADMITTED**：不要因为“更新”就替换 Host，也不要用 `--force` / `--legacy-peer-deps` 绕过 peer 解析。
 
 > **⚠️ Windows Server 不在 `0.9.0` 支持范围**
 >
@@ -180,9 +206,9 @@ TTY 是一种能力，不是宿主存在的前提。
 >
 > 原始 RED：[Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174)。独立 bounded D5 审计：[PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703)。Server 兼容性只可能按新反馈/新测试另行调查，不是 0.9.0 的发布承诺或阻塞项。
 >
-> **支持的桌面 Windows 范围**：Windows 10 / Windows 11 桌面版，使用 Windows Terminal 或 conhost。Windows 10 仅在既有 CI / 真机范围内做**有界实测**，不等于所有 Windows 10 配置通过。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 Host 线；该 runner 是测试基础设施，不构成对 Windows Server 的支持。真机 Windows 11、特定终端/IME 组合仍为 `NOT_MEASURED`，本候选不声称“所有桌面 Windows 组合都已通过”。
+> **支持的桌面 Windows 范围**：Windows 10 / Windows 11 桌面版，使用 Windows Terminal 或 conhost。Windows 10 仅在既有 CI / 真机范围内做**有界实测**，不等于所有 Windows 10 配置通过。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 Host 线；该 runner 是测试基础设施，不构成对 Windows Server 的支持。真机 Windows 11、特定终端/IME 组合仍为 `NOT_MEASURED`，本版本不声称“所有桌面 Windows 组合都已通过”。
 
-#### Search 出口与计费边界（0.9 候选）
+#### Search 出口与计费边界（0.9.0 已发布版本）
 
 rc.5 的 DeepSeek 模型路由（`deepseek-official` / `deepseek-account`）默认走 **Messages Search**；其他路由或没有模型请求时可选择 **Search API**。`llm-deepseek.baseURL` 只是模型网关，**不会自动约束搜索端点**。legacy Messages Search 使用独立的 `web-search-deepseek.baseURL` / `DEEPSEEK_SEARCH_BASE_URL`（官方默认 `https://api.deepseek.com/anthropic/v1/messages`）和对应密钥；Search API 则使用其自身来源（source）的 origin 与 key，不继承模型网关。
 
@@ -352,8 +378,9 @@ Windows 不是“顺便能跑”的平台。
 安装方式与 Linux 相同：
 
 ```powershell
-npm i -g @deepseek-ai/dsh
-dsh plugin --profile tui add dsh-ssh-tui@latest
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
+dsh --version
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
 dsh --profile tui
 ```
 
@@ -398,7 +425,7 @@ Desktop Host
 如果你希望使用终端界面，请安装真正的 CLI，并从真实终端启动：
 
 ```bash
-npm i -g @deepseek-ai/dsh
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
 dsh --profile tui
 ```
 
