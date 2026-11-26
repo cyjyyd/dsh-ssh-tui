@@ -35,8 +35,9 @@ import {
   observeChild,
   reportOutcome,
   runtimeFacts,
+  safeDetail,
   safeExcerpt,
-  safeRows,
+  safeRowsDetail,
   workspaceFrameReady,
   writeDiagnosticBundle,
 } from './probe-diagnostics.mjs'
@@ -151,6 +152,9 @@ async function runProbe(argv) {
     console.log('SKIP: set PROBE_HOME to a home whose tui profile is already installed')
     return 0
   }
+  // The real operator home can appear in a pasted value or a resolved path; every
+  // derived failure excerpt is checked against it before it is written or printed.
+  const knownHome = process.env.HOME ?? process.env.USERPROFILE
   const pty = await loadPty()
   if (pty === undefined) {
     console.log('SKIP: node-pty is unavailable, so the wizard cannot be driven on a PTY here')
@@ -220,7 +224,9 @@ async function runProbe(argv) {
       await delay(50)
     }
     if (active.child.observed === undefined) active.child.observed = observeChild(active.child)
-    throw new Error(`timed out waiting for ${label}\n--- captured ---\n${plain(output).slice(-1200)}`)
+    // Clean the whole captured stream, then take the readable tail. Slicing first
+    // can cut `sk-` off a key and leave a body that no later check can classify.
+    throw new Error(`timed out waiting for ${label}\n--- captured ---\n${safeDetail(plain(output), 1200, { home: knownHome })}`)
   }
 
   try {
@@ -280,7 +286,7 @@ async function runProbe(argv) {
     // *looks like* on the wire is skipped, and said out loud at the end.
     const listRows = rowsOf(listed)
     if (!PTY_IS_CONPTY) {
-      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(listed), `a keystroke must not clear the screen: ${JSON.stringify(plain(listed).slice(0, 120))}`)
+      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(listed), `a keystroke must not clear the screen: ${JSON.stringify(safeDetail(plain(listed), 120, { home: knownHome }))}`)
       check(listRows.length > 0, 'the list step repaints the row the highlight moved to')
       check(Math.min(...listRows) >= 2, `the repaint starts at the body, never the title (rows ${listRows.join(',')})`)
     }
@@ -301,7 +307,7 @@ async function runProbe(argv) {
     if (!PTY_IS_CONPTY) {
       check(!/\x1b\[[HJ]|\x1b\[2J/u.test(output.slice(beforeStep)), 'walking a step must not clear the screen')
       check(stepRows.length > 0, 'the new step painted something')
-      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(typed), `a keystroke must not clear the screen: ${JSON.stringify(plain(typed).slice(0, 120))}`)
+      check(!/\x1b\[[HJ]|\x1b\[2J/u.test(typed), `a keystroke must not clear the screen: ${JSON.stringify(safeDetail(plain(typed), 120, { home: knownHome }))}`)
       check(rows.length > 0 && rows.length <= 8, `typing in the field repaints a few rows (${rows.length})`)
     }
 
@@ -319,9 +325,9 @@ async function runProbe(argv) {
     await delay(450)
     const fieldAfterMouse = fieldRowOf(await wizardRows(output))
     check(fieldAfterMouse === fieldBeforeMouse,
-      `a right-button report leaves the field alone (${JSON.stringify(fieldBeforeMouse)} → ${JSON.stringify(fieldAfterMouse)})`)
+      `a right-button report leaves the field alone (${JSON.stringify(safeDetail(fieldBeforeMouse, 160, { home: knownHome }))} → ${JSON.stringify(safeDetail(fieldAfterMouse, 160, { home: knownHome }))})`)
     check(!plain(output.slice(beforeMouse)).includes('<2;'),
-      `the report is not painted anywhere (${JSON.stringify(plain(output.slice(beforeMouse)).slice(-120))})`)
+      `the report is not painted anywhere (${JSON.stringify(safeDetail(plain(output.slice(beforeMouse)), 120, { home: knownHome }))})`)
 
     // 3b. A paste belongs to the field the wizard owns — which is the whole point
     //     of the field being its own. An API key, a base URL and a model list are
@@ -352,7 +358,7 @@ async function runProbe(argv) {
       check(!plain(output.slice(beforePaste)).includes(PASTE), 'the pasted key is never painted')
       check(!output.slice(beforePaste).includes(PASTE), 'and never appears verbatim in the byte stream')
     } else {
-      check(fieldAfter.includes(PASTE), `the paste reaches the field (${JSON.stringify(fieldAfter)})`)
+      check(fieldAfter.includes(PASTE), `the paste reaches the field (${JSON.stringify(safeDetail(fieldAfter, 160, { home: knownHome }))})`)
     }
     check(fieldAfter !== fieldBefore, 'the paste repainted the field row')
 
@@ -373,7 +379,7 @@ async function runProbe(argv) {
     term.write('\x1b')
     await delay(900)
     const after = plain(output.slice(beforeEsc))
-    check(after.includes('目录') || after.includes('❯'), `the workspace is back after Esc (${JSON.stringify(after.slice(-160))})`)
+    check(after.includes('目录') || after.includes('❯'), `the workspace is back after Esc (${JSON.stringify(safeDetail(after, 160, { home: knownHome }))})`)
     check(!after.includes(PASTE), 'the paste never reached the composer behind the wizard')
     successLines.push(`setup Screen: painted, listed (${listRows.length} rows), stepped, typed (${rows.length} rows), pasted${secretStep ? ' (masked)' : ''}, resized and left`)
   } catch (error) {
@@ -496,13 +502,13 @@ async function runProbe(argv) {
         while (Date.now() < deadline) {
           if (resumedState.exit !== undefined) {
             if (resumedState.observed === undefined) resumedState.observed = observeChild(resumedState)
-            throw new Error(`the TUI exited while waiting for step ${want.join('/')} (${label}); exit ${resumedState.exit.exitCode}, signal ${resumedState.exit.signal}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
+            throw new Error(`the TUI exited while waiting for step ${want.join('/')} (${label}); exit ${resumedState.exit.exitCode}, signal ${resumedState.exit.signal}\n--- captured ---\n${safeDetail(wizardOf(thirdOutput).text, 1200, { home: knownHome })}`)
           }
           if (want.includes(wizardOf(thirdOutput).step)) return
           await delay(100)
         }
         if (resumedState.observed === undefined) resumedState.observed = observeChild(resumedState)
-        throw new Error(`timed out waiting for step ${want.join('/')} (${label}); at ${wizardOf(thirdOutput).step}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
+        throw new Error(`timed out waiting for step ${want.join('/')} (${label}); at ${wizardOf(thirdOutput).step}\n--- captured ---\n${safeDetail(wizardOf(thirdOutput).text, 1200, { home: knownHome })}`)
       }
       try {
         const deadline = Date.now() + 60_000
@@ -541,11 +547,11 @@ async function runProbe(argv) {
         const frame = await currentFrame()
         const after = plain(thirdOutput.slice(beforeSave))
         check(workspaceFrameReady(frame),
-          `the workspace frame is ready after the save (current-frame 目录 + composer; ${JSON.stringify(frame.slice(-4))})`)
+          `the workspace frame is ready after the save (current-frame 目录 + composer; ${JSON.stringify(safeRowsDetail(frame, 4, { home: knownHome }))})`)
         check(observed.alive,
           `the TUI stays alive after the save (observed ${observed.alive ? 'alive' : 'exited'}; exit ${observed.exit?.exitCode ?? 'none'}, signal ${observed.exit?.signal ?? 'none'}, teardown ${observed.teardown})`)
         check(frame.some(row => /^\s*(?:❯|>)(?:\s|$)/u.test(row)),
-          `the workspace composer comes back on its own after the save (${JSON.stringify(frame.slice(-4))})`)
+          `the workspace composer comes back on its own after the save (${JSON.stringify(safeRowsDetail(frame, 4, { home: knownHome }))})`)
         check(!/安装向导\s*9\/9/u.test(after), 'and the wizard is not still on screen')
         check(/配置完成/u.test(plain(thirdOutput)), 'the confirmation reaches the transcript, not just the Screen')
         successLines.push('resumed first run: wizard saved on step 9, workspace back with no extra keypress')
@@ -563,7 +569,9 @@ async function runProbe(argv) {
 
   // PROBE_DIAG_ALWAYS keeps the synthetic screen/transcript for a green user-path
   // run too; CI uploads the packet only on failure, so the default stays `failure`.
-  const knownHome = process.env.HOME ?? process.env.USERPROFILE
+  // Every problem is built from whole values above; this last pass is the fail-closed
+  // guard for a caller-side mistake, not a licence to slice before sanitising.
+  const reportedProblems = problems.map(problem => safeDetail(String(problem), 64 * 1024, { home: knownHome }))
   if (problems.length > 0 || process.env.PROBE_DIAG_ALWAYS === '1') {
     // The packet is written before anything is printed so a truncated log still
     // points at the directory CI uploaded.
@@ -572,7 +580,7 @@ async function runProbe(argv) {
       const bundle = writeDiagnosticBundle({
         dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
         phase: problems.length > 0 ? phase : `${phase}-complete`,
-        problems,
+        problems: reportedProblems,
         // The raw PTY stream is ANSI; the bundle carries the readable transcript
         // and the synthetic screen separately. Both are sanitised whole inside.
         output: plain(active.output()),
@@ -588,18 +596,19 @@ async function runProbe(argv) {
         // Sanitise the whole values first, then take the log excerpt. Slicing first
         // would let a cut through `sk-` turn the payload into unredacted text.
         console.error('--- captured screen (last 12 rows) ---')
-        console.error(safeRows(screen, 12, { home: knownHome }))
+        console.error(safeRowsDetail(screen, 12, { home: knownHome }))
         console.error('--- captured transcript (last 1600 chars) ---')
-        console.error(safeExcerpt(active.output(), 1600, { home: knownHome }))
+        console.error(safeDetail(active.output(), 1600, { home: knownHome }))
       }
     } catch (error) {
-      console.error(`diagnostics: could not write the bundle: ${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`diagnostics: could not write the bundle: ${safeDetail(message, 400, { home: knownHome })}`)
     }
   }
   if (problems.length > 0) {
     // Success lines are unreachable here: reportOutcome only prints them when
     // `problems` is empty.
-    return reportOutcome({ problems, successLines: [], home: knownHome })
+    return reportOutcome({ problems: reportedProblems, successLines: [], home: knownHome })
   }
   if (PTY_IS_CONPTY) {
     // Not a pass: the frame-shape half did not run. Everything the wizard *does*
@@ -643,10 +652,13 @@ async function runDiagnosticSelfTest() {
   const observed = observeChild(state)
   state.observed = observed
   markTeardown(state) // after the observation: the bundle must keep teardown false
+  // A zero-width split prefix is the reporter fail-closed control: the writer must
+  // keep class-only metadata and the reporter must never echo the synthetic value.
+  const splitKey = 'sk-\u200bSYNTHETIC-ONLY-SPLIT-CONTROL'
   const bundle = writeDiagnosticBundle({
     dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
     phase: 'self-test',
-    problems: [`synthetic failure: ${key} and ${home}`],
+    problems: [`synthetic failure: ${key} and ${home}`, `synthetic split control: ${splitKey}`],
     output: transcript,
     screen,
     child: state.observed,
@@ -654,7 +666,7 @@ async function runDiagnosticSelfTest() {
     runtime: runtimeFacts(),
     home,
   })
-  const forbidden = ['SYNTHETIC-ONLY', home, '\x1b']
+  const forbidden = ['SYNTHETIC-ONLY', home, '\x1b', 'sk-']
   for (const name of readdirSync(bundle.dir)) {
     const text = readFileSync(join(bundle.dir, name), 'utf8')
     for (const value of forbidden) {
@@ -668,7 +680,11 @@ async function runDiagnosticSelfTest() {
   console.error('--- synthetic failure log excerpt ---')
   console.error(safeExcerpt(`synthetic log line: ${key} home ${home}`, 400, { home }))
   console.error(`diagnostics: ${bundle.dir}`)
-  return reportOutcome({ problems: ['synthetic failure: the workspace never came back'], successLines: [], home })
+  return reportOutcome({
+    problems: ['synthetic failure: the workspace never came back', `synthetic split control: ${splitKey}`],
+    successLines: [],
+    home,
+  })
 }
 
 const argv = process.argv.slice(2)
