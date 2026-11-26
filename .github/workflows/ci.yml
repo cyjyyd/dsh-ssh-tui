@@ -177,6 +177,18 @@ jobs:
       - name: Reply copy probe (scripted turn)
         if: matrix.dsh == '0.2.1-rc.2'
         run: node scripts/tui-mock-probe.mjs
+      # A red probe now writes a sanitised packet: synthetic screen, transcript,
+      # child exit status, elapsed ms and toolchain versions. Upload it only on
+      # failure, and never let a missing packet turn a red job green.
+      - name: Upload probe diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-diagnostics-${{ runner.os }}-dsh-${{ matrix.dsh }}
+          path: .ci-diagnostics/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
   # rc.5 is the ninth declared Host line (#74 U2) but is still not admitted or
   # released; the real Host legs above prove installation and lifecycle. This
   # job keeps the independent characterization evidence: it installs the exact
@@ -300,3 +312,15 @@ jobs:
       # a silent terminal — the pipe parent can, and does, on this leg too.
       - name: Unmeasured link-chip probe (pipe parent)
         run: node scripts/probe-home.mjs --probe --script tui-unmeasured-probe.mjs
+      # A red probe now writes a sanitised packet: synthetic screen, transcript,
+      # child exit status, elapsed ms and toolchain versions. Upload it only on
+      # failure, and never let a missing packet turn a red job green.
+      - name: Upload probe diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-diagnostics-${{ runner.os }}-dsh-${{ matrix.dsh }}
+          path: .ci-diagnostics/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
