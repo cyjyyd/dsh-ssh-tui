@@ -28,12 +28,14 @@ SSH-flavoured screen.
 > display name. See [`docs/decisions/brand-dsh-relay.md`](docs/decisions/brand-dsh-relay.md).
 
 ```bash
-npm i -g @deepseek-ai/dsh
-dsh plugin --profile tui add dsh-ssh-tui@latest
+node --version                    # >= 24.9.0; the Host 0.2.2-rc.5 engine is also >=24.9.0
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
+dsh --version                     # should print 0.2.2-rc.5 (one of the nine exact pins)
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
 dsh --profile tui
 ```
 
-Reconnect with `dsh --profile tui --resume`.
+`0.9.0` is the current Stable published on 2026-11-26; `0.2.2-rc.5` + `0.9.0` is a known exact pair, and both require Node.js `>=24.9.0`. Do not omit the Host version and do not treat a newer, unadmitted Host as the default; see the nine exact pins and the `NOT_ADMITTED` boundary under [Which host lines this covers](#which-host-lines-this-covers). Reconnect with `dsh --profile tui --resume`.
 
 ![Reconnect demo: a turn streams, the window is closed, the host keeps running, the same command attaches back, and the session is where it was; the demo runs the continue policy, so that turn also finished in the background](docs/screenshots/reconnect.gif)
 
@@ -75,14 +77,19 @@ Listed on the [dshfind plugin directory](https://dshfind.com/en/plugins/cyjyyd/d
 Install with the official CLI (no clone):
 
 ```sh
-dsh plugin --profile tui add dsh-ssh-tui@latest
+node --version                    # >= 24.9.0
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
+dsh --version                     # 0.2.2-rc.5
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
 dsh --profile tui
 ```
 
 Current `dsh` requires `--profile` (`dsh plugin add …` errors without it).
 Swap `tui` for another profile name.
 
-**Which host line?** The current published stable release is `0.8.6` (Node `>=24.9`), covering seven frozen Host versions: `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2` and `0.2.2-rc.3`. The published prerelease is `0.9.0-rc.1` (historical, npm `next`). This branch is the **unreleased** `0.9.0` stable candidate (package identity `0.9.0`, stable candidate in preparation). It declares nine Hosts and grants candidate-only **qualified technical admission** (`EVIDENCE_LIMITED`) for all nine; that is not a claim that `0.9.0` is published, publicly supported, or on npm `latest` / `next`. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
+**Which host line?** The current published stable release is `0.9.0` (2026-11-26, Node `>=24.9.0`), covering the nine exact Hosts `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.2`, `0.2.1-rc.5`, `0.2.2-rc.1`, `0.2.2-rc.2`, `0.2.2-rc.3`, `0.2.2-rc.4` and `0.2.2-rc.5`. `0.8.6` (seven frozen Hosts) and `0.9.0-rc.1` (2026-11-24) are historical. The nine Hosts keep **qualified technical admission** (`EVIDENCE_LIMITED`) within the published scope, which is not a claim that every terminal/platform combination was measured. At publication readback, npm `latest` / `next` both pointed at `0.9.0`; that is a 2026-11-26 readback, not a timeless pointer guarantee. The final independent registry/asset byte readback remains HOLD; do not treat the release receipt as independently verified bytes.
+
+**`0.9.1` is a future, unreleased development line**; the package identity stays `0.9.0` during development, and this branch does not create a `0.9.1` tag, GitHub Release, or npm version. Anything outside the nine exact pins (for example a newer 0.2.3 alpha) is **NOT_ADMITTED**: do not swap the Host just because it is newer, and do not bypass peer resolution with `--force` / `--legacy-peer-deps`. On this branch `0.2.1-rc.2` remains the default development line and the `0.2.0-rc` lines remain supported until a separate retirement decision. The `0.1.7` line was dropped in 0.8.4-rc.1 and is refused by the launcher's version check, as is everything older. **0.1.5 and older hosts are no longer supported as of 0.8.0.**
 
 > **⚠️ Windows Server is outside the `0.9.0` supported scope**
 >
@@ -92,14 +99,46 @@ Swap `tui` for another profile name.
 >
 > Original RED: [Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174). Independent bounded D5 audit: [PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703). Server compatibility may only be investigated separately on new feedback/tests; it is neither a release promise nor a 0.9.0 blocker.
 >
-> **Supported desktop Windows scope**: Windows 10 / Windows 11 desktop editions using Windows Terminal or conhost. Windows 10 is only **bounded-measured** within the existing CI / real-machine scope, not a claim that every Windows 10 configuration passed. CI covers the six ConPTY Host lines on the GitHub Windows runner; that runner is test infrastructure and does not make Windows Server a supported OS. Real-machine Windows 11 and specific terminal/IME combinations remain `NOT_MEASURED`; this candidate does not claim that every desktop Windows combination passed.
+> **Supported desktop Windows scope**: Windows 10 / Windows 11 desktop editions using Windows Terminal or conhost. Windows 10 is only **bounded-measured** within the existing CI / real-machine scope, not a claim that every Windows 10 configuration passed. CI covers the six ConPTY Host lines on the GitHub Windows runner; that runner is test infrastructure and does not make Windows Server a supported OS. Real-machine Windows 11 and specific terminal/IME combinations remain `NOT_MEASURED`; this release does not claim that every desktop Windows combination passed.
 
-**Stable updates must use `@latest`.** `dsh plugin` forwards the rest of the line to
-pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
+**Stable updates should name a version or `@latest`.** `dsh plugin` forwards the rest
+of the line to pnpm in the profile directory. A bare `add dsh-ssh-tui` keeps the version
 already pinned in `pnpm-lock.yaml` (often 0.3.7). RC testers should use `@next`
 or an exact `-rc.N` version instead; `@latest` stays on the stable channel. Do not put `--profile`
-after `add`: `dsh plugin add --profile tui add dsh-ssh-tui` is not valid.
+after `add`; `dsh plugin` requires it before the subcommand.
 Remove with `dsh plugin --profile tui remove dsh-ssh-tui`.
+
+### Exact install, upgrade and fallback
+
+The quickstart pins exact versions; `@latest` is only for "follow the current
+stable channel", and the pointer moves over time.
+
+```bash
+# check Node and Host before adding the Relay
+node --version
+dsh --version
+
+# upgrade an older Relay profile to the published stable (explicit profile + exact version)
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
+
+# fallback example: stay on 0.9.0 but move to another admitted Host pin
+npm i -g @deepseek-ai/dsh@0.2.2-rc.3
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
+dsh --profile tui
+```
+
+`0.8.6` is historical and covers only seven frozen Hosts; it cannot be paired
+with `0.2.2-rc.4` / `0.2.2-rc.5`. Swap the profile name instead of editing a
+production profile's `cordis.patch.yml` by hand: let `dsh plugin` own the
+declaration, then ask `/doctor` to judge the composition.
+
+If `/doctor` / `/diag` cannot start, collect only the failing command's full
+terminal output, `node --version`, `dsh --version`, the profile name and the
+Host/plugin versions; on Windows the Host stderr is under
+`%USERPROFILE%\.dsh\tui-socks\`. Do not upload `env.cmd`, `.credentials.yaml`,
+tokens, a raw production transcript, internal hostnames or unredacted absolute
+paths; replace them with `REDACTED` first. A minimal reproduction is more useful
+than a full production log.
 
 ## Verified, not assumed
 
@@ -122,7 +161,7 @@ repaints the whole screen.
 
 Both commands above are the evidence: `npm run bench` (the numbers), `npm run freeze`
 (that the architecture stayed what it claims). CI re-runs them on every leg — Linux and
-Windows, nine host versions plus the six-line ConPTY subset. The link-side promises have their own real-PTY probes:
+Windows, nine host versions, the six-line ConPTY subset and the synthetic characterization job. The link-side promises have their own real-PTY probes:
 drop/reattach, a host that outlives the window mid-turn, a resume with history, and the
 "terminal does not answer cursor probes" case; `npm run freeze` lists them.
 
@@ -192,8 +231,8 @@ The plugin declares and tests **every `@deepseek-ai/dsh` line in flight**:
 
 | Host line | Status |
 | --- | --- |
-| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the `0.9.0` stable candidate (S1-A/B); Node `>=24.9`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
-| `0.2.2-rc.4` / `0.2.2-rc.5` | ninth-Host targets merged in the `0.9.0` S1-C candidate; Node `>=24.9`, one strict DSH family per target; provenance is `EVIDENCE_LIMITED`. Candidate-only qualified technical admission, **not published Host support**; the rc.5 Windows trailing-newline flake remains `INCONCLUSIVE` |
+| `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` | exact targets of the published `0.9.0` stable; Node `>=24.9.0`, one strict DSH family per target; rc.2/rc.3 provenance is `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` / `0.2.2-rc.5` | ninth-Host targets of the published `0.9.0` stable; Node `>=24.9.0`, one strict DSH family per target; provenance is `EVIDENCE_LIMITED`. Qualified technical admission within the published scope; not every combination was measured; the rc.5 Windows trailing-newline flake remains `INCONCLUSIVE` |
 | `0.2.1-rc.5` | exact 0.8.5 stable target; retained |
 | `0.2.1-rc.2` | declared compatible; retained default development line — the committed manifest and lock install it and the default Linux leg runs the full probe set; the Windows ConPTY leg covers `0.2.1-rc.5` / `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5` |
 | `0.2.0-rc.1` / `0.2.0-rc.2` | declared compatible; retained until a separate retirement decision |
@@ -243,7 +282,7 @@ your PATH (`DeepSeek Harness.exe` with `ELECTRON_RUN_AS_NODE`) is a GUI-subsyste
 `dsh --profile tui` cannot start under it. For a terminal session, install the npm CLI:
 
 ```bash
-npm i -g @deepseek-ai/dsh        # a real console runtime
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5  # a real console runtime
 dsh --profile tui                # from a terminal or an SSH session
 ```
 
@@ -253,8 +292,8 @@ The full diagnosis, both desktop defects, the strategy and a copy-paste-ready up
 
 ## Requirements
 
-- Node.js >= 24.9
-- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh` (the exact `0.9.0` S1-C candidate targets are `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the six ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
+- Node.js >= 24.9.0
+- `@deepseek-ai/dsh` CLI: `npm i -g @deepseek-ai/dsh@0.2.2-rc.5` (install it at one of the nine exact admitted pins; the published `0.9.0` targets include `0.2.2-rc.1` / `0.2.2-rc.2` / `0.2.2-rc.3` / `0.2.2-rc.4` / `0.2.2-rc.5`; the retained 0.8.5 target `0.2.1-rc.5`, the default `0.2.1-rc.2` and the `0.2.0-rc` lines remain in CI. The default leg installs the committed manifest and gets the full real-PTY probe set; every other leg rewrites the manifest with `scripts/ci-pin-line.mjs` and installs from scratch without a lock. `test-windows` runs the six ConPTY lines. **`0.1.7` and older are no longer supported** — if the install is refused, upgrade the host first)
 - pnpm (used by `dsh plugin` to manage profile dependencies)
 - an ANSI terminal (SSH directly, or PowerShell / Windows Terminal on Windows)
 - **Windows**: install, troubleshooting and how to read `/doctor` are in [docs/windows.md](docs/windows.md)
@@ -262,9 +301,12 @@ The full diagnosis, both desktop defects, the strategy and a copy-paste-ready up
 ## Install
 
 The recommended install is the command at the top of this README:
-`dsh plugin --profile tui add dsh-ssh-tui@latest`. The CLI pulls npm, writes the
+`dsh plugin --profile tui add dsh-ssh-tui@0.9.0`. The CLI pulls npm, writes the
 profile dependency, and appends this package to `dsh.profile.bundles`
-because the manifest declares `dsh.bundle`.
+because the manifest declares `dsh.bundle`. Use an exact version for a
+reproducible install; `@latest` follows whatever the stable channel points at
+later. At the 2026-11-26 publication readback, `latest` and `next` both pointed
+at `0.9.0`.
 
 Optional: put a SuperGrok subscription on dsh (standalone plugin, this TUI is not required):
 
