@@ -10,8 +10,20 @@
 推荐走 npm，Windows 和 Linux 是同一条命令，不需要仓库、也不需要 bash：
 
 ```powershell
-npm i -g @deepseek-ai/dsh
-dsh plugin --profile tui add dsh-ssh-tui@latest
+node --version                    # 需要 >= 24.9.0；Host 0.2.2-rc.5 的 engines 也是 >=24.9.0
+npm i -g @deepseek-ai/dsh@0.2.2-rc.5
+dsh --version                     # 应输出 0.2.2-rc.5
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
+dsh --profile tui
+```
+
+`0.9.0` 是 2026-11-26 发布的当前 Stable；`0.2.2-rc.5` + `0.9.0` 是一个已知的精确组合。不要省略 Host 版本：更新的 0.2.3 alpha 或九条 pin 之外的 Host 是 **NOT_ADMITTED**，不要用 `--force` / `--legacy-peer-deps` 绕过 peer 解析。`0.9.1` 尚未发布，开发期间包身份仍是 `0.9.0`。
+
+精确回退示例（仍留在 0.9.0 的九条已准入 Host 内）：
+
+```powershell
+npm i -g @deepseek-ai/dsh@0.2.2-rc.3
+dsh plugin --profile tui add dsh-ssh-tui@0.9.0
 dsh --profile tui
 ```
 
@@ -39,8 +51,8 @@ node scripts/verify.mjs           # 检查组合是否生效
 | 你看到的 | 含义 | 怎么办 |
 |---|---|---|
 | `both stdin and stdout must be TTYs` | 没有分配到终端 | 在 Windows Terminal / PowerShell 窗口里启动，不要用管道或后台任务 |
-| `'dsh' not found on PATH` | CLI 没装上 | `npm i -g @deepseek-ai/dsh`，新开一个窗口再试 |
-| `host display socket did not appear` | 显示通道没建起来 | 先升级：`dsh plugin --profile tui add dsh-ssh-tui@latest`。仍失败就贴 `/diag` 提 issue |
+| `'dsh' not found on PATH` | CLI 没装上 | `npm i -g @deepseek-ai/dsh@0.2.2-rc.5`，新开一个窗口再试 |
+| `host display socket did not appear` | 显示通道没建起来 | 先升级：`dsh plugin --profile tui add dsh-ssh-tui@0.9.0`。仍失败就贴 `/diag` 提 issue |
 | 应用内更新报 `spawn dsh ENOENT` | 旧版本直接 `spawn dsh`，而 Windows 上装的是 `dsh.cmd` 垫片 | 在命令行跑一次同样的升级，之后应用内更新就正常 |
 | 完全没有颜色，只有黑白 | 旧版本把「没设 TERM」当成没有终端 | `set DSH_TUI_COLOR_DEPTH=8`（或 `256` / `truecolor`），`/diag` 的「配色」一行能看到判定 |
 | 框线、圆点变成乱码 | 控制台代码页不是 UTF-8 | `chcp 65001`，或改用 Windows Terminal。详见下面「字符」一节 |
@@ -88,10 +100,24 @@ profile 补丁：C:\Users\you\.dsh\profiles\tui\cordis.patch.yml
 - **dsh 版本不在声明表内**：宿主版本超出本插件声明的范围，先升级宿主或插件里较旧的那个。
 - **发现多份 `@deepseek-ai/dsh-scope`**：插件和宿主各解析到一份，preset 会拒绝组合。常见于
   profile 里用软链指向一份 checkout、而 CLI 装在另一处。改成
-  `dsh plugin --profile tui add dsh-ssh-tui@latest`，让两边用同一份。
+  `dsh plugin --profile tui add dsh-ssh-tui@0.9.0`，让两边用同一份。
 - **路由自洽性**：默认提供商、模型、子代理模型对不上。`/provider`、`/model`、`/submodel` 里改。
 
 底栏里一个可点击的 `⚠` 打开的就是 `/doctor`。
+
+## `/doctor` / `/diag` 起不来时，怎么收日志
+
+先不要上传整份生产 transcript。按最小集收集：
+
+1. 失败的那一行命令，以及它在终端里的完整输出（不要只截最后一行）。
+2. `node --version`、`dsh --version`、profile 名、插件版本和 Host pin。
+3. Windows 上 Host 的 stderr 在 `%USERPROFILE%\.dsh\tui-socks\`，锁在
+   `%USERPROFILE%\.dsh\tui-locks\`；只取与本次失败时间对应的最新文件。
+4. 上传前把 API key、token、`Authorization`、cookie、内网 URL、用户名和绝对路径替换成
+   `REDACTED`。**不要**上传 `env.cmd`、`.credentials.yaml`、真实生产 transcript 或完整
+   home 目录。
+5. 如果 `/doctor` / `/diag` 本身能跑，优先附它们的纯文本输出；起不来时，上面 1–3 的
+   最小复现比整份日志更有用。
 
 ## 已知限制
 
