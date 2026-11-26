@@ -60,7 +60,7 @@ const HOSTS = Object.freeze([
 const UNION = HOSTS.join(' || ');
 
 function firstFence(text) {
-  const match = text.match(/```(?:bash|sh|powershell)\n([\s\S]*?)```/);
+  const match = text.match(/```(?:bash|sh|powershell)\r?\n([\s\S]*?)```/);
   assert.ok(match, 'expected a quickstart fenced code block');
   return match[1];
 }
@@ -250,7 +250,7 @@ function assertPinnedQuickstart(name, text) {
     `${name} must keep --profile before the plugin subcommand`,
   );
 
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     if (/^\s*(?:npm i|dsh plugin)/.test(line)) {
       assert.doesNotMatch(
         line,
