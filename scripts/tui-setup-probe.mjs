@@ -30,10 +30,20 @@ import { createRequire } from 'node:module'
 import { provisionProbeCredential } from './probe-home.mjs'
 // The pty in front may rewrite the frame shape these row checks read (see the export).
 import { PTY_IS_CONPTY } from './pty-window.mjs'
+import {
+  reportOutcome,
+  runtimeFacts,
+  sanitizeText,
+  workspaceReady,
+  writeDiagnosticBundle,
+} from './probe-diagnostics.mjs'
 
 const require = createRequire(import.meta.url)
 const ROOT = dirname(fileURLToPath(import.meta.url))
-const CLI = require.resolve('@deepseek-ai/dsh/lib/bin.js')
+// The official-package user path installs its own Host; PROBE_CLI lets that run
+// drive the exact binary under test instead of the checkout's dev dependency.
+// CI leaves it unset, so the normal probe still resolves the pinned tree.
+const CLI = process.env.PROBE_CLI ?? require.resolve('@deepseek-ai/dsh/lib/bin.js')
 
 const USAGE = `usage: node scripts/tui-setup-probe.mjs [--keep]
 
@@ -42,7 +52,10 @@ const USAGE = `usage: node scripts/tui-setup-probe.mjs [--keep]
 Set PROBE_HOME to a throwaway tree (the same convention as the other probes); the
 home must have the profile installed already — building one needs a package
 registry, which a sandboxed run does not have. The session is left behind on
-purpose: the probe has to *not* resume, because resuming skips first-run setup.`
+purpose: the probe has to *not* resume, because resuming skips first-run setup.
+
+Set PROBE_CLI to drive a specific Host binary (the official-package path uses the
+Host it installed); the default is this checkout's pinned dev dependency.`
 
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 const OSC = /\x1b\][^\x07]*\x07/gu
@@ -54,8 +67,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const { screen: newGrid } = await import(pathToFileURL(join(ROOT, '../tests/screen.mjs')).href)
 
 /** The rows the terminal is showing, replayed from the bytes the PTY handed over. */
-async function wizardRows(output) {
-  const grid = await newGrid(100, 30)
+async function wizardRows(output, cols = 100, rows = 30) {
+  const grid = await newGrid(cols, rows)
   await grid.write(output)
   return grid.lines()
 }
@@ -134,6 +147,23 @@ async function runProbe(argv) {
   let output = ''
   term.onData(chunk => { output += chunk })
   const problems = []
+  const successLines = []
+  const startedAt = Date.now()
+  let phase = 'first-run'
+  // A child that exits between a write and the next read used to look exactly like
+  // a slow frame: the wait loop only read bytes. Keep the exit status so a failure
+  // can say which one happened.
+  const trackChild = (name, child) => {
+    const state = { name, pid: child.pid, startedAt: Date.now(), exit: undefined }
+    child.onExit(({ exitCode, signal }) => {
+      state.exit = { exitCode: exitCode ?? null, signal: signal ?? null, at: Date.now() }
+    })
+    return state
+  }
+  const termState = trackChild('setup', term)
+  // The child/output the diagnostics should read when a phase fails. Updated as the
+  // probe moves from the wizard to the configured boot to the resumed save.
+  let active = { name: 'setup', output: () => output, child: termState, cols: 100, rows: 30 }
   const check = (condition, message) => { if (!condition) problems.push(message) }
   const waitFor = async (predicate, timeoutMs, label) => {
     const deadline = Date.now() + timeoutMs
@@ -296,7 +326,9 @@ async function runProbe(argv) {
     const after = plain(output.slice(beforeEsc))
     check(after.includes('目录') || after.includes('❯'), `the workspace is back after Esc (${JSON.stringify(after.slice(-160))})`)
     check(!after.includes(PASTE), 'the paste never reached the composer behind the wizard')
-    console.log(`setup Screen: painted, listed (${listRows.length} rows), stepped, typed (${rows.length} rows), pasted${secretStep ? ' (masked)' : ''}, resized and left`)
+    successLines.push(`setup Screen: painted, listed (${listRows.length} rows), stepped, typed (${rows.length} rows), pasted${secretStep ? ' (masked)' : ''}, resized and left`)
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error))
   } finally {
     try { term.kill() } catch { /* already gone */ }
     if (keep) console.log(`probe home kept: ${home}`)
@@ -342,13 +374,23 @@ async function runProbe(argv) {
     })
     let secondOutput = ''
     second.onData(chunk => { secondOutput += chunk })
+    const secondState = trackChild('second-boot', second)
+    active = { name: 'second-boot', output: () => secondOutput, child: secondState, cols: 100, rows: 30 }
+    phase = 'configured-boot'
     try {
       const until = Date.now() + 45_000
-      while (Date.now() < until && !/目录:|目录：/u.test(plain(secondOutput))) await delay(100)
+      while (Date.now() < until && !/目录:|目录：/u.test(plain(secondOutput))) {
+        if (secondState.exit !== undefined) break
+        await delay(100)
+      }
       const text = plain(secondOutput)
       check(/目录:|目录：/u.test(text), 'the second boot reaches the workspace')
+      check(secondState.exit === undefined,
+        `the second boot stays alive until the workspace is read (exit ${secondState.exit?.exitCode ?? 'none'}, signal ${secondState.exit?.signal ?? 'none'})`)
       check(!/安装向导|选择提供商/u.test(text), 'and does not open the wizard again')
-      console.log(`second boot on the configured home: ${/目录:|目录：/u.test(text) ? 'workspace, no wizard' : 'no workspace'}`)
+      successLines.push(`second boot on the configured home: ${/目录:|目录：/u.test(text) ? 'workspace, no wizard' : 'no workspace'}`)
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : String(error))
     } finally {
       try { second.kill() } catch { /* already gone */ }
       // Put the home back the way this run found it.
@@ -394,9 +436,15 @@ async function runProbe(argv) {
       })
       let thirdOutput = ''
       resumed.onData(chunk => { thirdOutput += chunk })
+      const resumedState = trackChild('resumed-save', resumed)
+      active = { name: 'resumed-save', output: () => thirdOutput, child: resumedState, cols: 100, rows: 30 }
+      phase = 'resumed-save'
       const waitForStep = async (want, label) => {
         const deadline = Date.now() + 60_000
         while (Date.now() < deadline) {
+          if (resumedState.exit !== undefined) {
+            throw new Error(`the TUI exited while waiting for step ${want.join('/')} (${label}); exit ${resumedState.exit.exitCode}, signal ${resumedState.exit.signal}\n--- captured ---\n${wizardOf(thirdOutput).text.slice(-1200)}`)
+          }
           if (want.includes(wizardOf(thirdOutput).step)) return
           await delay(100)
         }
@@ -423,12 +471,24 @@ async function runProbe(argv) {
         const beforeSave = thirdOutput.length
         resumed.write('y') // save — and nothing is pressed after this
         const back = Date.now() + 30_000
-        while (Date.now() < back && !/❯|╭/u.test(plain(thirdOutput.slice(beforeSave)))) await delay(100)
+        // The workspace is ready only when its footer cwd chip and a composer are both
+        // on screen. A single `❯` or `╭` can be a transcript row or a dialog border;
+        // the old wait accepted either and reported success on an empty capture.
+        while (Date.now() < back && !workspaceReady(plain(thirdOutput.slice(beforeSave)))) {
+          if (resumedState.exit !== undefined) break
+          await delay(100)
+        }
         const after = plain(thirdOutput.slice(beforeSave))
+        check(workspaceReady(after),
+          `the workspace frame is ready after the save (目录 + composer; ${JSON.stringify(after.slice(-160))})`)
+        check(resumedState.exit === undefined,
+          `the TUI stays alive after the save (exit ${resumedState.exit?.exitCode ?? 'none'}, signal ${resumedState.exit?.signal ?? 'none'})`)
         check(/❯|╭/u.test(after), `the workspace comes back on its own after the save (${JSON.stringify(after.slice(-160))})`)
         check(!/安装向导\s*9\/9/u.test(after), 'and the wizard is not still on screen')
         check(/配置完成/u.test(plain(thirdOutput)), 'the confirmation reaches the transcript, not just the Screen')
-        console.log(`resumed first run: wizard saved on step 9, workspace back with no extra keypress`)
+        successLines.push('resumed first run: wizard saved on step 9, workspace back with no extra keypress')
+      } catch (error) {
+        problems.push(error instanceof Error ? error.message : String(error))
       } finally {
         try { resumed.kill() } catch { /* already gone */ }
         // The saved key is this phase's own doing: put the home back unconfigured, or
@@ -439,24 +499,56 @@ async function runProbe(argv) {
     }
   }
 
+  // PROBE_DIAG_ALWAYS keeps the synthetic screen/transcript for a green user-path
+  // run too; CI uploads the packet only on failure, so the default stays `failure`.
+  if (problems.length > 0 || process.env.PROBE_DIAG_ALWAYS === '1') {
+    // The packet is written before anything is printed so a truncated log still
+    // points at the directory CI uploaded.
+    try {
+      const screen = await wizardRows(active.output(), active.cols, active.rows)
+      const bundle = writeDiagnosticBundle({
+        dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
+        phase: problems.length > 0 ? phase : `${phase}-complete`,
+        problems,
+        // The raw PTY stream is ANSI; the bundle carries the readable transcript
+        // and the synthetic screen separately.
+        output: plain(active.output()),
+        screen: screen.join('\n'),
+        child: active.child,
+        elapsedMs: Date.now() - startedAt,
+        runtime: runtimeFacts(),
+        home: process.env.HOME ?? process.env.USERPROFILE,
+      })
+      const say = problems.length > 0 ? console.error : console.log
+      say(`diagnostics: ${bundle.dir}`)
+      if (problems.length > 0) {
+        console.error('--- captured screen (last 12 rows) ---')
+        console.error(sanitizeText(screen.slice(-12).join('\n')))
+        console.error('--- captured transcript (last 1600 chars) ---')
+        console.error(sanitizeText(active.output().slice(-1600)))
+      }
+    } catch (error) {
+      console.error(`diagnostics: could not write the bundle: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   if (problems.length > 0) {
-    console.error('FAIL')
-    for (const problem of problems) console.error(`  - ${problem}`)
-    return 1
+    // Success lines are unreachable here: reportOutcome only prints them when
+    // `problems` is empty.
+    return reportOutcome({ problems, successLines: [] })
   }
   if (PTY_IS_CONPTY) {
     // Not a pass: the frame-shape half did not run. Everything the wizard *does*
     // did (it opens by itself, steps, types, survives a resize, hands the
     // workspace back), and the incremental-repaint contract is covered
     // headlessly by `tests/setup-screen.test.mjs` and `npm run bench`.
-    console.log('SKIP: ConPTY re-emits frames as newline batches and adds clears of its own, so the')
-    console.log('      row-addressed repaint checks cannot be read here; the wizard itself was walked')
-    return 0
+    successLines.push('SKIP: ConPTY re-emits frames as newline batches and adds clears of its own, so the')
+    successLines.push('      row-addressed repaint checks cannot be read here; the wizard itself was walked')
+    return reportOutcome({ problems, successLines })
   }
-  console.log('OK: the setup wizard is a Screen — it paints its own frame, owns its field,')
-  console.log('    survives a resize, hands the workspace back on Esc, and hands it back again')
-  console.log('    when it is saved (on a resumed session, with no extra keypress)')
-  return 0
+  successLines.push('OK: the setup wizard is a Screen — it paints its own frame, owns its field,')
+  successLines.push('    survives a resize, hands the workspace back on Esc, and hands it back again')
+  successLines.push('    when it is saved (on a resumed session, with no extra keypress)')
+  return reportOutcome({ problems, successLines })
 }
 
 const argv = process.argv.slice(2)
