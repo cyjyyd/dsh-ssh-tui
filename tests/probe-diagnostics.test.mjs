@@ -16,7 +16,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -426,9 +426,11 @@ test('a spontaneous child exit is frozen before teardown', () => {
 })
 
 test('the synthetic failure packet is written sanitised and exits nonzero', () => {
-  const base = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-e2e-'))
+  const root = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-e2e-'))
+  const home = join(root, 'synthetic-home')
+  const diag = join(home, 'nested-output', 'diagnostics')
   try {
-    const env = { ...process.env, PROBE_DIAG_SELFTEST: '1', PROBE_DIAG_DIR: base, HOME: '/home/synthetic-user' }
+    const env = { ...process.env, PROBE_DIAG_SELFTEST: '1', PROBE_DIAG_DIR: diag, HOME: home }
     delete env.USERPROFILE
     const result = spawnSync(process.execPath, [join(REPO, 'scripts/tui-setup-probe.mjs')], {
       cwd: REPO,
@@ -436,18 +438,26 @@ test('the synthetic failure packet is written sanitised and exits nonzero', () =
       encoding: 'utf8',
       timeout: 120_000,
     })
-    assert.equal(result.status, 1, result.stderr)
-    assert.match(result.stderr, /FAIL/u)
-    assert.match(result.stderr, /<redacted-key>/u)
-    assert.ok(!result.stderr.includes('SYNTHETIC-ONLY'), result.stderr)
-    assert.ok(!result.stderr.includes('/home/synthetic-user'), result.stderr)
-    const runs = readdirSync(base)
+    assert.equal(result.status, 1, 'expected the self-test to exit nonzero')
+    assert.ok(/FAIL/u.test(result.stderr), 'stderr reports FAIL')
+    assert.ok(/<redacted-key>/u.test(result.stderr), 'stderr shows the redacted key class')
+    assert.ok(!result.stderr.includes('SYNTHETIC-ONLY'), 'stderr leaked the synthetic payload')
+    assert.ok(!result.stderr.includes('/home/synthetic-user'), 'stderr leaked the fixed synthetic home')
+    assert.ok(!result.stdout.includes(home), 'stdout printed the synthetic home')
+    assert.ok(!result.stderr.includes(home), 'stderr printed the synthetic home')
+    assert.ok(!result.stdout.includes(diag), 'stdout printed the diagnostic destination')
+    assert.ok(!result.stderr.includes(diag), 'stderr printed the diagnostic destination')
+    assert.match(result.stderr, /diagnostics: tui-setup-probe-\S+ written under the configured diagnostic destination/u,
+      'the log names the generated packet and the configured location category, not the path')
+    const runs = readdirSync(diag)
     assert.equal(runs.length, 1, `one packet: ${runs.join(', ')}`)
-    const dir = join(base, runs[0])
+    const dir = join(diag, runs[0])
     for (const name of readdirSync(dir)) {
       const text = readFileSync(join(dir, name), 'utf8')
       assert.ok(!text.includes('SYNTHETIC-ONLY'), `${name} leaked the synthetic payload`)
       assert.ok(!text.includes('/home/synthetic-user'), `${name} leaked the home`)
+      assert.ok(!text.includes(home), `${name} leaked the synthetic run home`)
+      assert.ok(!text.includes(diag), `${name} leaked the diagnostic destination`)
       assert.ok(!text.includes('\x1b'), `${name} kept an escape sequence`)
     }
     const json = JSON.parse(readFileSync(join(dir, 'diagnostics.json'), 'utf8'))
@@ -456,6 +466,90 @@ test('the synthetic failure packet is written sanitised and exits nonzero', () =
     assert.equal(json.child.teardown, false)
     assert.equal(json.child.exit.exitCode, 0)
   } finally {
-    rmSync(base, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a self-test bundle write failure is path-free and still exits nonzero', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-e2e-fail-'))
+  const home = join(root, 'synthetic-home')
+  const blocker = join(home, 'blocker')
+  const diag = join(blocker, 'diagnostics')
+  try {
+    mkdirSync(home, { recursive: true })
+    writeFileSync(blocker, 'not a directory')
+    const env = { ...process.env, PROBE_DIAG_SELFTEST: '1', PROBE_DIAG_DIR: diag, HOME: home }
+    delete env.USERPROFILE
+    const result = spawnSync(process.execPath, [join(REPO, 'scripts/tui-setup-probe.mjs')], {
+      cwd: REPO,
+      env,
+      encoding: 'utf8',
+      timeout: 120_000,
+    })
+    assert.equal(result.status, 1, 'expected the self-test write failure to exit nonzero')
+    assert.ok(/could not write the self-test bundle under the configured diagnostic destination/u.test(result.stderr),
+      'the write failure is reported by category')
+    assert.ok(/ENOTDIR/u.test(result.stderr), 'the path-free errno code is kept')
+    assert.ok(!result.stderr.includes(home), 'stderr printed the synthetic home')
+    assert.ok(!result.stderr.includes(diag), 'stderr printed the diagnostic destination')
+    assert.ok(!/^\s+at .*mkdirSync/mu.test(result.stderr), 'the raw stack reached the log')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a real failed boot and its --keep notice print no raw path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-probe-diag-boot-'))
+  const home = join(root, 'synthetic-home')
+  const diag = join(home, 'nested-output', 'diagnostics')
+  const fakeCli = join(root, 'fake-tui.mjs')
+  try {
+    mkdirSync(home, { recursive: true })
+    // A real PTY child that settles into the workspace: with PROBE_REQUIRE_WIZARD the
+    // probe fails fast (after its three-second settle window) and reaches the same
+    // bundle/reporter boundary as a red setup run, without a provider or real home.
+    writeFileSync(fakeCli, "process.stdout.write('目录:fake\\n'); setInterval(() => {}, 1000)\\n")
+    const env = {
+      ...process.env,
+      HOME: home,
+      PROBE_HOME: home,
+      PROBE_CLI: fakeCli,
+      PROBE_DIAG_DIR: diag,
+      PROBE_REQUIRE_WIZARD: '1',
+    }
+    delete env.USERPROFILE
+    const result = spawnSync(process.execPath, [join(REPO, 'scripts/tui-setup-probe.mjs'), '--keep'], {
+      cwd: REPO,
+      env,
+      encoding: 'utf8',
+      timeout: 60_000,
+    })
+    if (/node-pty is unavailable/u.test(result.stdout ?? '')) {
+      // The probe's own documented skip: this host cannot exercise a PTY. Not a pass
+      // for the path check, but the self-test above still covers the writer/reporter.
+      assert.equal(result.status, 0)
+      return
+    }
+    assert.equal(result.status, 1, 'expected the failing boot to exit nonzero')
+    assert.ok(/FAIL/u.test(result.stderr), 'stderr reports FAIL')
+    assert.ok(/diagnostics: tui-setup-probe-\S+ written under the configured diagnostic destination/u.test(result.stderr),
+      'the bundle log names the packet and the location category')
+    assert.ok(/probe home kept: the configured probe home \(PROBE_HOME or DSH_HOME\); its path is not printed/u.test(result.stdout),
+      'the keep notice is path-free')
+    assert.ok(!result.stdout.includes(home), 'stdout printed the synthetic home')
+    assert.ok(!result.stderr.includes(home), 'stderr printed the synthetic home')
+    assert.ok(!result.stdout.includes(diag), 'stdout printed the diagnostic destination')
+    assert.ok(!result.stderr.includes(diag), 'stderr printed the diagnostic destination')
+    const runs = readdirSync(diag)
+    assert.equal(runs.length, 1, `one packet: ${runs.join(', ')}`)
+    const dir = join(diag, runs[0])
+    assert.ok(existsSync(join(dir, 'diagnostics.json')), 'the intended packet exists')
+    for (const name of readdirSync(dir)) {
+      const text = readFileSync(join(dir, name), 'utf8')
+      assert.ok(!text.includes(home), `${name} leaked the synthetic run home`)
+      assert.ok(!text.includes(diag), `${name} leaked the diagnostic destination`)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })

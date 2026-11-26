@@ -21,7 +21,7 @@
  *
  * Exit code 0 means every assertion passed; the captured stream is printed on failure.
  */
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import process from 'node:process'
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -60,6 +60,20 @@ purpose: the probe has to *not* resume, because resuming skips first-run setup.
 
 Set PROBE_CLI to drive a specific Host binary (the official-package path uses the
 Host it installed); the default is this checkout's pinned dev dependency.`
+
+// The resolved diagnostic destination and the probe home are user-controlled
+// absolute paths, and either may sit under the real home. The packet still goes to
+// exactly the configured destination; the log names the destination category and
+// the generated packet directory (a fixed timestamp/pid name), never the path.
+const DIAGNOSTIC_LOCATION = 'the configured diagnostic destination (PROBE_DIAG_DIR, or .ci-diagnostics under the working directory)'
+const PROBE_HOME_LOCATION = 'the configured probe home (PROBE_HOME or DSH_HOME); its path is not printed'
+const diagnosticLine = dir => `diagnostics: ${basename(dir)} written under ${DIAGNOSTIC_LOCATION}`
+
+/** A path-free detail for a failed bundle write: the errno code, or fixed class text. */
+function bundleErrorDetail(error, home) {
+  if (typeof error?.code === 'string' && error.code !== '') return error.code
+  return safeDetail(error instanceof Error ? error.message : String(error), 400, { home })
+}
 
 const CSI = /\x1b\[[0-9;?]*[a-zA-Z]/gu
 const OSC = /\x1b\][^\x07]*\x07/gu
@@ -386,7 +400,7 @@ async function runProbe(argv) {
     problems.push(error instanceof Error ? error.message : String(error))
   } finally {
     stopChild(termState)
-    if (keep) console.log(`probe home kept: ${home}`)
+    if (keep) console.log(`probe home kept: ${PROBE_HOME_LOCATION}`)
   }
 
   // 6. The other half of the claim: once the machine is configured, the wizard is
@@ -591,7 +605,7 @@ async function runProbe(argv) {
         home: knownHome,
       })
       const say = problems.length > 0 ? console.error : console.log
-      say(`diagnostics: ${bundle.dir}`)
+      say(diagnosticLine(bundle.dir))
       if (problems.length > 0) {
         // Sanitise the whole values first, then take the log excerpt. Slicing first
         // would let a cut through `sk-` turn the payload into unredacted text.
@@ -601,8 +615,7 @@ async function runProbe(argv) {
         console.error(safeDetail(active.output(), 1600, { home: knownHome }))
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(`diagnostics: could not write the bundle: ${safeDetail(message, 400, { home: knownHome })}`)
+      console.error(`diagnostics: could not write the bundle under ${DIAGNOSTIC_LOCATION}: ${bundleErrorDetail(error, knownHome)}`)
     }
   }
   if (problems.length > 0) {
@@ -655,17 +668,25 @@ async function runDiagnosticSelfTest() {
   // A zero-width split prefix is the reporter fail-closed control: the writer must
   // keep class-only metadata and the reporter must never echo the synthetic value.
   const splitKey = 'sk-\u200bSYNTHETIC-ONLY-SPLIT-CONTROL'
-  const bundle = writeDiagnosticBundle({
-    dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
-    phase: 'self-test',
-    problems: [`synthetic failure: ${key} and ${home}`, `synthetic split control: ${splitKey}`],
-    output: transcript,
-    screen,
-    child: state.observed,
-    elapsedMs: 1_234,
-    runtime: runtimeFacts(),
-    home,
-  })
+  let bundle
+  try {
+    bundle = writeDiagnosticBundle({
+      dir: process.env.PROBE_DIAG_DIR ?? join(process.cwd(), '.ci-diagnostics'),
+      phase: 'self-test',
+      problems: [`synthetic failure: ${key} and ${home}`, `synthetic split control: ${splitKey}`],
+      output: transcript,
+      screen,
+      child: state.observed,
+      elapsedMs: 1_234,
+      runtime: runtimeFacts(),
+      home,
+    })
+  } catch (error) {
+    // A write failure must not let Node print the resolved destination path in an
+    // unhandled stack: fail closed to the same path-free location category.
+    console.error(`diagnostics: could not write the self-test bundle under ${DIAGNOSTIC_LOCATION}: ${bundleErrorDetail(error, home)}`)
+    return 1
+  }
   const forbidden = ['SYNTHETIC-ONLY', home, '\x1b', 'sk-']
   for (const name of readdirSync(bundle.dir)) {
     const text = readFileSync(join(bundle.dir, name), 'utf8')
@@ -679,7 +700,7 @@ async function runDiagnosticSelfTest() {
   }
   console.error('--- synthetic failure log excerpt ---')
   console.error(safeExcerpt(`synthetic log line: ${key} home ${home}`, 400, { home }))
-  console.error(`diagnostics: ${bundle.dir}`)
+  console.error(diagnosticLine(bundle.dir))
   return reportOutcome({
     problems: ['synthetic failure: the workspace never came back', `synthetic split control: ${splitKey}`],
     successLines: [],
