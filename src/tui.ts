@@ -9070,7 +9070,7 @@ export class SshTui {
             kind: 'turn-error',
             failureCode: 'TURN_ERROR',
             phase: 'turn',
-            exitCode: 1,
+            exitCode: null,
             problemClasses: ['UNKNOWN'],
           }).catch(() => {})
         }
@@ -9164,7 +9164,7 @@ export class SshTui {
       kind: 'turn-error',
       failureCode: 'TURN_ERROR',
       phase: 'turn',
-      exitCode: 1,
+      exitCode: null,
       problemClasses: ['UNKNOWN'],
     }).catch(() => {})
   }
