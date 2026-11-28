@@ -38,7 +38,7 @@ export async function createDiagnosticsFixture() {
   for (const [name, data] of Object.entries(material)) {
     const target = join(dir, name)
     await writeFile(target, data, { mode: 0o600 })
-    await chmod(target, 0o600)
+    await chmod(target, 0o600).catch(() => {})
     paths[name] = target
   }
   const caPem = pki.caCertPem
@@ -65,8 +65,8 @@ export async function createDiagnosticsFixture() {
   const xPath = join(dir, 'recipient-x25519.key')
   await writeFile(edPath, edPrivatePem, { mode: 0o600 })
   await writeFile(xPath, xPrivatePem, { mode: 0o600 })
-  await chmod(edPath, 0o600)
-  await chmod(xPath, 0o600)
+  await chmod(edPath, 0o600).catch(() => {})
+  await chmod(xPath, 0o600).catch(() => {})
 
   return {
     dir,
