@@ -16,6 +16,8 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_MAX_BUNDLE_BYTES,
   DEFAULT_MAX_FILE_BYTES,
+  DEFAULT_MAX_SPOOL_BYTES,
+  DEFAULT_MAX_SPOOL_ENTRIES,
   DEFAULT_MAX_TOTAL_BYTES,
   DEFAULT_PORT,
   DEFAULT_TIMEOUT_MS,
@@ -36,10 +38,10 @@ import { COMMIT_PATTERN, HASH_PATTERN, VERSION_PATTERN } from './redact.js'
 
 const CONFIG_KEYS = [
   'enabled', 'host', 'port', 'serverName', 'caFile', 'certFile', 'keyFile',
-  'clientEd25519KeyFile', 'serverSpkiSha256', 'clientSpkiSha256',
+  'clientEd25519KeyFile', 'clientEd25519PublicKey', 'serverSpkiSha256', 'clientSpkiSha256',
   'serverEd25519PublicKey', 'recipientX25519PublicKey', 'recipientX25519PrivateKeyFile',
   'maxBundleBytes', 'maxFileBytes', 'maxTotalBytes', 'timeoutMs', 'maxAttempts',
-  'allowPublicEndpoint', 'spoolDir', 'verifiedDir',
+  'maxSpoolEntries', 'maxSpoolBytes', 'allowPublicEndpoint', 'spoolDir', 'verifiedDir',
 ] as const
 
 const ENV = {
@@ -56,6 +58,7 @@ const ENV = {
   keyPem: 'DSH_DIAGNOSTICS_KEY_PEM',
   clientEd25519KeyFile: 'DSH_DIAGNOSTICS_CLIENT_ED25519_KEY_FILE',
   clientEd25519KeyPem: 'DSH_DIAGNOSTICS_CLIENT_ED25519_KEY_PEM',
+  clientEd25519PublicKey: 'DSH_DIAGNOSTICS_CLIENT_ED25519_PUBLIC_KEY',
   serverSpki: 'DSH_DIAGNOSTICS_SERVER_SPKI',
   clientSpki: 'DSH_DIAGNOSTICS_CLIENT_SPKI',
   serverEd25519PublicKey: 'DSH_DIAGNOSTICS_SERVER_ED25519_PUBLIC_KEY',
@@ -67,6 +70,8 @@ const ENV = {
   maxTotalBytes: 'DSH_DIAGNOSTICS_MAX_TOTAL_BYTES',
   timeoutMs: 'DSH_DIAGNOSTICS_TIMEOUT_MS',
   maxAttempts: 'DSH_DIAGNOSTICS_MAX_ATTEMPTS',
+  maxSpoolEntries: 'DSH_DIAGNOSTICS_MAX_SPOOL_ENTRIES',
+  maxSpoolBytes: 'DSH_DIAGNOSTICS_MAX_SPOOL_BYTES',
   allowPublic: 'DSH_DIAGNOSTICS_ALLOW_PUBLIC_ENDPOINT',
   spoolDir: 'DSH_DIAGNOSTICS_SPOOL_DIR',
   verifiedDir: 'DSH_DIAGNOSTICS_VERIFIED_DIR',
@@ -83,6 +88,7 @@ interface FileConfig {
   certFile?: string
   keyFile?: string
   clientEd25519KeyFile?: string
+  clientEd25519PublicKey?: string
   serverSpkiSha256?: string
   clientSpkiSha256?: string
   serverEd25519PublicKey?: string
@@ -93,6 +99,8 @@ interface FileConfig {
   maxTotalBytes?: number
   timeoutMs?: number
   maxAttempts?: number
+  maxSpoolEntries?: number
+  maxSpoolBytes?: number
   allowPublicEndpoint?: boolean
   spoolDir?: string
   verifiedDir?: string
@@ -264,6 +272,8 @@ function disabledConfig(env: NodeJS.ProcessEnv, home: string, sourceSha: string 
     maxTotalBytes: DEFAULT_MAX_TOTAL_BYTES,
     timeoutMs: DEFAULT_TIMEOUT_MS,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    maxSpoolEntries: DEFAULT_MAX_SPOOL_ENTRIES,
+    maxSpoolBytes: DEFAULT_MAX_SPOOL_BYTES,
     allowPublicEndpoint: false,
     spoolDir: env[ENV.spoolDir] ?? join(home, 'tui-diagnostics', 'spool'),
     verifiedDir: env[ENV.verifiedDir] ?? join(home, 'tui-diagnostics', 'verified'),
@@ -317,6 +327,14 @@ export async function loadDiagnosticsConfig(options: ResolveOptions = {}): Promi
   if (clientKeyMaterial === undefined) throw new DiagnosticsError('CONFIG_INVALID')
   const signingKey = parsePrivateKey(clientKeyMaterial, 'ed25519')
   const signingKeyId = publicKeyId(signingKey)
+  const clientEd25519PublicKeyRaw = env[ENV.clientEd25519PublicKey] ?? file.clientEd25519PublicKey
+  if (clientEd25519PublicKeyRaw !== undefined && typeof clientEd25519PublicKeyRaw !== 'string') {
+    throw new DiagnosticsError('CONFIG_INVALID')
+  }
+  const clientEd25519PublicKey = clientEd25519PublicKeyRaw === undefined || clientEd25519PublicKeyRaw.trim() === ''
+    ? undefined
+    : parsePublicKey(clientEd25519PublicKeyRaw, 'ed25519')
+  const verificationKeyId = clientEd25519PublicKey === undefined ? signingKeyId : publicKeyId(clientEd25519PublicKey)
   const recipientKeyId = publicKeyId(parsePublicKey(recipientX25519PublicKey, 'x25519'))
   const recipientPrivateMaterial = env[ENV.recipientX25519PrivateKeyPem] !== undefined
     ? (env[ENV.recipientX25519PrivateKeyPem] as string)
@@ -360,6 +378,19 @@ export async function loadDiagnosticsConfig(options: ResolveOptions = {}): Promi
   if (maxTotalBytes > maxBundleBytes) throw new DiagnosticsError('CONFIG_INVALID')
   const timeoutMs = intValue(env[ENV.timeoutMs] ?? file.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, 60_000)
   const maxAttempts = intValue(env[ENV.maxAttempts] ?? file.maxAttempts, DEFAULT_MAX_ATTEMPTS, 1, 10)
+  const maxSpoolEntries = intValue(
+    env[ENV.maxSpoolEntries] ?? file.maxSpoolEntries,
+    DEFAULT_MAX_SPOOL_ENTRIES,
+    1,
+    1024,
+  )
+  const maxSpoolBytes = intValue(
+    env[ENV.maxSpoolBytes] ?? file.maxSpoolBytes,
+    DEFAULT_MAX_SPOOL_BYTES,
+    1024 * 1024,
+    4 * 1024 * 1024 * 1024,
+  )
+  if (maxSpoolBytes < maxBundleBytes) throw new DiagnosticsError('CONFIG_INVALID')
   const spoolDir = env[ENV.spoolDir] ?? file.spoolDir ?? join(home, 'tui-diagnostics', 'spool')
   const verifiedDir = env[ENV.verifiedDir] ?? file.verifiedDir ?? join(home, 'tui-diagnostics', 'verified')
 
@@ -371,6 +402,7 @@ export async function loadDiagnosticsConfig(options: ResolveOptions = {}): Promi
     serverEd25519KeyId: publicKeyId(parsePublicKey(serverEd25519PublicKey, 'ed25519')),
     recipientKeyId,
     signingKeyId,
+    verificationKeyId,
   }
   const destinationFingerprint = sha256Hex(canonicalJson(fingerprintInput))
   const endpointId = sha256Hex(`${host}:${port}`).slice(0, 32)
@@ -387,6 +419,7 @@ export async function loadDiagnosticsConfig(options: ResolveOptions = {}): Promi
     ...(env[ENV.certFile] === undefined && file.certFile === undefined ? {} : { certFile: env[ENV.certFile] ?? file.certFile }),
     ...(env[ENV.keyFile] === undefined && file.keyFile === undefined ? {} : { keyFile: env[ENV.keyFile] ?? file.keyFile }),
     clientEd25519KeyPem: clientKeyMaterial,
+    ...(clientEd25519PublicKey === undefined ? {} : { clientEd25519PublicKey: clientEd25519PublicKeyRaw }),
     ...(env[ENV.clientEd25519KeyFile] === undefined && file.clientEd25519KeyFile === undefined
       ? {}
       : { clientEd25519KeyFile: env[ENV.clientEd25519KeyFile] ?? file.clientEd25519KeyFile }),
@@ -402,6 +435,8 @@ export async function loadDiagnosticsConfig(options: ResolveOptions = {}): Promi
     maxTotalBytes,
     timeoutMs,
     maxAttempts,
+    maxSpoolEntries,
+    maxSpoolBytes,
     allowPublicEndpoint,
     resolvedAddresses: addresses,
     spoolDir,
@@ -422,6 +457,8 @@ export function describeDiagnosticsConfig(config: DiagnosticsConfig): Record<str
     port: config.enabled ? config.port : null,
     maxBundleBytes: config.maxBundleBytes,
     maxAttempts: config.maxAttempts,
+    maxSpoolEntries: config.maxSpoolEntries,
+    maxSpoolBytes: config.maxSpoolBytes,
     allowPublicEndpoint: config.allowPublicEndpoint,
     spoolDir: config.spoolDir,
     destinationFingerprint: config.enabled ? config.destinationFingerprint.slice(0, 16) : null,

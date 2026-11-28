@@ -19,6 +19,8 @@ export const BUNDLE_ID_PATTERN = /^[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{16}$/
 export const UPLOAD_PATH_PATTERN = /^\/v1\/diagnostics\/[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{16}$/
 export const MAX_CHUNK_BYTES = 4 * 1024 * 1024
 export const DEFAULT_CHUNK_BYTES = 1024 * 1024
+export const DIAG_ERROR_HEADER = 'x-dsh-diag-error'
+export const DIAG_ERROR_CODES = ['AUTH_REPLAY_REFUSED', 'AUTH_FAILED'] as const
 
 export type Operation = 'upload' | 'download'
 
@@ -132,7 +134,7 @@ export function verifyRequest(publicKey: KeyObject, request: SignedRequest, sign
 
 export function checkTimestamp(timestamp: number, now: number = Date.now()): void {
   if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > MAX_CLOCK_SKEW_MS) {
-    throw new DiagnosticsError('REPLAY_REJECTED')
+    throw new DiagnosticsError('AUTH_REPLAY_REFUSED')
   }
 }
 
@@ -188,7 +190,7 @@ export class SessionStore {
     if (grant === undefined) throw new DiagnosticsError('AUTH_FAILED')
     if (grant.consumed || grant.expiresAt <= this.now()) {
       this.grants.delete(token)
-      throw new DiagnosticsError('AUTH_FAILED')
+      throw new DiagnosticsError('AUTH_REPLAY_REFUSED')
     }
     if (grant.operation !== operation || grant.bundleId !== bundleId) throw new DiagnosticsError('AUTH_FAILED')
     if (grant.clientSpkiSha256 !== clientSpkiSha256) throw new DiagnosticsError('AUTH_FAILED')

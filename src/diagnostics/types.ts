@@ -9,6 +9,7 @@
 
 export const DIAGNOSTICS_SCHEMA = 'dsh-ssh-tui/diagnostics/v1'
 export const MANIFEST_SCHEMA = 'dsh-ssh-tui/diagnostics-manifest/v1'
+export const ENVELOPE_BINDING_SCHEMA = 'dsh-ssh-tui/diagnostics-envelope/v1'
 export const RECEIPT_SCHEMA = 'dsh-ssh-tui/diagnostics-receipt/v1'
 export const ENVELOPE_MAGIC = 'DSHENV1\n'
 export const ENVELOPE_VERSION = 1
@@ -21,6 +22,9 @@ export const DEFAULT_MAX_FILE_BYTES = 256 * 1024
 export const DEFAULT_MAX_TOTAL_BYTES = 1024 * 1024
 export const DEFAULT_TIMEOUT_MS = 10_000
 export const DEFAULT_MAX_ATTEMPTS = 5
+export const DEFAULT_MAX_SPOOL_ENTRIES = 64
+export const DEFAULT_MAX_SPOOL_BYTES = 256 * 1024 * 1024
+export const DEFAULT_SPOOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 export const MIN_PORT = 1024
 
 export type BundleKind = 'turn-error' | 'boot-error' | 'probe-failure'
@@ -64,6 +68,8 @@ export interface FailureContext {
   }
   /** Unix epoch ms; tests inject it. */
   observedAt?: number
+  /** Optional caller-scoped incident id; independent events stay distinct. */
+  incidentId?: string
 }
 
 export interface BundleFile {
@@ -93,6 +99,8 @@ export interface DiagnosticsManifest {
     version: string
     commit: string | null
   }
+  /** Authorized structured source revision; never a path or a raw error. */
+  sourceSha: string | null
   runtime: {
     node: string
     platform: string
@@ -131,6 +139,10 @@ export interface EnvelopeHeader {
   archiveBytes: number
   manifestSha256: string
   ciphertextBytes: number
+  /** SHA-256 over the AES-GCM ciphertext bytes, bound by the signature below. */
+  ciphertextSha256: string
+  /** Ed25519 signature over the canonical header plus ciphertextSha256. */
+  envelopeSignature: ManifestSignature
 }
 
 export interface PreparedBundle {
@@ -188,6 +200,8 @@ export interface DiagnosticReceipt {
   redaction: DiagnosticsManifest['redaction']
   remote: RemoteLocator | null
   verifiedAt: string | null
+  /** Stable failure identity; persisted so a restart cannot double-enqueue. */
+  failureId?: string
 }
 
 export type DiagnosticsErrorCode =
@@ -199,7 +213,7 @@ export type DiagnosticsErrorCode =
   | 'PIN_MISMATCH'
   | 'AUTH_FAILED'
   | 'SESSION_FAILED'
-  | 'REPLAY_REJECTED'
+  | 'AUTH_REPLAY_REFUSED'
   | 'REDIRECT_REFUSED'
   | 'TOO_LARGE'
   | 'REDACTION_BLOCKED'
@@ -244,6 +258,8 @@ export interface DiagnosticsConfig {
   keyFile?: string
   clientEd25519KeyPem?: string
   clientEd25519KeyFile?: string
+  /** Sender public key used to verify manifests/envelopes without its private key. */
+  clientEd25519PublicKey?: string
   /** Pinned SHA-256 of the server certificate SPKI. */
   serverSpkiSha256: string
   /** Pinned SHA-256 of the client certificate SPKI (checked by the receiver). */
@@ -259,6 +275,8 @@ export interface DiagnosticsConfig {
   maxTotalBytes: number
   timeoutMs: number
   maxAttempts: number
+  maxSpoolEntries: number
+  maxSpoolBytes: number
   allowPublicEndpoint: boolean
   /** Resolved addresses for this endpoint, pinned for the lifetime of a config. */
   resolvedAddresses?: readonly string[]

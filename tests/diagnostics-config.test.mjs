@@ -159,3 +159,55 @@ test('unknown config keys fail closed', async () => {
     await fixture.cleanup()
   }
 })
+
+test('an explicit env 0 wins over config-file enabled:true', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const configDir = join(fixture.dir, 'tui-diagnostics')
+    await mkdir(configDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ enabled: true }), { mode: 0o600 })
+    const config = await loadDiagnosticsConfig({
+      env: { DSH_HOME: fixture.dir, DSH_DIAGNOSTICS_UPLOAD: '0' },
+      home: fixture.dir,
+    })
+    assert.equal(config.enabled, false)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('bounded spool caps and a sender public key load from the config file', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const configDir = join(fixture.dir, 'tui-diagnostics')
+    await mkdir(configDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({
+      enabled: true,
+      host: '127.0.0.1',
+      port: 18443,
+      caFile: fixture.paths['ca.crt'],
+      certFile: fixture.paths['client.crt'],
+      keyFile: fixture.paths['client.key'],
+      clientEd25519KeyFile: fixture.edPath,
+      clientEd25519PublicKey: fixture.edPublicRaw,
+      serverSpkiSha256: fixture.serverSpki,
+      serverEd25519PublicKey: fixture.serverEdPublicRaw,
+      recipientX25519PublicKey: fixture.xPublicRaw,
+      maxSpoolEntries: 7,
+      maxSpoolBytes: 64 * 1024 * 1024,
+      spoolDir: join(fixture.dir, 'spool'),
+      verifiedDir: join(fixture.dir, 'verified'),
+    }), { mode: 0o600 })
+    const config = await loadDiagnosticsConfig({
+      env: { DSH_HOME: fixture.dir },
+      home: fixture.dir,
+      resolveHost: async () => ['127.0.0.1'],
+    })
+    assert.equal(config.enabled, true)
+    assert.equal(config.maxSpoolEntries, 7)
+    assert.equal(config.maxSpoolBytes, 64 * 1024 * 1024)
+    assert.equal(config.clientEd25519PublicKey, fixture.edPublicRaw)
+  } finally {
+    await fixture.cleanup()
+  }
+})

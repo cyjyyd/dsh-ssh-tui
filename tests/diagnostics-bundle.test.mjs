@@ -15,7 +15,7 @@ import {
   verifyEncryptedBundle,
   verifyManifestSignature,
 } from '../lib/diagnostics/bundle.js'
-import { decryptEnvelope, sha256Hex, spkiSha256 } from '../lib/diagnostics/crypto.js'
+import { decryptEnvelope, encryptEnvelope, sha256Hex, spkiSha256 } from '../lib/diagnostics/crypto.js'
 import { scanForSecrets } from '../lib/diagnostics/redact.js'
 import { createDiagnosticsFixture } from './helpers/diagnostics-fixture.mjs'
 
@@ -232,7 +232,7 @@ test('the receiver metadata/versions allowlists reject raw or unknown fields', a
     const versions = bundle.versions.toString('utf8')
     validateVersions(versions)
     assert.throws(() => validateVersions(`${versions}\nscreen.txt=raw`), (error) => error.code === 'INTEGRITY_FAILED')
-    assert.throws(() => validateVersions(versions.replace(/^platform=.*$/m, 'platform=unknown')), (error) => error.code === 'REDACTION_BLOCKED')
+    assert.throws(() => validateVersions(versions.replace(/^npm=.*$/m, 'npm=not-a-version')), (error) => ['INTEGRITY_FAILED', 'REDACTION_BLOCKED'].includes(error.code))
   } finally {
     await fixture.cleanup()
   }
@@ -246,6 +246,77 @@ test('validateManifest rejects unknown keys and bad signatures', async () => {
     assert.equal(good.bundleId, bundle.bundleId)
     const extra = { ...bundle.manifest, screen: 'secret' }
     assert.throws(() => validateManifest(extra), (error) => error.code === 'REDACTION_BLOCKED')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('versions.txt is exactly node/npm/pnpm/os/created with fixed unknown fallbacks', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const bundle = await prepared(fixture)
+    const lines = bundle.versions.toString('utf8').split('\n').filter((line) => line !== '')
+    assert.deepEqual(lines.map((line) => line.slice(0, line.indexOf('='))), ['node', 'npm', 'pnpm', 'os', 'created'])
+    validateVersions(bundle.versions.toString('utf8'))
+    const values = Object.fromEntries(lines.map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
+    assert.equal(values.node, process.version)
+    assert.ok(values.npm === 'unknown' || /^\d+\.\d+\.\d+/.test(values.npm))
+    assert.ok(values.pnpm === 'unknown' || /^\d+\.\d+\.\d+/.test(values.pnpm))
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('the structured manifest keeps the authorized source SHA', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const bundle = await prepared(fixture)
+    assert.equal(bundle.manifest.sourceSha, 'ee212a601e9452f5ad4507fc46666da02eb3bb4a')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a re-encrypted envelope without the sender signature is rejected', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const bundle = await prepared(fixture)
+    const other = encryptEnvelope({
+      bundleId: bundle.bundleId,
+      archive: bundle.archive,
+      archiveSha256: bundle.archiveSha256,
+      manifestBytes: bundle.manifestBytes,
+      manifestSha256: bundle.manifestSha256,
+      recipientPublicKey: fixture.x.publicKey,
+      // The attacker can encrypt, but this key is not the pinned sender key.
+      signingKey: fixture.serverEd.privateKey,
+    })
+    assert.throws(() => verifyEncryptedBundle({
+      manifest: bundle.manifest,
+      envelope: other.envelope,
+      signerPublicKey: createPublicKey(fixture.ed.privateKey),
+      recipientPrivateKey: fixture.x.privateKey,
+      maxFileBytes: 256 * 1024,
+      maxTotalBytes: 1024 * 1024,
+      expectedEnvelopeSha256: sha256Hex(other.envelope),
+    }), (error) => ['INTEGRITY_FAILED', 'PIN_MISMATCH'].includes(error.code))
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('receiver verification requires an independent expected envelope digest', async () => {
+  const fixture = await createDiagnosticsFixture()
+  try {
+    const bundle = await prepared(fixture)
+    assert.throws(() => verifyEncryptedBundle({
+      manifest: bundle.manifest,
+      envelope: bundle.envelope,
+      signerPublicKey: createPublicKey(fixture.ed.privateKey),
+      recipientPrivateKey: fixture.x.privateKey,
+      maxFileBytes: 256 * 1024,
+      maxTotalBytes: 1024 * 1024,
+    }), (error) => error.code === 'INTEGRITY_FAILED')
   } finally {
     await fixture.cleanup()
   }

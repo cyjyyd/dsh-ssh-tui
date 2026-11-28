@@ -24,14 +24,29 @@ import {
 import {
   DiagnosticsError,
   ENVELOPE_ALG,
+  ENVELOPE_BINDING_SCHEMA,
   ENVELOPE_MAGIC,
   ENVELOPE_VERSION,
+  SIGNATURE_ALG,
   type EnvelopeHeader,
+  type ManifestSignature,
 } from './types.js'
+import {
+  HASH_PATTERN,
+  assertExactKeys,
+  boundedInt,
+  boundedString,
+} from './redact.js'
 
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex')
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
 const ENVELOPE_INFO = 'dsh-diag-envelope-v1'
+const BUNDLE_ID = /^[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{16}$/
+const ENVELOPE_HEADER_KEYS = [
+  'v', 'alg', 'bundleId', 'recipientKeyId', 'ephemeralPublicKey', 'salt', 'nonce',
+  'archiveSha256', 'archiveBytes', 'manifestSha256', 'ciphertextBytes',
+  'ciphertextSha256', 'envelopeSignature',
+] as const
 
 export function sha256(data: Buffer | string): Buffer {
   return createHash('sha256').update(data).digest()
@@ -225,11 +240,32 @@ export interface EncryptEnvelopeInput {
   manifestBytes: Buffer
   manifestSha256: string
   recipientPublicKey: KeyObject
+  /** Sender key that binds the actual ciphertext to the signed manifest. */
+  signingKey: KeyObject
 }
 
 export interface EncryptedEnvelope {
   envelope: Buffer
   header: EnvelopeHeader
+}
+
+type BaseEnvelopeHeader = Omit<EnvelopeHeader, 'ciphertextSha256' | 'envelopeSignature'>
+type BoundEnvelopeHeader = Omit<EnvelopeHeader, 'envelopeSignature'>
+
+/** Domain-separated payload binding the ciphertext digest to the manifest digest. */
+export function envelopeBindingPayload(header: BoundEnvelopeHeader): string {
+  return canonicalJson({ schema: ENVELOPE_BINDING_SCHEMA, ...header })
+}
+
+export function verifyEnvelopeBinding(header: EnvelopeHeader, publicKey: KeyObject): void {
+  const signature = header.envelopeSignature
+  if (signature === undefined || signature.alg !== SIGNATURE_ALG) throw new DiagnosticsError('INTEGRITY_FAILED')
+  if (signature.keyId !== publicKeyId(publicKey)) throw new DiagnosticsError('PIN_MISMATCH')
+  const { envelopeSignature, ...bound } = header
+  void envelopeSignature
+  if (!verifyEd25519(publicKey, envelopeBindingPayload(bound), signature.value)) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
+  }
 }
 
 export function encryptEnvelope(input: EncryptEnvelopeInput): EncryptedEnvelope {
@@ -239,7 +275,7 @@ export function encryptEnvelope(input: EncryptEnvelopeInput): EncryptedEnvelope 
   const nonce = randomBytes(12)
   const shared = diffieHellman({ privateKey: ephemeral.privateKey, publicKey: input.recipientPublicKey })
   const key = Buffer.from(hkdfSync('sha256', shared, salt, ENVELOPE_INFO, 32))
-  const header: EnvelopeHeader = {
+  const baseHeader: BaseEnvelopeHeader = {
     v: ENVELOPE_VERSION,
     alg: ENVELOPE_ALG,
     bundleId: input.bundleId,
@@ -252,16 +288,25 @@ export function encryptEnvelope(input: EncryptEnvelopeInput): EncryptedEnvelope 
     manifestSha256: input.manifestSha256,
     ciphertextBytes: input.archive.length + 16,
   }
-  const headerBytes = Buffer.from(canonicalJson(header), 'utf8')
+  const headerBytes = Buffer.from(canonicalJson(baseHeader), 'utf8')
   const cipher = createCipheriv('aes-256-gcm', key, nonce)
   cipher.setAAD(headerBytes)
   const ciphertext = Buffer.concat([cipher.update(input.archive), cipher.final(), cipher.getAuthTag()])
+  const ciphertextSha256 = sha256Hex(ciphertext)
+  const bound: BoundEnvelopeHeader = { ...baseHeader, ciphertextSha256 }
+  const signature: ManifestSignature = {
+    alg: SIGNATURE_ALG,
+    keyId: publicKeyId(input.signingKey),
+    value: signEd25519(input.signingKey, envelopeBindingPayload(bound)),
+  }
+  const header: EnvelopeHeader = { ...bound, envelopeSignature: signature }
+  const finalHeaderBytes = Buffer.from(canonicalJson(header), 'utf8')
   const length = Buffer.alloc(4)
-  length.writeUInt32BE(headerBytes.length, 0)
+  length.writeUInt32BE(finalHeaderBytes.length, 0)
   const envelope = Buffer.concat([
     Buffer.from(ENVELOPE_MAGIC, 'ascii'),
     length,
-    headerBytes,
+    finalHeaderBytes,
     ciphertext,
   ])
   return { envelope, header }
@@ -272,6 +317,7 @@ export interface DecryptedEnvelope {
   archive: Buffer
   archiveSha256: string
   manifestSha256: string
+  ciphertextSha256: string
 }
 
 export interface InspectedEnvelope {
@@ -292,21 +338,48 @@ export function inspectEnvelope(envelope: Buffer): InspectedEnvelope {
   const headerBytes = envelope.subarray(headerStart, headerStart + headerLength)
   let header: EnvelopeHeader
   try {
-    header = JSON.parse(headerBytes.toString('utf8')) as EnvelopeHeader
+    const record = JSON.parse(headerBytes.toString('utf8')) as Record<string, unknown>
+    assertExactKeys(record, ENVELOPE_HEADER_KEYS, 'envelope')
+    header = record as unknown as EnvelopeHeader
+    if (header.v !== ENVELOPE_VERSION || header.alg !== ENVELOPE_ALG) throw new Error('bad envelope version')
+    if (!BUNDLE_ID.test(boundedString(header.bundleId, BUNDLE_ID, 1, 64))) throw new Error('bad bundle id')
+    boundedString(header.recipientKeyId, HASH_PATTERN, 64, 64)
+    const ephemeral = decodeBase64(header.ephemeralPublicKey, 'ephemeralPublicKey')
+    if (ephemeral.length !== 32) throw new Error('bad ephemeral key')
+    const salt = decodeBase64(header.salt, 'salt')
+    const nonce = decodeBase64(header.nonce, 'nonce')
+    if (salt.length !== 16 || nonce.length !== 12) throw new Error('bad salt/nonce')
+    boundedString(header.archiveSha256, HASH_PATTERN, 64, 64)
+    boundedInt(header.archiveBytes, 1, 64 * 1024 * 1024)
+    boundedString(header.manifestSha256, HASH_PATTERN, 64, 64)
+    boundedInt(header.ciphertextBytes, 17, 64 * 1024 * 1024)
+    boundedString(header.ciphertextSha256, HASH_PATTERN, 64, 64)
+    const signature = header.envelopeSignature
+    if (signature === null || typeof signature !== 'object') throw new Error('bad signature')
+    if (signature.alg !== SIGNATURE_ALG) throw new Error('bad signature alg')
+    boundedString(signature.keyId, HASH_PATTERN, 64, 64)
+    const rawSignature = decodeBase64(signature.value, 'signature')
+    if (rawSignature.length !== 64) throw new Error('bad signature length')
   } catch {
     throw new DiagnosticsError('INTEGRITY_FAILED')
   }
-  if (header.v !== ENVELOPE_VERSION || header.alg !== ENVELOPE_ALG) throw new DiagnosticsError('INTEGRITY_FAILED')
   if (header.ciphertextBytes !== envelope.length - headerStart - headerLength) {
     throw new DiagnosticsError('INTEGRITY_FAILED')
   }
   if (header.ciphertextBytes !== header.archiveBytes + 16) throw new DiagnosticsError('INTEGRITY_FAILED')
-  return { header, headerBytes, ciphertext: envelope.subarray(headerStart + headerLength) }
+  const ciphertext = envelope.subarray(headerStart + headerLength)
+  if (sha256Hex(ciphertext) !== header.ciphertextSha256) throw new DiagnosticsError('INTEGRITY_FAILED')
+  return { header, headerBytes, ciphertext }
 }
 
-export function decryptEnvelope(envelope: Buffer, recipientPrivateKey: KeyObject): DecryptedEnvelope {
+export function decryptEnvelope(
+  envelope: Buffer,
+  recipientPrivateKey: KeyObject,
+  signerPublicKey?: KeyObject,
+): DecryptedEnvelope {
   const parsed = inspectEnvelope(envelope)
-  const { header, headerBytes, ciphertext } = parsed
+  const { header, ciphertext } = parsed
+  if (signerPublicKey !== undefined) verifyEnvelopeBinding(header, signerPublicKey)
   if (header.recipientKeyId !== publicKeyId(recipientPrivateKey)) throw new DiagnosticsError('INTEGRITY_FAILED')
   let ephemeralKey: KeyObject
   try {
@@ -317,6 +390,9 @@ export function decryptEnvelope(envelope: Buffer, recipientPrivateKey: KeyObject
   const salt = decodeBase64(header.salt, 'salt')
   const nonce = decodeBase64(header.nonce, 'nonce')
   if (salt.length !== 16 || nonce.length !== 12) throw new DiagnosticsError('INTEGRITY_FAILED')
+  const { ciphertextSha256, envelopeSignature, ...baseHeader } = header
+  void ciphertextSha256
+  void envelopeSignature
   const shared = diffieHellman({ privateKey: recipientPrivateKey, publicKey: ephemeralKey })
   const key = Buffer.from(hkdfSync('sha256', shared, salt, ENVELOPE_INFO, 32))
   const tag = ciphertext.subarray(ciphertext.length - 16)
@@ -324,7 +400,7 @@ export function decryptEnvelope(envelope: Buffer, recipientPrivateKey: KeyObject
   let archive: Buffer
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, nonce)
-    decipher.setAAD(headerBytes)
+    decipher.setAAD(Buffer.from(canonicalJson(baseHeader), 'utf8'))
     decipher.setAuthTag(tag)
     archive = Buffer.concat([decipher.update(body), decipher.final()])
   } catch {
@@ -334,7 +410,13 @@ export function decryptEnvelope(envelope: Buffer, recipientPrivateKey: KeyObject
   if (archiveSha256 !== header.archiveSha256 || archive.length !== header.archiveBytes) {
     throw new DiagnosticsError('INTEGRITY_FAILED')
   }
-  return { header, archive, archiveSha256, manifestSha256: header.manifestSha256 }
+  return {
+    header,
+    archive,
+    archiveSha256,
+    manifestSha256: header.manifestSha256,
+    ciphertextSha256: header.ciphertextSha256,
+  }
 }
 
 export function makeBundleId(now: number, random: Buffer = randomBytes(8)): string {

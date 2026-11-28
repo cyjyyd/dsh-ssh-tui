@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { request as httpsRequest } from 'node:https'
 import { createPublicKey } from 'node:crypto'
 import { prepareBundle, verifyEncryptedBundle } from '../lib/diagnostics/bundle.js'
-import { DiagnosticsTransport } from '../lib/diagnostics/transport.js'
+import { DiagnosticsTransport, createPinnedLookup } from '../lib/diagnostics/transport.js'
 import { signSessionRequest } from '../lib/diagnostics/protocol.js'
 import { canonicalJson } from '../lib/diagnostics/crypto.js'
 import { configFor, createDiagnosticsFixture } from './helpers/diagnostics-fixture.mjs'
@@ -76,6 +76,7 @@ test('mTLS upload round-trips the signed manifest and envelope', async () => {
       recipientPrivateKey: fixture.x.privateKey,
       maxFileBytes: 256 * 1024,
       maxTotalBytes: 1024 * 1024,
+      expectedEnvelopeSha256: bundle.envelopeSha256,
     })
     assert.equal(verified.metadata.length > 0, true)
     assert.equal(server.requestCount > 0, true)
@@ -267,4 +268,122 @@ test('oversized bundles are rejected before any connection', async () => {
   } finally {
     await fixture.cleanup()
   }
+})
+
+test('a hostname with a pinned address survives the all-addresses lookup callback', async () => {
+  const fixture = await createDiagnosticsFixture()
+  const { server, port } = await serverFor(fixture)
+  try {
+    const config = await configFor(fixture, {
+      DSH_DIAGNOSTICS_HOST: 'localhost',
+      DSH_DIAGNOSTICS_SERVER_NAME: 'localhost',
+      DSH_DIAGNOSTICS_PORT: String(port),
+    })
+    const result = await transportFor(config).upload(preparedFor(fixture))
+    assert.equal(result.remote.bundleId, preparedFor(fixture).bundleId)
+    assert.equal(result.downloadedManifest.exitCode, 1)
+  } finally {
+    await server.stop()
+    await fixture.cleanup()
+  }
+})
+
+test('a pre-handshake connection refusal is retried and recovers', async () => {
+  const fixture = await createDiagnosticsFixture()
+  const probe = new DiagnosticsMockServer({
+    caPem: fixture.caPem,
+    serverCertPem: fixture.serverCertPem,
+    serverKeyPem: fixture.serverKeyPem,
+    clientSpki: fixture.clientSpki,
+    clientEd25519PublicKey: fixture.ed.publicKey,
+    serverEd25519PrivateKey: fixture.serverEd.privateKey,
+    recipientPrivateKey: fixture.x.privateKey,
+  })
+  const { port } = await probe.start()
+  await probe.stop()
+  const server = new DiagnosticsMockServer({
+    caPem: fixture.caPem,
+    serverCertPem: fixture.serverCertPem,
+    serverKeyPem: fixture.serverKeyPem,
+    clientSpki: fixture.clientSpki,
+    clientEd25519PublicKey: fixture.ed.publicKey,
+    serverEd25519PrivateKey: fixture.serverEd.privateKey,
+    recipientPrivateKey: fixture.x.privateKey,
+  })
+  try {
+    const config = await configFor(fixture, {
+      DSH_DIAGNOSTICS_PORT: String(port),
+      DSH_DIAGNOSTICS_MAX_ATTEMPTS: '3',
+    })
+    let sleepCalls = 0
+    let started = false
+    const transport = new DiagnosticsTransport(config, {
+      sleep: async () => {
+        sleepCalls += 1
+        if (!started) {
+          started = true
+          await server.start(port)
+        }
+      },
+    })
+    const result = await transport.upload(preparedFor(fixture))
+    assert.equal(result.downloadedManifest.exitCode, 1)
+    assert.ok(sleepCalls >= 1, 'the refusal was retried')
+  } finally {
+    await server.stop()
+    await fixture.cleanup()
+  }
+})
+
+test('certificate and pin rejection are terminal and never sleep', async () => {
+  const fixture = await createDiagnosticsFixture()
+  const { server, port } = await serverFor(fixture)
+  try {
+    const wrongCa = await configFor(fixture, {
+      DSH_DIAGNOSTICS_PORT: String(port),
+      DSH_DIAGNOSTICS_CA_FILE: fixture.paths['other-ca.crt'],
+    })
+    let sleeps = 0
+    const transport = new DiagnosticsTransport(wrongCa, { sleep: async () => { sleeps += 1 } })
+    await assert.rejects(
+      transport.upload(preparedFor(fixture)),
+      (error) => ['TLS_FAILED', 'PIN_MISMATCH'].includes(error.code),
+    )
+    assert.equal(sleeps, 0)
+
+    const wrongPin = await configFor(fixture, {
+      DSH_DIAGNOSTICS_PORT: String(port),
+      DSH_DIAGNOSTICS_SERVER_SPKI: '0'.repeat(64),
+    })
+    sleeps = 0
+    const pinned = new DiagnosticsTransport(wrongPin, { sleep: async () => { sleeps += 1 } })
+    await assert.rejects(
+      pinned.upload(preparedFor(fixture)),
+      (error) => error.code === 'PIN_MISMATCH',
+    )
+    assert.equal(sleeps, 0)
+  } finally {
+    await server.stop()
+    await fixture.cleanup()
+  }
+})
+
+test('the pinned lookup supports both scalar and all-addresses callback shapes', () => {
+  const lookup = createPinnedLookup(['127.0.0.1'])
+  const scalar = []
+  lookup('localhost', { family: 4, all: false }, (...args) => scalar.push(args))
+  assert.equal(scalar.length, 1)
+  assert.equal(scalar[0][0], null)
+  assert.equal(scalar[0][1], '127.0.0.1')
+  assert.equal(scalar[0][2], 4)
+
+  const all = []
+  lookup('localhost', { family: 0, all: true }, (...args) => all.push(args))
+  assert.equal(all.length, 1)
+  assert.deepEqual(all[0][1], [{ address: '127.0.0.1', family: 4 }])
+
+  const mismatch = []
+  lookup('localhost', { family: 6, all: true }, (...args) => mismatch.push(args))
+  assert.equal(mismatch[0][1], '')
+  assert.equal(mismatch[0][0].code, 'EAI_ADDRFAMILY')
 })

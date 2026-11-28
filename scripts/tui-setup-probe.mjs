@@ -77,7 +77,9 @@ const diagnosticLine = dir => `diagnostics: ${basename(dir)} written under ${DIA
  * own outcome/exit code remains authoritative.
  */
 async function publishRemoteProbeFailure() {
-  if (process.env.DSH_DIAGNOSTICS_UPLOAD !== '1') return
+  // The shared loader owns the enablement decision: config-file `enabled:true`
+  // works without an env opt-in, while an explicit env `0` still wins. A missing
+  // or disabled configuration returns before any transport is constructed.
   try {
     const { publishDiagnosticFailure } = await import('../lib/diagnostics/index.js')
     await publishDiagnosticFailure({

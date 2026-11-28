@@ -24,18 +24,18 @@ import {
 } from './types.js'
 import {
   canonicalJson,
+  inspectEnvelope,
   parsePrivateKey,
   parsePublicKey,
   publicKeyId,
   sha256Hex,
+  verifyEnvelopeBinding,
 } from './crypto.js'
 import { prepareBundle, validateManifest, verifyEncryptedBundle, verifyManifestSignature } from './bundle.js'
-import { inspectEnvelope } from './crypto.js'
 import { SpoolStore, writeVerifiedCopy } from './spool.js'
 import { DiagnosticsTransport } from './transport.js'
 
 const DEDUP_WINDOW_MS = 5_000
-let lastCapture: { key: string; at: number } | undefined
 let instanceId = randomBytes(8).toString('hex')
 
 export interface PublishOptions {
@@ -76,6 +76,9 @@ export interface FetchOptions {
   home?: string
   transport?: DiagnosticsTransport
   spool?: SpoolStore
+  /** Independent expected digest from a trusted channel (reviewer/CI). */
+  expectedEnvelopeSha256?: string
+  expectedManifestSha256?: string
 }
 
 export interface FetchResult {
@@ -94,19 +97,56 @@ export interface StatusResult {
 }
 
 export function resetDiagnosticsStateForTests(options: { instanceId?: string } = {}): void {
-  lastCapture = undefined
   instanceId = options.instanceId ?? randomBytes(8).toString('hex')
 }
 
-function dedupKey(context: FailureContext): string {
-  return `${context.kind}:${context.failureCode}`
+/** Stable identity for one failure signature; the observed time is not part of it. */
+export function failureIdentity(context: FailureContext, config: DiagnosticsConfig): string {
+  const incidentId = typeof context.incidentId === 'string' && /^[A-Za-z0-9._:-]{1,64}$/.test(context.incidentId)
+    ? context.incidentId
+    : null
+  return sha256Hex(canonicalJson({
+    schema: 'dsh-ssh-tui/diagnostics-failure/v1',
+    kind: context.kind,
+    failureCode: context.failureCode,
+    phase: context.phase,
+    exitCode: context.exitCode,
+    incidentId,
+    sourceSha: config.sourceSha ?? null,
+    problemClasses: [...new Set(context.problemClasses ?? [])].sort(),
+    ci: context.ci === undefined
+      ? null
+      : { runId: context.ci.runId, jobId: context.ci.jobId, attempt: context.ci.attempt },
+  }))
 }
 
-function shouldDedup(context: FailureContext, now: number): boolean {
-  const key = dedupKey(context)
-  if (lastCapture !== undefined && lastCapture.key === key && now - lastCapture.at < DEDUP_WINDOW_MS) return true
-  lastCapture = { key, at: now }
-  return false
+function receiptDedupable(receipt: DiagnosticReceipt, now: number): boolean {
+  if (receipt.state === 'pending' || receipt.state === 'retry' || receipt.state === 'uploading') return true
+  return now - Date.parse(receipt.updatedAt) < DEDUP_WINDOW_MS
+}
+
+function dedupedResult(receipt: DiagnosticReceipt): PublishResult {
+  const state = receipt.state === 'verified'
+    ? 'verified'
+    : receipt.state === 'uploaded' || receipt.state === 'envelope-verified'
+      ? 'uploaded'
+      : receipt.state === 'pending' || receipt.state === 'retry' || receipt.state === 'uploading'
+        ? 'queued'
+        : receipt.state === 'disabled'
+          ? 'disabled'
+          : 'failed'
+  return { state, receipt, errorClass: 'DEDUPED' }
+}
+
+/** Public key used to verify the sender's manifest and envelope binding. */
+export function manifestVerificationKey(config: DiagnosticsConfig): KeyObject {
+  if (config.clientEd25519PublicKey !== undefined && config.clientEd25519PublicKey.trim() !== '') {
+    return parsePublicKey(config.clientEd25519PublicKey, 'ed25519')
+  }
+  if (config.clientEd25519KeyPem !== undefined) {
+    return createPublicKey(parsePrivateKey(config.clientEd25519KeyPem, 'ed25519'))
+  }
+  throw new DiagnosticsError('CONFIG_INVALID')
 }
 
 function asDiagnosticsError(error: unknown): DiagnosticsError {
@@ -158,7 +198,7 @@ async function executeUpload(
       manifest: canonicalJson(prepared.manifest),
       envelope: prepared.envelope,
       receipt: verifiedReceipt,
-    })
+    }, { maxEntries: config.maxSpoolEntries, maxBytes: config.maxSpoolBytes })
     return { state: 'verified', receipt: verifiedReceipt }
   } catch (error) {
     const mapped = asDiagnosticsError(error)
@@ -183,8 +223,16 @@ export async function publishDiagnosticFailure(
     return { state: 'blocked', errorClass: asDiagnosticsError(error).code }
   }
   if (!config.enabled) return { state: 'disabled' }
-  if (options.dedupe !== false && shouldDedup(context, now)) {
-    return { state: 'queued', errorClass: 'DEDUPED' }
+
+  const failureId = failureIdentity(context, config)
+  const spool = options.spool ?? new SpoolStore(config.spoolDir, { now: () => now, random: options.random })
+  try {
+    const existing = await spool.findByFailureId(failureId, config)
+    if (existing !== undefined && receiptDedupable(existing.receipt, now)) {
+      return dedupedResult(existing.receipt)
+    }
+  } catch {
+    // A corrupt entry must not stop a new capture; enqueue re-validates under lock.
   }
 
   let prepared: PreparedBundle
@@ -195,13 +243,13 @@ export async function publishDiagnosticFailure(
     return { state: 'blocked', errorClass: mapped.code }
   }
 
-  const spool = options.spool ?? new SpoolStore(config.spoolDir, { now: () => now, random: options.random })
   let receipt: DiagnosticReceipt
   try {
-    receipt = await spool.enqueue(prepared, config, context.exitCode)
+    receipt = await spool.enqueue(prepared, config, context.exitCode, failureId)
   } catch (error) {
     return { state: 'blocked', errorClass: asDiagnosticsError(error).code }
   }
+  if (receipt.bundleId !== prepared.bundleId) return dedupedResult(receipt)
 
   if (options.skipRateLimit !== true) {
     let allowed: boolean
@@ -299,7 +347,7 @@ export async function drainDiagnosticsSpool(options: DrainOptions = {}): Promise
           manifest: canonicalJson(prepared.manifest),
           envelope: prepared.envelope,
           receipt: updated,
-        })
+        }, { maxEntries: config.maxSpoolEntries, maxBytes: config.maxSpoolBytes })
         verified += 1
       } catch (error) {
         const mapped = asDiagnosticsError(error)
@@ -325,12 +373,12 @@ async function readPreparedFromSpool(spool: SpoolStore, bundleId: string, config
     throw new DiagnosticsError('INTEGRITY_FAILED')
   }
   const manifest = validateManifest(parsed)
-  if (config.clientEd25519KeyPem === undefined) throw new DiagnosticsError('CONFIG_INVALID')
-  const signingKey = parsePrivateKey(config.clientEd25519KeyPem, 'ed25519')
-  verifyManifestSignature(manifest, createPublicKey(signingKey))
+  const verificationKey = manifestVerificationKey(config)
+  verifyManifestSignature(manifest, verificationKey)
   const manifestBytes = Buffer.from(canonicalJson(manifest), 'utf8')
   const manifestSha256 = sha256Hex(manifestBytes)
   const inspected = inspectEnvelope(envelope)
+  verifyEnvelopeBinding(inspected.header, verificationKey)
   if (inspected.header.bundleId !== bundleId ||
     inspected.header.manifestSha256 !== manifestSha256 ||
     inspected.header.archiveSha256 !== manifest.archive.sha256 ||
@@ -375,7 +423,10 @@ export async function fetchDiagnosticBundle(bundleId: string, options: FetchOpti
   if (!/^[0-9]{8}-[0-9]{6}-[0-9]{3}-[0-9a-f]{16}$/.test(bundleId)) throw new DiagnosticsError('CONFIG_INVALID')
   const config = await makeConfig(options)
   if (!config.enabled) throw new DiagnosticsError('NOT_CONFIGURED')
-  if (config.clientEd25519KeyPem === undefined) throw new DiagnosticsError('CONFIG_INVALID')
+  const verificationKey = manifestVerificationKey(config)
+  if (options.transport === undefined && config.clientEd25519KeyPem === undefined) {
+    throw new DiagnosticsError('CONFIG_INVALID')
+  }
   const transport = options.transport ?? new DiagnosticsTransport(config)
   const manifest = await transport.fetchManifest(bundleId)
   const envelope = await transport.fetchEnvelope(bundleId)
@@ -383,6 +434,7 @@ export async function fetchDiagnosticBundle(bundleId: string, options: FetchOpti
   const manifestSha256 = sha256Hex(manifestBytes)
   const envelopeSha256 = sha256Hex(envelope)
   const inspected = inspectEnvelope(envelope)
+  verifyEnvelopeBinding(inspected.header, verificationKey)
   if (inspected.header.bundleId !== bundleId ||
     inspected.header.manifestSha256 !== manifestSha256 ||
     inspected.header.archiveSha256 !== manifest.archive.sha256 ||
@@ -392,24 +444,27 @@ export async function fetchDiagnosticBundle(bundleId: string, options: FetchOpti
 
   const spool = options.spool ?? new SpoolStore(config.spoolDir)
   const local = await spool.read(bundleId).catch(() => undefined)
-  if (local?.receipt.remote !== null && local?.receipt.remote !== undefined) {
-    if (local.receipt.remote.manifestSha256 !== manifestSha256 ||
-      local.receipt.remote.envelopeSha256 !== envelopeSha256) {
-      throw new DiagnosticsError('INTEGRITY_FAILED')
-    }
+  const expectedManifestSha256 = options.expectedManifestSha256 ?? local?.receipt.remote?.manifestSha256
+  const expectedEnvelopeSha256 = options.expectedEnvelopeSha256 ?? local?.receipt.remote?.envelopeSha256
+  if (expectedManifestSha256 !== undefined && expectedManifestSha256 !== manifestSha256) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
   }
+  if (expectedEnvelopeSha256 !== undefined && expectedEnvelopeSha256 !== envelopeSha256) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
+  }
+  const boundToExpected = expectedManifestSha256 !== undefined && expectedEnvelopeSha256 !== undefined
 
   let verifiedContent = false
-  if (config.recipientX25519PrivateKeyPem !== undefined) {
-    const signingKey = parsePrivateKey(config.clientEd25519KeyPem, 'ed25519')
+  if (boundToExpected && config.recipientX25519PrivateKeyPem !== undefined) {
     const recipientKey = parsePrivateKey(config.recipientX25519PrivateKeyPem, 'x25519')
     verifyEncryptedBundle({
       manifest,
       envelope,
-      signerPublicKey: createPublicKey(signingKey),
+      signerPublicKey: verificationKey,
       recipientPrivateKey: recipientKey,
       maxFileBytes: config.maxFileBytes,
       maxTotalBytes: config.maxTotalBytes,
+      expectedEnvelopeSha256: envelopeSha256,
     })
     verifiedContent = true
   }
@@ -439,13 +494,13 @@ export async function fetchDiagnosticBundle(bundleId: string, options: FetchOpti
     },
     verifiedAt: now,
   }
-  const archive = verifiedContent ? await materializeArchive(manifest, envelope, config) : undefined
+  const archive = verifiedContent ? await materializeArchive(manifest, envelope, config, verificationKey) : undefined
   const verifiedDir = await writeVerifiedCopy(config.verifiedDir, bundleId, {
     ...(archive === undefined ? {} : { archive }),
     manifest: canonicalJson(manifest),
     envelope,
     receipt,
-  })
+  }, { maxEntries: config.maxSpoolEntries, maxBytes: config.maxSpoolBytes })
   return {
     state: verifiedContent ? 'verified' : 'envelope-verified',
     manifest,
@@ -461,10 +516,15 @@ async function materializeArchive(
   manifest: DiagnosticsManifest,
   envelope: Buffer,
   config: DiagnosticsConfig,
+  verificationKey: KeyObject,
 ): Promise<Buffer> {
   if (config.recipientX25519PrivateKeyPem === undefined) throw new DiagnosticsError('CONFIG_INVALID')
   const { decryptEnvelope } = await import('./crypto.js')
-  const decrypted = decryptEnvelope(envelope, parsePrivateKey(config.recipientX25519PrivateKeyPem, 'x25519'))
+  const decrypted = decryptEnvelope(
+    envelope,
+    parsePrivateKey(config.recipientX25519PrivateKeyPem, 'x25519'),
+    verificationKey,
+  )
   if (decrypted.archiveSha256 !== manifest.archive.sha256) throw new DiagnosticsError('INTEGRITY_FAILED')
   return decrypted.archive
 }

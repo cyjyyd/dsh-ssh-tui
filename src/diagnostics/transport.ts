@@ -10,11 +10,13 @@
 import { request as httpsRequest } from 'node:https'
 import { checkServerIdentity as tlsCheckServerIdentity } from 'node:tls'
 import { X509Certificate, createPublicKey, type KeyObject } from 'node:crypto'
-import { isIP } from 'node:net'
+import { isIP, type LookupFunction } from 'node:net'
+import type { LookupAddress } from 'node:dns'
 import {
   DEFAULT_CHUNK_BYTES,
   MAX_CHUNK_BYTES,
   BUNDLE_ID_PATTERN,
+  DIAG_ERROR_HEADER,
   checkNonce,
   checkTimestamp,
   checkToken,
@@ -84,8 +86,15 @@ function parseJsonBody<T>(body: Buffer, limit = MAX_JSON_BYTES): T {
   }
 }
 
-function statusError(status: number): DiagnosticsError {
-  if (status === 401 || status === 403) return new DiagnosticsError('AUTH_FAILED')
+function statusError(status: number, headers: HttpResponse['headers'] = {}): DiagnosticsError {
+  if (status === 401 || status === 403) {
+    // The receiver may advertise only this fixed, allowlisted code. The body is
+    // never parsed: an arbitrary remote string cannot mint a trusted class.
+    if (headerValue(headers, DIAG_ERROR_HEADER) === 'AUTH_REPLAY_REFUSED') {
+      return new DiagnosticsError('AUTH_REPLAY_REFUSED')
+    }
+    return new DiagnosticsError('AUTH_FAILED')
+  }
   if (status === 404 || status === 410) return new DiagnosticsError('DOWNLOAD_FAILED')
   if (status === 409) return new DiagnosticsError('CLIENT_ERROR')
   if (status === 413) return new DiagnosticsError('TOO_LARGE')
@@ -93,6 +102,30 @@ function statusError(status: number): DiagnosticsError {
   if (status >= 500) return new DiagnosticsError('SERVER_ERROR', { retryable: true })
   if (status >= 300 && status < 400) return new DiagnosticsError('REDIRECT_REFUSED')
   return new DiagnosticsError('CLIENT_ERROR')
+}
+
+/** Lookup over the already-resolved pinned addresses; never performs DNS. */
+export function createPinnedLookup(addresses: readonly string[]): LookupFunction {
+  const pinned: LookupAddress[] = addresses.map((address) => ({
+    address,
+    family: isIP(address) === 6 ? 6 : 4,
+  }))
+  return (_hostname, options, callback) => {
+    const wanted = options.family === 4 || options.family === 6 ? options.family : 0
+    const candidates = wanted === 0 ? pinned : pinned.filter((entry) => entry.family === wanted)
+    if (candidates.length === 0) {
+      callback(Object.assign(new Error('no pinned address for the requested family'), { code: 'EAI_ADDRFAMILY' }), '')
+      return
+    }
+    // Node's happy-eyeballs path (autoSelectFamily) asks for `all` and needs an
+    // array; the classic path asks for one scalar address. Support both without
+    // ever re-resolving the hostname.
+    if (options.all === true) {
+      callback(null, candidates)
+      return
+    }
+    callback(null, candidates[0].address, candidates[0].family)
+  }
 }
 
 export class DiagnosticsTransport {
@@ -151,24 +184,12 @@ export class DiagnosticsTransport {
     maxVersion: 'TLSv1.3'
     rejectUnauthorized: true
     servername?: string
-    lookup: (hostname: string, options: unknown, callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void) => void
+    lookup: LookupFunction
     checkServerIdentity: (hostname: string, cert: { pubkey?: Buffer; raw?: Buffer }) => Error | undefined
   } {
     const config = this.config
-    const addresses = config.resolvedAddresses ?? []
     const expectedPin = config.serverSpkiSha256
-    const lookup = (
-      _hostname: string,
-      _options: unknown,
-      callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void,
-    ): void => {
-      const address = addresses[0]
-      if (address === undefined) {
-        callback(new DiagnosticsError('CONFIG_INVALID'), '', 0)
-        return
-      }
-      callback(null, address, isIP(address) === 6 ? 6 : 4)
-    }
+    const lookup = createPinnedLookup(config.resolvedAddresses ?? [])
     const checkServerIdentity = (hostname: string, cert: { pubkey?: Buffer; raw?: Buffer }): Error | undefined => {
       const hostError = tlsCheckServerIdentity(hostname, cert as never)
       if (hostError !== undefined) return hostError
@@ -271,11 +292,17 @@ export class DiagnosticsTransport {
       return new DiagnosticsError('TLS_FAILED')
     }
     if (
-      code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ENETUNREACH' ||
-      code === 'EHOSTUNREACH' || code === 'EPIPE' || code === 'EAI_AGAIN'
+      code === 'ECONNREFUSED' || code === 'ENETUNREACH' || code === 'EHOSTUNREACH' ||
+      code === 'ENETDOWN' || code === 'EHOSTDOWN' || code === 'EAI_AGAIN' || code === 'EAI_NODATA'
     ) {
-      // A reset before the TLS handshake completed is a certificate/auth
-      // rejection, not a transient network failure: never retry it.
+      // A closed port / unreachable host before the handshake is a transient
+      // network condition. It must be retried so a receiver that starts a
+      // moment later can still be reached.
+      return new DiagnosticsError('NETWORK', { retryable: true })
+    }
+    if (code === 'ECONNRESET' || code === 'EPIPE') {
+      // A reset *before* the handshake is a certificate/auth rejection, not a
+      // transient network failure: keep it terminal.
       if (!secure) return new DiagnosticsError('TLS_FAILED')
       return new DiagnosticsError('NETWORK', { retryable: true })
     }
@@ -290,7 +317,7 @@ export class DiagnosticsTransport {
     maxResponseBytes = MAX_JSON_BYTES,
   ): Promise<HttpResponse> {
     const response = await this.rawRequest(method, path, headers, body, maxResponseBytes)
-    if (response.status < 200 || response.status >= 300) throw statusError(response.status)
+    if (response.status < 200 || response.status >= 300) throw statusError(response.status, response.headers)
     return response
   }
 
@@ -377,7 +404,7 @@ export class DiagnosticsTransport {
     const path = this.endpointPath(bundleId)
     const response = await this.rawRequest('HEAD', path, this.signedHeaders('HEAD', path, undefined, 0, token), undefined, MAX_JSON_BYTES)
     if (response.status === 404) return { offset: 0, complete: false }
-    if (response.status < 200 || response.status >= 300) throw statusError(response.status)
+    if (response.status < 200 || response.status >= 300) throw statusError(response.status, response.headers)
     const complete = headerValue(response.headers, 'x-dsh-upload-complete') === '1'
     const offsetText = headerValue(response.headers, 'x-dsh-upload-offset') ?? '0'
     const offset = Number(offsetText)

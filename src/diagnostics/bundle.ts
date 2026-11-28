@@ -26,11 +26,13 @@ import {
   canonicalJson,
   decryptEnvelope,
   encryptEnvelope,
+  inspectEnvelope,
   makeBundleId,
   publicKeyId,
   sha256Hex,
   signEd25519,
   verifyEd25519,
+  verifyEnvelopeBinding,
 } from './crypto.js'
 import {
   ARCH_PATTERN,
@@ -112,22 +114,25 @@ export function buildVersions(input: {
   sourceSha?: string | null
   createdAt: string
 }): Buffer {
-  const version = boundedString(input.toolVersion, VERSION_PATTERN, 1, 64)
-  const commit = input.sourceSha === undefined || input.sourceSha === null
-    ? 'unknown'
-    : boundedString(input.sourceSha, COMMIT_PATTERN, 7, 64)
+  void input.toolVersion
+  void input.sourceSha
   const lines = [
     `node=${process.version}`,
-    `platform=${platform()}`,
-    `arch=${arch()}`,
+    `npm=${agentVersion('npm')}`,
+    `pnpm=${agentVersion('pnpm')}`,
     `os=${type()} ${release()}`,
-    `tool=dsh-ssh-tui@${version}`,
-    `commit=${commit}`,
     `created=${input.createdAt}`,
   ]
   const text = lines.join('\n')
   assertNoSecrets(text)
   return Buffer.from(text, 'utf8')
+}
+
+/** Read a package-manager version from the npm-compatible user agent, or `unknown`. */
+function agentVersion(name: 'npm' | 'pnpm'): string {
+  const agent = process.env.npm_config_user_agent ?? ''
+  const match = new RegExp(`(?:^|\\s)${name}/([0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)(?:\\s|$)`).exec(agent)
+  return match?.[1] ?? 'unknown'
 }
 
 function octal(value: number, width: number): string {
@@ -294,6 +299,9 @@ export function prepareBundle(options: PrepareBundleOptions): PreparedBundle {
         ? null
         : boundedString(options.sourceSha, COMMIT_PATTERN, 7, 64),
     },
+    sourceSha: options.sourceSha === undefined || options.sourceSha === null
+      ? null
+      : boundedString(options.sourceSha, COMMIT_PATTERN, 7, 64),
     runtime: {
       node: process.version,
       platform: platform(),
@@ -320,6 +328,7 @@ export function prepareBundle(options: PrepareBundleOptions): PreparedBundle {
     manifestBytes,
     manifestSha256,
     recipientPublicKey: options.recipientPublicKey,
+    signingKey: options.signingKey,
   })
   if (envelope.length > options.maxBundleBytes) throw new DiagnosticsError('TOO_LARGE')
   return {
@@ -366,7 +375,7 @@ export function verifyManifestSignature(manifest: DiagnosticsManifest, publicKey
 
 const MANIFEST_KEYS = [
   'schema', 'bundleId', 'createdAt', 'kind', 'phase', 'failureCode', 'exitCode', 'elapsedMs',
-  'tool', 'runtime', 'archive', 'files', 'encryption', 'redaction', 'signature',
+  'tool', 'sourceSha', 'runtime', 'archive', 'files', 'encryption', 'redaction', 'signature',
 ] as const
 
 export function validateManifest(value: unknown): DiagnosticsManifest {
@@ -384,6 +393,9 @@ export function validateManifest(value: unknown): DiagnosticsManifest {
   if (tool.name !== 'dsh-ssh-tui') throw new DiagnosticsError('INTEGRITY_FAILED')
   const toolVersion = boundedString(tool.version, VERSION_PATTERN, 1, 64)
   const commit = tool.commit === null ? null : boundedString(tool.commit, COMMIT_PATTERN, 7, 64)
+  const sourceSha = record.sourceSha === undefined || record.sourceSha === null
+    ? null
+    : boundedString(record.sourceSha, COMMIT_PATTERN, 7, 64)
 
   const runtime = assertRecord(record.runtime, ['node', 'platform', 'arch'], 'runtime')
   const nodeVersion = boundedString(runtime.node, /^v\d+\.\d+\.\d+$/, 6, 32)
@@ -436,6 +448,7 @@ export function validateManifest(value: unknown): DiagnosticsManifest {
     exitCode,
     elapsedMs,
     tool: { name: 'dsh-ssh-tui', version: toolVersion, commit },
+    sourceSha,
     runtime: { node: nodeVersion, platform: platformValue, arch: archValue },
     archive: { name: 'bundle.tar.gz', bytes: archiveBytes, sha256: archiveSha256 },
     files,
@@ -483,8 +496,8 @@ export function validateMetadata(value: unknown): void {
 /** Strict receiver-side allowlist for versions.txt. */
 export function validateVersions(text: string): void {
   const lines = text.split('\n').filter((line) => line !== '')
-  if (lines.length !== 7) throw new DiagnosticsError('INTEGRITY_FAILED')
-  const allowed = new Set(['node', 'platform', 'arch', 'os', 'tool', 'commit', 'created'])
+  if (lines.length !== 5) throw new DiagnosticsError('INTEGRITY_FAILED')
+  const allowed = new Set(['node', 'npm', 'pnpm', 'os', 'created'])
   const seen = new Set<string>()
   for (const line of lines) {
     const index = line.indexOf('=')
@@ -494,16 +507,14 @@ export function validateVersions(text: string): void {
     if (!allowed.has(key) || seen.has(key)) throw new DiagnosticsError('INTEGRITY_FAILED')
     seen.add(key)
     if (key === 'node') boundedString(value, /^v\d+\.\d+\.\d+$/, 6, 32)
-    else if (key === 'platform') boundedString(value, PLATFORM_PATTERN, 3, 16)
-    else if (key === 'arch') boundedString(value, ARCH_PATTERN, 2, 16)
-    else if (key === 'os') boundedString(value, /^[A-Za-z_]+ [0-9A-Za-z._+~:-]+$/, 3, 128)
-    else if (key === 'tool') boundedString(value, /^dsh-ssh-tui@[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}$/, 15, 96)
-    else if (key === 'commit') {
-      if (value !== 'unknown') boundedString(value, COMMIT_PATTERN, 7, 64)
-    } else if (key === 'created') {
+    else if (key === 'npm' || key === 'pnpm') {
+      if (value !== 'unknown') boundedString(value, /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/, 1, 64)
+    } else if (key === 'os') boundedString(value, /^[A-Za-z_]+ [0-9A-Za-z._+~:-]+$/, 3, 128)
+    else if (key === 'created') {
       boundedString(value, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, 24, 24)
     }
   }
+  if (seen.size !== allowed.size) throw new DiagnosticsError('INTEGRITY_FAILED')
   assertNoSecrets(text)
 }
 
@@ -556,22 +567,36 @@ export function verifyEncryptedBundle(input: {
   recipientPrivateKey: KeyObject
   maxFileBytes: number
   maxTotalBytes: number
-  expectedEnvelopeSha256?: string
+  /** Independent digest of the exact envelope bytes; never optional. */
+  expectedEnvelopeSha256: string
 }): { metadata: Buffer; versions: Buffer } {
-  validateManifest(input.manifest)
-  verifyManifestSignature(input.manifest, input.signerPublicKey)
-  if (input.manifest.encryption.recipientKeyId !== publicKeyId(input.recipientPrivateKey)) {
-    throw new DiagnosticsError('PIN_MISMATCH')
-  }
-  if (input.expectedEnvelopeSha256 !== undefined && sha256Hex(input.envelope) !== input.expectedEnvelopeSha256) {
+  const manifest = validateManifest(input.manifest)
+  if (typeof input.expectedEnvelopeSha256 !== 'string' ||
+    !HASH_PATTERN.test(input.expectedEnvelopeSha256) ||
+    sha256Hex(input.envelope) !== input.expectedEnvelopeSha256) {
     throw new DiagnosticsError('INTEGRITY_FAILED')
   }
-  const decrypted = decryptEnvelope(input.envelope, input.recipientPrivateKey)
-  const manifestSha256 = sha256Hex(canonicalJson(input.manifest))
-  if (decrypted.header.manifestSha256 !== manifestSha256) throw new DiagnosticsError('INTEGRITY_FAILED')
-  if (decrypted.header.bundleId !== input.manifest.bundleId) throw new DiagnosticsError('INTEGRITY_FAILED')
+  const inspected = inspectEnvelope(input.envelope)
+  verifyEnvelopeBinding(inspected.header, input.signerPublicKey)
+  verifyManifestSignature(manifest, input.signerPublicKey)
+  if (inspected.header.bundleId !== manifest.bundleId) throw new DiagnosticsError('INTEGRITY_FAILED')
+  if (inspected.header.manifestSha256 !== sha256Hex(canonicalJson(manifest))) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
+  }
+  if (inspected.header.archiveSha256 !== manifest.archive.sha256 ||
+    inspected.header.archiveBytes !== manifest.archive.bytes) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
+  }
+  if (manifest.encryption.recipientKeyId !== publicKeyId(input.recipientPrivateKey)) {
+    throw new DiagnosticsError('PIN_MISMATCH')
+  }
+  const decrypted = decryptEnvelope(input.envelope, input.recipientPrivateKey, input.signerPublicKey)
+  if (decrypted.header.manifestSha256 !== sha256Hex(canonicalJson(manifest))) {
+    throw new DiagnosticsError('INTEGRITY_FAILED')
+  }
+  if (decrypted.header.bundleId !== manifest.bundleId) throw new DiagnosticsError('INTEGRITY_FAILED')
   return verifyBundle({
-    manifest: input.manifest,
+    manifest,
     archive: decrypted.archive,
     signerPublicKey: input.signerPublicKey,
     maxFileBytes: input.maxFileBytes,
