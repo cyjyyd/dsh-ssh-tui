@@ -32,7 +32,7 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
-import { publishDiagnosticFailure } from './diagnostics/index.js'
+import { drainDiagnosticsSpool, publishDiagnosticFailure } from './diagnostics/index.js'
 import { copyTrapHint } from './doctor.js'
 import { presetLabel } from './preset-label.js'
 
@@ -279,6 +279,10 @@ export function apply(ctx: Context, config: Config): void {
     else process.stderr.write(`dsh-ssh-tui: ${line}\n`)
     return
   }
+  // Recover any due spool entries from a previous process. This is deliberately
+  // fire-and-forget and bounded by the spool's lease/attempt rules: a slow or
+  // disabled endpoint can never delay the first frame.
+  void drainDiagnosticsSpool({ maxEntries: 3 }).catch(() => {})
   const subagentSelection = createSubagentSelection(ctx)
   installRouteMemory(ctx)
   installUiLocale(ctx)
