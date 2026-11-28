@@ -87,7 +87,7 @@ test('public endpoints are refused unless explicitly allowed', async () => {
   }
 })
 
-test('credential files must be regular and 0600', async () => {
+test('credential files must be regular and 0600', { skip: process.platform === 'win32' }, async () => {
   const fixture = await createDiagnosticsFixture()
   try {
     await chmod(fixture.paths['client.key'], 0o644)

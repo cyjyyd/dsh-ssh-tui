@@ -62,6 +62,11 @@ export async function writeAtomic(path: string, data: Buffer | string, mode = FI
     await handle.sync()
     await handle.close()
     handle = undefined
+    if (process.platform === 'win32') {
+      // Windows cannot atomically replace an existing file with rename(); remove
+      // the old receipt first. The write is still single-consumer (lease).
+      await rm(path, { force: true })
+    }
     await rename(tmp, path)
   } catch (error) {
     if (handle !== undefined) await handle.close().catch(() => {})

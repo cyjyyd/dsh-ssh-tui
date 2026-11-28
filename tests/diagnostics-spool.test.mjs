@@ -58,9 +58,11 @@ test('enqueue writes 0600 artifacts and a pending receipt', async () => {
     assert.equal(receipt.state, 'pending')
     assert.equal(receipt.originalExitCode, 1)
     const dir = join(root, bundle.bundleId)
-    assert.equal((await stat(dir)).mode & 0o777, 0o700)
-    for (const name of ['bundle.tar.gz', 'manifest.json', 'envelope.bin', 'receipt.json']) {
-      assert.equal((await stat(join(dir, name))).mode & 0o777, 0o600, name)
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(dir)).mode & 0o777, 0o700)
+      for (const name of ['bundle.tar.gz', 'manifest.json', 'envelope.bin', 'receipt.json']) {
+        assert.equal((await stat(join(dir, name))).mode & 0o777, 0o600, name)
+      }
     }
     const raw = await readFile(join(dir, 'receipt.json'), 'utf8')
     assert.equal(raw.includes('BEGIN'), false)

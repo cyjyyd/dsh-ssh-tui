@@ -4,11 +4,12 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const CLI = new URL('../scripts/diagnostics-cli.mjs', import.meta.url)
+const CLI = fileURLToPath(new URL('../scripts/diagnostics-cli.mjs', import.meta.url))
 
 function run(args, env = {}) {
-  return spawnSync(process.execPath, [CLI.pathname, ...args], {
+  return spawnSync(process.execPath, [CLI, ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   })
