@@ -69,6 +69,29 @@ const DIAGNOSTIC_LOCATION = 'the configured diagnostic destination (PROBE_DIAG_D
 const PROBE_HOME_LOCATION = 'the configured probe home (PROBE_HOME or DSH_HOME); its path is not printed'
 const diagnosticLine = dir => `diagnostics: ${basename(dir)} written under ${DIAGNOSTIC_LOCATION}`
 
+/**
+ * Optional metadata-only remote handoff for a failed probe.
+ *
+ * Disabled unless the operator opted in. It never receives the probe's problem
+ * strings, screen or transcript, and a remote failure is swallowed: the probe's
+ * own outcome/exit code remains authoritative.
+ */
+async function publishRemoteProbeFailure() {
+  if (process.env.DSH_DIAGNOSTICS_UPLOAD !== '1') return
+  try {
+    const { publishDiagnosticFailure } = await import('../lib/diagnostics/index.js')
+    await publishDiagnosticFailure({
+      kind: 'probe-failure',
+      failureCode: 'PROBE_ASSERTION',
+      phase: 'probe',
+      exitCode: 1,
+      problemClasses: ['ASSERTION'],
+    }, { maxWaitMs: 1500 })
+  } catch {
+    // Optional evidence must never alter the probe result.
+  }
+}
+
 /** A path-free detail for a failed bundle write: the errno code, or fixed class text. */
 function bundleErrorDetail(error, home) {
   if (typeof error?.code === 'string' && error.code !== '') return error.code
@@ -604,6 +627,7 @@ async function runProbe(argv) {
         runtime: runtimeFacts(),
         home: knownHome,
       })
+      if (problems.length > 0) await publishRemoteProbeFailure()
       const say = problems.length > 0 ? console.error : console.log
       say(diagnosticLine(bundle.dir))
       if (problems.length > 0) {

@@ -1076,6 +1076,12 @@ All sessions, credentials, and settings live under `$DSH_HOME` (default
 `node_modules/`, build output, `.env*`, keys, session logs, and local state, so
 cloning or uploading the repo never carries user sessions or secrets.
 
+Failure-diagnostics remote handoff is **off by default**. When explicitly
+enabled, it uploads a metadata-only bundle over pinned mTLS + an encrypted,
+signed envelope; it never carries screen/transcript/session content. See
+[docs/diagnostics.md](docs/diagnostics.md) (Chinese) for configuration, firewall,
+rotation and rollback.
+
 ## License
 
 MIT

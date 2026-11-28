@@ -317,7 +317,8 @@ docs/screenshots/slow-link.json
 - `/diag`：检查当前 Host、显示通道和 terminal capability；
 - `/approval auto`：自动处理明确安全或明确危险的操作；
 - 无法确定的动作仍回到用户审批；
-- Host / terminal 不满足运行条件时尽量 fail-safe，而不是破坏宿主。
+- Host / terminal 不满足运行条件时尽量 fail-safe，而不是破坏宿主；
+- 失败诊断远端交接默认关闭；显式启用后只上传元数据包，见 [docs/diagnostics.md](docs/diagnostics.md)。
 
 ---
 
@@ -632,6 +633,7 @@ cross-platform CI
 |---|---|
 | [windows.md](docs/windows.md) | Windows 安装、终端与排障 |
 | [remote-ops.md](docs/remote-ops.md) | SSH、断线、attach、Host 生命周期 |
+| [diagnostics.md](docs/diagnostics.md) | 失败诊断包的安全远端交接（mTLS、加密、重试/回滚） |
 | [desktop.md](docs/desktop.md) | 官方 Harness Desktop / no-TTY Host |
 | [platform.md](docs/platform.md) | 平台生命周期设计与维护者约束 |
 | [release.md](docs/release.md) | 发版流程（硬性规则）与发布前人工门槛 |

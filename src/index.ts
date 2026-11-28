@@ -32,6 +32,7 @@ function readAgentDefaultFromFile(): Record<string, unknown> | undefined {
   }
 }
 import { showSessionPicker } from './picker.js'
+import { publishDiagnosticFailure } from './diagnostics/index.js'
 import { copyTrapHint } from './doctor.js'
 import { presetLabel } from './preset-label.js'
 
@@ -107,6 +108,17 @@ const LOCK_DRAIN_TIMEOUT_MS = 1_000
 // `launcher-exit.ts` so the picker, `/exit`, the attach recovery and the error
 // paths all hand the terminal back the same way.
 export { EXIT_FALLBACK_MS, createLauncherExit } from './launcher-exit.js'
+export {
+  publishDiagnosticFailure,
+  fetchDiagnosticBundle,
+  drainDiagnosticsSpool,
+  diagnosticsStatus,
+} from './diagnostics/index.js'
+export type {
+  FailureContext as DiagnosticFailureContext,
+  DiagnosticReceipt,
+  DiagnosticsManifest,
+} from './diagnostics/types.js'
 
 /** Plugin config: the session identity and presentation defaults. */
 export interface Config {
@@ -771,13 +783,22 @@ export function apply(ctx: Context, config: Config): void {
       await start(SessionId(config.sessionId), config.resume === true)
     }
 
-    void boot().catch((error: unknown) => {
+    void boot().catch(async (error: unknown) => {
       const detail = error instanceof Error && error.name === 'SessionLockHeldError'
         ? error.message
         : errorChain(error)
       process.stderr.write(`dsh-ssh-tui: session "${bootingSessionId}" failed to start:\n${detail}\n`)
       const hint = copyTrapHint(detail)
       if (hint !== undefined) process.stderr.write(`${hint}\n`)
+      // Bounded foreground wait; a slow endpoint leaves the metadata-only
+      // bundle in the spool for the next start. The original exit code is kept.
+      await publishDiagnosticFailure({
+        kind: 'boot-error',
+        failureCode: 'BOOT_ERROR',
+        phase: 'boot',
+        exitCode: 1,
+        problemClasses: ['UNKNOWN'],
+      }, { maxWaitMs: 1500 }).catch(() => {})
       exitLauncher(1)
     })
 

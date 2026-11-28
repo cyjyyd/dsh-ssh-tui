@@ -57,6 +57,7 @@
     "README.md",
     "README.en.md",
     "docs/remote-ops.md",
+    "docs/diagnostics.md",
     "docs/screenshots/compare.png",
     "docs/screenshots/headless.png",
     "docs/screenshots/workspace.png",
@@ -124,7 +125,11 @@
     "screenshots": "npm run build && node scripts/capture-readme-frames.mjs",
     "screenshots:slow": "npm run build && node scripts/capture-slow-link.mjs",
     "screenshots:reconnect": "npm run build && node scripts/capture-reconnect.mjs",
-    "bench:report": "node scripts/bench-report.mjs"
+    "bench:report": "node scripts/bench-report.mjs",
+    "diagnostics:status": "node scripts/diagnostics-cli.mjs status",
+    "diagnostics:publish": "node scripts/diagnostics-cli.mjs publish",
+    "diagnostics:fetch": "node scripts/diagnostics-cli.mjs fetch",
+    "diagnostics:drain": "node scripts/diagnostics-cli.mjs drain"
   },
   "engines": {
     "node": ">=24.9.0"

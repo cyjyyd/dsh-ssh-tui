@@ -109,6 +109,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { formatFooterCwd } from './session-list.js'
 import { pruneBlankSessions } from './session-list.js'
 import { collectDiag, formatDiag } from './diag.js'
+import { publishDiagnosticFailure } from './diagnostics/index.js'
 import { ApprovalVerdictCache, cacheableShape, verdictKey, type VerdictKeyInput } from './approval-cache.js'
 import { collectDoctor, doctorChecks, formatDoctorReport, rowsToRepair, type DoctorFacts, type DoctorRouting } from './doctor.js'
 import { colorDepth, downgradeSgr, type ColorDepth } from './color-depth.js'
@@ -9063,6 +9064,15 @@ export class SshTui {
         if (reason.kind === 'error') {
           this.pushRow(represent('turn-error', { kind: 'error', text: t('turn.failed', { turn: event.data.turn, error: reason.error.message }) }))
           this.reportAuthFailure(String(reason.error.message ?? ''))
+          // Metadata-only remote capture. The raw message never enters this
+          // path; dedupe collapses the paired turn/end + agent/error events.
+          void publishDiagnosticFailure({
+            kind: 'turn-error',
+            failureCode: 'TURN_ERROR',
+            phase: 'turn',
+            exitCode: 1,
+            problemClasses: ['UNKNOWN'],
+          }).catch(() => {})
         }
         if (reason.kind === 'completed' && !this.replaying && !this.turnSawOutput) {
           // The provider ended the turn without an answer. Some gateways map a
@@ -9150,6 +9160,13 @@ export class SshTui {
     this.lastActivity = Date.now()
     this.pushRow(represent('error-surface', { kind: 'error', text: errorChain(error) }))
     this.markDirty()
+    void publishDiagnosticFailure({
+      kind: 'turn-error',
+      failureCode: 'TURN_ERROR',
+      phase: 'turn',
+      exitCode: 1,
+      problemClasses: ['UNKNOWN'],
+    }).catch(() => {})
   }
 
   private readonly handleInboxClaimed = ({ agent, message }: { agent: Agent; message: { id: string } }): void => {
