@@ -232,7 +232,7 @@ test('the receiver metadata/versions allowlists reject raw or unknown fields', a
     const versions = bundle.versions.toString('utf8')
     validateVersions(versions)
     assert.throws(() => validateVersions(`${versions}\nscreen.txt=raw`), (error) => error.code === 'INTEGRITY_FAILED')
-    assert.throws(() => validateVersions(versions.replace('platform=linux', 'platform=unknown')), (error) => error.code === 'REDACTION_BLOCKED')
+    assert.throws(() => validateVersions(versions.replace(/^platform=.*$/m, 'platform=unknown')), (error) => error.code === 'REDACTION_BLOCKED')
   } finally {
     await fixture.cleanup()
   }
