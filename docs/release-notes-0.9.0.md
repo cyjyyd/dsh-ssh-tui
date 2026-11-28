@@ -1,35 +1,46 @@
-# 0.9.0 — Stable Candidate in preparation（未发布）
+# 0.9.0 — 已发布 Stable（2026-11-26）
 
-> **STABLE CANDIDATE IN PREPARATION — NOT A RELEASE.** 本文档随 `0.9.0` 稳定候选源码树
-> 一起准备，但该候选**尚未**创建 `v0.9.0` Git tag、GitHub Release 或 npm `0.9.0` 版本，
-> 也**没有**改动 `latest` / `next`。当前 `latest` 仍指向已发布 Stable `0.8.6`，`next`
-> 仍指向已发布预发布 `0.9.0-rc.1`。本文档不是 Stable 发布声明，也不构成任何发布承诺。
+> **PUBLISHED STABLE — 2026-11-26.** 本文档记录 `0.9.0` 的发布状态、精确工件与支持边界。
+> annotated tag `v0.9.0`（tag object `f9fbbb8fa0470b086c76e1058f2149f2fa8e4faf`，peel 到
+> `8f85ab4a0563c9366c8469d4ffaf7697563cfc36`）；GitHub Release id `458821277`，
+> `2026-11-26T01:01:54Z` 发布，非 draft、非 prerelease、latest；唯一 asset
+> `dsh-ssh-tui-0.9.0.tgz`，1,638,517 B，SHA-256
+> `a0f53a972bdab7e1d714a9dd9edf3d516cff53c183a27155c45730c9f98c3ae1`。
+> npm `dsh-ssh-tui@0.9.0` 于 `2026-11-26T01:05:32.535Z` 发布，gitHead 同上，
+> shasum `4ca0edd5ccecfbbbdf8fbcbe4f7cce1836b705a6`，integrity
+> `sha512-cw6GfTMhK8Yy/Gw7E1/CsA0qbqJSfFqVKE0lFoMWySCbS1chGQbOolEYzGIePWj2To9YcPIc30Zj+x4qaMfeqQ==`。
+> 发布读回时 `latest` / `next` 均为 `0.9.0`；这是 2026-11-26 的读回，不是永久指针承诺。
+> T0 = `2026-11-26T01:11:07Z`（GitHub 与 npm 读回完成时刻的较晚者）。
 >
-> 源码基线：`368baeac6636709d81c08e87455a56d3be91a22c`
-> （tree `b20db899f3a786943d66721ea7e8533c22c5f025`，即已发布 `0.9.0-rc.1` 的精确
-> commit）。本准备单只在其上增加版本身份、状态文案与候选材料，不改产品运行时行为；
-> 精确候选 SHA、CI run 与 tarball 哈希记录在 #81 的 `REL090-STABLE.PREP4_R1` 回执中。
-> 包内文档不能自引用发布后的哈希。
+> **独立字节读回仍为 HOLD。** 执行层回执完成了官方 GitHub/npm 双向读回与重新下载；独立
+> reviewer 只独立读回 GitHub metadata，未独立下载 npm 字节。因此本文件和执行层回执都
+> 不是独立字节验证，不能写成“独立复算通过”或 `FULL_PASS`。
+>
+> **本文件在 0.9.0 发布后按 #94 DEV091-INSTALL.I1 更新发布状态**；已发布 tarball 内同名
+> 文件仍是发布前的候选文案（发布后禁止 repack）。本仓库的文档更新用于后续维护开发，
+> 不改变已发布 tag、Release、asset 或 npm 工件。精确发布回执见 #81
+> `REL090-STABLE.RELEASE_R1`。
 
-本候选来自 `0.9.0` 主线开发栈（9 Host 候选），**不是**已发布 Stable `0.8.6` 的重新打包，
-也不是 `release/0.8.4` 维护线。
+`0.9.0` 来自 0.9 主线开发栈（九 Host），**不是**历史 Stable `0.8.6` 的重新打包，也不是
+`release/0.8.4` 维护线。
 
 ## 当前发布状态
 
 | 对象 | 状态 |
 |---|---|
-| 已发布 Stable | `0.8.6`（npm `latest`；七个冻结 Host） |
-| 已发布预发布 / 历史 | `0.9.0-rc.1`（2026-11-24 的 GitHub prerelease 与 npm `next`；历史材料见 [docs/release-notes-0.9.0-rc.1.md](release-notes-0.9.0-rc.1.md)） |
-| 本文档候选 | `0.9.0` — **stable candidate in preparation / not published** |
+| 当前 Stable | `0.9.0`（2026-11-26；GitHub Release 与 npm `latest` / `next`，九条精确 Host） |
+| 历史 Stable | `0.8.6`（七个冻结 Host；历史） |
+| 历史预发布 | `0.9.0-rc.1`（2026-11-24 的 GitHub prerelease 与 npm `next`；历史材料见 [docs/release-notes-0.9.0-rc.1.md](release-notes-0.9.0-rc.1.md)） |
+| 未来开发线 | `0.9.1` — **尚未发布**；package identity 保持 `0.9.0`，无 tag / Release / npm 版本 |
 
-`0.9.0` 与已发布 `0.9.0-rc.1` 的内容一致；本准备单只把候选身份从 `0.9.0-rc.1` 转正为
-`0.9.0`，并让 README、CHANGELOG、发版说明与版本钉死测试跟随状态。没有新增用户功能，
-没有新运行时源码，也没有重新打包。
+`0.9.0` 与 `0.9.0-rc.1` 的内容一致；发布事务只把候选身份从 `0.9.0-rc.1` 转正为 `0.9.0`
+（历史准备记录见 #81 `REL090-STABLE.PREP4_R1`）。没有新增用户功能，没有新运行时源码，
+也没有重新打包。
 
 ## 为什么是 0.9.0
 
 相对已发布 Stable `0.8.6`，0.9 主线汇入了三项面向会话现场的能力，并把兼容矩阵从七个
-冻结 Host 扩展到九个精确 Host 版本。这个稳定候选的目标是冻结候选身份与证据，不是新增
+冻结 Host 扩展到九个精确 Host 版本。这个已发布版本的目标是冻结发布身份与证据，不是新增
 功能：
 
 - **W6B `/terminal`**：Terminal Doctor 的**快照屏**，报告当前 attach 已知的终端能力与
@@ -41,33 +52,33 @@
   event log、projection registry 或历史正文。STALE / UNKNOWN / `routeUnverified` 均如实
   展示，provider provenance 使用 `modelSelection.lastUsed`（不是 `next`）。
 
-没有新的用户功能超出上述已评审范围；本候选不重开 Reader、Search V09、Picker/F2、
+没有新的用户功能超出上述已评审范围；本版本不重开 Reader、Search V09、Picker/F2、
 archive/restore/delete/reset 或 AgentTeam deep。
 
 ## 兼容范围：九个精确 Host
 
-Node.js 要求 `>=24.9.0`。声明窗口是精确并集，不是无界 semver：
+Node.js 要求 `>=24.9.0`。九条 Host 的声明窗口是精确并集，不是无界 semver：
 
 ```text
 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1 || 0.2.2-rc.2 || 0.2.2-rc.3 || 0.2.2-rc.4 || 0.2.2-rc.5
 ```
 
-| Host pin | 0.9.0 候选状态 | 证据性质 |
+| Host pin | 0.9.0 已发布状态 | 证据性质 |
 |---|---|---|
-| `0.2.0-rc.1` | 候选范围有限技术准入 | Linux exact install + probes；旧线保留 |
-| `0.2.0-rc.2` | 候选范围有限技术准入 | Linux exact install + probes；旧线保留 |
-| `0.2.1-rc.2` | 候选范围有限技术准入；默认开发线 | 提交的 manifest/lock 安装它，默认 Linux leg 跑全量探针 |
-| `0.2.1-rc.5` | 候选范围有限技术准入 | Linux 全量腿 + Windows ConPTY 腿 |
-| `0.2.2-rc.1` | 候选范围有限技术准入 | Linux 全量腿 + Windows ConPTY 腿 |
-| `0.2.2-rc.2` | 候选范围有限技术准入 | Linux + Windows ConPTY；上游来源 `EVIDENCE_LIMITED` |
-| `0.2.2-rc.3` | 候选范围有限技术准入 | Linux + Windows ConPTY；上游来源 `EVIDENCE_LIMITED` |
-| `0.2.2-rc.4` | 候选范围有限技术准入 | Linux + Windows ConPTY + rc.4/rc.5 synthetic characterization；上游来源 `EVIDENCE_LIMITED` |
-| `0.2.2-rc.5` | 候选范围有限技术准入 | Linux + Windows ConPTY + rc.4/rc.5 synthetic characterization；上游来源 `EVIDENCE_LIMITED` |
+| `0.2.0-rc.1` | 已发布范围有限技术准入 | Linux exact install + probes；旧线保留 |
+| `0.2.0-rc.2` | 已发布范围有限技术准入 | Linux exact install + probes；旧线保留 |
+| `0.2.1-rc.2` | 已发布范围有限技术准入；默认开发线 | 提交的 manifest/lock 安装它，默认 Linux leg 跑全量探针 |
+| `0.2.1-rc.5` | 已发布范围有限技术准入 | Linux 全量腿 + Windows ConPTY 腿 |
+| `0.2.2-rc.1` | 已发布范围有限技术准入 | Linux 全量腿 + Windows ConPTY 腿 |
+| `0.2.2-rc.2` | 已发布范围有限技术准入 | Linux + Windows ConPTY；上游来源 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.3` | 已发布范围有限技术准入 | Linux + Windows ConPTY；上游来源 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.4` | 已发布范围有限技术准入 | Linux + Windows ConPTY + rc.4/rc.5 synthetic characterization；上游来源 `EVIDENCE_LIMITED` |
+| `0.2.2-rc.5` | 已发布范围有限技术准入 | Linux + Windows ConPTY + rc.4/rc.5 synthetic characterization；上游来源 `EVIDENCE_LIMITED` |
 
-**这是候选范围内的 qualified technical admission，不是已公开发布的 Host 支持，也不是
-`0.9.0` 已发布的声明。** `0.2.2-rc.2` / `rc.3` / `rc.4` / `rc.5` 的上游 source-to-artifact
-证据均为 `EVIDENCE_LIMITED`：保留既有 qualified Owner exceptions，不声称完整 npm
-`gitHead` / attestation 或 `FULL_PASS`；#42 的 provenance Gate 状态不因本候选改写。
+**这是已发布范围内的 qualified technical admission，不是“所有组合都已实测”。**
+`0.2.2-rc.2` / `rc.3` / `rc.4` / `rc.5` 的上游 source-to-artifact 证据均为
+`EVIDENCE_LIMITED`：保留既有 qualified Owner exceptions，不声称完整 npm `gitHead` /
+attestation 或 `FULL_PASS`；#42 的 provenance Gate 状态不因本次发布改写。
 
 `0.2.1-rc.5` 与 `0.2.1-rc.2` 在退役裁决前继续保留；`0.1.7` 及更早仍由 `dshReleases`
 标为 `incompatible`，启动器会拒绝。
@@ -76,10 +87,10 @@ Node.js 要求 `>=24.9.0`。声明窗口是精确并集，不是无界 semver：
 
 **支持的桌面 Windows 范围**：Windows 10 / Windows 11 桌面版，使用 Windows Terminal 或
 conhost。Windows 10 仅在既有 CI / 真机范围内做**有界实测**，不等于所有 Windows 10
-配置通过。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 Host 线（`0.2.1-rc.5`、
+配置通过。CI 在 GitHub Windows runner 的 ConPTY 上覆盖六条 ConPTY Host 线（`0.2.1-rc.5`、
 `0.2.2-rc.1` / `rc.2` / `rc.3` / `rc.4` / `rc.5`）；该 runner 是测试基础设施，不构成对
 Windows Server 的支持。真机 Windows 11、特定终端/IME 组合、以及“所有桌面 Windows 组合”
-仍为 `NOT_MEASURED` 或未覆盖，本候选不作通过声明。
+仍为 `NOT_MEASURED` 或未覆盖，本版本不作通过声明。
 
 > **⚠️ Windows Server 系列（含 Server 2025）不在 0.9.0 支持范围。历史 Windows Server 2025 question-wait 双换行 CI RED 仍保留，根因未明；不保证 Server 兼容性。**
 >
@@ -87,7 +98,7 @@ Windows Server 的支持。真机 Windows 11、特定终端/IME 组合、以及�
 >
 > 原始 RED：[Actions 44881356855 / job 136777141174](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/44881356855/job/136777141174)。
 > 独立 bounded D5 审计：[PR #89 comment 7090676703](https://github.com/cyjyyd/dsh-ssh-tui/pull/89#issuecomment-7090676703)。
-> 这条历史 RED 是 out-of-support 的 **NON_BLOCKING** 记录，不因 0.9.0 候选被改写为 GREEN
+> 这条历史 RED 是 out-of-support 的 **NON_BLOCKING** 记录，不因 0.9.0 发布被改写为 GREEN
 > 或“已修复”。Server 兼容性只可能按新反馈/新测试另行调查，不是 0.9.0 的发布承诺，也不是
 > 0.9.0 的阻塞项。
 
@@ -106,7 +117,7 @@ credential outlet 的既有警告继续保留：不要把真实生产 credential
 相关测试只使用 fake key、loopback/mock HTTP 和 `fetch` tripwire，**不会向真实官方或
 网关发起请求**。
 
-## 明确排除（不在本候选范围）
+## 明确排除（不在本版本范围）
 
 - **Historical Context Reader**：PR #49 / #50 / #73 的只读历史 Reader；不会读取冷同步
   历史或历史正文。
@@ -115,31 +126,40 @@ credential outlet 的既有警告继续保留：不要把真实生产 credential
 - **Archive / Restore / Delete / Reset**：不包含会话归档、恢复、删除、重置。
 - **AgentTeam deep**：不包含 AgentTeam 深层集成。
 
-这些排除项是候选边界，不是“以后自动包含”的承诺。
+这些排除项是版本边界，不是“以后自动包含”的承诺。
 
 ## 验证与证据状态
 
-- **RED → GREEN**：版本从 `0.9.0-rc.1` 转正为 `0.9.0`、文案跟随状态后，两个版本钉死
-  测试先按旧身份断言失败（RED）；把测试按状态忠实更新为“rc.1 历史 / 0.9.0 候选未发布 /
-  0.8.6 当前 stable”后同一套断言 GREEN。没有删除、跳过或削弱功能断言；具体断言与
-  实际/期望值记录在 #81 回执。
-- **本地**：本准备单运行 `npm run build`、full `npm test`、`npm run typecheck`、
-  `npm run freeze`；命令摘要与结果记录在 #81 `REL090-STABLE.PREP4_R1` 回执。没有执行
-  真实付费 Provider 调用。
-- **CI**：Draft PR 跑完整 16-job 矩阵（Linux 九 Host + Windows ConPTY 六线 + synthetic
-  characterization），只使用 synthetic fixture / fake key / loopback。精确 run/job URL
-  记录在 #81 回执；本文件不写死未来 run ID。
-- **未发布**：本准备单不创建 tag、GitHub Release 或 npm 版本，不修改 dist-tags，不合并
-  `main`，不把 PR 转为 Ready，不 repack，不代签 Owner 签名。任何发布事务都需要 Owner
-  单独的精确授权，并以干净 checkout 的 exact SHA 为前提。
+- **发布事务 RED → GREEN**：发布前 `v0.9.0` tag、GitHub Release 与 npm `0.9.0` 均不存在；
+  写入后 tag object、release、asset、npm version 与 dist-tags 均通过官方读回。精确的
+  前后读回与哈希见 #81 `REL090-STABLE.RELEASE_R1`。
+- **本维护单 RED → GREEN**：I1 先把文档/测试契约改为“0.9.0 当前 Stable、0.8.6 / rc.1 历史、
+  0.9.1 未发布、Host 精确安装”，在未改文档上得到 RED；再更新允许的文档与两个测试文件
+  得到 GREEN。没有删除、跳过或削弱功能断言；命令、计数与实际 head 记录在 #94
+  `DEV091-INSTALL.I1_R1`。
+- **主分支 CI 首红/重跑**：attempt 1 在 rc.5 Linux packed wizard 上 RED
+  （[run 45735121259 attempt 1](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/45735121259/attempts/1)，
+  job 139626388176）；attempt 2 为 16/16 SUCCESS
+  （[attempt 2](https://github.com/cyjyyd/dsh-ssh-tui/actions/runs/45735121259/attempts/2)）。
+  根因仍为 `INCONCLUSIVE` / `NOT_REPRODUCED`，不写成已修复，也不把 16/16 当作所有
+  终端/平台组合都已实测。旧 CI 不重跑。
+- **本地（本维护单）**：运行 full `npm test`、`npm run typecheck`、`npm run freeze`；
+  结果记录在 #94 回执。没有执行真实付费 Provider 调用。
+- **新 head CI**：本维护单的 Draft PR 使用精确 head 跑完整 16-job 矩阵（Linux 九 Host +
+  Windows ConPTY 六线 + synthetic characterization），只使用 synthetic fixture / fake key /
+  loopback；精确 run/job URL 记录在 #94 回执，不用旧 run 替代。
+- **发布边界**：`v0.9.0` tag、GitHub Release 与 npm `0.9.0` 已发布并保持不可变；本维护单
+  不创建/移动/删除 tag，不重发、不 repack、不 unpublish，不修改 dist-tags，不合并
+  `main`，不把 PR 转为 Ready，不代签 Owner 签名。`0.9.1` 尚未发布；开发期间 package
+  identity 保持 `0.9.0`，任何 0.9.1 版本都需要 Owner 单独的精确授权。
 
 ## 已知限制
 
 - 上游 `0.2.2-rc.4` / `rc.5` 的 source-to-artifact 证据为 `EVIDENCE_LIMITED`，不是
   完整 attestation / `FULL_PASS`；qualified Owner exceptions 原样保留。
 - `rc.5` 的 Windows 尾换行 flake 仍记 `INCONCLUSIVE`，不写成已修复。
-- 真机 Windows 11、IME、所有桌面终端组合、Windows-side H11 等未在本候选全部重测，
+- 真机 Windows 11、IME、所有桌面终端组合、Windows-side H11 等未在本版本全部重测，
   标为 `NOT_MEASURED`；ConPTY capability row 或 boot-only 检查不等于 IME PASS。
-- 超长会话冷恢复、极慢分片粘贴 Esc 歧义等既有性能/输入限制不因本候选改变。
-- 本文档不包含自己发布后的哈希、run ID 或 dist-tag 状态；这些只能由 #81 回执和发布后
-  read-back 提供。
+- 超长会话冷恢复、极慢分片粘贴 Esc 歧义等既有性能/输入限制不因本版本改变。
+- 独立 registry/asset 字节读回仍为 HOLD；tarball 内同名文档保留发布前候选文案，因为
+  发布后禁止 repack。发布后的权威状态以 #81 发布回执与本仓库的维护更新为准。

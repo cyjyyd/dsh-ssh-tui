@@ -5,6 +5,7 @@ node_modules/
 lib/
 
 # logs, temp, and local state
+.ci-diagnostics/
 # scratch checkouts for probe / line runs (never commit: they carry node_modules)
 .probe-tree/
 .line-tree/
